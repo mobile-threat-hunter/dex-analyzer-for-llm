@@ -11,3 +11,20 @@ local.properties
 /docs
 /doc
 /apk
+
+# Python / pybind11 build artifacts under new_dexkit/
+new_dexkit/build/
+new_dexkit/*.egg-info/
+__pycache__/
+*.pyc
+
+# Test corpus (binary APKs) — fetched separately for regression runs
+/test_apk/
+
+# androguard's runtime sqlite cache
+/androguard.db
+/androguard.db-shm
+/androguard.db-wal
+# Claude Code runtime state / per-user preferences
+.claude/settings.local.json
+.claude/scheduled_tasks.lock
