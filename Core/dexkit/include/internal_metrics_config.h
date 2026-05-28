@@ -1,5 +1,0 @@
-#pragma once
-
-#ifndef DEXKIT_ENABLE_INTERNAL_METRICS
-#define DEXKIT_ENABLE_INTERNAL_METRICS 0
-#endif

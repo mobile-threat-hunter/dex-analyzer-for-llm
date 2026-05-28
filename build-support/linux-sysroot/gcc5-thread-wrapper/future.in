@@ -1,2 +1,0 @@
-#pragma once
-#include "@TARGET_SYSROOT@/usr/include/c++/5/future"
