@@ -1,0 +1,124 @@
+// decompile.cpp — DAD decompile.py port (DvMethod only).
+
+#include "decompile.h"
+
+#include <algorithm>
+#include <memory>
+#include <string>
+
+#include "basic_blocks.h"
+#include "control_flow.h"
+#include "dataflow.h"
+#include "graph.h"
+#include "instruction.h"
+#include "instruction_dispatch.h"
+#include "util.h"
+#include "writer.h"
+
+namespace dexkit::dad {
+
+DvMethod::DvMethod(std::shared_ptr<const MethodSnapshot> snap)
+    : snap_(std::move(snap)) {}
+
+void DvMethod::Process() {
+    if (!snap_ || !snap_->entry_block_id) {
+        // No code path. Distinguish:
+        //   (a) Truly abstract/native (access flags non-empty) → emit
+        //       signature (DAD-compatible).
+        //   (b) External reference (access empty = no ClassDef in this dex)
+        //       → emit empty string; this method's code lives in another
+        //       dex / framework jar, not decompilable from here.
+        if (snap_ && snap_->meta.access.empty()) {
+            source_ = "";  // external reference: nothing to emit
+            return;
+        }
+        Writer w(snap_.get(), nullptr);
+        w.WriteMethod();
+        source_ = w.str();
+        return;
+    }
+
+    const MethodMeta& m = snap_->meta;
+
+    // 1. Pre-populate Vmap with ThisParam/Param.
+    //    DAD: DvMethod.__init__ lines 116-130.
+    int start = static_cast<int>(snap_->registers_size)
+              - static_cast<int>(snap_->ins_size);
+    int num_param = 0;
+    bool is_static = std::find(m.access.begin(), m.access.end(), "static")
+                     != m.access.end();
+    if (!is_static) {
+        const std::string key = "v" + std::to_string(start);
+        vmap_[key] = std::make_shared<ThisParam>(key, m.cls_name);
+        lparams_.push_back(start);
+        ++num_param;
+    }
+    for (const std::string& ptype : m.params_type) {
+        int reg = start + num_param;
+        const std::string key = "v" + std::to_string(reg);
+        vmap_[key] = std::make_shared<Param>(key, ptype);
+        lparams_.push_back(reg);
+        num_param += static_cast<int>(GetTypeSize(ptype));
+    }
+
+    // 2. CFG construction.
+    graph_ = Construct(*snap_, vmap_, gen_ret_);
+    if (!graph_ || !graph_->entry) {
+        // Construct returned empty — fall back to signature-only.
+        Writer w(snap_.get(), nullptr);
+        w.WriteMethod();
+        source_ = w.str();
+        return;
+    }
+
+    // 3. Dataflow analyses.
+    //    lparams as string keys (DAD uses int keys; we use "v<N>").
+    std::vector<std::string> lparam_keys;
+    for (int reg : lparams_) lparam_keys.push_back("v" + std::to_string(reg));
+
+    auto chains = BuildDefUse(*graph_, lparam_keys);
+
+    // var_to_name (DAD): int-keyed lvars dict. DAD seeds `var_to_name` with
+    // params, then `construct()` populates it with every register it sees
+    // through `get_variables(vmap, reg)`. By the time `split_variables` runs,
+    // var_to_name covers all locals too — that's what makes per-register
+    // splitting work.
+    // We mirror that by walking the full string-keyed vmap and converting
+    // every `"vN"` key into its int form. (Previously we only copied params,
+    // so SplitVariables saw an empty set of candidates and produced un-split
+    // variables — the root of the IR-cycle / `v1` vs `v1_1` divergence.)
+    std::unordered_map<int, IRFormPtr> lvars;
+    for (const auto& [key, var] : vmap_) {
+        if (key.empty() || key.front() != 'v') continue;
+        try {
+            const int reg = std::stoi(key.substr(1));
+            lvars[reg] = var;
+        } catch (...) {
+            continue;
+        }
+    }
+    SplitVariables(*graph_, lvars, chains.du, chains.ud);
+    DeadCodeElimination(*graph_, chains.du, chains.ud);
+    RegisterPropagation(*graph_, chains.du, chains.ud);
+
+    // dvars for PlaceDeclarations — string-keyed mirror of lvars.
+    std::unordered_map<std::string, IRFormPtr> dvars;
+    for (const auto& [reg, var] : lvars) {
+        dvars["v" + std::to_string(reg)] = var;
+    }
+    PlaceDeclarations(*graph_, dvars, chains.du, chains.ud);
+
+    // 4. Structural passes.
+    SplitIfNodes(*graph_);
+    Simplify(*graph_);
+    graph_->compute_rpo();
+    auto idoms = graph_->immediate_dominators();
+    IdentifyStructures(*graph_, idoms);
+
+    // 5. Emit Java source.
+    Writer w(snap_.get(), graph_.get());
+    w.WriteMethod();
+    source_ = w.str();
+}
+
+}  // namespace dexkit::dad

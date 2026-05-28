@@ -1,0 +1,24 @@
+[build-system]
+requires = ["scikit-build-core>=0.10", "pybind11>=2.13"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "dexkit-py"
+version = "0.0.1"
+description = "pybind11 wrapper around LuckyPray DexKit with Android API analysis (DAD-based Java decompiler in progress)"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "Apache-2.0" }
+authors = [{ name = "DexKit-py contributors" }]
+
+[tool.scikit-build]
+minimum-version = "build-system.requires"
+cmake.version = ">=3.20"
+ninja.make-fallback = false
+wheel.packages = ["python/dexkit_py"]
+wheel.install-dir = "dexkit_py"
+build-dir = "build/{wheel_tag}"
+
+[tool.scikit-build.cmake.define]
+# Override if upstream DexKit lives elsewhere.
+# DEXKIT_GIT_ROOT = "/abs/path/to/dexkit_git"

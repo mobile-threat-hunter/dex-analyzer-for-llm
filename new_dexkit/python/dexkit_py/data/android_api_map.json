@@ -1,0 +1,169 @@
+{
+  "version": "0.1-seed",
+  "source": "manual-seed (2026-05-25)",
+  "notes": "Initial high-value Android framework API → permission/category mapping. Curated from AOSP @RequiresPermission annotations and PScout-style mappings. Extend with PScout/Axplorer data for full coverage.",
+  "entries": {
+    "Landroid/telephony/TelephonyManager;->getDeviceId()Ljava/lang/String;": {
+      "permissions": ["android.permission.READ_PHONE_STATE"],
+      "categories": ["TELEPHONY", "DEVICE_ID", "IDENTIFIER"],
+      "since_api": 1, "deprecated_since": 29
+    },
+    "Landroid/telephony/TelephonyManager;->getDeviceId(I)Ljava/lang/String;": {
+      "permissions": ["android.permission.READ_PHONE_STATE"],
+      "categories": ["TELEPHONY", "DEVICE_ID", "IDENTIFIER"],
+      "since_api": 23, "deprecated_since": 29
+    },
+    "Landroid/telephony/TelephonyManager;->getSubscriberId()Ljava/lang/String;": {
+      "permissions": ["android.permission.READ_PHONE_STATE"],
+      "categories": ["TELEPHONY", "IMSI", "IDENTIFIER"]
+    },
+    "Landroid/telephony/TelephonyManager;->getSimSerialNumber()Ljava/lang/String;": {
+      "permissions": ["android.permission.READ_PHONE_STATE"],
+      "categories": ["TELEPHONY", "ICCID", "IDENTIFIER"]
+    },
+    "Landroid/telephony/TelephonyManager;->getLine1Number()Ljava/lang/String;": {
+      "permissions": ["android.permission.READ_PHONE_NUMBERS", "android.permission.READ_SMS"],
+      "categories": ["TELEPHONY", "PHONE_NUMBER"]
+    },
+    "Landroid/telephony/TelephonyManager;->getNetworkOperator()Ljava/lang/String;": {
+      "categories": ["TELEPHONY", "NETWORK_INFO"]
+    },
+    "Landroid/telephony/TelephonyManager;->getNetworkOperatorName()Ljava/lang/String;": {
+      "categories": ["TELEPHONY", "NETWORK_INFO"]
+    },
+    "Landroid/telephony/SmsManager;->sendTextMessage(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Landroid/app/PendingIntent;Landroid/app/PendingIntent;)V": {
+      "permissions": ["android.permission.SEND_SMS"],
+      "categories": ["SMS", "SEND_SMS"]
+    },
+    "Landroid/telephony/SmsManager;->getDefault()Landroid/telephony/SmsManager;": {
+      "categories": ["SMS"]
+    },
+    "Landroid/location/LocationManager;->getLastKnownLocation(Ljava/lang/String;)Landroid/location/Location;": {
+      "permissions": ["android.permission.ACCESS_FINE_LOCATION", "android.permission.ACCESS_COARSE_LOCATION"],
+      "categories": ["LOCATION"]
+    },
+    "Landroid/location/LocationManager;->requestLocationUpdates(Ljava/lang/String;JFLandroid/location/LocationListener;)V": {
+      "permissions": ["android.permission.ACCESS_FINE_LOCATION", "android.permission.ACCESS_COARSE_LOCATION"],
+      "categories": ["LOCATION"]
+    },
+    "Landroid/location/LocationManager;->getProviders(Z)Ljava/util/List;": {
+      "categories": ["LOCATION"]
+    },
+    "Landroid/hardware/Camera;->open()Landroid/hardware/Camera;": {
+      "permissions": ["android.permission.CAMERA"],
+      "categories": ["CAMERA"], "deprecated_since": 21
+    },
+    "Landroid/hardware/Camera;->open(I)Landroid/hardware/Camera;": {
+      "permissions": ["android.permission.CAMERA"],
+      "categories": ["CAMERA"], "deprecated_since": 21
+    },
+    "Landroid/hardware/camera2/CameraManager;->openCamera(Ljava/lang/String;Landroid/hardware/camera2/CameraDevice$StateCallback;Landroid/os/Handler;)V": {
+      "permissions": ["android.permission.CAMERA"],
+      "categories": ["CAMERA"]
+    },
+    "Landroid/media/AudioRecord;-><init>(IIIII)V": {
+      "permissions": ["android.permission.RECORD_AUDIO"],
+      "categories": ["MICROPHONE", "AUDIO_RECORD"]
+    },
+    "Landroid/media/MediaRecorder;->setAudioSource(I)V": {
+      "permissions": ["android.permission.RECORD_AUDIO"],
+      "categories": ["MICROPHONE", "AUDIO_RECORD"]
+    },
+    "Landroid/net/wifi/WifiManager;->getConnectionInfo()Landroid/net/wifi/WifiInfo;": {
+      "permissions": ["android.permission.ACCESS_WIFI_STATE"],
+      "categories": ["WIFI", "NETWORK_INFO"]
+    },
+    "Landroid/net/wifi/WifiManager;->getScanResults()Ljava/util/List;": {
+      "permissions": ["android.permission.ACCESS_WIFI_STATE", "android.permission.ACCESS_FINE_LOCATION"],
+      "categories": ["WIFI", "LOCATION"]
+    },
+    "Landroid/bluetooth/BluetoothAdapter;->getDefaultAdapter()Landroid/bluetooth/BluetoothAdapter;": {
+      "categories": ["BLUETOOTH"]
+    },
+    "Landroid/bluetooth/BluetoothAdapter;->getAddress()Ljava/lang/String;": {
+      "permissions": ["android.permission.BLUETOOTH_CONNECT", "android.permission.LOCAL_MAC_ADDRESS"],
+      "categories": ["BLUETOOTH", "MAC_ADDRESS", "IDENTIFIER"]
+    },
+    "Landroid/accounts/AccountManager;->getAccounts()[Landroid/accounts/Account;": {
+      "permissions": ["android.permission.GET_ACCOUNTS"],
+      "categories": ["ACCOUNTS"]
+    },
+    "Landroid/accounts/AccountManager;->getAccountsByType(Ljava/lang/String;)[Landroid/accounts/Account;": {
+      "permissions": ["android.permission.GET_ACCOUNTS"],
+      "categories": ["ACCOUNTS"]
+    },
+    "Landroid/provider/ContactsContract$CommonDataKinds$Phone;->CONTENT_URI:Landroid/net/Uri;": {
+      "permissions": ["android.permission.READ_CONTACTS"],
+      "categories": ["CONTACTS"]
+    },
+    "Landroid/provider/CallLog$Calls;->CONTENT_URI:Landroid/net/Uri;": {
+      "permissions": ["android.permission.READ_CALL_LOG"],
+      "categories": ["CALL_LOG"]
+    },
+    "Landroid/provider/CalendarContract$Events;->CONTENT_URI:Landroid/net/Uri;": {
+      "permissions": ["android.permission.READ_CALENDAR"],
+      "categories": ["CALENDAR"]
+    },
+    "Landroid/os/Environment;->getExternalStorageDirectory()Ljava/io/File;": {
+      "categories": ["STORAGE"]
+    },
+    "Landroid/content/Context;->getExternalFilesDir(Ljava/lang/String;)Ljava/io/File;": {
+      "categories": ["STORAGE"]
+    },
+    "Landroid/webkit/WebView;->loadUrl(Ljava/lang/String;)V": {
+      "categories": ["WEBVIEW", "NETWORK_IO"]
+    },
+    "Landroid/webkit/WebView;->addJavascriptInterface(Ljava/lang/Object;Ljava/lang/String;)V": {
+      "categories": ["WEBVIEW", "JS_INTERFACE", "RISKY"]
+    },
+    "Ljava/net/URL;->openConnection()Ljava/net/URLConnection;": {
+      "permissions": ["android.permission.INTERNET"],
+      "categories": ["NETWORK_IO"]
+    },
+    "Ljava/net/Socket;-><init>(Ljava/lang/String;I)V": {
+      "permissions": ["android.permission.INTERNET"],
+      "categories": ["NETWORK_IO", "SOCKET"]
+    },
+    "Ljavax/crypto/Cipher;->getInstance(Ljava/lang/String;)Ljavax/crypto/Cipher;": {
+      "categories": ["CRYPTO"]
+    },
+    "Ljava/security/MessageDigest;->getInstance(Ljava/lang/String;)Ljava/security/MessageDigest;": {
+      "categories": ["CRYPTO", "HASH"]
+    },
+    "Ljava/lang/Class;->forName(Ljava/lang/String;)Ljava/lang/Class;": {
+      "categories": ["REFLECTION", "DYNAMIC"]
+    },
+    "Ljava/lang/reflect/Method;->invoke(Ljava/lang/Object;[Ljava/lang/Object;)Ljava/lang/Object;": {
+      "categories": ["REFLECTION", "DYNAMIC"]
+    },
+    "Ldalvik/system/DexClassLoader;-><init>(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/ClassLoader;)V": {
+      "categories": ["DYNAMIC_LOAD", "RISKY"]
+    },
+    "Ldalvik/system/PathClassLoader;-><init>(Ljava/lang/String;Ljava/lang/ClassLoader;)V": {
+      "categories": ["DYNAMIC_LOAD"]
+    },
+    "Ljava/lang/Runtime;->exec(Ljava/lang/String;)Ljava/lang/Process;": {
+      "categories": ["PROCESS_EXEC", "RISKY"]
+    },
+    "Ljava/lang/Runtime;->exec([Ljava/lang/String;)Ljava/lang/Process;": {
+      "categories": ["PROCESS_EXEC", "RISKY"]
+    },
+    "Ljava/lang/System;->loadLibrary(Ljava/lang/String;)V": {
+      "categories": ["NATIVE_CODE"]
+    },
+    "Ljava/lang/System;->load(Ljava/lang/String;)V": {
+      "categories": ["NATIVE_CODE", "RISKY"]
+    },
+    "Landroid/content/pm/PackageManager;->getInstalledPackages(I)Ljava/util/List;": {
+      "permissions": ["android.permission.QUERY_ALL_PACKAGES"],
+      "categories": ["PACKAGE_INFO"]
+    },
+    "Landroid/content/pm/PackageManager;->getInstalledApplications(I)Ljava/util/List;": {
+      "permissions": ["android.permission.QUERY_ALL_PACKAGES"],
+      "categories": ["PACKAGE_INFO"]
+    },
+    "Landroid/provider/Settings$Secure;->getString(Landroid/content/ContentResolver;Ljava/lang/String;)Ljava/lang/String;": {
+      "categories": ["SETTINGS", "POTENTIAL_ANDROID_ID"]
+    }
+  }
+}

@@ -1,0 +1,170 @@
+// dataflow.h — C++ port of androguard DAD dataflow.py
+// DAD: androguard/decompiler/dataflow.py
+//
+// PORT STATUS (12/12 entities ported):
+//   - BasicReachDef          — DAD dataflow.py:27
+//   - update_chain           — DAD dataflow.py:80
+//   - dead_code_elimination  — DAD dataflow.py:116
+//   - clear_path_node        — DAD dataflow.py:148
+//   - clear_path             — DAD dataflow.py:162
+//   - register_propagation   — DAD dataflow.py:190
+//   - DummyNode              — DAD dataflow.py:323
+//   - group_variables        — DAD dataflow.py:337
+//   - split_variables        — DAD dataflow.py:368
+//   - reach_def_analysis     — DAD dataflow.py:406
+//   - build_def_use          — DAD dataflow.py:432
+//   - place_declarations     — DAD dataflow.py:471
+//
+// Type-mapping notes:
+//   - DAD's `defs[node][reg]` keys regs by Variable identity (same vmap
+//     instance shared across uses). We key by the variable's id string
+//     (IRForm::Vid()) since that's identity-equivalent for vmap-managed
+//     Variables and stable across moves.
+//   - DAD's DU/UD chains are dicts keyed by (var, loc) tuples. We mirror with
+//     unordered_map keyed by (string, int).
+//   - DAD's `loc` is an int (with negatives marking params). Same in C++.
+
+#pragma once
+
+#include <cstddef>
+#include <functional>
+#include <set>
+#include <string>
+#include <unordered_map>
+#include <unordered_set>
+#include <utility>
+#include <vector>
+
+#include "graph.h"
+#include "instruction.h"
+#include "node.h"
+
+namespace dexkit::dad {
+
+// (string, int) key with a small hash — used for DU/UD chains.
+struct VarLocKey {
+    std::string var;
+    int loc;
+    bool operator==(const VarLocKey& o) const noexcept {
+        return loc == o.loc && var == o.var;
+    }
+};
+struct VarLocHash {
+    size_t operator()(const VarLocKey& k) const noexcept {
+        return std::hash<std::string>{}(k.var) ^
+               (std::hash<int>{}(k.loc) << 1);
+    }
+};
+
+// DU / UD chain types. DAD uses defaultdict(list); we mirror via
+// unordered_map<key, vector<int>>.
+using ChainMap = std::unordered_map<VarLocKey, std::vector<int>, VarLocHash>;
+
+// DAD: dataflow.py:27 BasicReachDef — reaching-definitions worklist analysis.
+class BasicReachDef {
+public:
+    // DAD: dataflow.py:28 __init__(graph, params)
+    //   `params` is the list of formal-parameter variable ids; DAD uses them
+    //   to seed defs at the synthetic entry node with locations -1, -2, ...
+    BasicReachDef(Graph& graph, const std::vector<std::string>& params);
+
+    // DAD: dataflow.py:51 run — fixed-point worklist.
+    void run();
+
+    // Public (DAD treats these as attributes).
+    Graph& g;
+    std::unordered_map<NodeBase*, std::set<int>> A;  // out-set per node
+    std::unordered_map<NodeBase*, std::set<int>> R;  // in-set per node
+    std::unordered_map<NodeBase*, std::set<int>> DB; // kill set per node
+    // defs[node][reg_id] = set of locations defining reg in node.
+    std::unordered_map<NodeBase*,
+                       std::unordered_map<std::string, std::set<int>>> defs;
+    // def_to_loc[reg_id] = set of all locations that define reg across graph.
+    std::unordered_map<std::string, std::set<int>> def_to_loc;
+};
+
+// DAD: dataflow.py:80 update_chain.
+void UpdateChain(Graph& graph, int loc, ChainMap& du, ChainMap& ud);
+
+// DAD: dataflow.py:116 dead_code_elimination.
+void DeadCodeElimination(Graph& graph, ChainMap& du, ChainMap& ud);
+
+// DAD: dataflow.py:148 clear_path_node.
+bool ClearPathNode(Graph& graph, const std::string& reg, int loc1, int loc2);
+
+// DAD: dataflow.py:162 clear_path.
+//   `reg` is empty string when DAD passes None (side-effect-only check).
+bool ClearPath(Graph& graph, const std::string& reg, int loc1, int loc2);
+
+// DAD: dataflow.py:190 register_propagation.
+void RegisterPropagation(Graph& graph, ChainMap& du, ChainMap& ud);
+
+// DAD: dataflow.py:323 DummyNode — placeholder Node with empty loc-with-ins.
+class DummyNode : public Node {
+public:
+    explicit DummyNode(std::string n);
+    // DAD: dataflow.py:327 get_loc_with_ins → returns [] (empty list).
+    // We expose as the same call shape used by Graph::number_ins (a
+    // BasicBlock cast). DummyNode is a Node, not BasicBlock, so Graph
+    // ignores it during number_ins. (DAD's reach_def_analysis removes the
+    // dummies before number_ins gets called.)
+    // String form: DAD __str__ → '<name>-dummynode'.
+    std::string ToString() const { return name + "-dummynode"; }
+};
+
+// DAD: dataflow.py:337 group_variables.
+//   DAD's `lvars` is `{int_register_id → Variable}`. We mirror as
+//   `unordered_map<int, IRFormPtr>`.
+//   DAD's DU keys are (var, loc) where var is the int register id.
+//   We re-use ChainMap (string key) and require the caller to encode int
+//   registers as `std::to_string(reg)` — keeping DU/UD consistent with the
+//   rest of the module.
+//   Returns: variables[reg_str] → list of (defs, uses) pairs.
+using GroupedVersions =
+    std::vector<std::pair<std::vector<int>, std::vector<int>>>;
+// Insertion-ordered map: vector of (var_str, versions) pairs. DAD relies on
+// Python dict's insertion ordering (3.7+); unordered_map iteration is hash
+// order and would produce non-deterministic nb_vars assignments — leading
+// to variable suffixes that differ from DAD even when the structure is
+// otherwise identical (e.g. `v0_5` vs `v0_3`).
+using VariableGroups =
+    std::vector<std::pair<std::string, GroupedVersions>>;
+VariableGroups GroupVariables(
+    const std::unordered_map<int, IRFormPtr>& lvars,
+    const ChainMap& du, const ChainMap& ud);
+
+// DAD: dataflow.py:368 split_variables.
+void SplitVariables(Graph& graph,
+                    std::unordered_map<int, IRFormPtr>& lvars,
+                    ChainMap& du, ChainMap& ud);
+
+// DAD: dataflow.py:406 reach_def_analysis — driver.
+//   Returns the analysis object so callers can read .defs / .def_to_loc / .R.
+//   The driver inserts/removes synthetic entry & exit DummyNodes; ownership
+//   for those nodes is held by the analysis object via a unique_ptr stash.
+class ReachDefResult {
+public:
+    explicit ReachDefResult(Graph& g, const std::vector<std::string>& params);
+
+    BasicReachDef& analysis() noexcept { return *analysis_; }
+
+private:
+    std::unique_ptr<DummyNode> dummy_entry_;
+    std::unique_ptr<DummyNode> dummy_exit_;
+    std::unique_ptr<BasicReachDef> analysis_;
+};
+
+// DAD: dataflow.py:432 build_def_use.
+//   Returns (UD, DU) — DAD's call is `UD, DU = build_def_use(graph, lparams)`.
+struct DefUseChains { ChainMap ud; ChainMap du; };
+DefUseChains BuildDefUse(Graph& graph,
+                         const std::vector<std::string>& lparams);
+
+// DAD: dataflow.py:471 place_declarations.
+//   dvars maps reg_string → Variable IRForm; place each declaration in the
+//   nearest common dominator of its def points (subject to DAD's range guard).
+void PlaceDeclarations(Graph& graph,
+                       const std::unordered_map<std::string, IRFormPtr>& dvars,
+                       const ChainMap& du, const ChainMap& ud);
+
+}  // namespace dexkit::dad
