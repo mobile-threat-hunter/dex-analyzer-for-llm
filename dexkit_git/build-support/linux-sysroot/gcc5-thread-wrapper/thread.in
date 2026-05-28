@@ -1,0 +1,33 @@
+#pragma once
+#include <functional>
+#include <tuple>
+#include <type_traits>
+#include <utility>
+
+namespace std {
+  template<typename _Callable, typename... _Args>
+  struct __dexkit_bind_simple
+  {
+    tuple<decay_t<_Callable>, decay_t<_Args>...> _M_bound;
+
+    explicit __dexkit_bind_simple(_Callable&& __f, _Args&&... __args)
+      : _M_bound(std::forward<_Callable>(__f), std::forward<_Args>(__args)...)
+    { }
+
+    decltype(auto) operator()()
+    {
+      return std::apply([](auto& __f, auto&... __args) -> decltype(auto) {
+        return std::invoke(std::move(__f), std::move(__args)...);
+      }, _M_bound);
+    }
+  };
+
+  template<typename _Callable, typename... _Args>
+  auto __bind_simple(_Callable&& __f, _Args&&... __args)
+  {
+    return __dexkit_bind_simple<_Callable, _Args...>(
+        std::forward<_Callable>(__f), std::forward<_Args>(__args)...);
+  }
+}
+
+#include "@TARGET_SYSROOT@/usr/include/c++/5/thread"
