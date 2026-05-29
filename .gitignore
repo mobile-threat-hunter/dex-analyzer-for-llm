@@ -12,9 +12,9 @@ local.properties
 /doc
 /apk
 
-# Python / pybind11 build artifacts under new_dexkit/
-new_dexkit/build/
-new_dexkit/*.egg-info/
+# Python / pybind11 build artifacts under dex_analyzer/
+dex_analyzer/build/
+dex_analyzer/*.egg-info/
 __pycache__/
 *.pyc
 

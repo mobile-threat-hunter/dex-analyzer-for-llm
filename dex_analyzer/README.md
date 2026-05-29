@@ -22,7 +22,7 @@ Requires:
 - C++20 compiler
 
 ```bash
-cd new_dexkit
+cd dex_analyzer
 pip install -e .                           # editable build
 # or:
 pip install -e . --no-build-isolation --force-reinstall   # force a clean native rebuild
@@ -194,7 +194,7 @@ print(src)
 # → "// DexKit-DAD: empty skeleton. Port DAD modules in dad_cpp/ — see CLAUDE.md.\n"
 ```
 
-The decompiler API surface (`decompile_method_java`, `decompile_class_java`, `decompile_method`, `decompile_class`, `decompiler_cache_size`, `decompiler_clear_cache`) is wired and stable — it currently routes to a stub while the C++ DAD port lands. See [CLAUDE.md](../CLAUDE.md#port-status--new_dexkitdad_cpp) for the per-module port status and recommended order.
+The decompiler API surface (`decompile_method_java`, `decompile_class_java`, `decompile_method`, `decompile_class`, `decompiler_cache_size`, `decompiler_clear_cache`) is wired and stable — it currently routes to a stub while the C++ DAD port lands. See [CLAUDE.md](../CLAUDE.md#port-status--dex_analyzerdad_cpp) for the per-module port status and recommended order.
 
 The prior in-tree implementation was removed (2026-05-26) because it was not a port of androguard's DAD; it had grown into a parallel decompiler with ad-hoc text-regex post-passes. The replacement under `dad_cpp/` is a strict, function-by-function port of androguard's `decompiler/*.py` (graph → dataflow → control_flow → writer), with a `PreToolUse` hook that injects a DAD-reference reminder on every edit.
 
@@ -334,7 +334,7 @@ Python ↔ C++ marshalling overhead stays under 1 ms per call.
 
 ## Licence
 
-- This wrapper (everything under `new_dexkit/`): **Apache 2.0**
+- This wrapper (everything under `dex_analyzer/`): **Apache 2.0**
 - Upstream LuckyPray DexKit (linked statically): **LGPLv3**
 - DAD algorithm references (androguard): **Apache 2.0**
 

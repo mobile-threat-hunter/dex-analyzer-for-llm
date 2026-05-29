@@ -4,11 +4,11 @@ Project: C++ DexKit Core + pybind11 wrapper (`dexkit_py`) with an embedded DAD-a
 
 ## DAD-aligned development policy
 
-Decompiler implementation lives in `new_dexkit/dad_cpp/`. It is being built as a faithful C++ port of androguard's DAD. Reference source: `/home/nyahumi/Downloads/androguard-master/androguard/decompiler/`. Every function added MUST carry `// DAD: <file.py>:<lineno> <concept>` in both code comment and commit message. If no DAD analogue exists, do not implement — discuss first.
+Decompiler implementation lives in `dex_analyzer/dad_cpp/`. It is being built as a faithful C++ port of androguard's DAD. Reference source: `/home/nyahumi/Downloads/androguard-master/androguard/decompiler/`. Every function added MUST carry `// DAD: <file.py>:<lineno> <concept>` in both code comment and commit message. If no DAD analogue exists, do not implement — discuss first.
 
-A `PreToolUse` hook injects this reminder when editing `vendor/dexkit_core/Core/**` or `new_dexkit/binding/**` C++ sources.
+A `PreToolUse` hook injects this reminder when editing `vendor/dexkit_core/Core/**` or `dex_analyzer/binding/**` C++ sources.
 
-### Port status — `new_dexkit/dad_cpp/` (COMPLETE — end-to-end pipeline working)
+### Port status — `dex_analyzer/dad_cpp/` (COMPLETE — end-to-end pipeline working)
 
 All 12 DAD modules ported. `dk.decompile_method_java(descriptor)` returns DAD-quality Java text on real APKs. 24 parity suites pass (~770+ cumulative checks), 0 regressions.
 
@@ -27,7 +27,7 @@ All 12 DAD modules ported. `dk.decompile_method_java(descriptor)` returns DAD-qu
 | decompile    | decompile.py (627 lines)     | **ported (DvMethod only)** — full pipeline driver: Construct → BuildDefUse → SplitVariables → DCE → RegisterPropagation → PlaceDeclarations → SplitIfNodes → Simplify → IdentifyStructures → Writer. External method refs (no code in this dex) detected via empty access flags, return `""`. DvClass/DvMachine deferred — DexKit pybind11 handles class enumeration. |
 | decompiler   | decompiler.py (100 lines)    | **fully ported** — `Decompiler` facade with shared_mutex cache, exception-safe per-method decompilation, descriptor-string lookup via `IDexCodeSource::LocateMethod`. GIL released in pybind11 binding for true multi-thread decompile. |
 
-### Snapshot ABI — `new_dexkit/dad_cpp/include/method_snapshot.h` + `dex_code_source.h`
+### Snapshot ABI — `dex_analyzer/dad_cpp/include/method_snapshot.h` + `dex_code_source.h`
 
 DexKit ↔ DAD boundary: `MethodSnapshotBuilder::Build(IDexCodeSource&, dex_id, method_idx) → unique_ptr<MethodSnapshot>`. Snapshot is immutable POD-ish DTO with:
 - `MethodMeta` (cls/name/proto/access/lparams/triple)
@@ -48,7 +48,7 @@ Builder runs in 7 stages: decode → leaders → exception table → block split
 
 Policy: now that the port reaches DAD parity, real DAD bugs with observable production impact get fixed in our production path. A `*DADFaithful` sibling is retained for byte-identical parity comparison against androguard DAD output. Dual-track parity tests assert **both** the fixed output (for production) and the buggy output (for DAD-compat).
 
-- **`util.py:205 get_type`** — `atype[1:-1].lstrip('java/lang/')` is Python char-set strip, not prefix strip. DAD mangles `Ljava/lang/annotation/Foo;` → `otation.Foo` (and similar lowercase-leading subpackages). **Production `GetType` ([util.cpp:128](new_dexkit/dad_cpp/util.cpp#L128)) now does proper `"java/lang/"` prefix strip** — emits `annotation.Foo`. DAD-faithful variant `GetTypeDADFaithful` ([util.cpp:174](new_dexkit/dad_cpp/util.cpp#L174)) kept for parity test ([util_parity_test.cpp:88-92](new_dexkit/tests/parity/util_parity_test.cpp#L88-L92)). Effect: 7,539-class scan across 3 APKs shows 102 spec-correct hits, 0 mangled residues; match-rate vs DAD unaffected on random-200/APK bench (mangle cases under-represented in random sample but always fixed when they occur).
+- **`util.py:205 get_type`** — `atype[1:-1].lstrip('java/lang/')` is Python char-set strip, not prefix strip. DAD mangles `Ljava/lang/annotation/Foo;` → `otation.Foo` (and similar lowercase-leading subpackages). **Production `GetType` ([util.cpp:128](dex_analyzer/dad_cpp/util.cpp#L128)) now does proper `"java/lang/"` prefix strip** — emits `annotation.Foo`. DAD-faithful variant `GetTypeDADFaithful` ([util.cpp:174](dex_analyzer/dad_cpp/util.cpp#L174)) kept for parity test ([util_parity_test.cpp:88-92](dex_analyzer/tests/parity/util_parity_test.cpp#L88-L92)). Effect: 7,539-class scan across 3 APKs shows 102 spec-correct hits, 0 mangled residues; match-rate vs DAD unaffected on random-200/APK bench (mangle cases under-represented in random sample but always fixed when they occur).
 
 ### Deferred DAD quirks (bug-compatible IR, Writer may diverge for correct Java)
 
@@ -56,7 +56,7 @@ The IR layer is bug-for-bug faithful (parity tests fail on divergence). For Writ
 
 - **`util.py:227 get_params_type`** — `descriptor.split(')')[0][1:].split()` whitespace-splits a no-whitespace string → single-element list for multi-arg methods. `GetParamsType()` replicates the quirk for parity-test compatibility, but **all production call sites use non-DAD `ParseParamsType`** (`BuildMethodRef` in instruction_dispatch.cpp, `MethodMeta::params_type` in method_snapshot_builder.cpp, Writer signature emission). DAD's `get_params_type` only works correctly because androguard's `get_descriptor()` returns space-separated args like `(LA; LB;)V`; our internal proto is spaceless, so the quirk would drop args.
 - **`basic_blocks.py:152 CondBlock.neg`** calls `self.ins[-1].neg()`. `ConditionalExpression::Neg()` and `ConditionalZExpression::Neg()` are implemented in our port (flip via CONDS table). `CondBlock::neg` dispatches via virtual `IRForm::Neg` — and we added a `virtual void Neg() {}` default on `IRForm` because C++ can't duck-type the `ins[-1].neg()` call DAD does. Side effect: in DAD, calling `.neg()` on a non-Conditional IRForm raises `AttributeError`; in our port it's a silent no-op. The call path is gated by `CondBlock::neg`'s `ins.size()==1` guard, so no observable difference on real input.
-- **`basic_blocks.py:244 LoopBlock.visit_cond`** calls `self.cond.visit_cond(visitor)`. In DAD this is a `ShortCircuitBlock` (CondBlock subclass) that delegates to `cond.visit()` → `visit_short_circuit_condition`. Our `LoopBlock::visit_cond` ([basic_blocks.cpp:357](new_dexkit/dad_cpp/basic_blocks.cpp#L357)) dispatches: `cond->visit(visitor)` for composite Condition, `cond_block->visit_cond(visitor)` for the single-CondBlock form. Without this, `while ((a < b) && (c == 0))` short-circuit loops emit empty `while () {}`.
+- **`basic_blocks.py:244 LoopBlock.visit_cond`** calls `self.cond.visit_cond(visitor)`. In DAD this is a `ShortCircuitBlock` (CondBlock subclass) that delegates to `cond.visit()` → `visit_short_circuit_condition`. Our `LoopBlock::visit_cond` ([basic_blocks.cpp:357](dex_analyzer/dad_cpp/basic_blocks.cpp#L357)) dispatches: `cond->visit(visitor)` for composite Condition, `cond_block->visit_cond(visitor)` for the single-CondBlock form. Without this, `while ((a < b) && (c == 0))` short-circuit loops emit empty `while () {}`.
 - **`basic_blocks.py:247 LoopBlock.update_attribute_with`** calls `self.cond.update_attribute_with(n_map)` but `Condition` has no `update_attribute_with`. Same AttributeError pattern as line 244. Not implemented in our `LoopBlock` until a use site appears.
 - **`basic_blocks.py:119 SwitchBlock.copy_from`** does `self.switch = node.switch[:]` which only works if the switch payload is list-like. DAD assumes it is; the actual payload is the raw fill-data object. Our port replicates as pointer-copy (DAD's slice on a non-list raises).
 - **`basic_blocks.py:154/162 CondBlock.neg / visit_cond`** raise `RuntimeWarning` if `len(ins) != 1`. `raise RuntimeWarning(...)` IS a real raise in Python (RuntimeWarning is an Exception subclass) — the warning filter only affects `warnings.warn()` calls, not `raise`. So DAD would propagate the exception and `DvMethod.process` would die. Our port returns silently — divergent on this edge case, but the `len(ins) != 1` invariant is satisfied on every real method in the test corpus (159k methods, 0 trigger), so behavior matches in practice. If a future input violates the invariant, we'll see different output (we produce something; DAD crashes).
@@ -170,10 +170,10 @@ State a brief plan with verification steps. For decompiler work, verification is
 ## C++ → Python rebuild loop
 
 Every C++ change requires two atomic steps in this exact order:
-1. `cd new_dexkit/build/cp313-cp313-linux_x86_64 && ninja`
-2. `cd new_dexkit && pip install -e . --no-build-isolation`
+1. `cd dex_analyzer/build/cp313-cp313-linux_x86_64 && ninja`
+2. `cd dex_analyzer && pip install -e . --no-build-isolation`
 
-A `PostToolUse` hook reminds when files under `vendor/dexkit_core/Core/` or `new_dexkit/binding/` are edited. Run `/dexkit-build` to do both steps correctly.
+A `PostToolUse` hook reminds when files under `vendor/dexkit_core/Core/` or `dex_analyzer/binding/` are edited. Run `/dexkit-build` to do both steps correctly.
 
 ## Memory safety — ASan checked (2026-05-28)
 
@@ -196,11 +196,11 @@ Last run: 31,639 methods across 4 APKs — 0 leaks (DexKit code), 0 UAF, 0 inval
 
 ## Regression verification
 
-Default success criterion for any decompiler change: **24 parity suites in `new_dexkit/tests/parity/` must remain at 0 failures**, and end-to-end decompilation on `test_apk/APK/com.example.android.tvleanback.apk` must not crash.
+Default success criterion for any decompiler change: **24 parity suites in `dex_analyzer/tests/parity/` must remain at 0 failures**, and end-to-end decompilation on `test_apk/APK/com.example.android.tvleanback.apk` must not crash.
 
 Run parity sweep (build + run all 24 via CMake/CTest):
 ```bash
-cd /home/nyahumi/Project/Dexkit/new_dexkit/build/cp313-cp313-linux_x86_64 && \
+cd /home/nyahumi/Project/Dexkit/dex_analyzer/build/cp313-cp313-linux_x86_64 && \
     ninja parity_tests && ctest --output-on-failure
 ```
 Expected tail: `100% tests passed, 0 tests failed out of 24`.

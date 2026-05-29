@@ -1,8 +1,8 @@
 // Parity test for instruction.cpp chunk 3.
 // Compile:
-//   g++ -std=gnu++20 -I /home/nyahumi/Project/Dexkit/new_dexkit/dad_cpp/include \
+//   g++ -std=gnu++20 -I /home/nyahumi/Project/Dexkit/dex_analyzer/dad_cpp/include \
 //       /tmp/instr_chunk3_parity_test.cpp \
-//       /home/nyahumi/Project/Dexkit/new_dexkit/build/cp313-cp313-linux_x86_64/libdexkit_dad.a \
+//       /home/nyahumi/Project/Dexkit/dex_analyzer/build/cp313-cp313-linux_x86_64/libdexkit_dad.a \
 //       -o /tmp/instr_chunk3_parity_test && /tmp/instr_chunk3_parity_test
 
 #include "instruction.h"

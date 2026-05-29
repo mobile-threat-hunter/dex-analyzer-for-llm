@@ -3,7 +3,7 @@
 Surfaces the native `DexKit` class plus higher-level Python facades
 (descriptor helpers, L1 ref filters, L3 capability summary). The Java
 decompiler is being built as a faithful C++ port of androguard's DAD in
-``new_dexkit/dad_cpp/``; the `decompile_*` family currently returns a
+``dex_analyzer/dad_cpp/``; the `decompile_*` family currently returns a
 stub message until per-module porting lands.
 """
 

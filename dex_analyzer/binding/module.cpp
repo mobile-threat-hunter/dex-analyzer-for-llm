@@ -2,7 +2,7 @@
 //
 // Wires Python → DexKitExt → DexKit Core, plus the dad_cpp Decompiler stub.
 // The decompile_* family currently returns a stub message; real output lands
-// as `new_dexkit/dad_cpp/` is ported from androguard DAD (see CLAUDE.md).
+// as `dex_analyzer/dad_cpp/` is ported from androguard DAD (see CLAUDE.md).
 
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>

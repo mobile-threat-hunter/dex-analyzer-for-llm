@@ -1,8 +1,8 @@
 // Standalone parity test for dad_cpp/util.cpp against androguard DAD util.py.
 // Compile:
-//   g++ -std=gnu++20 -I /home/nyahumi/Project/Dexkit/new_dexkit/dad_cpp/include \
+//   g++ -std=gnu++20 -I /home/nyahumi/Project/Dexkit/dex_analyzer/dad_cpp/include \
 //       /tmp/util_parity_test.cpp \
-//       /home/nyahumi/Project/Dexkit/new_dexkit/build/cp313-cp313-linux_x86_64/libdexkit_dad.a \
+//       /home/nyahumi/Project/Dexkit/dex_analyzer/build/cp313-cp313-linux_x86_64/libdexkit_dad.a \
 //       -o /tmp/util_parity_test && /tmp/util_parity_test
 
 #include "util.h"

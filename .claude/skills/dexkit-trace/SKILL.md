@@ -92,14 +92,14 @@ kill $PID
 ## Common fix patterns (precedents)
 
 - **Cycle in IR traversal (stack overflow)** — see `GetUsedVarsGuard` in
-  [instruction.cpp:35](../../../new_dexkit/dad_cpp/instruction.cpp#L35). RAII thread-local visited
+  [instruction.cpp:35](../../../dex_analyzer/dad_cpp/instruction.cpp#L35). RAII thread-local visited
   set, return `{}` on re-entry. Required for any `get_used_vars` / `ToString` / `has_side_effect`
   that recurses through `var_map`.
 - **Null deref in `Interval::GetEnd`** — added null guard at
-  [node.h](../../../new_dexkit/dad_cpp/include/node.h). DAD bug-compatible: `end_` stays nullptr
+  [node.h](../../../dex_analyzer/dad_cpp/include/node.h). DAD bug-compatible: `end_` stays nullptr
   when ComputeEnd finds no external successors.
 - **MUTF-8 surrogate** — `SanitizeUtf8` at
-  [decompiler.cpp:22](../../../new_dexkit/dad_cpp/decompiler.cpp#L22). Escape non-ASCII as `\uXXXX`
+  [decompiler.cpp:22](../../../dex_analyzer/dad_cpp/decompiler.cpp#L22). Escape non-ASCII as `\uXXXX`
   before returning to Python's strict UTF-8 stdout.
 
 ## Reporting
