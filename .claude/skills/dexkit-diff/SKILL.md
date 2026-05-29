@@ -15,9 +15,16 @@ description: |
 ## When to use
 
 When `dk.decompile_method_java(desc)` produces output that looks wrong, the first question is
-"does DAD produce the same wrong output?" If yes, the defect is in DAD's algorithm — we're
-bug-compatible by design (see `CLAUDE.md` "Deferred DAD quirks" section). If no, it's a
-port bug.
+"does DAD produce the same wrong output?" Three outcomes:
+
+1. **DAD matches DexKit (both wrong the same way)** — DAD bug we haven't tackled yet. Check
+   CLAUDE.md "Deferred DAD quirks" (bug-for-bug faithful by design) or consider promoting to
+   "Upstream DAD bug fixes" with a dual-track parity entry.
+2. **DAD wrong, DexKit correct** — we've already fixed it upstream-of-DAD. Look for a
+   `*DADFaithful` sibling in `util.cpp` etc.; the mismatch is intentional and counts as
+   improvement, not divergence.
+3. **DAD correct, DexKit wrong** — port bug. Use the diverging output region to narrow down
+   which pass introduced the regression.
 
 ## Execute
 
@@ -51,11 +58,16 @@ diff -u /tmp/dad.txt /tmp/dexkit.txt | head -80
 ## Interpreting results
 
 - **No diff**: byte-identical → port is DAD-faithful. Any "defect" must be addressed at
-  DAD's level (upstream patch) or via a Writer-side correction (see `ParseParamsType`
-  precedent in writer.cpp).
-- **Diff present**: port bug. Use the location (which class/pass) to narrow down. Common
-  classes: `decompile.cpp` (pass ordering), `writer.cpp` (Java text emission), `instruction.cpp`
-  (IR semantics), `dataflow.cpp` (def-use / propagation), `control_flow.cpp` (structuring).
+  DAD's level (a DAD bug) — either deferred (add to CLAUDE.md "Deferred DAD quirks") or
+  fixed in production (add to "Upstream DAD bug fixes" with a `*DADFaithful` sibling +
+  dual-track parity test). Precedents: `GetType` (fixed), `ParseParamsType` (Writer-side
+  alternative to DAD's `GetParamsType`).
+- **Diff present, DexKit looks better**: we already fixed a DAD bug — confirm via
+  CLAUDE.md "Upstream DAD bug fixes" section. Not a regression.
+- **Diff present, DexKit looks wrong**: port bug. Use the diverging region to narrow down.
+  Common classes: `decompile.cpp` (pass ordering), `writer.cpp` (Java text emission),
+  `instruction.cpp` (IR semantics), `dataflow.cpp` (def-use / propagation), `control_flow.cpp`
+  (structuring).
 
 ## Caveats
 

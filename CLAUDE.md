@@ -48,7 +48,7 @@ Builder runs in 7 stages: decode → leaders → exception table → block split
 
 Policy: now that the port reaches DAD parity, real DAD bugs with observable production impact get fixed in our production path. A `*DADFaithful` sibling is retained for byte-identical parity comparison against androguard DAD output. Dual-track parity tests assert **both** the fixed output (for production) and the buggy output (for DAD-compat).
 
-- **`util.py:205 get_type`** — `atype[1:-1].lstrip('java/lang/')` is Python char-set strip, not prefix strip. DAD mangles `Ljava/lang/annotation/Foo;` → `otation.Foo` (and similar lowercase-leading subpackages). **Production `GetType` ([util.cpp:128](new_dexkit/dad_cpp/util.cpp#L128)) now does proper `"java/lang/"` prefix strip** — emits `annotation.Foo`. DAD-faithful variant `GetTypeDADFaithful` ([util.cpp:174](new_dexkit/dad_cpp/util.cpp#L174)) kept for parity test ([util_parity_test.cpp:88-92](file:///tmp/util_parity_test.cpp)). Effect: 7,539-class scan across 3 APKs shows 102 spec-correct hits, 0 mangled residues; match-rate vs DAD unaffected on random-200/APK bench (mangle cases under-represented in random sample but always fixed when they occur).
+- **`util.py:205 get_type`** — `atype[1:-1].lstrip('java/lang/')` is Python char-set strip, not prefix strip. DAD mangles `Ljava/lang/annotation/Foo;` → `otation.Foo` (and similar lowercase-leading subpackages). **Production `GetType` ([util.cpp:128](new_dexkit/dad_cpp/util.cpp#L128)) now does proper `"java/lang/"` prefix strip** — emits `annotation.Foo`. DAD-faithful variant `GetTypeDADFaithful` ([util.cpp:174](new_dexkit/dad_cpp/util.cpp#L174)) kept for parity test ([util_parity_test.cpp:88-92](new_dexkit/tests/parity/util_parity_test.cpp#L88-L92)). Effect: 7,539-class scan across 3 APKs shows 102 spec-correct hits, 0 mangled residues; match-rate vs DAD unaffected on random-200/APK bench (mangle cases under-represented in random sample but always fixed when they occur).
 
 ### Deferred DAD quirks (bug-compatible IR, Writer may diverge for correct Java)
 
@@ -125,14 +125,15 @@ The class+method enumeration APIs let drivers (sweep, bench) drop the androguard
 
 `dexkit-build` is the production rebuild loop (ninja + pip install). Use `/dexkit-build` after any C++ change.
 
-`.claude/skills/dexkit-{diff,decompile,sweep,trace,bench}/SKILL.md` were marked obsolete 2026-05-26 when `dad_cpp/` was a skeleton. As of 2026-05-27 the pipeline produces real Java output and these skills can be revived. Until they are formally updated, use these one-liners:
+`.claude/skills/dexkit-{diff,decompile,sweep,trace,bench}/SKILL.md` are all active and aligned with the current `dad_cpp/` pipeline:
 
-- **Quick decompile** (single method):
-  ```bash
-  python -c "import dexkit_py; print(dexkit_py.DexKit('<apk>').decompile_method_java('<desc>'))"
-  ```
-- **Class decompile**: `decompile_class_java('<class_desc>')` — iterates declared methods.
-- **DAD comparison**: load APK in both `androguard.misc.AnalyzeAPK` and `dexkit_py.DexKit`, run `DvMethod` and `decompile_method_java` on same descriptor.
+- `/dexkit-decompile <desc> [from <apk>]` — single method or whole class via the DAD pipeline
+- `/dexkit-diff <desc> [from <apk>]` — side-by-side parity diff vs androguard DAD (with guidance on DAD-bug vs port-bug attribution)
+- `/dexkit-sweep` — full-corpus regression (0-crash gate, ~16k m/s)
+- `/dexkit-trace` — bisect crashes/hangs to method + capture stack trace
+- `/dexkit-bench` — head-to-head perf benchmark with indent-normalized match rate
+
+Bench output match rate normalization (`norm()` in the skill) strips leading whitespace per line — DAD emits class-context indent that DexKit's standalone-method output omits; without normalization match rate would read as 0%.
 
 ### Removed in 2026-05-26 audit — DO NOT REINTRODUCE
 
@@ -195,22 +196,14 @@ Last run: 31,639 methods across 4 APKs — 0 leaks (DexKit code), 0 UAF, 0 inval
 
 ## Regression verification
 
-Default success criterion for any decompiler change: **24 parity suites in `/tmp/*_parity_test.cpp` must remain at 0 failures**, and end-to-end decompilation on `test_apk/APK/com.example.android.tvleanback.apk` must not crash.
+Default success criterion for any decompiler change: **24 parity suites in `new_dexkit/tests/parity/` must remain at 0 failures**, and end-to-end decompilation on `test_apk/APK/com.example.android.tvleanback.apk` must not crash.
 
-Run parity sweep:
+Run parity sweep (build + run all 24 via CMake/CTest):
 ```bash
-cd /tmp && for src in *_parity_test.cpp; do
-  exe="${src%.cpp}"
-  g++ -std=gnu++20 -O0 \
-    -I /home/nyahumi/Project/Dexkit/new_dexkit/dad_cpp/include \
-    -I /home/nyahumi/Project/Dexkit/dexkit_git/Core/third_party/slicer/export \
-    "$src" \
-    /home/nyahumi/Project/Dexkit/new_dexkit/build/cp313-cp313-linux_x86_64/libdexkit_dad.a \
-    /home/nyahumi/Project/Dexkit/new_dexkit/build/cp313-cp313-linux_x86_64/dexkit_core_build/libdexkit_static.a \
-    -lz -lpthread -o "$exe" 2>/dev/null && \
-  ./"$exe" 2>&1 | tail -1 | sed "s|^|$src |"
-done
+cd /home/nyahumi/Project/Dexkit/new_dexkit/build/cp313-cp313-linux_x86_64 && \
+    ninja parity_tests && ctest --output-on-failure
 ```
+Expected tail: `100% tests passed, 0 tests failed out of 24`.
 
 End-to-end smoke check:
 ```bash

@@ -64,3 +64,11 @@ target_link_libraries(_dexkit_core PRIVATE dexkit_ext dexkit_dad)
 # `wheel.install-dir = "dexkit_py"` places that root under the dexkit_py
 # package, so DESTINATION "." resolves to dexkit_py/_dexkit_core.*.so.
 install(TARGETS _dexkit_core LIBRARY DESTINATION .)
+
+# Parity tests — built on demand (not part of wheel). Enabled when we're
+# the top-level CMake project (i.e. `cd build/... && ninja parity_tests`);
+# skipped when scikit-build-core configures us for a wheel build.
+if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
+    enable_testing()
+    add_subdirectory(tests/parity)
+endif()

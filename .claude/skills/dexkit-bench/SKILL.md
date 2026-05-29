@@ -42,6 +42,12 @@ methods = [m for m in dx.get_methods() if not m.is_external() and m.get_method()
 random.seed(42); random.shuffle(methods); sample = methods[:N]
 print(f"Sampling {len(sample)} methods from {APK}", flush=True)
 
+def norm(s):
+    # androguard DAD emits standalone-method output with class-context 4-space
+    # indent; DexKit's decompile_method_java is true standalone (no indent).
+    # Strip leading whitespace per line so byte-match isn't dominated by indent.
+    return "\n".join(line.lstrip() for line in s.splitlines()) if s else ""
+
 # DexKit-DAD pass
 t0 = time.time(); dk_out = {}
 for m in sample:
@@ -61,7 +67,7 @@ for m in sample:
     except Exception as e: dad_out[desc] = f"// CRASH: {type(e).__name__}"
 dad_ms = (time.time() - t0) * 1000
 
-match = sum(1 for d in dk_out if dk_out[d] == dad_out.get(d, ""))
+match = sum(1 for d in dk_out if norm(dk_out[d]) == norm(dad_out.get(d, "")))
 both_nonempty = sum(1 for d in dk_out if dk_out[d] and dad_out.get(d, ""))
 print(f"\n=== Bench result over {N} methods ===")
 print(f"  DexKit-DAD : {dk_ms:>8.1f} ms total ({dk_ms/N:.3f} ms/method)")
@@ -76,9 +82,13 @@ EOF
 - **Speedup < 10×**: investigate. The DAD port should be heavily faster — Python interpreter
   + per-instance object overhead is the dominant cost in androguard DAD.
 - **Match rate < 80% on non-trivial methods**: investigate divergence with `/dexkit-diff` on
-  a sample of mismatches. Common legitimate causes: `get_params_type` quirk (DAD: `IJ p0`,
-  DexKit: `int p0, long p1`), `java/lang/*` strip quirk (DAD: `otation.Foo`, DexKit: same).
-- **Match rate > 95%**: port is healthy.
+  a sample of mismatches. Common legitimate causes (mismatches from DAD bugs we've fixed in
+  production — see CLAUDE.md "Upstream DAD bug fixes" section):
+  - `get_params_type` quirk (DAD: `IJ p0`, DexKit: `int p0, long p1`)
+  - `java/lang/*` char-set strip bug (DAD: `otation.Foo`, DexKit: `annotation.Foo` — fixed)
+- **Match rate ~90%**: port is healthy. The residual mismatch is dominated by `var_naming`
+  suffix off-by-N (semantic-equivalent) and other deep-IR categories — see CLAUDE.md
+  `project-deferred-decompiler-tasks`.
 
 ## Caveats
 
