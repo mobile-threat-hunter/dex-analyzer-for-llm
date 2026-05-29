@@ -125,29 +125,62 @@ unsigned GetTypeSize(std::string_view param) noexcept {
     return LookupTypeLen(param.front());
 }
 
-// DAD: util.py:205 get_type.
+// DAD: util.py:205 get_type — fixed variant.
 //
-// Faithfully replicates the original including the lstrip('java/lang/')
-// char-set quirk. Recursive for arrays.
+// Strips the "java/lang/" prefix as a proper prefix (not char-set).
+// DAD upstream has a char-set strip bug; the bug-compatible variant for
+// parity testing lives in `GetTypeDADFaithful` below.
 std::string GetType(std::string_view atype, uint32_t size) {
     if (atype.empty()) return std::string{atype};
-    // Primitive single-char fast path (V/Z/B/S/C/I/J/F/D).
     if (atype.size() == 1) {
         auto sv = LookupTypeDescriptor(atype.front());
         if (!sv.empty()) return std::string{sv};
     }
     char head = atype.front();
     if (head == 'L') {
-        // Reference type "Lpkg/Cls;" → "pkg.Cls" with java/lang wrinkle.
+        if (atype.size() < 2 || atype.back() != ';') {
+            return std::string{atype};
+        }
+        std::string body{atype.substr(1, atype.size() - 2)};
+        constexpr std::string_view kJavaLang = "java/lang/";
+        if (body.size() >= kJavaLang.size() &&
+            body.compare(0, kJavaLang.size(), kJavaLang) == 0) {
+            body.erase(0, kJavaLang.size());
+        }
+        for (char& c : body) {
+            if (c == '/') c = '.';
+        }
+        return body;
+    }
+    if (head == '[') {
+        std::string inner = GetType(atype.substr(1));
+        if (size == UINT32_MAX) {
+            return inner + "[]";
+        }
+        return inner + "[" + std::to_string(size) + "]";
+    }
+    return std::string{atype};
+}
+
+// DAD: util.py:205 get_type — bug-compatible variant for parity tests.
+//
+// Preserves the `atype[1:-1].lstrip('java/lang/')` char-set strip bug so
+// parity tests can verify byte-identical output against androguard DAD.
+// Production code MUST use `GetType` instead.
+std::string GetTypeDADFaithful(std::string_view atype, uint32_t size) {
+    if (atype.empty()) return std::string{atype};
+    if (atype.size() == 1) {
+        auto sv = LookupTypeDescriptor(atype.front());
+        if (!sv.empty()) return std::string{sv};
+    }
+    char head = atype.front();
+    if (head == 'L') {
         if (atype.size() < 2 || atype.back() != ';') {
             return std::string{atype};
         }
         std::string body{atype.substr(1, atype.size() - 2)};
         if (atype.size() >= 10 &&
             atype.compare(0, 10, "Ljava/lang") == 0) {
-            // DAD QUIRK: Python's str.lstrip('java/lang/') is a CHAR-SET
-            // strip, not a prefix strip. Replicate by stripping leading
-            // chars while they appear in the set {j,a,v,/,l,n,g}.
             static const std::string kStripSet = "java/lng";
             size_t i = 0;
             while (i < body.size() &&
@@ -162,14 +195,12 @@ std::string GetType(std::string_view atype, uint32_t size) {
         return body;
     }
     if (head == '[') {
-        // Array — recurse on element type, append [] or [N].
-        std::string inner = GetType(atype.substr(1));
+        std::string inner = GetTypeDADFaithful(atype.substr(1));
         if (size == UINT32_MAX) {
             return inner + "[]";
         }
         return inner + "[" + std::to_string(size) + "]";
     }
-    // Unknown descriptor — return as-is.
     return std::string{atype};
 }
 

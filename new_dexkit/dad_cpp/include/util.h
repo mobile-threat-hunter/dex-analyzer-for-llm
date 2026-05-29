@@ -49,15 +49,24 @@ unsigned GetTypeSize(std::string_view param) noexcept;
 
 // DAD: util.py:205 get_type — Dalvik type descriptor → human Java type string.
 //
-// QUIRK (faithful to DAD): for descriptors starting with 'Ljava/lang' the
-// original code calls `atype[1:-1].lstrip('java/lang/')` which is Python's
-// CHAR-SET strip, NOT a prefix strip. So `Ljava/lang/Override;` correctly
-// yields "Override" but `Ljava/lang/annotation/Foo;` yields "otation.Foo".
-// We replicate this bug for compatibility — fix only if DAD upstream fixes it.
+// Production behavior: strips the "java/lang/" prefix properly (real prefix
+// strip, not Python char-set strip). So both `Ljava/lang/Override;` → "Override"
+// and `Ljava/lang/annotation/Foo;` → "annotation.Foo".
+//
+// DAD upstream has a bug here: `atype[1:-1].lstrip('java/lang/')` is a
+// char-set strip, mangling `Ljava/lang/annotation/Foo;` into "otation.Foo".
+// The bug-compatible variant lives in `GetTypeDADFaithful` and is used by
+// parity tests only.
 //
 // `size` is used only when atype begins with '[' (array). Pass UINT32_MAX
 // to defer to the default `T[]` rendering; any other value emits `T[N]`.
 std::string GetType(std::string_view atype, uint32_t size = UINT32_MAX);
+
+// DAD-faithful variant of GetType — preserves the `lstrip('java/lang/')`
+// char-set quirk for byte-identical comparison against androguard DAD output.
+// Production code MUST NOT call this; use `GetType` instead. Parity tests
+// call this to verify our port still matches DAD's exact (buggy) output.
+std::string GetTypeDADFaithful(std::string_view atype, uint32_t size = UINT32_MAX);
 
 // DAD: util.py:227 get_params_type — method descriptor → parameter type list.
 //
