@@ -5,20 +5,20 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
-# Path to upstream LuckyPray DexKit (sibling directory).
-# Override with -DDEXKIT_GIT_ROOT=/path/to/dexkit if needed.
-if(NOT DEFINED DEXKIT_GIT_ROOT)
-    set(DEXKIT_GIT_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../dexkit_git")
+# Path to our vendored DexKit Core fork.
+# Override with -DDEXKIT_CORE_ROOT=/path/to/dexkit if needed.
+if(NOT DEFINED DEXKIT_CORE_ROOT)
+    set(DEXKIT_CORE_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../vendor/dexkit_core")
 endif()
 
-if(NOT EXISTS "${DEXKIT_GIT_ROOT}/Core/CMakeLists.txt")
+if(NOT EXISTS "${DEXKIT_CORE_ROOT}/Core/CMakeLists.txt")
     message(FATAL_ERROR
-        "DexKit Core not found at ${DEXKIT_GIT_ROOT}/Core. "
-        "Pass -DDEXKIT_GIT_ROOT=<path> or place upstream at ../dexkit_git.")
+        "DexKit Core not found at ${DEXKIT_CORE_ROOT}/Core. "
+        "Pass -DDEXKIT_CORE_ROOT=<path> or place vendored fork at ../vendor/dexkit_core.")
 endif()
 
-# Pull in upstream DexKit static library (`dexkit_static` target).
-add_subdirectory("${DEXKIT_GIT_ROOT}/Core" dexkit_core_build EXCLUDE_FROM_ALL)
+# Pull in vendored DexKit static library (`dexkit_static` target).
+add_subdirectory("${DEXKIT_CORE_ROOT}/Core" dexkit_core_build EXCLUDE_FROM_ALL)
 
 # pybind11 + Python
 find_package(Python COMPONENTS Interpreter Development.Module REQUIRED)

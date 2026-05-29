@@ -310,7 +310,7 @@ dexkit-py/
 ├── python/dexkit_py/— Python facade + descriptor helpers + capability catalog
 ```
 
-Upstream DexKit lives at `../dexkit_git/` (sibling directory). Public accessors added to upstream's `DexItem` class live in `dexkit_git/Core/dexkit/{include/dex_item.h,dex_item.cpp}`. The fork stays small and re-rebases easily on upstream updates.
+Vendored DexKit Core fork lives at `../vendor/dexkit_core/` (sibling directory). Public accessors added to upstream's `DexItem` class live in `vendor/dexkit_core/Core/dexkit/{include/dex_item.h,dex_item.cpp}`. The fork stays small and re-rebases easily on upstream updates.
 
 ---
 

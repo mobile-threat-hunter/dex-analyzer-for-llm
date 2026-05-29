@@ -1,6 +1,6 @@
 ---
 name: dexkit-build
-description: Rebuild the DexKit C++ core via ninja and reinstall the editable Python wheel. Run this every time any C++ source under dexkit_git/Core/, new_dexkit/binding/, new_dexkit/dad_cpp/, or new_dexkit/core_ext/ is modified — the in-memory pip extension does NOT pick up rebuilt .so files automatically.
+description: Rebuild the DexKit C++ core via ninja and reinstall the editable Python wheel. Run this every time any C++ source under vendor/dexkit_core/Core/, new_dexkit/binding/, new_dexkit/dad_cpp/, or new_dexkit/core_ext/ is modified — the in-memory pip extension does NOT pick up rebuilt .so files automatically.
 ---
 
 DexKit develops natively (C++ static lib + pybind11 module) and Python wraps it. Two directories are involved:

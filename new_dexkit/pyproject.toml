@@ -20,5 +20,5 @@ wheel.install-dir = "dexkit_py"
 build-dir = "build/{wheel_tag}"
 
 [tool.scikit-build.cmake.define]
-# Override if upstream DexKit lives elsewhere.
-# DEXKIT_GIT_ROOT = "/abs/path/to/dexkit_git"
+# Override if vendored DexKit Core lives elsewhere.
+# DEXKIT_CORE_ROOT = "/abs/path/to/vendor/dexkit_core"

@@ -1,12 +1,12 @@
 # CLAUDE.md — DexKit pybind11 wrapper
 
-Project: C++ DexKit Core + pybind11 wrapper (`dexkit_py`) with an embedded DAD-aligned Java decompiler. Develop in C++ (mostly `dexkit_git/Core/dexkit/dex_item.cpp`), test via Python.
+Project: C++ DexKit Core + pybind11 wrapper (`dexkit_py`) with an embedded DAD-aligned Java decompiler. Develop in C++ (mostly `vendor/dexkit_core/Core/dexkit/dex_item.cpp`), test via Python.
 
 ## DAD-aligned development policy
 
 Decompiler implementation lives in `new_dexkit/dad_cpp/`. It is being built as a faithful C++ port of androguard's DAD. Reference source: `/home/nyahumi/Downloads/androguard-master/androguard/decompiler/`. Every function added MUST carry `// DAD: <file.py>:<lineno> <concept>` in both code comment and commit message. If no DAD analogue exists, do not implement — discuss first.
 
-A `PreToolUse` hook injects this reminder when editing `dexkit_git/Core/**` or `new_dexkit/binding/**` C++ sources.
+A `PreToolUse` hook injects this reminder when editing `vendor/dexkit_core/Core/**` or `new_dexkit/binding/**` C++ sources.
 
 ### Port status — `new_dexkit/dad_cpp/` (COMPLETE — end-to-end pipeline working)
 
@@ -95,7 +95,7 @@ After the SplitVariables root-cause fix, the remaining mismatch carrousel was at
 | `cmp` operator → real comparison op (BinaryCompExpression.set_op) | writer.cpp:455 | +1.2 |
 | Switch-as-while: packed-switch as block leader + node_to_case wiring | method_snapshot_builder.cpp:301 + graph.cpp:619 | +0.8 |
 | `fill-array-data` payload (add OP_FILL_ARRAY_DATA to IsBranchOpcode) | method_snapshot_builder.cpp:91 | +0.4 |
-| `declared_synchronized` raw access flags (upstream DexKit patch) | dexkit_git/Core/dexkit/dex_item.cpp + dexitem_code_source.cpp | +0.4 |
+| `declared_synchronized` raw access flags (upstream DexKit patch) | vendor/dexkit_core/Core/dexkit/dex_item.cpp + dexitem_code_source.cpp | +0.4 |
 | `// Both branches` comment form + else_diff visited check | writer.cpp:681 / 732 | +0.6 |
 | String apostrophe escape (`\'`) | writer.cpp:35 | +0.6 |
 | (var_to_declare insertion-ordered — no rate change, deterministic) | basic_blocks.cpp:90 | 0 |
@@ -173,7 +173,7 @@ Every C++ change requires two atomic steps in this exact order:
 1. `cd new_dexkit/build/cp313-cp313-linux_x86_64 && ninja`
 2. `cd new_dexkit && pip install -e . --no-build-isolation`
 
-A `PostToolUse` hook reminds when files under `dexkit_git/Core/` or `new_dexkit/binding/` are edited. Run `/dexkit-build` to do both steps correctly.
+A `PostToolUse` hook reminds when files under `vendor/dexkit_core/Core/` or `new_dexkit/binding/` are edited. Run `/dexkit-build` to do both steps correctly.
 
 ## Memory safety — ASan checked (2026-05-28)
 
