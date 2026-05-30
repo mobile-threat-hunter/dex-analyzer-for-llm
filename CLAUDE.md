@@ -44,9 +44,13 @@ Builder runs in 7 stages: decode → leaders → exception table → block split
 - `data_provider.h` — old IDexDataProvider interface. Deleted. Replaced by `IDexCodeSource` + `MethodSnapshot`.
 - `NullDataProvider` stub in `binding/module.cpp` — deleted.
 
-### ⚠ Known critical hang in DAD pipeline (use `safe_decompile_*` in batch code)
+### Fixed: non-deterministic ShortCircuitStruct hang (Phase 2 6906cb7) — `safe_decompile_*` retained as defense-in-depth
 
-Repeated sweep runs (30+ iters) reproducibly expose **non-deterministic hangs** in the C++ IR pipeline on a small set of classes:
+**Status: FIXED at the IR level by a max-iteration cap on `ShortCircuitStruct`'s outer `while (change)` loop ([control_flow.cpp:435](dex_analyzer/dad_cpp/control_flow.cpp#L435)). Post-fix 30-iter sweep = 0/30 timeouts (vs 16.7% pre-fix).** Keep using `safe_decompile_*` (see [safe.py](dex_analyzer/python/dexkit_py/safe.py)) in batch/automation code — it now mainly serves as a belt-and-suspenders catch for any future hang we haven't isolated yet.
+
+#### Original symptom (kept for context)
+
+Repeated sweep runs (30+ iters) reproducibly exposed **non-deterministic hangs** in the C++ IR pipeline on a small set of classes:
 
 | APK | Class | Hang frequency |
 |---|---|---|
@@ -61,21 +65,29 @@ Repeated sweep runs (30+ iters) reproducibly expose **non-deterministic hangs** 
 - 100% of one CPU core
 - Classes themselves are **deterministically fast** when decompiled standalone (Guideline = 0.06s/call, 30/30 OK). Hang only manifests in mid-sweep cumulative state and at a non-deterministic rate (~12-17% of sweep runs).
 
-**Likely root cause** (unconfirmed): worst-case `std::unordered_map` iteration order somewhere in the DAD passes (Construct / SplitVariables / RegisterPropagation / IdentifyStructures) hitting an O(n^k) path; process-level hash randomization makes the trigger non-deterministic.
+#### Confirmed root cause (P1b gdb backtraces from a watchdog-armed sweep)
 
-**Production safety net** — `dex_analyzer/python/dexkit_py/safe.py`:
+Two independent dumps both pinned the stack inside
+`Graph::post_order` → `Graph::compute_rpo` → `ShortCircuitStruct` → `IdentifyStructures` → `DvMethod::Process`.
+The outer `while (change)` loop in `ShortCircuitStruct` failed to reach a fixed point: `MergeShortCircuit` allocates a fresh `ShortCircuitBlock` each iteration, and under certain `std::unordered_map<NodeBase*, NodeBase*>` iteration orders (process-local hash randomness) the merged node immediately satisfies the next merge predicate, so the loop synthesises new nodes forever. DAD Python has the same algorithmic structure but CPython dict iteration happens to give a benign order in practice.
+
+#### Fix
+
+[control_flow.cpp:435](dex_analyzer/dad_cpp/control_flow.cpp#L435): bound the outer loop at `max(graph.nodes.size() * 10, 1000)`. Healthy runs converge in ~N steps; the cap only fires in the non-deterministic pathological case. On bail we leave the graph in a partially-merged but internally-consistent state and write a `[dexkit-dad] ShortCircuitStruct: bailing after N iters` line to stderr so callers can detect it.
+
+#### Defense-in-depth: `safe_decompile_*` wrappers
+
+`dex_analyzer/python/dexkit_py/safe.py` ([safe.py](dex_analyzer/python/dexkit_py/safe.py)) runs each call on a `daemon=True` thread with a wall-clock deadline (default 10s). If a future regression introduces another hang the cap above doesn't catch, the wrapper still keeps the caller alive — the hung thread leaks until process exit but the batch loop progresses. **Batch / CI / automation code MUST continue to use the safe wrapper.** Single-class interactive debugging from a REPL can use the raw binding (`dk.decompile_class_java(cls)`).
+
 ```python
-from dexkit_py import safe_decompile_class_java, safe_decompile_method_java, is_timeout_marker
+from dexkit_py import safe_decompile_class_java, is_timeout_marker
 
 out = safe_decompile_class_java(dk, cls, timeout=10.0)
 if is_timeout_marker(out):
-    # hung — record and move on
+    # hit the safe deadline AND the IR cap didn't catch it — record and move on
 ```
-The wrapper runs the call on a `daemon=True` thread and abandons it on deadline. The hung thread keeps consuming CPU/memory until the process exits (no way to interrupt user-space C++), but the caller continues. **ALL batch/CI/automation code MUST use the safe wrapper** — direct binding calls in those contexts will hang indefinitely.
 
-Single-class interactive debugging from a REPL can still use the raw binding (`dk.decompile_class_java(cls)`) when there's a human in the loop.
-
-Affected tools updated to use the safe API: `/tmp/full_sweep.py`, `dex_analyzer/tests/dvclass_parity.py`. New tools added by future work MUST follow the same pattern.
+Tools updated to use both the cap and the safe wrapper: `/tmp/full_sweep.py` (counts `class_timeout` separately from crashes), `dex_analyzer/tests/dvclass_parity.py` (per-APK + total `timeouts` column with warning footer).
 
 ### Upstream DAD bug fixes (production diverges from DAD, parity-faithful variant retained for tests)
 
