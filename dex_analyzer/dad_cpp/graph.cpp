@@ -158,6 +158,28 @@ void Graph::remove_node(NodeBase* node) {
     EraseFirst(nodes, node);
     // DAD: if node in self.rpo: self.rpo.remove(node)
     EraseFirst(rpo, node);
+    // REAL ROOT-CAUSE FIX (supersedes earlier ShortCircuit done-check):
+    // erase `node`'s OWN entry from edges / reverse_edges tables. DAD
+    // doesn't do this — `self.edges[node]` / `self.reverse_edges[node]`
+    // stay around with the pre-removal pred/succ lists. Subsequent
+    // `graph.preds(node)` / `graph.sucs(node)` calls then return those
+    // stale lists, which is exactly how ShortCircuitStruct ended up
+    // merging on already-removed nodes (net +1 per iter forever, hang).
+    // After the erase, preds/sucs return empty for `node` so any
+    // dangling pointer that still references it is naturally filtered
+    // out at the size==1 / membership checks.
+    //
+    // We deliberately diverge from DAD here: DAD survives this bug in
+    // practice only because CPython dict iteration on `n_map` happens
+    // to give a benign order on the bench corpus. C++ unordered_map
+    // hash randomisation exposes the bug ~17% of sweep runs.
+    edges.erase(node);
+    reverse_edges.erase(node);
+    // (catch_edges/reverse_catch_edges already erased above via the
+    // existing `.erase(it)` calls, but call again here for symmetry —
+    // erase on absent key is a no-op.)
+    catch_edges.erase(node);
+    reverse_catch_edges.erase(node);
     // DAD: del node — Python no-op for shared refs; we don't own storage.
 }
 

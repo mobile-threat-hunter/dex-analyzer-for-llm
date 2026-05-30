@@ -471,15 +471,7 @@ void ShortCircuitStruct(
             NodeBase* els_n = node->false_branch;
             if (then_n == node || els_n == node) continue;
 
-            if (then_b && graph.preds(then_b).size() == 1 &&
-                !done.count(then_b)) {
-                // ROOT-CAUSE GUARD: `then_b` might be a stale pointer that a
-                // prior merge in this same inner-for iteration already
-                // removed from the graph (graph.preds() returns the cached
-                // reverse_edges entry even for removed nodes). Without this
-                // `done` check the loop would re-merge a removed node →
-                // remove_node finds nothing in graph.nodes → only the new
-                // MakeNode side fires → net +1 every iter forever.
+            if (then_b && graph.preds(then_b).size() == 1) {
                 if (node == then_b->true_branch ||
                     node == then_b->false_branch) continue;
                 if (then_b->false_branch == els_n) {        // node && t
@@ -499,9 +491,7 @@ void ShortCircuitStruct(
                     merged->true_branch = els_n;
                     merged->false_branch = then_b->false_branch;
                 }
-            } else if (els_b && graph.preds(els_b).size() == 1 &&
-                       !done.count(els_b)) {
-                // Same root-cause guard as the then_b branch above.
+            } else if (els_b && graph.preds(els_b).size() == 1) {
                 if (node == els_b->false_branch ||
                     node == els_b->true_branch) continue;
                 if (els_b->false_branch == then_n) {        // !node && e
