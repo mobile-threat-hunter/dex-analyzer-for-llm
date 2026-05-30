@@ -44,9 +44,9 @@ Builder runs in 7 stages: decode → leaders → exception table → block split
 - `data_provider.h` — old IDexDataProvider interface. Deleted. Replaced by `IDexCodeSource` + `MethodSnapshot`.
 - `NullDataProvider` stub in `binding/module.cpp` — deleted.
 
-### Fixed: non-deterministic ShortCircuitStruct hang (Phase 2 6906cb7) — `safe_decompile_*` retained as defense-in-depth
+### Fixed: non-deterministic ShortCircuitStruct hang (Phase 2 6906cb7 cap; real root-cause fix a104e22) — `safe_decompile_*` retained as defense-in-depth
 
-**Status: FIXED at the IR level by a max-iteration cap on `ShortCircuitStruct`'s outer `while (change)` loop ([control_flow.cpp:435](dex_analyzer/dad_cpp/control_flow.cpp#L435)). Post-fix 30-iter sweep = 0/30 timeouts (vs 16.7% pre-fix).** Keep using `safe_decompile_*` (see [safe.py](dex_analyzer/python/dexkit_py/safe.py)) in batch/automation code — it now mainly serves as a belt-and-suspenders catch for any future hang we haven't isolated yet.
+**Status: FIXED at the IR level. Real root cause is a missing `done` check on `then_b` / `els_b` (stale-pointer merge after sibling merge in the same inner-for iteration). Post-fix 30-iter sweep = 0/30 timeouts AND 0/30 cap bails (vs 16.7% pre-fix; cap-only had 2-5 bails / 30 sweeps).** Keep using `safe_decompile_*` (see [safe.py](dex_analyzer/python/dexkit_py/safe.py)) in batch/automation code as belt-and-suspenders.
 
 #### Original symptom (kept for context)
 
@@ -65,15 +65,17 @@ Repeated sweep runs (30+ iters) reproducibly exposed **non-deterministic hangs**
 - 100% of one CPU core
 - Classes themselves are **deterministically fast** when decompiled standalone (Guideline = 0.06s/call, 30/30 OK). Hang only manifests in mid-sweep cumulative state and at a non-deterministic rate (~12-17% of sweep runs).
 
-#### Confirmed root cause (P1b gdb backtraces from a watchdog-armed sweep)
+#### Confirmed root cause (P1b gdb backtraces + P1c in-memory merge log)
 
 Two independent dumps both pinned the stack inside
 `Graph::post_order` → `Graph::compute_rpo` → `ShortCircuitStruct` → `IdentifyStructures` → `DvMethod::Process`.
-The outer `while (change)` loop in `ShortCircuitStruct` failed to reach a fixed point: `MergeShortCircuit` allocates a fresh `ShortCircuitBlock` each iteration, and under certain `std::unordered_map<NodeBase*, NodeBase*>` iteration orders (process-local hash randomness) the merged node immediately satisfies the next merge predicate, so the loop synthesises new nodes forever. DAD Python has the same algorithmic structure but CPython dict iteration happens to give a benign order in practice.
+The outer `while (change)` loop in `ShortCircuitStruct` failed to reach a fixed point: Inside one inner-for iteration we merge `node` + `then_b`/`els_b`. The merged-away nodes are removed from `graph.nodes` and added to `done`, but `CondBlock::true_branch` / `false_branch` are raw pointers — when the next post_order entry has its branch still pointing at the just-removed node, the old code (only guarding `node` itself) merged on the stale pointer. `graph.remove_node(stale)` then no-ops (EraseFirst finds nothing) while `MakeNode<ShortCircuitBlock>` still fires → net +1 per iter forever. Specific trigger is process-local: whichever post_order order exposes the re-use. DAD Python omits the same guard but CPython dict iteration on n_map happens to give a benign order on the corpus.
 
 #### Fix
 
-[control_flow.cpp:435](dex_analyzer/dad_cpp/control_flow.cpp#L435): bound the outer loop at `max(graph.nodes.size() * 10, 1000)`. Healthy runs converge in ~N steps; the cap only fires in the non-deterministic pathological case. On bail we leave the graph in a partially-merged but internally-consistent state and write a `[dexkit-dad] ShortCircuitStruct: bailing after N iters` line to stderr so callers can detect it.
+[control_flow.cpp:474+501](dex_analyzer/dad_cpp/control_flow.cpp#L474) (commit `a104e22`): extend the existing `done.count(n)` guard to cover `then_b` and `els_b` too — one `&& !done.count(...)` per branch. **Real root-cause fix; eliminates the +1/iter divergence.** Post-fix 30-iter sweeps: 0 timeouts AND 0 cap bails (vs cap-only era's 2-5 cap bails / 30).
+
+The earlier [control_flow.cpp:441](dex_analyzer/dad_cpp/control_flow.cpp#L441) max-iteration cap (`max(graph.nodes.size() * 10, 1000)` + stderr bail) is retained as defense-in-depth — quiet on the bench corpus now, but still catches any future fixed-point regression.
 
 #### Defense-in-depth: `safe_decompile_*` wrappers
 
