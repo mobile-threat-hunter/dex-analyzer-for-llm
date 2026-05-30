@@ -191,11 +191,17 @@ std::string Decompiler::DecompileClass(std::string_view class_descriptor) {
     if (is_interface) access &= ~kAccAbstract;
     auto access_list = GetAccessClass(access);
 
-    std::string prototype;
-    for (const auto& a : access_list) {
-        prototype += a;
-        prototype += ' ';
+    // DAD: `prototype = '%s class %s' % (' '.join(access), name)` for class,
+    // `'%s %s'` for interface. Note: `' '.join([])` is empty, but the literal
+    // space in `'%s %s'` still appears — so package-private interface emits
+    // ` interface Foo` with a leading space. Match byte-for-byte.
+    std::string access_joined;
+    for (size_t i = 0; i < access_list.size(); ++i) {
+        if (i > 0) access_joined += ' ';
+        access_joined += access_list[i];
     }
+    std::string prototype = access_joined;
+    prototype += ' ';
     if (!is_interface) prototype += "class ";
     prototype += name;
 
