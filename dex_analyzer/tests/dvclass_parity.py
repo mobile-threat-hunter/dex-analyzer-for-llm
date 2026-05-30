@@ -57,22 +57,23 @@ def header_fields(src: str) -> str:
     return '\n'.join(out)
 
 
-def parity_for_apk(apk: str, n: int) -> tuple[int, int, list[tuple[str, str]]]:
-    """Returns (matched, total, mismatches[:3])."""
+def parity_for_apk(apk: str, n: int) -> tuple[int, int, int, list[tuple[str, str]]]:
+    """Returns (matched, total, timeouts, mismatches[:3])."""
     dk = dexkit_py.DexKit(apk)
     try:
         _a, d_list, dx = AnalyzeAPK(apk)
     except Exception as e:
-        print(f"  AnalyzeAPK failed: {e}", flush=True); return 0, 0, []
+        print(f"  AnalyzeAPK failed: {e}", flush=True); return 0, 0, 0, []
 
     # Pool every defined class across all dexes
     all_classes = [(d, c) for d in d_list for c in d.get_classes()]
     if not all_classes:
-        return 0, 0, []
+        return 0, 0, 0, []
     random.shuffle(all_classes)
     sample = all_classes[:n]
 
     matched = 0
+    timeouts = 0
     mismatches: list[tuple[str, str]] = []
     for d, cls in sample:
         cls_name = cls.get_name()
@@ -81,8 +82,11 @@ def parity_for_apk(apk: str, n: int) -> tuple[int, int, list[tuple[str, str]]]:
                 dk, cls_name, timeout=DECOMPILE_TIMEOUT_S)
         except Exception:
             continue
-        if not dk_out or is_timeout_marker(dk_out):
+        if is_timeout_marker(dk_out):
+            timeouts += 1
             continue  # skip hangs from the parity check entirely
+        if not dk_out:
+            continue
         try:
             dv = DvClass(cls, dx); dv.process()
             dad_out = dv.get_source()
@@ -94,7 +98,7 @@ def parity_for_apk(apk: str, n: int) -> tuple[int, int, list[tuple[str, str]]]:
             if len(mismatches) < 3:
                 mismatches.append((cls_name, _diff(dk_out, dad_out)))
     del dx; del d_list; gc.collect()
-    return matched, len(sample), mismatches
+    return matched, len(sample), timeouts, mismatches
 
 
 def _diff(dk: str, dad: str) -> str:
@@ -119,27 +123,32 @@ def main() -> int:
         print(f"No APKs in {args.corpus}", file=sys.stderr); return 1
 
     print(f"=== DvClass header+fields parity vs androguard DAD ===")
-    print(f"{'APK':<55} | match")
-    print('-' * 75)
-    total_match = 0; total_n = 0; failing_apks: list[str] = []
+    print(f"{'APK':<55} | match              | timeouts")
+    print('-' * 92)
+    total_match = 0; total_n = 0; total_timeouts = 0; failing_apks: list[str] = []
     all_mismatches: list[tuple[str, str, str]] = []
     for apk in apks:
         name = os.path.basename(apk)
         if os.path.getsize(apk) > 100_000_000:
             print(f"{name:<55} | (skip — large/no-dex)"); continue
-        m, n, mismatches = parity_for_apk(apk, args.per_apk)
+        m, n, to, mismatches = parity_for_apk(apk, args.per_apk)
         if n == 0:
             print(f"{name:<55} | (no classes)"); continue
         pct = m / n * 100
         flag = '' if m == n else f"  ⚠ {n-m} mismatch"
-        print(f"{name:<55} | {m:>3}/{n:<3} ({pct:>5.1f}%){flag}")
-        total_match += m; total_n += n
+        to_str = f"{to:>2}" if to else " 0"
+        print(f"{name:<55} | {m:>3}/{n:<3} ({pct:>5.1f}%){flag:<8} | {to_str}")
+        total_match += m; total_n += n; total_timeouts += to
         if m < n: failing_apks.append(name)
         for cls, diff in mismatches:
             all_mismatches.append((name, cls, diff))
-    print('-' * 75)
+    print('-' * 92)
     pct = total_match / max(total_n, 1) * 100
-    print(f"{'TOTAL':<55} | {total_match:>3}/{total_n:<3} ({pct:>5.1f}%)")
+    print(f"{'TOTAL':<55} | {total_match:>3}/{total_n:<3} ({pct:>5.1f}%)         | {total_timeouts:>2}")
+    if total_timeouts:
+        print(f"\n⚠ {total_timeouts} class(es) hit the {DECOMPILE_TIMEOUT_S}s safe_decompile deadline."
+              f" These are not counted as parity mismatches (we don't know what DAD would have produced),"
+              f" but they DO indicate the P0 safety net was needed.")
 
     if all_mismatches:
         print(f"\n=== First {min(3, len(all_mismatches))} mismatches ===")

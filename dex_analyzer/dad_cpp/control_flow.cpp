@@ -1,6 +1,7 @@
 // control_flow.cpp — DAD control_flow.py port.
 // See include/control_flow.h for entity list & status.
 
+#include <cstdio>
 #include "control_flow.h"
 
 #include <algorithm>
@@ -421,8 +422,33 @@ void ShortCircuitStruct(
     Graph& graph,
     std::unordered_map<NodeBase*, NodeBase*>& idom,
     std::unordered_map<NodeBase*, NodeBase*>& node_map) {
+    // SAFETY CAP: the DAD-faithful outer `while (change)` loop occasionally
+    // fails to reach a fixed point on real APK classes (FlowLayout.onMeasure,
+    // Guideline.addToSolver, AppCompatDelegateImpl.reopenMenu — caught via
+    // gdb on hung sweeps). The trigger is non-deterministic, depending on
+    // unordered_map<NodeBase*, ...> iteration order between processes; some
+    // orderings let MergeShortCircuit keep introducing new ShortCircuitBlocks
+    // each iteration so the loop never converges. DAD Python has the same
+    // structure but appears to converge in practice — likely because Python's
+    // dict iteration happens to give a benign order here.
+    //
+    // The cap is generous (10 * original node count) — each merge removes
+    // 2 nodes and adds 1, so a healthy run converges in ~N iters. Hitting
+    // the cap means we're in the pathological loop; bail with a stderr
+    // warning so callers can see we abandoned the pass. The graph is left
+    // in a partially-merged but consistent state; downstream Writer
+    // tolerates this (worst case: less pretty short-circuit collapsing).
+    const size_t kMaxIters = std::max<size_t>(graph.nodes.size() * 10, 1000);
+    size_t iter = 0;
     bool change = true;
     while (change) {
+        if (++iter > kMaxIters) {
+            std::fprintf(stderr,
+                "[dexkit-dad] ShortCircuitStruct: bailing after %zu iters "
+                "(non-deterministic fixed-point miss); graph kept in current "
+                "state.\n", iter);
+            break;
+        }
         change = false;
         std::unordered_set<NodeBase*> done;
         for (NodeBase* n : graph.post_order()) {
