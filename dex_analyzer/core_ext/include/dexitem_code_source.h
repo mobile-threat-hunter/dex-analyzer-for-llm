@@ -39,6 +39,9 @@ public:
                        GetMethodRefTriple(uint16_t, uint32_t) override;
     std::array<std::string_view, 3>
                        GetFieldRefTriple(uint16_t, uint32_t) override;
+    std::optional<ClassInfo>
+                       GetClassInfo(std::string_view class_descriptor) override;
+    FieldInfo          GetFieldInfo(uint16_t, uint32_t) override;
 
 private:
     // Per-(dex_id, proto_idx) proto descriptor cache. Strings are owned by

@@ -67,6 +67,36 @@ public:
     // Enumerate all methods of a class. Default returns empty.
     virtual std::vector<MethodLocator>
     LocateClassMethods(std::string_view /*class_descriptor*/) { return {}; }
+
+    // ─── Class metadata (for DvClass-style full-class decompile) ────────
+    // DAD: decompile.py:258 DvClass.__init__ — supplies package, access,
+    // superclass, interfaces, field list at class header emission time.
+    struct ClassInfo {
+        uint16_t                      dex_id = 0;
+        uint32_t                      type_idx = 0;
+        uint32_t                      access_flags = 0;     // raw dex access
+        std::string_view              superclass;           // Smali "Ljava/lang/Object;" or empty
+        std::vector<std::string_view> interfaces;           // Smali descriptors
+        std::vector<uint32_t>         field_ids;            // per-class field_idxs
+    };
+    // Default returns nullopt — override in production source.
+    virtual std::optional<ClassInfo>
+    GetClassInfo(std::string_view /*class_descriptor*/) { return std::nullopt; }
+
+    // ─── Field metadata (for class field declaration emit) ──────────────
+    // DAD: decompile.py:354 DvClass.get_source — needs name + type + access
+    // + optional initializer. init_text is the already-rendered RHS of the
+    // declaration (`"foo"`, `42`, `0x2a`, `null`, …) or empty if no
+    // EncodedValue / unsupported value type.
+    struct FieldInfo {
+        std::string_view name;
+        std::string_view type;          // Smali descriptor "Ljava/lang/String;" / "I" / …
+        uint32_t         access_flags = 0;
+        std::string      init_text;     // empty when no compile-time initializer
+    };
+    virtual FieldInfo GetFieldInfo(uint16_t /*dex_id*/, uint32_t /*field_idx*/) {
+        return {};
+    }
 };
 
 }  // namespace dexkit::dad

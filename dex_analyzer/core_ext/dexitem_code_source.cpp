@@ -220,4 +220,64 @@ DexItemCodeSource::GetFieldRefTriple(uint16_t dex_id, uint32_t fidx) {
     return {type_names[f.class_idx], strings[f.name_idx], type_names[f.type_idx]};
 }
 
+// DAD: decompile.py:269 DvClass.__init__ — supplies metadata used by
+// get_source() to emit the package / class header / interface list.
+std::optional<dexkit::dad::IDexCodeSource::ClassInfo>
+DexItemCodeSource::GetClassInfo(std::string_view class_descriptor) {
+    auto [item, type_idx] = core_.GetClassDeclaredPair(class_descriptor);
+    if (item == nullptr) return std::nullopt;
+    uint32_t class_def_idx = item->GetTypeDefIdx(type_idx);
+    if (class_def_idx == dex::kNoIndex) return std::nullopt;
+
+    const auto& reader = item->GetReader();
+    const auto& type_names = item->GetTypeNames();
+    const auto class_defs = reader.ClassDefs();
+    if (class_def_idx >= class_defs.size()) return std::nullopt;
+    const auto& cdef = class_defs[class_def_idx];
+
+    ClassInfo info;
+    info.dex_id = item->GetDexId();
+    info.type_idx = type_idx;
+    info.access_flags = cdef.access_flags;
+    if (cdef.superclass_idx != dex::kNoIndex) {
+        info.superclass = type_names[cdef.superclass_idx];
+    }
+    if (cdef.interfaces_off != 0) {
+        const auto* type_list =
+            reader.dataPtr<dex::TypeList>(cdef.interfaces_off);
+        if (type_list != nullptr) {
+            info.interfaces.reserve(type_list->size);
+            for (uint32_t i = 0; i < type_list->size; ++i) {
+                info.interfaces.push_back(
+                    type_names[type_list->list[i].type_idx]);
+            }
+        }
+    }
+    // field_ids: class_field_ids[type_idx] is already indexed in InitBaseCache.
+    info.field_ids = item->GetClassFieldIds(type_idx);
+    return info;
+}
+
+// DAD: decompile.py:367 DvClass.get_source — per-field name + type + access.
+// init_text is left empty for now (Phase 1): DvClass emits `Type name;`
+// when there's no compile-time initializer, which is valid Java. EncodedValue
+// decoding (String/byte/primitive/...) is a deferred follow-up.
+dexkit::dad::IDexCodeSource::FieldInfo
+DexItemCodeSource::GetFieldInfo(uint16_t dex_id, uint32_t fidx) {
+    FieldInfo info;
+    DexItem* item = SafeGetDexItem(core_, dex_id);
+    if (!item) return info;
+    const auto& reader = item->GetReader();
+    const auto& strings = item->GetStrings();
+    const auto& type_names = item->GetTypeNames();
+    const auto field_ids = reader.FieldIds();
+    if (fidx >= field_ids.size()) return info;
+    const auto& f = field_ids[fidx];
+    info.name = strings[f.name_idx];
+    info.type = type_names[f.type_idx];
+    const auto& access = item->GetFieldAccessFlags();
+    if (fidx < access.size()) info.access_flags = access[fidx];
+    return info;
+}
+
 }  // namespace dexkit::ext

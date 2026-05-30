@@ -9,6 +9,7 @@
 
 #include "decompile.h"
 #include "method_snapshot.h"
+#include "util.h"
 
 namespace dexkit::dad {
 
@@ -148,17 +149,111 @@ Decompiler::DecompileMethodAst(std::string_view descriptor) {
     return ast;
 }
 
+// DAD: decompile.py:354 DvClass.get_source — emits full Java class text
+// (package + class header + fields + methods + closing brace). Replaces the
+// earlier "method-body dump" form. inner-class handling is not auto-detected
+// (DAD also hard-codes `self.inner = False`). Field initializer rendering
+// (EncodedValue → text) is a Phase-2 follow-up; FieldInfo.init_text is
+// currently always empty so fields emit as `Type name;`.
 std::string Decompiler::DecompileClass(std::string_view class_descriptor) {
+    auto info_opt = source_.GetClassInfo(class_descriptor);
+    if (!info_opt) {
+        // Class not defined in this dex (external ref / wrong descriptor).
+        // Matches DAD's effective behavior on ExternalMethod refs.
+        return {};
+    }
+    const auto& info = *info_opt;
+
+    auto slash_to_dot = [](std::string s) {
+        for (char& c : s) if (c == '/') c = '.';
+        return s;
+    };
+
+    // Parse package + name from "Lcom/foo/Bar;".
+    std::string_view body = class_descriptor;
+    if (body.size() >= 2 && body.front() == 'L' && body.back() == ';') {
+        body = body.substr(1, body.size() - 2);
+    }
+    std::string package, name;
+    auto last_slash = body.rfind('/');
+    if (last_slash != std::string_view::npos) {
+        package = slash_to_dot(std::string{body.substr(0, last_slash)});
+        name.assign(body.substr(last_slash + 1));
+    } else {
+        name.assign(body);
+    }
+
+    uint32_t access = info.access_flags;
+    constexpr uint32_t kAccInterface = 0x200;
+    constexpr uint32_t kAccAbstract  = 0x400;
+    bool is_interface = (access & kAccInterface) != 0;
+    // DAD: interface implies abstract — strip the abstract bit for cleaner output.
+    if (is_interface) access &= ~kAccAbstract;
+    auto access_list = GetAccessClass(access);
+
+    std::string prototype;
+    for (const auto& a : access_list) {
+        prototype += a;
+        prototype += ' ';
+    }
+    if (!is_interface) prototype += "class ";
+    prototype += name;
+
+    // extends — Object is implicit and omitted (DAD convention).
+    if (!info.superclass.empty() &&
+        info.superclass != "Ljava/lang/Object;") {
+        std::string sc{info.superclass.substr(1, info.superclass.size() - 2)};
+        prototype += " extends ";
+        prototype += slash_to_dot(sc);
+    }
+    // implements
+    if (!info.interfaces.empty()) {
+        prototype += " implements ";
+        for (size_t i = 0; i < info.interfaces.size(); ++i) {
+            if (i > 0) prototype += ", ";
+            std::string_view iv = info.interfaces[i];
+            prototype += slash_to_dot(std::string{iv.substr(1, iv.size() - 2)});
+        }
+    }
+
     std::string out;
+    if (!package.empty()) {
+        out += "package ";
+        out += package;
+        out += ";\n";
+    }
+    out += prototype;
+    out += " {\n";
+
+    // Fields — DAD: decompile.py:367.
+    for (uint32_t fidx : info.field_ids) {
+        auto finfo = source_.GetFieldInfo(info.dex_id, fidx);
+        auto facc = GetAccessField(finfo.access_flags);
+        out += "    ";
+        for (const auto& a : facc) {
+            out += a;
+            out += ' ';
+        }
+        out += GetType(finfo.type);
+        out += ' ';
+        out.append(finfo.name);
+        if (!finfo.init_text.empty()) {
+            out += " = ";
+            out += finfo.init_text;
+        }
+        out += ";\n";
+    }
+
+    // Methods — reuse the existing per-method decompile path.
     auto methods = source_.LocateClassMethods(class_descriptor);
     for (const auto& loc : methods) {
         auto cls = source_.GetMethodClassName(loc.dex_id, loc.method_idx);
-        auto name = source_.GetMethodName(loc.dex_id, loc.method_idx);
+        auto mname = source_.GetMethodName(loc.dex_id, loc.method_idx);
         auto proto = source_.GetMethodProto(loc.dex_id, loc.method_idx);
         std::string method_descriptor;
         method_descriptor.append(cls.data(), cls.size());
         method_descriptor += "->";
-        method_descriptor.append(name.data(), name.size());
+        method_descriptor.append(mname.data(), mname.size());
         method_descriptor += proto;
         try {
             out += DecompileMethod(method_descriptor);
@@ -170,6 +265,8 @@ std::string Decompiler::DecompileClass(std::string_view class_descriptor) {
             out += "\n";
         }
     }
+
+    out += "}\n";
     return out;
 }
 
