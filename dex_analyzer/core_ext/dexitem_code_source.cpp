@@ -11,6 +11,7 @@
 #include "dex_item.h"
 #include "slicer/dex_format.h"
 #include "slicer/reader.h"
+#include "util.h"  // dad::GetType — for TYPE/ENUM EncodedValue rendering
 
 namespace dexkit::ext {
 
@@ -212,10 +213,31 @@ std::string DecodeEncodedValueText(const U1*& p,
             if (raw.empty()) return std::string("\"\"");
             return std::string("\"") + PythonUnicodeEscape(raw) + "\"";
         }
-        case 0x18:   // TYPE
-        case 0x19:   // FIELD
-        case 0x1a:   // METHOD
-        case 0x1b: { // ENUM
+        case 0x18: {  // TYPE — class literal "pkg.Cls.class" or "int[].class"
+            uint64_t idx = ReadIntLE(p, end, nbytes);
+            const auto& type_names = item.GetTypeNames();
+            if (idx >= type_names.size()) return {};
+            // dad::GetType handles primitives (V/Z/B/.../J → void/boolean/...),
+            // reference types ("Lpkg/Cls;" → "pkg.Cls"), and arrays.
+            return dexkit::dad::GetType(type_names[idx]) + ".class";
+        }
+        case 0x19:   // FIELD — constant field reference: "Cls.NAME"
+        case 0x1b: { // ENUM  — same shape; semantically an enum constant.
+            uint64_t idx = ReadIntLE(p, end, nbytes);
+            const auto& reader = item.GetReader();
+            const auto& strings = item.GetStrings();
+            const auto& type_names = item.GetTypeNames();
+            const auto field_ids = reader.FieldIds();
+            if (idx >= field_ids.size()) return {};
+            const auto& f = field_ids[idx];
+            std::string out;
+            out += dexkit::dad::GetType(type_names[f.class_idx]);
+            out += '.';
+            out.append(strings[f.name_idx]);
+            return out;
+        }
+        case 0x1a: {  // METHOD — no Java literal form (method reflection isn't
+                      // a valid initializer expression). Skip.
             p += nbytes;
             return {};
         }
