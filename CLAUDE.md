@@ -44,9 +44,9 @@ Builder runs in 7 stages: decode → leaders → exception table → block split
 - `data_provider.h` — old IDexDataProvider interface. Deleted. Replaced by `IDexCodeSource` + `MethodSnapshot`.
 - `NullDataProvider` stub in `binding/module.cpp` — deleted.
 
-### Fixed: non-deterministic ShortCircuitStruct hang (Phase 2 6906cb7 cap; real root-cause fix a104e22) — `safe_decompile_*` retained as defense-in-depth
+### Fixed: non-deterministic ShortCircuitStruct hang — true root cause `90d0b79`
 
-**Status: FIXED at the IR level. Real root cause is a missing `done` check on `then_b` / `els_b` (stale-pointer merge after sibling merge in the same inner-for iteration). Post-fix 30-iter sweep = 0/30 timeouts AND 0/30 cap bails (vs 16.7% pre-fix; cap-only had 2-5 bails / 30 sweeps).** Keep using `safe_decompile_*` (see [safe.py](dex_analyzer/python/dexkit_py/safe.py)) in batch/automation code as belt-and-suspenders.
+**Status: FIXED at the source (Graph::remove_node leaked stale edges/reverse_edges entries for removed nodes). The earlier mitigations (cap `6906cb7`, ShortCircuit local done-checks `a104e22`) were band-aids on the use site; the graph-side erase is the structural fix. Post-fix 30-iter sweep = 0/30 timeouts, 0/30 cap bails (vs 16.7% timeout rate pre-fix).** Keep using `safe_decompile_*` (see [safe.py](dex_analyzer/python/dexkit_py/safe.py)) in batch/automation code as belt-and-suspenders.
 
 #### Original symptom (kept for context)
 
@@ -71,11 +71,17 @@ Two independent dumps both pinned the stack inside
 `Graph::post_order` → `Graph::compute_rpo` → `ShortCircuitStruct` → `IdentifyStructures` → `DvMethod::Process`.
 The outer `while (change)` loop in `ShortCircuitStruct` failed to reach a fixed point: Inside one inner-for iteration we merge `node` + `then_b`/`els_b`. The merged-away nodes are removed from `graph.nodes` and added to `done`, but `CondBlock::true_branch` / `false_branch` are raw pointers — when the next post_order entry has its branch still pointing at the just-removed node, the old code (only guarding `node` itself) merged on the stale pointer. `graph.remove_node(stale)` then no-ops (EraseFirst finds nothing) while `MakeNode<ShortCircuitBlock>` still fires → net +1 per iter forever. Specific trigger is process-local: whichever post_order order exposes the re-use. DAD Python omits the same guard but CPython dict iteration on n_map happens to give a benign order on the corpus.
 
-#### Fix
+#### Fix (final — commit `90d0b79`)
 
-[control_flow.cpp:474+501](dex_analyzer/dad_cpp/control_flow.cpp#L474) (commit `a104e22`): extend the existing `done.count(n)` guard to cover `then_b` and `els_b` too — one `&& !done.count(...)` per branch. **Real root-cause fix; eliminates the +1/iter divergence.** Post-fix 30-iter sweeps: 0 timeouts AND 0 cap bails (vs cap-only era's 2-5 cap bails / 30).
+True root cause is in `Graph::remove_node` itself: it removed the node from `nodes` and `rpo` but **left the node's own entries in `edges` / `reverse_edges` intact**. Subsequent `graph.preds(removed)` / `graph.sucs(removed)` returned those stale lists, and `ShortCircuitStruct` used the size-1 predecessor count as its "is this still a valid merge target" gate — so the stale pointer passed the gate, MergeShortCircuit got called on a fully-removed node, the second remove_node no-oped, MakeNode still fired, net `+1` per iter forever.
 
-The earlier [control_flow.cpp:441](dex_analyzer/dad_cpp/control_flow.cpp#L441) max-iteration cap (`max(graph.nodes.size() * 10, 1000)` + stderr bail) is retained as defense-in-depth — quiet on the bench corpus now, but still catches any future fixed-point regression.
+The earlier a104e22 `done.count(then_b/els_b)` guards inside `ShortCircuitStruct` worked too but only blocked the *use*; this fix removes the *source* — the stale data — so any other pass that calls `graph.remove_node` benefits as well. The local ShortCircuit guards were reverted to keep that pass DAD-faithful at the algorithm level.
+
+[graph.cpp:158](dex_analyzer/dad_cpp/graph.cpp#L158): after `EraseFirst(nodes, node)` / `EraseFirst(rpo, node)`, also `edges.erase(node)` / `reverse_edges.erase(node)` / `catch_edges.erase(node)` / `reverse_catch_edges.erase(node)`. Five extra lines, zero perf impact (single unordered_map erase per node-remove).
+
+Post-fix verification: 30/30 sweeps → **0 timeouts, 0 cap bails, mean 12.05s** (no perf regression). 24 parity 100%, DvClass parity 90.4% unchanged.
+
+DAD's `graph.remove_node` has the same leak; we deliberately diverge for the algorithmic-correctness reasons above. The earlier [control_flow.cpp:441](dex_analyzer/dad_cpp/control_flow.cpp#L441) max-iteration cap is retained as defense-in-depth — quiet on the bench corpus now, but still catches any future fixed-point regression.
 
 #### Defense-in-depth: `safe_decompile_*` wrappers
 
