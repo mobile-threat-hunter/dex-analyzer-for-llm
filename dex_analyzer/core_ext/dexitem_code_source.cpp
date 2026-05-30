@@ -2,6 +2,8 @@
 
 #include "dexitem_code_source.h"
 
+#include <cmath>
+#include <cstring>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -158,10 +160,49 @@ std::string DecodeEncodedValueText(const U1*& p,
             uint64_t v = ReadIntLE(p, end, nbytes);
             return std::to_string(v);
         }
-        case 0x10:   // FLOAT  — DAD's TODO; skip
-        case 0x11: { // DOUBLE — DAD's TODO; skip
-            p += nbytes;
-            return {};
+        case 0x10: {  // FLOAT — 32-bit IEEE754, "zero-extended to the right"
+            // Per dex spec (and androguard `_unpack_value`): payload bytes go
+            // to the LSB end of the 4-byte buffer; the high (MSB) end is
+            // zero-padded. So `padded[0..size-1] = stored, padded[size..3] = 0`,
+            // then reinterpret little-endian as float.
+            //
+            // We diverge from DAD here (DAD reads it as LE unsigned and emits
+            // the resulting huge integer, which isn't valid Java). DAD's
+            // `_getintvalue` has `# TODO: parse floats/doubles correctly`.
+            uint8_t buf[4] = {0};
+            size_t n = std::min<size_t>(nbytes, 4);
+            for (size_t i = 0; i < n && p < end; ++i) buf[i] = *p++;
+            // Consume any excess bytes the encoder claimed (shouldn't happen
+            // for well-formed dex, but keep the cursor honest).
+            if (nbytes > 4) p += (nbytes - 4);
+            uint32_t bits = 0;
+            for (int i = 0; i < 4; ++i) bits |= static_cast<uint32_t>(buf[i]) << (i * 8);
+            float f;
+            std::memcpy(&f, &bits, 4);
+            if (std::isnan(f)) return std::string("Float.NaN");
+            if (std::isinf(f)) return f > 0 ? std::string("Float.POSITIVE_INFINITY")
+                                            : std::string("Float.NEGATIVE_INFINITY");
+            char buffer[40];
+            // %.9g is the round-trip precision for IEEE754 binary32.
+            std::snprintf(buffer, sizeof(buffer), "%.9gf", static_cast<double>(f));
+            return std::string(buffer);
+        }
+        case 0x11: {  // DOUBLE — 64-bit IEEE754, "zero-extended to the right"
+            uint8_t buf[8] = {0};
+            size_t n = std::min<size_t>(nbytes, 8);
+            for (size_t i = 0; i < n && p < end; ++i) buf[i] = *p++;
+            if (nbytes > 8) p += (nbytes - 8);
+            uint64_t bits = 0;
+            for (int i = 0; i < 8; ++i) bits |= static_cast<uint64_t>(buf[i]) << (i * 8);
+            double d;
+            std::memcpy(&d, &bits, 8);
+            if (std::isnan(d)) return std::string("Double.NaN");
+            if (std::isinf(d)) return d > 0 ? std::string("Double.POSITIVE_INFINITY")
+                                            : std::string("Double.NEGATIVE_INFINITY");
+            char buffer[48];
+            // %.17g is the round-trip precision for IEEE754 binary64.
+            std::snprintf(buffer, sizeof(buffer), "%.17g", d);
+            return std::string(buffer);
         }
         case 0x17: {  // STRING
             uint64_t idx = ReadIntLE(p, end, nbytes);
