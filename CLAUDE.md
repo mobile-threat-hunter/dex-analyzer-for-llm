@@ -44,6 +44,39 @@ Builder runs in 7 stages: decode → leaders → exception table → block split
 - `data_provider.h` — old IDexDataProvider interface. Deleted. Replaced by `IDexCodeSource` + `MethodSnapshot`.
 - `NullDataProvider` stub in `binding/module.cpp` — deleted.
 
+### ⚠ Known critical hang in DAD pipeline (use `safe_decompile_*` in batch code)
+
+Repeated sweep runs (30+ iters) reproducibly expose **non-deterministic hangs** in the C++ IR pipeline on a small set of classes:
+
+| APK | Class | Hang frequency |
+|---|---|---|
+| `com.test.intent_filter.apk` | `Landroid/support/constraint/solver/widgets/Guideline;` (idx 197) | ~80% of hang events; appears every ~7 sweep iterations |
+| `multiple_locale_appname_test.apk` | `Landroidx/appcompat/app/AppCompatDelegateImpl;` (idx 245) | seen |
+| `multiple_locale_appname_test.apk` | `Landroidx/appcompat/app/WindowDecorActionBar;` (idx 276) | seen |
+
+**Symptoms** ([/proc/PID/status](file:///proc/) capture during hang):
+- `State: R (running)` — user-space tight loop, no syscall
+- `wchan: 0` — single-thread spin
+- Slow `VmRSS` growth (~150 KB/s during hang) — small ongoing allocation
+- 100% of one CPU core
+- Classes themselves are **deterministically fast** when decompiled standalone (Guideline = 0.06s/call, 30/30 OK). Hang only manifests in mid-sweep cumulative state and at a non-deterministic rate (~12-17% of sweep runs).
+
+**Likely root cause** (unconfirmed): worst-case `std::unordered_map` iteration order somewhere in the DAD passes (Construct / SplitVariables / RegisterPropagation / IdentifyStructures) hitting an O(n^k) path; process-level hash randomization makes the trigger non-deterministic.
+
+**Production safety net** — `dex_analyzer/python/dexkit_py/safe.py`:
+```python
+from dexkit_py import safe_decompile_class_java, safe_decompile_method_java, is_timeout_marker
+
+out = safe_decompile_class_java(dk, cls, timeout=10.0)
+if is_timeout_marker(out):
+    # hung — record and move on
+```
+The wrapper runs the call on a `daemon=True` thread and abandons it on deadline. The hung thread keeps consuming CPU/memory until the process exits (no way to interrupt user-space C++), but the caller continues. **ALL batch/CI/automation code MUST use the safe wrapper** — direct binding calls in those contexts will hang indefinitely.
+
+Single-class interactive debugging from a REPL can still use the raw binding (`dk.decompile_class_java(cls)`) when there's a human in the loop.
+
+Affected tools updated to use the safe API: `/tmp/full_sweep.py`, `dex_analyzer/tests/dvclass_parity.py`. New tools added by future work MUST follow the same pattern.
+
 ### Upstream DAD bug fixes (production diverges from DAD, parity-faithful variant retained for tests)
 
 Policy: now that the port reaches DAD parity, real DAD bugs with observable production impact get fixed in our production path. A `*DADFaithful` sibling is retained for byte-identical parity comparison against androguard DAD output. Dual-track parity tests assert **both** the fixed output (for production) and the buggy output (for DAD-compat).

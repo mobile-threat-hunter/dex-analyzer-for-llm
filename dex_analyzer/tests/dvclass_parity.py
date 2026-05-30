@@ -25,8 +25,14 @@ from glob import glob
 
 from loguru import logger; logger.remove()
 import dexkit_py
+from dexkit_py import safe_decompile_class_java, is_timeout_marker
 from androguard.misc import AnalyzeAPK
 from androguard.decompiler.decompile import DvClass
+
+# Per CLAUDE.md "Known critical hang", the DAD pipeline can hang on
+# specific classes. dvclass_parity is a batch check, so we MUST use the
+# safe wrapper.
+DECOMPILE_TIMEOUT_S = 10.0
 
 
 def header_fields(src: str) -> str:
@@ -71,11 +77,12 @@ def parity_for_apk(apk: str, n: int) -> tuple[int, int, list[tuple[str, str]]]:
     for d, cls in sample:
         cls_name = cls.get_name()
         try:
-            dk_out = dk.decompile_class_java(cls_name)
+            dk_out = safe_decompile_class_java(
+                dk, cls_name, timeout=DECOMPILE_TIMEOUT_S)
         except Exception:
             continue
-        if not dk_out:
-            continue
+        if not dk_out or is_timeout_marker(dk_out):
+            continue  # skip hangs from the parity check entirely
         try:
             dv = DvClass(cls, dx); dv.process()
             dad_out = dv.get_source()

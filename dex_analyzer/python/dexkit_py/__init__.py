@@ -42,12 +42,19 @@ from .filters import (
     find_call_sites_to_ref,
 )
 from .format import format_class, format_class_summary
+from .safe import (
+    DEFAULT_TIMEOUT_S,
+    is_timeout_marker,
+    safe_decompile_class_java,
+    safe_decompile_method_java,
+)
 
 __all__ = [
     "ApiHit",
     "ArgOrigin",
     "CallSite",
     "CapabilityReport",
+    "DEFAULT_TIMEOUT_S",
     "DexKit",
     "ExternalFieldRef",
     "ExternalMethodRef",
@@ -62,10 +69,13 @@ __all__ = [
     "format_class",
     "format_class_summary",
     "is_framework_descriptor",
+    "is_timeout_marker",
     "java_to_descriptor",
     "method_ref_java",
     "parse_proto",
     "pretty_proto",
+    "safe_decompile_class_java",
+    "safe_decompile_method_java",
     "signature",
     "summarize_capabilities",
 ]
