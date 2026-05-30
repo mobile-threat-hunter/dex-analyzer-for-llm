@@ -226,7 +226,8 @@ std::string Decompiler::DecompileClass(std::string_view class_descriptor) {
     out += " {\n";
 
     // Fields — DAD: decompile.py:367.
-    for (uint32_t fidx : info.field_ids) {
+    for (size_t i = 0; i < info.field_ids.size(); ++i) {
+        uint32_t fidx = info.field_ids[i];
         auto finfo = source_.GetFieldInfo(info.dex_id, fidx);
         auto facc = GetAccessField(finfo.access_flags);
         out += "    ";
@@ -237,9 +238,15 @@ std::string Decompiler::DecompileClass(std::string_view class_descriptor) {
         out += GetType(finfo.type);
         out += ' ';
         out.append(finfo.name);
-        if (!finfo.init_text.empty()) {
+        // Initializer: ClassInfo carries the parsed static_values_off text
+        // (Phase 2). GetFieldInfo's per-call init_text is left as a future
+        // hook for non-class-context lookups.
+        const std::string& init =
+            (i < info.field_init_texts.size() && !info.field_init_texts[i].empty())
+                ? info.field_init_texts[i] : finfo.init_text;
+        if (!init.empty()) {
             out += " = ";
-            out += finfo.init_text;
+            out += init;
         }
         out += ";\n";
     }

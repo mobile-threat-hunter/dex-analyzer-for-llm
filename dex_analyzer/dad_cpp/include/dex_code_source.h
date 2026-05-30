@@ -78,6 +78,12 @@ public:
         std::string_view              superclass;           // Smali "Ljava/lang/Object;" or empty
         std::vector<std::string_view> interfaces;           // Smali descriptors
         std::vector<uint32_t>         field_ids;            // per-class field_idxs
+        // Parallel to field_ids — pre-rendered initializer RHS for static
+        // fields that have an EncodedValue in static_values_off (e.g. "2",
+        // "\"foo\"", "0x2a"). Empty string means no compile-time initializer
+        // (the field will be emitted as `Type name;`). Always same size as
+        // field_ids; non-static fields and unsupported value types stay empty.
+        std::vector<std::string>      field_init_texts;
     };
     // Default returns nullopt — override in production source.
     virtual std::optional<ClassInfo>

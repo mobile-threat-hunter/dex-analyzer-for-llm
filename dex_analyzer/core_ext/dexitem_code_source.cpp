@@ -41,6 +41,235 @@ DexItem* SafeGetDexItem(dexkit::DexKit& core, uint16_t dex_id) {
     return core.GetDexItem(dex_id);
 }
 
+// ─── Encoded value / array byte-stream parsers ────────────────────────────
+// dex spec: https://source.android.com/docs/core/runtime/dex-format#encoded-value
+// We mirror androguard `EncodedValue` (core/dex/__init__.py:1781) and
+// `DvClass.get_source` (decompile.py:354) to produce byte-identical text.
+
+using U1 = dex::u1;
+
+uint32_t ReadULEB128(const U1*& p, const U1* end) {
+    uint32_t result = 0;
+    uint32_t shift = 0;
+    while (p < end) {
+        uint8_t b = *p++;
+        result |= static_cast<uint32_t>(b & 0x7F) << shift;
+        if ((b & 0x80) == 0) return result;
+        shift += 7;
+        if (shift >= 32) break;
+    }
+    return result;
+}
+
+// Read N bytes (little-endian) as a plain unsigned 64-bit integer.
+// androguard `_getintvalue` does the same (no sign extension), so DAD
+// emits the unsigned value verbatim — we follow that for byte-identical
+// matching even when the result isn't valid Java.
+uint64_t ReadIntLE(const U1*& p, const U1* end, size_t nbytes) {
+    uint64_t v = 0;
+    for (size_t i = 0; i < nbytes && p < end; ++i) {
+        v |= static_cast<uint64_t>(*p++) << (8 * i);
+    }
+    return v;
+}
+
+// String escape mimicking Python `str.encode("unicode-escape")` for the
+// subset of characters DAD actually emits in field initializers. Printable
+// ASCII passes through except the standard backslash escapes; everything
+// else becomes \\xNN or \\uNNNN.
+std::string PythonUnicodeEscape(std::string_view s) {
+    std::string out;
+    out.reserve(s.size() + 2);
+    auto append_hex2 = [&](uint8_t v) {
+        char buf[5];
+        std::snprintf(buf, sizeof(buf), "\\x%02x", v);
+        out += buf;
+    };
+    auto append_hex4 = [&](uint32_t cp) {
+        char buf[8];
+        std::snprintf(buf, sizeof(buf), "\\u%04x", cp);
+        out += buf;
+    };
+    const uint8_t* p = reinterpret_cast<const uint8_t*>(s.data());
+    const uint8_t* end = p + s.size();
+    while (p < end) {
+        uint8_t c = *p;
+        if (c == '\\') { out += "\\\\"; ++p; continue; }
+        if (c == '\'') { out += "\\'";  ++p; continue; }
+        if (c == '\n') { out += "\\n";  ++p; continue; }
+        if (c == '\r') { out += "\\r";  ++p; continue; }
+        if (c == '\t') { out += "\\t";  ++p; continue; }
+        if (c >= 0x20 && c < 0x7F) { out += static_cast<char>(c); ++p; continue; }
+        if (c < 0x80) { append_hex2(c); ++p; continue; }
+        // Decode UTF-8 to a codepoint, then emit \\uXXXX.
+        uint32_t cp = 0; size_t n = 0;
+        if      ((c & 0xE0) == 0xC0) { cp = c & 0x1F; n = 2; }
+        else if ((c & 0xF0) == 0xE0) { cp = c & 0x0F; n = 3; }
+        else if ((c & 0xF8) == 0xF0) { cp = c & 0x07; n = 4; }
+        else { append_hex2(c); ++p; continue; }
+        if (p + n > end) { append_hex2(c); ++p; continue; }
+        bool ok = true;
+        ++p;
+        for (size_t i = 1; i < n; ++i, ++p) {
+            uint8_t cc = *p;
+            if ((cc & 0xC0) != 0x80) { ok = false; break; }
+            cp = (cp << 6) | (cc & 0x3F);
+        }
+        if (!ok) { append_hex2(c); continue; }
+        if (cp <= 0xFFFF) append_hex4(cp);
+        else {
+            // Surrogate pair (DAD's Python repr does the same)
+            uint32_t v = cp - 0x10000;
+            append_hex4(0xD800 | (v >> 10));
+            append_hex4(0xDC00 | (v & 0x3FF));
+        }
+    }
+    return out;
+}
+
+// Decode a single EncodedValue and produce DAD-equivalent text. Returns
+// empty string for value types we don't render (TYPE/FIELD/METHOD/ENUM/
+// ARRAY/ANNOTATION/FLOAT/DOUBLE) — DAD emits `str(<wrapped object>)` for
+// these but the result is rarely valid Java and varies by androguard
+// version, so we conservatively skip.
+//
+// p advances past the consumed bytes regardless.
+std::string DecodeEncodedValueText(const U1*& p,
+                                   const U1* end,
+                                   const dexkit::DexItem& item) {
+    if (p >= end) return {};
+    U1 header = *p++;
+    uint8_t value_arg = (header >> 5) & 0x07;
+    uint8_t value_type = header & 0x1F;
+    size_t nbytes = static_cast<size_t>(value_arg) + 1;
+    switch (value_type) {
+        case 0x00: {  // BYTE — 1 byte, treated as signed for `hex()` output
+            uint64_t raw = ReadIntLE(p, end, 1);
+            int8_t v = static_cast<int8_t>(raw & 0xFF);
+            char buf[16];
+            if (v < 0) std::snprintf(buf, sizeof(buf), "-0x%x", -static_cast<int>(v));
+            else       std::snprintf(buf, sizeof(buf), "0x%x", static_cast<int>(v));
+            return buf;
+        }
+        case 0x02:   // SHORT
+        case 0x03:   // CHAR
+        case 0x04:   // INT
+        case 0x06: { // LONG — androguard reads all of these as LE unsigned
+            uint64_t v = ReadIntLE(p, end, nbytes);
+            return std::to_string(v);
+        }
+        case 0x10:   // FLOAT  — DAD's TODO; skip
+        case 0x11: { // DOUBLE — DAD's TODO; skip
+            p += nbytes;
+            return {};
+        }
+        case 0x17: {  // STRING
+            uint64_t idx = ReadIntLE(p, end, nbytes);
+            const auto& strings = item.GetStrings();
+            if (idx >= strings.size()) return std::string("\"\"");
+            std::string_view raw = strings[idx];
+            if (raw.empty()) return std::string("\"\"");
+            return std::string("\"") + PythonUnicodeEscape(raw) + "\"";
+        }
+        case 0x18:   // TYPE
+        case 0x19:   // FIELD
+        case 0x1a:   // METHOD
+        case 0x1b: { // ENUM
+            p += nbytes;
+            return {};
+        }
+        case 0x1c: {  // ARRAY — skip body
+            uint32_t sz = ReadULEB128(p, end);
+            for (uint32_t i = 0; i < sz && p < end; ++i) {
+                (void)DecodeEncodedValueText(p, end, item);
+            }
+            return {};
+        }
+        case 0x1d: {  // ANNOTATION — skip (complex; DAD doesn't emit anyway)
+            // type_idx (uleb128), size (uleb128), then size * (name_idx + value)
+            (void)ReadULEB128(p, end);
+            uint32_t sz = ReadULEB128(p, end);
+            for (uint32_t i = 0; i < sz && p < end; ++i) {
+                (void)ReadULEB128(p, end);  // name_idx
+                (void)DecodeEncodedValueText(p, end, item);
+            }
+            return {};
+        }
+        case 0x1e:   // NULL  — DAD: value=None, but `if init_value:` is True
+                     // for the EncodedValue wrapper. Emits "None".
+            return std::string("None");
+        case 0x1f:   // BOOLEAN
+            return value_arg ? std::string("True") : std::string("False");
+        default:
+            return {};
+    }
+}
+
+// Walk ClassData to recover the declaration-order field_idx lists for the
+// class. DAD emits static fields first, then instance fields (mirroring the
+// ClassData layout). `class_field_ids` from DexItem isn't guaranteed to be
+// in this order, so we re-derive it here.
+struct OrderedFields {
+    std::vector<uint32_t> static_ids;
+    std::vector<uint32_t> instance_ids;
+};
+OrderedFields ParseClassFieldOrder(const dexkit::DexItem& item,
+                                   const dex::ClassDef& cdef) {
+    OrderedFields out;
+    if (cdef.class_data_off == 0) return out;
+    const auto& reader = item.GetReader();
+    const U1* data = reader.dataPtr<U1>(cdef.class_data_off);
+    if (!data) return out;
+    const U1* data_end = data + (1u << 20);  // generous mmap cap per class
+
+    uint32_t static_n   = ReadULEB128(data, data_end);
+    uint32_t instance_n = ReadULEB128(data, data_end);
+    (void)ReadULEB128(data, data_end);   // direct_methods_size
+    (void)ReadULEB128(data, data_end);   // virtual_methods_size
+
+    auto read_field_list = [&](uint32_t n, std::vector<uint32_t>& dst) {
+        dst.reserve(n);
+        uint32_t cur = 0;
+        for (uint32_t i = 0; i < n; ++i) {
+            uint32_t diff = ReadULEB128(data, data_end);
+            (void)ReadULEB128(data, data_end);   // access_flags
+            cur = (i == 0) ? diff : (cur + diff);
+            dst.push_back(cur);
+        }
+    };
+    read_field_list(static_n,   out.static_ids);
+    read_field_list(instance_n, out.instance_ids);
+    return out;
+}
+
+// Decode the EncodedArray @ static_values_off and pair each value with the
+// matching static field_idx (positional). Returns field_idx → init text;
+// fields without an EncodedValue entry (or with unsupported value types)
+// are simply absent from the map.
+std::unordered_map<uint32_t, std::string>
+DecodeStaticInitMap(const dexkit::DexItem& item,
+                    const dex::ClassDef& cdef,
+                    const std::vector<uint32_t>& static_field_idxs) {
+    std::unordered_map<uint32_t, std::string> init_map;
+    if (cdef.static_values_off == 0 || static_field_idxs.empty()) {
+        return init_map;
+    }
+    const auto& reader = item.GetReader();
+    const U1* sv = reader.dataPtr<U1>(cdef.static_values_off);
+    if (!sv) return init_map;
+    const U1* sv_end = sv + (1u << 20);
+    uint32_t value_count = ReadULEB128(sv, sv_end);
+    if (value_count > static_field_idxs.size()) {
+        value_count = static_field_idxs.size();
+    }
+    init_map.reserve(value_count);
+    for (uint32_t i = 0; i < value_count; ++i) {
+        std::string text = DecodeEncodedValueText(sv, sv_end, item);
+        if (!text.empty()) init_map.emplace(static_field_idxs[i], std::move(text));
+    }
+    return init_map;
+}
+
 }  // namespace
 
 DexItemCodeSource::DexItemCodeSource(dexkit::DexKit& core) : core_(core) {}
@@ -253,8 +482,25 @@ DexItemCodeSource::GetClassInfo(std::string_view class_descriptor) {
             }
         }
     }
-    // field_ids: class_field_ids[type_idx] is already indexed in InitBaseCache.
-    info.field_ids = item->GetClassFieldIds(type_idx);
+    // Field ordering: DAD's DvClass emits static fields first, then instance
+    // fields, in ClassData declaration order. DexItem's `class_field_ids`
+    // doesn't preserve that grouping — re-derive it from ClassData.
+    auto fields = ParseClassFieldOrder(*item, cdef);
+    info.field_ids.reserve(fields.static_ids.size() + fields.instance_ids.size());
+    info.field_ids.insert(info.field_ids.end(),
+                          fields.static_ids.begin(), fields.static_ids.end());
+    info.field_ids.insert(info.field_ids.end(),
+                          fields.instance_ids.begin(), fields.instance_ids.end());
+
+    // Decode static-field initializers (EncodedArray @ static_values_off);
+    // result is parallel to field_ids and stays empty for fields with no
+    // compile-time init or unsupported value types (FLOAT/DOUBLE/TYPE/...).
+    auto init_map = DecodeStaticInitMap(*item, cdef, fields.static_ids);
+    info.field_init_texts.assign(info.field_ids.size(), std::string{});
+    for (size_t i = 0; i < info.field_ids.size(); ++i) {
+        auto it = init_map.find(info.field_ids[i]);
+        if (it != init_map.end()) info.field_init_texts[i] = it->second;
+    }
     return info;
 }
 
