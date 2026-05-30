@@ -441,15 +441,26 @@ void ShortCircuitStruct(
     const size_t kMaxIters = std::max<size_t>(graph.nodes.size() * 10, 1000);
     size_t iter = 0;
     bool change = true;
+    // Diagnostic: (node_count, merges_this_iter) per iter.
+    std::vector<std::pair<size_t, size_t>> traj;
+    traj.reserve(64);
+    traj.push_back({graph.nodes.size(), 0});
     while (change) {
         if (++iter > kMaxIters) {
             std::fprintf(stderr,
-                "[dexkit-dad] ShortCircuitStruct: bailing after %zu iters "
-                "(non-deterministic fixed-point miss); graph kept in current "
-                "state.\n", iter);
+                "[dexkit-dad] ShortCircuitStruct: bailing after %zu iters\n"
+                "  iter | nodes | merges (first %zu samples)\n",
+                iter, std::min<size_t>(traj.size(), 30));
+            for (size_t i = 0; i < std::min<size_t>(traj.size(), 30); ++i) {
+                std::fprintf(stderr, "  %4zu | %5zu | %zu\n",
+                             i, traj[i].first, traj[i].second);
+            }
+            std::fprintf(stderr, "  ...\n  final node count = %zu\n",
+                         graph.nodes.size());
             break;
         }
         change = false;
+        size_t merges_this_iter = 0;
         std::unordered_set<NodeBase*> done;
         for (NodeBase* n : graph.post_order()) {
             auto* node = dynamic_cast<CondBlock*>(n);
@@ -460,11 +471,20 @@ void ShortCircuitStruct(
             NodeBase* els_n = node->false_branch;
             if (then_n == node || els_n == node) continue;
 
-            if (then_b && graph.preds(then_b).size() == 1) {
+            if (then_b && graph.preds(then_b).size() == 1 &&
+                !done.count(then_b)) {
+                // ROOT-CAUSE GUARD: `then_b` might be a stale pointer that a
+                // prior merge in this same inner-for iteration already
+                // removed from the graph (graph.preds() returns the cached
+                // reverse_edges entry even for removed nodes). Without this
+                // `done` check the loop would re-merge a removed node →
+                // remove_node finds nothing in graph.nodes → only the new
+                // MakeNode side fires → net +1 every iter forever.
                 if (node == then_b->true_branch ||
                     node == then_b->false_branch) continue;
                 if (then_b->false_branch == els_n) {        // node && t
                     change = true;
+                    ++merges_this_iter;
                     auto* merged = dynamic_cast<CondBlock*>(
                         MergeShortCircuit(graph, node, then_b, true, false,
                                           idom, node_map, done));
@@ -472,17 +492,21 @@ void ShortCircuitStruct(
                     merged->false_branch = els_n;
                 } else if (then_b->true_branch == els_n) {  // !node || t
                     change = true;
+                    ++merges_this_iter;
                     auto* merged = dynamic_cast<CondBlock*>(
                         MergeShortCircuit(graph, node, then_b, false, true,
                                           idom, node_map, done));
                     merged->true_branch = els_n;
                     merged->false_branch = then_b->false_branch;
                 }
-            } else if (els_b && graph.preds(els_b).size() == 1) {
+            } else if (els_b && graph.preds(els_b).size() == 1 &&
+                       !done.count(els_b)) {
+                // Same root-cause guard as the then_b branch above.
                 if (node == els_b->false_branch ||
                     node == els_b->true_branch) continue;
                 if (els_b->false_branch == then_n) {        // !node && e
                     change = true;
+                    ++merges_this_iter;
                     auto* merged = dynamic_cast<CondBlock*>(
                         MergeShortCircuit(graph, node, els_b, true, true,
                                           idom, node_map, done));
@@ -490,6 +514,7 @@ void ShortCircuitStruct(
                     merged->false_branch = then_n;
                 } else if (els_b->true_branch == then_n) {  // node || e
                     change = true;
+                    ++merges_this_iter;
                     auto* merged = dynamic_cast<CondBlock*>(
                         MergeShortCircuit(graph, node, els_b, false, false,
                                           idom, node_map, done));
@@ -500,6 +525,7 @@ void ShortCircuitStruct(
             done.insert(n);
         }
         if (change) graph.compute_rpo();
+        traj.push_back({graph.nodes.size(), merges_this_iter});
     }
 }
 
