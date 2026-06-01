@@ -48,6 +48,7 @@ from .safe import (
     safe_decompile_class_java,
     safe_decompile_method_java,
 )
+from . import tools as tools  # noqa: F401 — public sub-module for LLM integrations
 
 __all__ = [
     "ApiHit",
