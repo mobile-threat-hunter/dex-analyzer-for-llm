@@ -1,4 +1,4 @@
-"""LLM-friendly tool surface over dexkit_py.
+"""LLM-friendly tool surface over dexllm.
 
 This module is the single source of truth for the dexkit analysis tools
 exposed to an LLM (Claude, etc.). Both the MCP server and the FastAPI

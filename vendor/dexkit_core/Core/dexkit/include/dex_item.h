@@ -68,7 +68,7 @@ public:
         return dex_id;
     }
 
-    // dexkit-py L1 extension hooks — read-only access to base IR built in
+    // dexllm L1 extension hooks — read-only access to base IR built in
     // InitBaseCache(). Stable surfaces only (no analysis caches that require
     // an InitCache flag); those should still go through the existing accessors.
     [[nodiscard]] const dex::Reader &GetReader() const { return reader; }
@@ -76,13 +76,13 @@ public:
     [[nodiscard]] const std::vector<std::string_view> &GetStrings() const { return strings; }
     [[nodiscard]] const std::vector<bool> &GetTypeDefFlags() const { return type_def_flag; }
 
-    // dexkit-py L2 extension hook — caller→callees map. Valid only after
+    // dexllm L2 extension hook — caller→callees map. Valid only after
     // InitCache(kMethodInvoking); use DexKit::InitFullCache() upstream of the
     // call site to ensure population.
     [[nodiscard]] const std::vector<std::vector<uint32_t>> &
     GetMethodInvokingIds() const { return method_invoking_ids; }
 
-    // dexkit-py L1.5 extension hooks — per-class declared member access. Valid
+    // dexllm L1.5 extension hooks — per-class declared member access. Valid
     // after InitBaseCache (i.e. immediately after construction). Empty / kNoIndex
     // for type_idx that has no class_def in this dex.
     [[nodiscard]] const std::vector<uint32_t> &
@@ -92,14 +92,14 @@ public:
     [[nodiscard]] uint32_t GetTypeDefIdx(uint32_t type_idx) const {
         return type_def_idx[type_idx];
     }
-    // dexkit-py L1.5 — declared access flags for methods/fields. Indexed by
+    // dexllm L1.5 — declared access flags for methods/fields. Indexed by
     // global method_idx / field_idx (the same indices used by MethodIds /
     // FieldIds). Returns 0 for methods/fields whose class is not defined in
     // this dex (external refs).
     [[nodiscard]] const std::vector<uint32_t> &
     GetMethodAccessFlags() const { return method_access_flags; }
 
-    // dexkit-py L8.1 — raw method access flags as stored in the dex file,
+    // dexllm L8.1 — raw method access flags as stored in the dex file,
     // WITHOUT the Java-Modifier-compat transformation that
     // `GetMethodAccessFlags()` applies (declared_synchronized ↔ synchronized
     // bit swap). DAD-aligned decompilation needs the raw form so it can emit
@@ -107,7 +107,7 @@ public:
     [[nodiscard]] const std::vector<uint32_t> &
     GetMethodRawAccessFlags() const { return method_raw_access_flags; }
 
-    // dexkit-py L8 extension (DAD adapter) — direct read of the parsed
+    // dexllm L8 extension (DAD adapter) — direct read of the parsed
     // `dex::Code*` for a given method_idx. Populated in InitBaseCache.
     // Returns nullptr for native/abstract methods or out-of-range idx.
     [[nodiscard]] const dex::Code* GetMethodCode(uint32_t method_idx) const {
@@ -117,7 +117,7 @@ public:
     [[nodiscard]] const std::vector<uint32_t> &
     GetFieldAccessFlags() const { return field_access_flags; }
 
-    // dexkit-py L2.5 extension hook — enumerate every invoke-* site within a
+    // dexllm L2.5 extension hook — enumerate every invoke-* site within a
     // single method body. Returns (callee_method_idx, byte_offset_within_insns,
     // opcode). Works directly off method_codes which InitBaseCache populated;
     // no cache flag required. Empty if the method has no code item (native /
@@ -130,7 +130,7 @@ public:
     [[nodiscard]] std::vector<InvokeSite>
     EnumerateInvokeSites(uint32_t method_idx) const;
 
-    // dexkit-py L4 extension hook — for each invoke-* site in this method,
+    // dexllm L4 extension hook — for each invoke-* site in this method,
     // capture the argument registers' last-known definitions via a forward
     // basic-block-scoped register simulation. The walker recognises:
     //   const-string/const-string-jumbo, const-class, const/const-4/16/wide,
@@ -170,7 +170,7 @@ public:
     [[nodiscard]] std::vector<InvokeSiteWithArgs>
     AnalyzeMethodInvokes(uint32_t method_idx) const;
 
-    // dexkit-py L5 extension — baksmali-style text rendering of a method body
+    // dexllm L5 extension — baksmali-style text rendering of a method body
     // or a full class. Uses slicer's DecodeInstruction / GetOpcodeName /
     // GetFormatFromOpcode / GetIndexTypeFromOpcode to format every
     // instruction. Returns empty string for abstract/native methods. The

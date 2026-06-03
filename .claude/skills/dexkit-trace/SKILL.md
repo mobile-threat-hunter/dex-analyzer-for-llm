@@ -24,10 +24,10 @@ description: |
 python << 'EOF' 2>&1 | tail -5
 import sys; sys.stdout.reconfigure(line_buffering=True)
 from loguru import logger; logger.remove()
-import dexkit_py
+import dexllm
 from androguard.misc import AnalyzeAPK
 APK = "<resolved_apk_path>"
-dk = dexkit_py.DexKit(APK)
+dk = dexllm.DexKit(APK)
 _, d_list, _ = AnalyzeAPK(APK)
 for dex in d_list:
     for cls in dex.get_classes():
@@ -45,11 +45,11 @@ The last "trying ..." line before a crash names the offending class.
 python << 'EOF' 2>&1 | tail -10
 import sys; sys.stdout.reconfigure(line_buffering=True)
 from loguru import logger; logger.remove()
-import dexkit_py
+import dexllm
 from androguard.misc import AnalyzeAPK
 APK = "<resolved_apk_path>"
 TARGET = "<class_descriptor_from_step1>"
-dk = dexkit_py.DexKit(APK)
+dk = dexllm.DexKit(APK)
 _, d_list, _ = AnalyzeAPK(APK)
 for dex in d_list:
     for cls in dex.get_classes():
@@ -66,8 +66,8 @@ EOF
 ```bash
 gdb -batch -ex "set pagination off" -ex run -ex "thread apply all bt 20" -ex quit \
     --args python -c "
-import dexkit_py
-dk = dexkit_py.DexKit('<resolved_apk_path>')
+import dexllm
+dk = dexllm.DexKit('<resolved_apk_path>')
 dk.decompile_method_java('<method_descriptor>')
 " 2>&1 | grep -E "^#|signal|Program received" | head -40
 ```
@@ -76,8 +76,8 @@ dk.decompile_method_java('<method_descriptor>')
 ```bash
 # Terminal 1: start the hanging method (will hang)
 python -c "
-import dexkit_py
-dk = dexkit_py.DexKit('<resolved_apk_path>')
+import dexllm
+dk = dexllm.DexKit('<resolved_apk_path>')
 dk.decompile_method_java('<method_descriptor>')
 " &
 PID=$!

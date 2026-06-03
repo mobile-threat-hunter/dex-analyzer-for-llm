@@ -1686,7 +1686,7 @@ std::string DexItem::RenderClassSmali(uint32_t type_idx) const {
 }
 
 
-// dexkit-py L4 extension — see header for contract.
+// dexllm L4 extension — see header for contract.
 //
 // Light-weight forward register simulation, basic-block-scoped. Tracks the
 // last definition of each register; clears the whole map at any branch/
@@ -2009,7 +2009,7 @@ DexItem::AnalyzeMethodInvokes(uint32_t method_idx) const {
     return out;
 }
 
-// dexkit-py L2.5 extension — see header for contract.
+// dexllm L2.5 extension — see header for contract.
 std::vector<DexItem::InvokeSite>
 DexItem::EnumerateInvokeSites(uint32_t method_idx) const {
     std::vector<InvokeSite> out;

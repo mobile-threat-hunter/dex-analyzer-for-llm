@@ -1,6 +1,6 @@
 # CLAUDE.md — DexKit pybind11 wrapper
 
-Project: C++ DexKit Core + pybind11 wrapper (`dexkit_py`) with an embedded DAD-aligned Java decompiler. Develop in C++ (mostly `vendor/dexkit_core/Core/dexkit/dex_item.cpp`), test via Python.
+Project: C++ DexKit Core + pybind11 wrapper (`dexllm`) with an embedded DAD-aligned Java decompiler. Develop in C++ (mostly `vendor/dexkit_core/Core/dexkit/dex_item.cpp`), test via Python.
 
 ## DAD-aligned development policy
 
@@ -46,7 +46,7 @@ Builder runs in 7 stages: decode → leaders → exception table → block split
 
 ### Fixed: non-deterministic ShortCircuitStruct hang — true root cause `90d0b79`
 
-**Status: FIXED at the source (Graph::remove_node leaked stale edges/reverse_edges entries for removed nodes). The earlier mitigations (cap `6906cb7`, ShortCircuit local done-checks `a104e22`) were band-aids on the use site; the graph-side erase is the structural fix. Post-fix 30-iter sweep = 0/30 timeouts, 0/30 cap bails (vs 16.7% timeout rate pre-fix).** Keep using `safe_decompile_*` (see [safe.py](dex_analyzer/python/dexkit_py/safe.py)) in batch/automation code as belt-and-suspenders.
+**Status: FIXED at the source (Graph::remove_node leaked stale edges/reverse_edges entries for removed nodes). The earlier mitigations (cap `6906cb7`, ShortCircuit local done-checks `a104e22`) were band-aids on the use site; the graph-side erase is the structural fix. Post-fix 30-iter sweep = 0/30 timeouts, 0/30 cap bails (vs 16.7% timeout rate pre-fix).** Keep using `safe_decompile_*` (see [safe.py](dex_analyzer/python/dexllm/safe.py)) in batch/automation code as belt-and-suspenders.
 
 #### Original symptom (kept for context)
 
@@ -85,10 +85,10 @@ DAD's `graph.remove_node` has the same leak; we deliberately diverge for the alg
 
 #### Defense-in-depth: `safe_decompile_*` wrappers
 
-`dex_analyzer/python/dexkit_py/safe.py` ([safe.py](dex_analyzer/python/dexkit_py/safe.py)) runs each call on a `daemon=True` thread with a wall-clock deadline (default 10s). If a future regression introduces another hang the cap above doesn't catch, the wrapper still keeps the caller alive — the hung thread leaks until process exit but the batch loop progresses. **Batch / CI / automation code MUST continue to use the safe wrapper.** Single-class interactive debugging from a REPL can use the raw binding (`dk.decompile_class_java(cls)`).
+`dex_analyzer/python/dexllm/safe.py` ([safe.py](dex_analyzer/python/dexllm/safe.py)) runs each call on a `daemon=True` thread with a wall-clock deadline (default 10s). If a future regression introduces another hang the cap above doesn't catch, the wrapper still keeps the caller alive — the hung thread leaks until process exit but the batch loop progresses. **Batch / CI / automation code MUST continue to use the safe wrapper.** Single-class interactive debugging from a REPL can use the raw binding (`dk.decompile_class_java(cls)`).
 
 ```python
-from dexkit_py import safe_decompile_class_java, is_timeout_marker
+from dexllm import safe_decompile_class_java, is_timeout_marker
 
 out = safe_decompile_class_java(dk, cls, timeout=10.0)
 if is_timeout_marker(out):
@@ -160,7 +160,7 @@ Deferred residual ~7.6%: see [[project-deferred-decompiler-tasks]] memory — do
 
 ### Decompiler API surface (pybind11)
 
-Exposed via `dexkit_py.DexKit(apk_path)`:
+Exposed via `dexllm.DexKit(apk_path)`:
 
 | Method | Purpose |
 |---|---|
@@ -261,7 +261,7 @@ Expected tail: `100% tests passed, 0 tests failed out of 24`.
 
 End-to-end smoke check:
 ```bash
-python -c "import dexkit_py; dk = dexkit_py.DexKit('/home/nyahumi/Project/Dexkit/test_apk/APK/com.example.android.tvleanback.apk'); print(dk.decompile_class_java('Landroid/support/v4/app/Fragment;'))" | head -50
+python -c "import dexllm; dk = dexllm.DexKit('/home/nyahumi/Project/Dexkit/test_apk/APK/com.example.android.tvleanback.apk'); print(dk.decompile_class_java('Landroid/support/v4/app/Fragment;'))" | head -50
 ```
 
 For deeper validation, compare against androguard DAD on the same method:

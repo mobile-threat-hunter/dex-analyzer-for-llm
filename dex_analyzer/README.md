@@ -1,4 +1,4 @@
-# dexkit-py
+# dexllm
 
 Python static analysis library for Android APK / DEX files, built on top of [LuckyPray/DexKit](https://github.com/LuckyPray/DexKit) with pybind11.
 
@@ -31,9 +31,9 @@ pip install -e . --no-build-isolation --force-reinstall   # force a clean native
 ## TL;DR — load an APK
 
 ```python
-import dexkit_py
+import dexllm
 
-dk = dexkit_py.DexKit("/path/to/app.apk")
+dk = dexllm.DexKit("/path/to/app.apk")
 print(dk.dex_count, "dex files,", dk.apk_path)
 # Optional: warm all analysis caches upfront (one-time ~200ms on a 50-dex APK).
 # Otherwise caches warm lazily on first access of each analyser.
@@ -70,7 +70,7 @@ Pass `framework_only=False` to also include non-framework external refs (SDKs yo
 ### Filter with helpers
 
 ```python
-from dexkit_py import filter_method_refs
+from dexllm import filter_method_refs
 
 # Only methods on android.content.* / android.net.*
 hits = filter_method_refs(
@@ -111,7 +111,7 @@ Each site is a distinct invoke instruction — if the same caller invokes the AP
 ## L3 — what permissions / categories does this APK exercise?
 
 ```python
-report = dexkit_py.summarize_capabilities(dk)
+report = dexllm.summarize_capabilities(dk)
 
 # Top permissions touched (via API usage)
 for perm, count in report.top_permissions(10):
@@ -127,12 +127,12 @@ for cat, count in report.top_categories(10):
 # →   45 × RISKY
 
 # Filter to a subset (only crypto-related APIs)
-crypto = dexkit_py.summarize_capabilities(dk, only_categories={"CRYPTO", "HASH"})
+crypto = dexllm.summarize_capabilities(dk, only_categories={"CRYPTO", "HASH"})
 for hit in crypto.hits:
     print(hit.api, "→", hit.permission, hit.categories)
 ```
 
-The catalog is JSON; extend it to taste at `python/dexkit_py/data/android_api_map.json`.
+The catalog is JSON; extend it to taste at `python/dexllm/data/android_api_map.json`.
 
 ---
 
@@ -239,7 +239,7 @@ dk.find_methods_by_annotation("Landroidx/annotation/RequiresApi;")
 ## Descriptor helpers
 
 ```python
-from dexkit_py import descriptor_to_java, java_to_descriptor, parse_proto, pretty_proto
+from dexllm import descriptor_to_java, java_to_descriptor, parse_proto, pretty_proto
 
 descriptor_to_java("Landroid/util/Log;")     # → 'android.util.Log'
 descriptor_to_java("[[I")                    # → 'int[][]'
@@ -253,13 +253,13 @@ pretty_proto("(II)Ljava/lang/String;")       # → '(int, int) -> java.lang.Stri
 ## End-to-end example: malware triage
 
 ```python
-import dexkit_py
+import dexllm
 
-dk = dexkit_py.DexKit("/path/to/suspicious.apk")
+dk = dexllm.DexKit("/path/to/suspicious.apk")
 dk.warm_analysis_caches()
 
 # 1. What permissions does it actually exercise?
-report = dexkit_py.summarize_capabilities(dk)
+report = dexllm.summarize_capabilities(dk)
 for perm, count in report.top_permissions(15):
     print(f"  {count:>4}× {perm}")
 
@@ -303,11 +303,11 @@ print(dk.decompile_method_java(
 ## Architecture
 
 ```
-dexkit-py/
+dexllm/
 ├── core_ext/        — C++ extension over upstream DexKit (find/match wrappers, ref enumeration)
 ├── dad_cpp/         — DAD-aligned Java decompiler (port in progress — see CLAUDE.md)
 ├── binding/         — pybind11 module (boundary between C++ and Python)
-├── python/dexkit_py/— Python facade + descriptor helpers + capability catalog
+├── python/dexllm/— Python facade + descriptor helpers + capability catalog
 ```
 
 Vendored DexKit Core fork lives at `../vendor/dexkit_core/` (sibling directory). Public accessors added to upstream's `DexItem` class live in `vendor/dexkit_core/Core/dexkit/{include/dex_item.h,dex_item.cpp}`. The fork stays small and re-rebases easily on upstream updates.

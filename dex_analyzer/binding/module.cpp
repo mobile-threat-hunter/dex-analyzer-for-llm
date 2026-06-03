@@ -1,4 +1,4 @@
-// pybind11 entry point for the dexkit_py Python package.
+// pybind11 entry point for the dexllm Python package.
 //
 // Wires Python → DexKitExt → DexKit Core, plus the dad_cpp Decompiler stub.
 // The decompile_* family currently returns a stub message; real output lands
@@ -181,7 +181,7 @@ private:
 }  // namespace
 
 PYBIND11_MODULE(_dexkit_core, m) {
-    m.doc() = "dexkit_py native module (L1)";
+    m.doc() = "dexllm native module (L1)";
 
     py::class_<dexkit::ext::ExternalTypeRef>(m, "ExternalTypeRef")
         .def_readonly("descriptor", &dexkit::ext::ExternalTypeRef::descriptor)

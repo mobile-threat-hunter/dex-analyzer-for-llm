@@ -18,7 +18,7 @@ Run this single chained command:
 cd /home/nyahumi/Project/Dexkit/dex_analyzer/build/cp313-cp313-linux_x86_64 && ninja 2>&1 | tail -5 && cd /home/nyahumi/Project/Dexkit/dex_analyzer && pip install -e . --no-build-isolation 2>&1 | tail -3
 ```
 
-Report success only when both `Linking CXX shared module _dexkit_core...so` and `Successfully installed dexkit-py-0.0.1` appear in output.
+Report success only when both `Linking CXX shared module _dexkit_core...so` and `Successfully installed dexllm-0.0.1` appear in output.
 
 ## Common pitfalls
 

@@ -1,27 +1,27 @@
-"""MCP (Model Context Protocol) server for DexKit analysis tools.
+"""MCP (Model Context Protocol) server for dexllm analysis tools.
 
 Hosts: Claude Desktop, Cursor, Continue, any MCP client.
 Transport: stdio (default).
 
 Run as a script:
-    python -m dexkit_py.mcp_server
+    python -m dexllm.mcp_server
 
 Or register in Claude Desktop's `claude_desktop_config.json`:
     {
       "mcpServers": {
-        "dexkit": {
+        "dexllm": {
           "command": "python",
-          "args": ["-m", "dexkit_py.mcp_server"]
+          "args": ["-m", "dexllm.mcp_server"]
         }
       }
     }
 
-The LLM then calls tools like `dexkit_list_classes(apk_path=..., ...)`.
+The LLM then calls tools like `dexllm_list_classes(apk_path=..., ...)`.
 
 Design notes
 ------------
-- One MCP tool per entry in dexkit_py.tools.TOOL_DEFINITIONS, prefixed
-  with `dexkit_` for clarity in the host UI.
+- One MCP tool per entry in dexllm.tools.TOOL_DEFINITIONS, prefixed
+  with `dexllm_` for clarity in the host UI.
 - Every tool takes an `apk_path` argument; the server keeps an LRU of
   DexKit instances so opening the same APK multiple times in a session
   is free after the first hit.
@@ -60,12 +60,12 @@ def _get_dk(apk_path: str) -> DexKit:
 
 # ─── MCP server (FastMCP) ────────────────────────────────────────────────
 
-mcp = FastMCP("dexkit")
+mcp = FastMCP("dexllm")
 
 
 def _wrap(tool_name: str):
     """Build an MCP-callable that opens DexKit from apk_path and dispatches
-    through dexkit_py.tools.execute."""
+    through dexllm.tools.execute."""
     def call(**kwargs: Any) -> str:
         apk_path = kwargs.pop("apk_path", None)
         if not apk_path:
@@ -78,7 +78,7 @@ def _wrap(tool_name: str):
             })
         result = dxtools.execute(tool_name, kwargs, dk)
         return json.dumps(result, indent=2, default=str)
-    call.__name__ = f"dexkit_{tool_name}"
+    call.__name__ = f"dexllm_{tool_name}"
     return call
 
 
@@ -88,11 +88,11 @@ for spec in dxtools.tool_definitions():
     name = spec["name"]
     desc = spec["description"]
     full_desc = f"{desc}\n\nMUST pass `apk_path` (filesystem path to the .apk)."
-    mcp.add_tool(_wrap(name), name=f"dexkit_{name}", description=full_desc)
+    mcp.add_tool(_wrap(name), name=f"dexllm_{name}", description=full_desc)
 
 
 def main() -> None:
-    """Entrypoint for `python -m dexkit_py.mcp_server`. Runs stdio MCP."""
+    """Entrypoint for `python -m dexllm.mcp_server`. Runs stdio MCP."""
     mcp.run()
 
 

@@ -35,8 +35,8 @@ APK='<resolved_apk_path>'
 # DexKit-DAD output
 python << EOF > /tmp/dexkit.txt 2>&1
 from loguru import logger; logger.remove()
-import dexkit_py
-dk = dexkit_py.DexKit("$APK")
+import dexllm
+dk = dexllm.DexKit("$APK")
 print(dk.decompile_method_java("$DESC"))
 EOF
 

@@ -50,9 +50,9 @@ For one APK without the 200-class cap:
 python << 'EOF'
 import sys, time; sys.stdout.reconfigure(line_buffering=True)
 from loguru import logger; logger.remove()
-import dexkit_py; from androguard.misc import AnalyzeAPK
+import dexllm; from androguard.misc import AnalyzeAPK
 APK = "/home/nyahumi/Project/Dexkit/test_apk/APK/com.example.android.tvleanback.apk"
-dk = dexkit_py.DexKit(APK)
+dk = dexllm.DexKit(APK)
 _, d_list, _ = AnalyzeAPK(APK)
 classes = [c.get_name() for dex in d_list for c in dex.get_classes()]
 print(f"{len(classes)} classes", flush=True)

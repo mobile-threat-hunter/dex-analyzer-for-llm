@@ -24,8 +24,8 @@ import difflib
 from glob import glob
 
 from loguru import logger; logger.remove()
-import dexkit_py
-from dexkit_py import safe_decompile_class_java, is_timeout_marker
+import dexllm
+from dexllm import safe_decompile_class_java, is_timeout_marker
 from androguard.misc import AnalyzeAPK
 from androguard.decompiler.decompile import DvClass
 
@@ -59,7 +59,7 @@ def header_fields(src: str) -> str:
 
 def parity_for_apk(apk: str, n: int) -> tuple[int, int, int, list[tuple[str, str]]]:
     """Returns (matched, total, timeouts, mismatches[:3])."""
-    dk = dexkit_py.DexKit(apk)
+    dk = dexllm.DexKit(apk)
     try:
         _a, d_list, dx = AnalyzeAPK(apk)
     except Exception as e:

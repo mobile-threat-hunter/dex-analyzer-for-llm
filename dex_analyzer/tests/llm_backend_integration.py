@@ -38,8 +38,8 @@ if not TEST_APK.exists():
 # ─── Part 1: tools.py ────────────────────────────────────────────────────
 
 def test_tools_module() -> None:
-    import dexkit_py
-    from dexkit_py import tools as dxtools
+    import dexllm
+    from dexllm import tools as dxtools
 
     defs = dxtools.tool_definitions()
     impls = dxtools.TOOL_IMPLS
@@ -49,7 +49,7 @@ def test_tools_module() -> None:
         assert "description" in spec
         assert "input_schema" in spec
 
-    dk = dexkit_py.DexKit(str(TEST_APK))
+    dk = dexllm.DexKit(str(TEST_APK))
     r = dxtools.execute("list_classes", {"limit": 5}, dk)
     assert isinstance(r.get("items"), list) and len(r["items"]) == 5, r
     r = dxtools.execute("capability_report", {}, dk)
@@ -62,7 +62,7 @@ def test_tools_module() -> None:
 # ─── Part 2: mcp_server.py ───────────────────────────────────────────────
 
 def test_mcp_server() -> None:
-    from dexkit_py import mcp_server
+    from dexllm import mcp_server
 
     call = mcp_server._wrap("list_classes")
     out = call(apk_path=str(TEST_APK), limit=3)
@@ -81,7 +81,7 @@ def test_mcp_server() -> None:
 
 def test_fastapi_static() -> None:
     from fastapi.testclient import TestClient
-    from dexkit_py.server import app
+    from dexllm.server import app
 
     c = TestClient(app)
 
@@ -119,7 +119,7 @@ def test_fastapi_live_agent() -> None:
         return
 
     from fastapi.testclient import TestClient
-    from dexkit_py.server import app
+    from dexllm.server import app
 
     c = TestClient(app)
     with open(TEST_APK, "rb") as f:

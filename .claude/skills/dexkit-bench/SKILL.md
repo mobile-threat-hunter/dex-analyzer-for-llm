@@ -29,14 +29,14 @@ python << 'EOF'
 import sys, time, random
 sys.stdout.reconfigure(line_buffering=True)
 from loguru import logger; logger.remove()
-import dexkit_py
+import dexllm
 from androguard.misc import AnalyzeAPK
 from androguard.decompiler.decompile import DvMethod
 
 APK = "/home/nyahumi/Project/Dexkit/test_apk/APK/com.example.android.tvleanback.apk"
 N = 500
 
-dk = dexkit_py.DexKit(APK)
+dk = dexllm.DexKit(APK)
 _a, _d_list, dx = AnalyzeAPK(APK)
 methods = [m for m in dx.get_methods() if not m.is_external() and m.get_method().get_code() is not None]
 random.seed(42); random.shuffle(methods); sample = methods[:N]

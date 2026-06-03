@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(dexkit_py LANGUAGES CXX)
+project(dexllm LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -61,8 +61,8 @@ pybind11_add_module(_dexkit_core MODULE
 target_link_libraries(_dexkit_core PRIVATE dexkit_ext dexkit_dad)
 
 # Install the compiled module into the wheel root; scikit-build-core's
-# `wheel.install-dir = "dexkit_py"` places that root under the dexkit_py
-# package, so DESTINATION "." resolves to dexkit_py/_dexkit_core.*.so.
+# `wheel.install-dir = "dexllm"` places that root under the dexllm
+# package, so DESTINATION "." resolves to dexllm/_dexkit_core.*.so.
 install(TARGETS _dexkit_core LIBRARY DESTINATION .)
 
 # Parity tests — built on demand (not part of wheel). Enabled when we're

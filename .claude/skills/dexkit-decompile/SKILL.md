@@ -20,10 +20,10 @@ Android support library code — good coverage of if/else, try-catch, switch, sy
 Single method:
 ```bash
 python << 'EOF'
-import dexkit_py
+import dexllm
 APK = "<resolved_apk_path>"
 DESC = "<method_descriptor>"
-dk = dexkit_py.DexKit(APK)
+dk = dexllm.DexKit(APK)
 try:
     src = dk.decompile_method_java(DESC)
     print(src if src else "(empty — likely external method ref, no code in this dex)")
@@ -35,8 +35,8 @@ EOF
 Whole class:
 ```bash
 python << 'EOF'
-import dexkit_py
-dk = dexkit_py.DexKit("<resolved_apk_path>")
+import dexllm
+dk = dexllm.DexKit("<resolved_apk_path>")
 print(dk.decompile_class_java("<class_descriptor>"))
 EOF
 ```

@@ -1,4 +1,4 @@
-"""dexkit_py — Python wrapper around LuckyPray DexKit.
+"""dexllm — Python wrapper around LuckyPray DexKit.
 
 Surfaces the native `DexKit` class plus higher-level Python facades
 (descriptor helpers, L1 ref filters, L3 capability summary). The Java

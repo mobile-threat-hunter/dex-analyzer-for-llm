@@ -56,7 +56,7 @@ def summarize_capabilities(dk, *, only_categories=None) -> CapabilityReport:
     """Walk the catalog, look up each API's call sites via dk, aggregate.
 
     Args:
-        dk: a dexkit_py.DexKit instance (caches will be warmed lazily)
+        dk: a dexllm.DexKit instance (caches will be warmed lazily)
         only_categories: if set, restrict aggregation to APIs that include any
             of these categories (e.g. {"LOCATION", "TELEPHONY"})
     """

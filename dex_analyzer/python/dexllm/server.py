@@ -6,7 +6,7 @@ Web flow
    tempdir, opens a DexKit instance (cached in an LRU), returns `session_id`.
 2. Browser calls `POST /analyze` with `session_id` + `prompt`. Server runs a
    manual Anthropic tool-use loop against `claude-opus-4-7`, dispatching each
-   `tool_use` block through `dexkit_py.tools.execute(name, args, dk)` and
+   `tool_use` block through `dexllm.tools.execute(name, args, dk)` and
    feeding the result back as a `tool_result`. The whole conversation is
    streamed back to the browser as SSE events.
 3. `DELETE /session/{id}` cleans up.
@@ -15,7 +15,7 @@ Design notes
 ------------
 - One `DexKit` per session, kept warm in an LRU. Opening a 50MB APK is the
   expensive operation; subsequent tool calls are cheap.
-- Tool catalog comes from `dexkit_py.tools.tool_definitions()` — same surface
+- Tool catalog comes from `dexllm.tools.tool_definitions()` — same surface
   the MCP server exposes. No duplication.
 - The agentic loop is intentionally manual (not the SDK's BetaToolRunner) so
   we can stream events to the browser as they happen and gracefully cap the
@@ -28,7 +28,7 @@ Design notes
 
 Run
 ---
-    uvicorn dexkit_py.server:app --host 0.0.0.0 --port 8000
+    uvicorn dexllm.server:app --host 0.0.0.0 --port 8000
 
 Environment
 -----------
@@ -307,11 +307,11 @@ def list_tools() -> dict:
 
 
 def main() -> None:
-    """Entry point for `python -m dexkit_py.server` (dev convenience)."""
+    """Entry point for `python -m dexllm.server` (dev convenience)."""
     import uvicorn
 
     uvicorn.run(
-        "dexkit_py.server:app",
+        "dexllm.server:app",
         host=os.environ.get("DEXKIT_HOST", "127.0.0.1"),
         port=int(os.environ.get("DEXKIT_PORT", "8000")),
         log_level=os.environ.get("DEXKIT_LOG_LEVEL", "info"),
