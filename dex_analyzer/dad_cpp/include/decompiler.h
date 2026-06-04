@@ -17,6 +17,7 @@
 #include <unordered_map>
 #include <utility>
 
+#include "dast.h"
 #include "dex_code_source.h"
 
 namespace dexkit::dad {
@@ -52,8 +53,16 @@ public:
         std::vector<std::string> access;        // ["public","static",...]
         std::string source;                     // decompiled Java text body
         bool found = false;                     // false if descriptor not found
+        // Full nested AST — DAD dast.py get_ast() dict
+        // {triple, flags, ret, params, comments, body}. Null if not found.
+        AstValue ast;
     };
-    MethodAst DecompileMethodAst(std::string_view method_descriptor);
+    // `include_source` controls whether the Java text `source` field is also
+    // populated. The text requires a SECOND full pipeline run (the AST and
+    // text emitters both mutate the graph, so they can't share one). AST-only
+    // consumers should pass false to skip that redundant work.
+    MethodAst DecompileMethodAst(std::string_view method_descriptor,
+                                 bool include_source = true);
 
     // Cache control. The cache is an LRU bounded by `cache_capacity_` entries
     // (default 4096). Larger APKs evict cold methods; 0 disables eviction.

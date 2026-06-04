@@ -8,6 +8,7 @@
 
 #include "basic_blocks.h"
 #include "control_flow.h"
+#include "dast.h"
 #include "dataflow.h"
 #include "graph.h"
 #include "instruction.h"
@@ -21,13 +22,11 @@ DvMethod::DvMethod(std::shared_ptr<const MethodSnapshot> snap)
     : snap_(std::move(snap)) {}
 
 void DvMethod::Process() {
-    if (!snap_ || !snap_->entry_block_id) {
-        // No code path. Distinguish:
-        //   (a) Truly abstract/native (access flags non-empty) → emit
-        //       signature (DAD-compatible).
-        //   (b) External reference (access empty = no ClassDef in this dex)
-        //       → emit empty string; this method's code lives in another
-        //       dex / framework jar, not decompilable from here.
+    if (!BuildProcessedGraph()) {
+        // No usable graph. Distinguish:
+        //   (a) External reference (access empty = no ClassDef in this dex)
+        //       → emit empty string; this method's code lives elsewhere.
+        //   (b) Abstract/native or empty-construct → emit signature.
         if (snap_ && snap_->meta.access.empty()) {
             source_ = "";  // external reference: nothing to emit
             return;
@@ -37,6 +36,24 @@ void DvMethod::Process() {
         source_ = w.str();
         return;
     }
+    Writer w(snap_.get(), graph_.get());
+    w.WriteMethod();
+    source_ = w.str();
+}
+
+AstValue DvMethod::ProcessAst() {
+    if (!BuildProcessedGraph()) {
+        // Native/abstract/external — DAD's get_ast with graph None still
+        // emits the signature with body = null.
+        JSONWriter jw(snap_.get(), nullptr);
+        return jw.get_ast();
+    }
+    JSONWriter jw(snap_.get(), graph_.get());
+    return jw.get_ast();
+}
+
+bool DvMethod::BuildProcessedGraph() {
+    if (!snap_ || !snap_->entry_block_id) return false;
 
     const MethodMeta& m = snap_->meta;
 
@@ -64,11 +81,8 @@ void DvMethod::Process() {
     // 2. CFG construction.
     graph_ = Construct(*snap_, vmap_, gen_ret_);
     if (!graph_ || !graph_->entry) {
-        // Construct returned empty — fall back to signature-only.
-        Writer w(snap_.get(), nullptr);
-        w.WriteMethod();
-        source_ = w.str();
-        return;
+        // Construct returned empty — caller falls back to signature-only.
+        return false;
     }
 
     // 3. Dataflow analyses.
@@ -115,10 +129,7 @@ void DvMethod::Process() {
     auto idoms = graph_->immediate_dominators();
     IdentifyStructures(*graph_, idoms);
 
-    // 5. Emit Java source.
-    Writer w(snap_.get(), graph_.get());
-    w.WriteMethod();
-    source_ = w.str();
+    return true;
 }
 
 }  // namespace dexkit::dad

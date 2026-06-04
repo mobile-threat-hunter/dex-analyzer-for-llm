@@ -20,6 +20,86 @@ namespace py = pybind11;
 
 namespace {
 
+// Decode dex MUTF-8 → standard UTF-8 so pybind11's strict UTF-8 str decode
+// accepts it. Lone surrogates (invalid in UTF-8) become U+FFFD.
+std::string DecodeMutf8ForPy(std::string_view raw) {
+    std::string out;
+    out.reserve(raw.size());
+    const uint8_t* p = reinterpret_cast<const uint8_t*>(raw.data());
+    const uint8_t* end = p + raw.size();
+    auto emit_cp = [&](uint32_t cp) {
+        if (cp >= 0xD800 && cp <= 0xDFFF) cp = 0xFFFD;  // lone surrogate
+        if (cp < 0x80) {
+            out += static_cast<char>(cp);
+        } else if (cp < 0x800) {
+            out += static_cast<char>(0xC0 | (cp >> 6));
+            out += static_cast<char>(0x80 | (cp & 0x3F));
+        } else if (cp < 0x10000) {
+            out += static_cast<char>(0xE0 | (cp >> 12));
+            out += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
+            out += static_cast<char>(0x80 | (cp & 0x3F));
+        } else {
+            out += static_cast<char>(0xF0 | (cp >> 18));
+            out += static_cast<char>(0x80 | ((cp >> 12) & 0x3F));
+            out += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
+            out += static_cast<char>(0x80 | (cp & 0x3F));
+        }
+    };
+    while (p < end) {
+        uint8_t c = *p;
+        if (c < 0x80) { out += static_cast<char>(c); ++p; continue; }
+        uint32_t cp = 0; size_t n = 0;
+        if ((c & 0xE0) == 0xC0) { cp = c & 0x1F; n = 2; }
+        else if ((c & 0xF0) == 0xE0) { cp = c & 0x0F; n = 3; }
+        else if ((c & 0xF8) == 0xF0) { cp = c & 0x07; n = 4; }
+        else { emit_cp(0xFFFD); ++p; continue; }
+        if (p + n > end) { emit_cp(0xFFFD); ++p; continue; }
+        bool bad = false;
+        for (size_t i = 1; i < n; ++i) {
+            if ((p[i] & 0xC0) != 0x80) { bad = true; break; }
+            cp = (cp << 6) | (p[i] & 0x3F);
+        }
+        if (bad) { emit_cp(0xFFFD); ++p; continue; }
+        if (cp >= 0xD800 && cp <= 0xDBFF && p + n + 3 <= end &&
+            (p[n] & 0xF0) == 0xE0) {
+            uint32_t lo = ((p[n] & 0x0F) << 12) | ((p[n + 1] & 0x3F) << 6) |
+                          (p[n + 2] & 0x3F);
+            if (lo >= 0xDC00 && lo <= 0xDFFF) {
+                emit_cp(0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00));
+                p += n + 3;
+                continue;
+            }
+        }
+        emit_cp(cp);
+        p += n;
+    }
+    return out;
+}
+
+// Recursively convert a dad::AstValue into native Python objects (mirroring
+// DAD's nested-list AST: lists/tuples → list, None → None, ints, bools, strs).
+py::object AstToPy(const dexkit::dad::AstValue& v) {
+    using K = dexkit::dad::AstValue::Kind;
+    switch (v.kind()) {
+        case K::Null: return py::none();
+        case K::Bool: return py::bool_(v.as_bool());
+        case K::Int:  return py::int_(v.as_int());
+        case K::Str:  return py::str(DecodeMutf8ForPy(v.as_str()));
+        case K::Arr: {
+            py::list out;
+            for (const auto& e : v.as_arr()) out.append(AstToPy(e));
+            return std::move(out);
+        }
+        case K::Obj: {
+            py::dict out;
+            for (const auto& kv : v.as_obj())
+                out[py::str(kv.first)] = AstToPy(kv.second);
+            return std::move(out);
+        }
+    }
+    return py::none();
+}
+
 class PyDexKit {
 public:
     explicit PyDexKit(const std::string& apk_path)
@@ -151,8 +231,9 @@ public:
     std::string decompile_method(const std::string& descriptor) {
         return decompiler_->DecompileMethod(descriptor);
     }
-    py::dict decompile_method_ast(const std::string& descriptor) {
-        auto ast = decompiler_->DecompileMethodAst(descriptor);
+    py::dict decompile_method_ast(const std::string& descriptor,
+                                  bool include_source) {
+        auto ast = decompiler_->DecompileMethodAst(descriptor, include_source);
         py::dict out;
         out["found"] = ast.found;
         out["cls_name"] = ast.cls_name;
@@ -162,6 +243,9 @@ public:
         out["params_type"] = ast.params_type;
         out["access"] = ast.access;
         out["source"] = ast.source;
+        // Full nested AST (DAD dast.py get_ast): {triple, flags, ret, params,
+        // comments, body}. None if the method was not found / failed.
+        out["ast"] = AstToPy(ast.ast);
         return out;
     }
     void decompiler_clear_cache() { decompiler_->ClearCache(); }
@@ -448,11 +532,13 @@ PYBIND11_MODULE(_dexkit_core, m) {
              "Decompile a whole class to Java via DAD C++ port. "
              "Releases the GIL during execution. Alias of decompile_class.")
         .def("decompile_method_ast", &PyDexKit::decompile_method_ast,
-             py::arg("method_descriptor"),
+             py::arg("method_descriptor"), py::arg("include_source") = true,
              "Return a structured method dict: "
              "{cls_name, name, proto, ret_type, params_type, access, source, "
-             "found}. Body remains as decompiled Java text — see CLAUDE.md "
-             "for the deferred full-AST port of DAD's dast.py.")
+             "found, ast}. `ast` is the full nested AST from DAD's dast.py "
+             "JSONWriter: {triple, flags, ret, params, comments, body}. "
+             "`source` is the equivalent Java text — pass include_source=False "
+             "to skip its (separate) pipeline run when only the AST is needed.")
         .def("find_call_sites_to_api", &PyDexKit::find_call_sites_to_api,
              py::arg("api_descriptor"),
              "L2: every call site invoking the given API (\"Lpkg/Cls;->name(args)Ret;\"). "

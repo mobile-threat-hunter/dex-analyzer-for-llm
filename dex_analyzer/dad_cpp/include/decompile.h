@@ -11,6 +11,7 @@
 #include <memory>
 #include <string>
 
+#include "dast.h"
 #include "graph.h"
 #include "method_snapshot.h"
 #include "opcode_ins.h"
@@ -33,11 +34,21 @@ public:
     // currently not supported (mutable state). Throws on malformed IR.
     void Process();
 
+    // DAD: decompile.py:135 DvMethod.process(doAST=True) — runs the same
+    // pipeline but emits a nested AST (via JSONWriter) instead of Java text.
+    // Use a fresh DvMethod instance (mutually exclusive with Process()).
+    AstValue ProcessAst();
+
     // Returns the emitted Java source. Empty string before Process() is
     // called or if the method was native/abstract (no body).
     std::string GetSource() const { return source_; }
 
 private:
+    // Steps 1-4 of the pipeline (param seeding → Construct → dataflow →
+    // structural passes). Returns true iff a usable graph (with entry) was
+    // built; false for native/abstract/external methods with no code.
+    bool BuildProcessedGraph();
+
     std::shared_ptr<const MethodSnapshot> snap_;
     Vmap vmap_;
     std::vector<int> lparams_;

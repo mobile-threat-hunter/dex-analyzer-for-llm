@@ -123,7 +123,7 @@ std::string Decompiler::DecompileMethod(std::string_view descriptor) {
 }
 
 Decompiler::MethodAst
-Decompiler::DecompileMethodAst(std::string_view descriptor) {
+Decompiler::DecompileMethodAst(std::string_view descriptor, bool include_source) {
     MethodAst ast;
     uint16_t dex_id;
     uint32_t method_idx;
@@ -131,8 +131,9 @@ Decompiler::DecompileMethodAst(std::string_view descriptor) {
         ast.found = false;
         return ast;
     }
-    // Build snapshot for signature metadata (already cheap; same call DAD
-    // pipeline runs at decompile entry).
+    // Build snapshot for signature metadata + run the full nested-AST emit
+    // (DAD dast.py JSONWriter). The snapshot is cheap; the pipeline is the
+    // same one DecompileMethod runs, but emits AstValue instead of text.
     try {
         auto snap = MethodSnapshotBuilder::BuildShared(source_, dex_id, method_idx);
         ast.cls_name = snap->meta.cls_name;
@@ -141,10 +142,14 @@ Decompiler::DecompileMethodAst(std::string_view descriptor) {
         ast.ret_type = snap->meta.ret_type;
         ast.params_type = snap->meta.params_type;
         ast.access = snap->meta.access;
+        DvMethod dv(snap);
+        ast.ast = dv.ProcessAst();
     } catch (...) {
-        // Snapshot failure → still attempt the decompile for partial data.
+        // Pipeline failure → still return partial signature data + text body.
     }
-    ast.source = DecompileMethod(descriptor);
+    // Optional second pipeline for the Java text body (cached). Skipped when
+    // the caller only needs the AST.
+    if (include_source) ast.source = DecompileMethod(descriptor);
     ast.found = true;
     return ast;
 }

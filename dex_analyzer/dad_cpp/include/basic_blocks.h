@@ -316,6 +316,9 @@ public:
     std::string to_string() const override {
         return cond_ ? cond_->ToString() : std::string{};
     }
+    // Accessor so dast.py's get_cond(cond.condN) can recurse into the nested
+    // Condition (our port wraps it in this operand adapter).
+    Condition* cond() const noexcept { return cond_.get(); }
 private:
     std::shared_ptr<Condition> cond_;
 };
