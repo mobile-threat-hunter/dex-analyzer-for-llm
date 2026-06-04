@@ -258,11 +258,18 @@ std::string DecodeEncodedValueText(const U1*& p,
             }
             return {};
         }
-        case 0x1e:   // NULL  — DAD: value=None, but `if init_value:` is True
-                     // for the EncodedValue wrapper. Emits "None".
-            return std::string("None");
-        case 0x1f:   // BOOLEAN
-            return value_arg ? std::string("True") : std::string("False");
+        case 0x1e:   // NULL — DAD emits the Python literal "None" (value=None,
+                     // but the EncodedValue wrapper is truthy so the
+                     // initializer is still written). "None" is not valid Java.
+                     // Production fix (same precedent as the float/double
+                     // IEEE754 decode — this decoder lives in core_ext, not the
+                     // parity-tested dad_cpp surface, so no *DADFaithful sibling):
+                     // emit spec-correct "null".
+            return std::string("null");
+        case 0x1f:   // BOOLEAN — DAD emits the Python literals "True"/"False",
+                     // which are not valid Java. Production fix: emit the Java
+                     // literals "true"/"false".
+            return value_arg ? std::string("true") : std::string("false");
         default:
             return {};
     }
