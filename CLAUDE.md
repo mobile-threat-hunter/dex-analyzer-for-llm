@@ -4,7 +4,7 @@ Project: C++ DexKit Core + pybind11 wrapper (`dexllm`) with an embedded DAD-alig
 
 ## DAD-aligned development policy
 
-Decompiler implementation lives in `native/dad_cpp/`. It is being built as a faithful C++ port of androguard's DAD. Reference source: a local androguard checkout's `androguard/decompiler/` directory — set `$DAD_REF` to point at it (defaults to `/home/nyahumi/Downloads/androguard-master/androguard/decompiler` on the original dev box; override per-machine). Every function added MUST carry `// DAD: <file.py>:<lineno> <concept>` in both code comment and commit message. If no DAD analogue exists, do not implement — discuss first.
+Decompiler implementation lives in `native/dad_cpp/`. It is being built as a faithful C++ port of androguard's DAD. Reference source: a local androguard checkout's `androguard/decompiler/` directory — set `$DAD_REF` to point at it (defaults to `$HOME/androguard/androguard/decompiler`; override per-machine with `export DAD_REF=...`). Every function added MUST carry `// DAD: <file.py>:<lineno> <concept>` in both code comment and commit message. If no DAD analogue exists, do not implement — discuss first.
 
 A `PreToolUse` hook injects this reminder when editing `vendor/dexkit_core/Core/**` or `native/binding/**` C++ sources.
 
@@ -230,7 +230,7 @@ State a brief plan with verification steps. For decompiler work, verification is
 ## C++ → Python rebuild loop
 
 Every C++ change requires two atomic steps in this exact order:
-1. `cd build/cp313-cp313-linux_x86_64 && ninja`
+1. `cd build/cp*-cp*-* && ninja` (scikit-build-core's platform build dir — name varies by OS/Python; don't hardcode `linux_x86_64`)
 2. `pip install -e . --no-build-isolation` (from repo root)
 
 A `PostToolUse` hook reminds when files under `vendor/dexkit_core/Core/` or `native/binding/` are edited. Run `/dexkit-build` to do both steps correctly.
@@ -260,7 +260,7 @@ Default success criterion for any decompiler change: **24 parity suites in `test
 
 Run parity sweep (build + run all 24 via CMake/CTest):
 ```bash
-cd build/cp313-cp313-linux_x86_64 && \
+cd build/cp*-cp*-* && \
     ninja parity_tests && ctest --output-on-failure
 ```
 Expected tail: `100% tests passed, 0 tests failed out of 24`.

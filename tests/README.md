@@ -9,7 +9,7 @@ check against androguard DAD on synthetic bytecode. This is the gate that must s
 green for any decompiler change.
 
 ```bash
-cd ../build/cp*-cp*-linux_x86_64
+cd ../build/cp*-cp*-*        # scikit-build-core's platform build dir (linux/macos)
 ninja parity_tests
 ctest --output-on-failure        # expect: 100% tests passed, 0 failed out of 25
 ```

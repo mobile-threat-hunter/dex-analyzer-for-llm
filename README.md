@@ -107,10 +107,16 @@ decompiled text becomes GIL-bound. The APK-load gap instead widens with size (�
 
 ## Install
 
-Requirements: Python 3.9+, CMake 3.20+, Ninja, a C++20 compiler, pybind11 3.0+, scikit-build-core 0.10+.
+Requirements: Python 3.9+ and a **C++20 compiler**. CMake / Ninja / pybind11 / scikit-build-core
+are build-time deps that `pip` provisions automatically — you don't install them by hand.
+
+- **Linux**: GCC 10+ or Clang 12+, plus `zlib` dev headers (`apt install build-essential zlib1g-dev`).
+- **macOS** (Intel or Apple Silicon): Xcode Command Line Tools (`xcode-select --install`) — provides
+  Apple Clang (C++20 from Xcode 14+) and the system `zlib`. No Homebrew packages required. The build
+  is platform-agnostic (scikit-build-core resolves the wheel tag per OS/arch).
 
 ```bash
-# from the repo root
+# from the repo root — same on Linux and macOS
 pip install -e .                 # core (native analyzer + decompiler)
 pip install -e ".[all]"          # + MCP server + FastAPI backend
 pip install -e ".[dev]"          # + pytest + androguard (for tests / parity)
@@ -119,7 +125,7 @@ pip install -e ".[dev]"          # + pytest + androguard (for tests / parity)
 After editing C++ sources, rebuild with the two-step loop (or `/dexkit-build`):
 
 ```bash
-cd build/cp*-cp*-linux_x86_64 && ninja      # 1. rebuild the native lib
+cd build/cp*-cp*-* && ninja      # 1. rebuild the native lib
 cd - && pip install -e . --no-build-isolation   # 2. reinstall from repo root
 ```
 
@@ -160,7 +166,7 @@ uvicorn dexllm.server:app --port 8000       # FastAPI + SSE web backend
 
 ```bash
 # C++ parity suites (self-contained, no APK needed) — primary regression gate
-cd build/cp*-cp*-linux_x86_64 && ninja parity_tests && ctest --output-on-failure
+cd build/cp*-cp*-* && ninja parity_tests && ctest --output-on-failure
 
 # Python suite (skips APK-dependent tests if no APK is available)
 pip install -e ".[dev]"

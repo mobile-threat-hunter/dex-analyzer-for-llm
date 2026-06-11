@@ -19,7 +19,7 @@ set -u
 
 # Local checkout of androguard's DAD reference source. Override per-machine:
 #   export DAD_REF=/path/to/androguard-master/androguard/decompiler
-DAD_REF="${DAD_REF:-/home/nyahumi/Downloads/androguard-master/androguard/decompiler}"
+DAD_REF="${DAD_REF:-$HOME/androguard/androguard/decompiler}"
 
 path="$(jq -r '.tool_input.file_path // empty' 2>/dev/null || true)"
 if [[ -z "$path" ]]; then

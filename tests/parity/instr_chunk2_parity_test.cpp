@@ -2,7 +2,7 @@
 // Compile:
 //   g++ -std=gnu++20 -I native/dad_cpp/include \
 //       /tmp/instr_chunk2_parity_test.cpp \
-//       build/cp313-cp313-linux_x86_64/libdexkit_dad.a \
+//       build/cp*-cp*-*/libdexkit_dad.a \
 //       -o /tmp/instr_chunk2_parity_test && /tmp/instr_chunk2_parity_test
 
 #include "instruction.h"
