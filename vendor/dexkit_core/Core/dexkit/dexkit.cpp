@@ -1416,7 +1416,20 @@ DexItem *DexKit::GetDexItem(uint16_t dex_id) {
 
 void DexKit::PutDeclaredClass(std::string_view class_name, uint16_t dex_id, uint32_t type_idx) {
     std::lock_guard lock(this->_put_class_mutex);
-    this->class_declare_dex_map[class_name] = {dex_id, type_idx};
+    // First-wins by load order: when the same class descriptor is declared in
+    // multiple dex (packer / merged dex), keep the lowest dex_id — classes.dex
+    // before classes2.dex — matching ART/AOSP (DexPathList.findClass returns the
+    // first dex that defines the class). The map is mutex-guarded but parallel
+    // DexItem construction calls this in a non-deterministic order, so an
+    // unconditional overwrite made the winner non-deterministic across runs.
+    // Comparing dex_id (which is fixed by load order) makes resolution
+    // deterministic regardless of insertion order.
+    auto it = this->class_declare_dex_map.find(class_name);
+    if (it == this->class_declare_dex_map.end()) {
+        this->class_declare_dex_map[class_name] = {dex_id, type_idx};
+    } else if (dex_id < it->second.first) {
+        it->second = {dex_id, type_idx};
+    }
 }
 
 uint32_t DexKit::BeginBuildCrossRefAggregates(uint32_t aggregate_flags) {
