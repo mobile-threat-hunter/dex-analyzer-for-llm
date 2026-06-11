@@ -4,8 +4,9 @@ What this covers
 ----------------
 1. **tools.py** — every TOOL_DEFINITIONS entry has a matching impl, and
    `execute()` round-trips on a real APK.
-2. **mcp_server.py** — module imports cleanly, registers 15 tools, the
-   FastMCP `_wrap` callable hits DexKit and returns JSON.
+2. **mcp_server.py** — registers 15 tools whose exposed `inputSchema` carries
+   the real typed params + `apk_path` (not an opaque kwargs blob), and
+   `dispatch_tool` hits DexKit and returns the result dict.
 3. **server.py** (FastAPI) — static endpoints (`/health`, `/tools`,
    `/upload`, `/session/{id}`) work end-to-end against a real APK.
 4. **server.py /analyze** — only runs if `ANTHROPIC_API_KEY` is set in
@@ -23,7 +24,6 @@ Exit codes: 0 on success, non-zero on any failure.
 
 from __future__ import annotations
 
-import json
 import os
 import sys
 from pathlib import Path
@@ -67,17 +67,37 @@ def test_tools_module() -> None:
 def test_mcp_server() -> None:
     from dexllm import mcp_server
 
-    call = mcp_server._wrap("list_classes")
-    out = call(apk_path=str(TEST_APK), limit=3)
-    parsed = json.loads(out)
-    assert "items" in parsed and len(parsed["items"]) == 3, parsed
+    # The exposed inputSchema must carry the real typed parameters + apk_path —
+    # NOT a single opaque kwargs blob (the FastMCP-**kwargs regression).
+    specs = mcp_server.list_tool_specs()
+    assert len(specs) == 15, f"expected 15 MCP tools, got {len(specs)}"
+    by_name = {s["name"]: s for s in specs}
+
+    for s in specs:
+        props = s["inputSchema"].get("properties", {})
+        assert (
+            "kwargs" not in props
+        ), f"{s['name']} exposes an opaque kwargs blob: {props}"
+        assert "apk_path" in props, f"{s['name']} missing apk_path in schema"
+        assert "apk_path" in s["inputSchema"].get("required", []), s["name"]
+
+    # decompile_method must expose its real typed parameter, not just apk_path.
+    dm = by_name["dexllm_decompile_method"]["inputSchema"]["properties"]
+    assert "method_descriptor" in dm, dm
+
+    # dispatch round-trips on a real APK
+    r = mcp_server.dispatch_tool(
+        "dexllm_list_classes", {"apk_path": str(TEST_APK), "limit": 3}
+    )
+    assert "items" in r and len(r["items"]) == 3, r
 
     # missing apk_path branch
-    out = call()
-    parsed = json.loads(out)
-    assert parsed.get("error", "").startswith("apk_path"), parsed
+    r = mcp_server.dispatch_tool("dexllm_list_classes", {})
+    assert r.get("error", "").startswith("apk_path"), r
 
-    print("[OK] mcp_server.py — _wrap dispatches, missing-apk branch good")
+    print(
+        "[OK] mcp_server.py — 15 tools expose typed schemas (apk_path + params), dispatch good"
+    )
 
 
 # ─── Part 3: FastAPI static endpoints ────────────────────────────────────

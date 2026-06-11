@@ -5,7 +5,7 @@ Web flow
 1. Browser uploads an APK to `POST /upload`. Server saves to a session-scoped
    tempdir, opens a DexKit instance (cached in an LRU), returns `session_id`.
 2. Browser calls `POST /analyze` with `session_id` + `prompt`. Server runs a
-   manual Anthropic tool-use loop against `claude-opus-4-7`, dispatching each
+   manual Anthropic tool-use loop against `claude-opus-4-8`, dispatching each
    `tool_use` block through `dexllm.tools.execute(name, args, dk)` and
    feeding the result back as a `tool_result`. The whole conversation is
    streamed back to the browser as SSE events.
@@ -21,8 +21,8 @@ Design notes
   we can stream events to the browser as they happen and gracefully cap the
   number of turns.
 - We default to **adaptive thinking** (`thinking: {type: "adaptive"}`) on
-  Opus 4.7 — best cost/quality tradeoff for analysis tasks, no sampling
-  params allowed.
+  Opus 4.8 — the only on-mode thinking shape (`budget_tokens` 400s), and the
+  best cost/quality tradeoff for analysis tasks. No sampling params allowed.
 - Tool calls hold the GIL only briefly; the underlying DexKit C++ releases
   it during decompile, so concurrent sessions can analyse in parallel.
 
@@ -33,7 +33,7 @@ Run
 Environment
 -----------
     ANTHROPIC_API_KEY=sk-ant-...        # required
-    DEXKIT_MODEL=claude-opus-4-7        # optional override
+    DEXKIT_MODEL=claude-opus-4-8        # optional override
     DEXKIT_MAX_TURNS=20                 # safety cap on tool-use rounds
     DEXKIT_SESSION_CACHE=10             # how many DexKit instances to keep
 """
@@ -62,7 +62,7 @@ from . import tools as dxtools
 
 # ─── Config ───────────────────────────────────────────────────────────────
 
-MODEL = os.environ.get("DEXKIT_MODEL", "claude-opus-4-7")
+MODEL = os.environ.get("DEXKIT_MODEL", "claude-opus-4-8")
 MAX_TURNS = int(os.environ.get("DEXKIT_MAX_TURNS", "20"))
 SESSION_CACHE_MAX = int(os.environ.get("DEXKIT_SESSION_CACHE", "10"))
 MAX_TOKENS = int(os.environ.get("DEXKIT_MAX_TOKENS", "8192"))
