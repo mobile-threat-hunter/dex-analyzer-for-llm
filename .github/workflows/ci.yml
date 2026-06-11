@@ -43,7 +43,7 @@ jobs:
           pip install -e .
 
       - name: Toolchain for the C++ parity gate
-        run: pip install "cmake>=3.20" ninja pytest
+        run: pip install "cmake>=3.20" ninja pybind11 pytest
 
       - name: Import smoke
         run: python -c "import dexllm; print('dexllm', dexllm.__version__, '-', len(dexllm.tools.tool_definitions()), 'tools')"
@@ -51,14 +51,17 @@ jobs:
       - name: Python suite (APK-dependent tests skip without a corpus)
         run: pytest tests -q
 
+      # Configure a dedicated CMake tree for the parity tests (the editable
+      # install's build dir is tied to scikit-build-core's isolated build env,
+      # whose pybind11 is gone post-install, so re-driving it can't re-configure).
       - name: C++ parity suites (primary regression gate — APK-free)
         shell: bash
         run: |
-          B="$(find build -maxdepth 2 -name build.ninja -exec dirname {} \; | head -1)"
-          test -n "$B" || { echo "no scikit-build-core build dir under build/"; exit 1; }
-          echo "build dir: $B"
-          cmake --build "$B" --target parity_tests
-          ctest --test-dir "$B" --output-on-failure
+          cmake -B build-ci -S . -G Ninja \
+            -DPython_EXECUTABLE="$(which python)" \
+            -Dpybind11_DIR="$(python -c 'import pybind11; print(pybind11.get_cmake_dir())')"
+          cmake --build build-ci --target parity_tests
+          ctest --test-dir build-ci --output-on-failure
 
   lint:
     name: lint (black / ruff / mypy)

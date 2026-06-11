@@ -29,3 +29,4 @@ __pycache__/
 # Claude Code runtime state / per-user preferences
 .claude/settings.local.json
 .claude/scheduled_tasks.lock
+build-ci/

@@ -378,7 +378,7 @@ DexItemCodeSource::LocateMethod(std::string_view descriptor) {
         if (strings[m.name_idx] != name) continue;
         if (BuildProto(*dex_item, proto_ids[m.proto_idx]) != proto) continue;
         return dexkit::dad::IDexCodeSource::MethodLocator{
-            dex_item->GetDexId(), static_cast<uint32_t>(i)};
+            static_cast<uint16_t>(dex_item->GetDexId()), static_cast<uint32_t>(i)};
     }
     return std::nullopt;
 }
@@ -391,7 +391,7 @@ DexItemCodeSource::LocateClassMethods(std::string_view class_descriptor) {
     const auto& class_method_ids = dex_item->GetClassMethodIds(type_idx);
     out.reserve(class_method_ids.size());
     for (uint32_t midx : class_method_ids) {
-        out.push_back({dex_item->GetDexId(), midx});
+        out.push_back({static_cast<uint16_t>(dex_item->GetDexId()), midx});
     }
     return out;
 }

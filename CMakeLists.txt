@@ -60,6 +60,14 @@ pybind11_add_module(_dexkit_core MODULE
 )
 target_link_libraries(_dexkit_core PRIVATE dexkit_ext dexkit_dad)
 
+# Narrowing in a braced initializer is ill-formed C++ — Clang (macOS) rejects it
+# while GCC (Linux) only warns. Make it a hard error on OUR targets (not the
+# vendored Core) so the Linux dev build catches what the macOS build would,
+# instead of discovering it in CI. See dexitem_code_source.cpp uint16/uint32.
+foreach(t dexkit_ext dexkit_dad _dexkit_core)
+    target_compile_options(${t} PRIVATE -Werror=narrowing)
+endforeach()
+
 # Install the compiled module into the wheel root; scikit-build-core's
 # `wheel.install-dir = "dexllm"` places that root under the dexllm
 # package, so DESTINATION "." resolves to dexllm/_dexkit_core.*.so.
