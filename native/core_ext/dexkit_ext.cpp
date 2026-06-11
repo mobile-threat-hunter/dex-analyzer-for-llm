@@ -2,15 +2,19 @@
 
 #include <algorithm>
 #include <array>
+#include <cstring>  // memcmp (raw-dex magic sniff)
 #include <map>
 #include <set>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <utility>
 
 #include "analyze.h"  // kMethodInvoking et al.
 #include "dexitem_code_source.h"  // for GetCodeSource()
+#include "mmap.h"  // dexkit::MemMap (raw-dex load path)
 #include "schema/querys_generated.h"
+#include "zip_archive.h"  // dexkit::ZipArchive (PK/central-dir container probe)
 #include "schema/matchers_generated.h"
 #include "schema/results_generated.h"
 #include "schema/encode_value_generated.h"
@@ -259,9 +263,87 @@ DexKitExt::ListExternalFieldRefs(bool framework_only) const {
     return out;
 }
 
-DexKitExt::DexKitExt(const std::string& apk_path)
-    : apk_path_(apk_path),
-      core_(std::make_unique<dexkit::DexKit>(apk_path)) {}
+namespace {
+
+// A standard .dex starts with the magic "dex\n" (0x64 0x65 0x78 0x0a); a
+// zip/apk/jar starts with "PK". The core's apk_path constructor only opens
+// zip containers, so we sniff the header and load a bare .dex directly via
+// AddImage (which mmaps the file and parses its logical dex offsets).
+bool LooksLikeRawDex(const dexkit::MemMap& map) {
+    return map.ok() && map.len() >= 4 && std::memcmp(map.data(), "dex\n", 4) == 0;
+}
+
+// Count the sequential classes.dex / classes2.dex / ... entries the loader would
+// actually pick up. Mirrors DexKit::AddZipPath's "stop at the first gap" rule so
+// the reported dex_count equals what gets loaded.
+int CountClassesDex(const dexkit::ZipArchive& za) {
+    int count = 0;
+    for (int idx = 1;; ++idx) {
+        auto name = "classes" + (idx == 1 ? std::string() : std::to_string(idx)) + ".dex";
+        if (za.Find(name) == nullptr) break;
+        ++count;
+    }
+    return count;
+}
+
+}  // namespace
+
+ContainerInfo DexKitExt::Identify(const std::string& path) {
+    ContainerInfo info;
+    dexkit::MemMap map(path);
+    if (!map.ok()) {
+        info.format = "unknown";  // missing or empty
+        return info;
+    }
+    if (LooksLikeRawDex(map)) {
+        info.format = "dex";
+        info.dex_count = 1;
+        return info;
+    }
+    // Not a raw .dex — probe for a zip/apk by content (PK signature + a valid
+    // central directory), independent of the file's extension.
+    auto za = dexkit::ZipArchive::Open(map);
+    if (!za) {
+        info.format = "unknown";
+        return info;
+    }
+    info.format = "zip";
+    info.has_manifest = za->Find("AndroidManifest.xml") != nullptr;
+    info.is_apk = info.has_manifest;
+    info.dex_count = CountClassesDex(*za);
+    return info;
+}
+
+DexKitExt::DexKitExt(const std::string& apk_path) : apk_path_(apk_path) {
+    auto map = std::make_unique<dexkit::MemMap>(apk_path);
+    if (!map->ok()) {
+        throw std::runtime_error(
+            "dexllm: cannot open '" + apk_path + "' (file not found or empty)");
+    }
+    if (LooksLikeRawDex(*map)) {
+        core_ = std::make_unique<dexkit::DexKit>();
+        core_->AddImage(std::move(map));
+        return;
+    }
+    // Not a raw .dex. Prove it is an actual zip/apk container by its content —
+    // PK signature + parseable central directory — rather than trusting the
+    // extension, so a disguised .apk (renamed/extension-less) still loads.
+    auto za = dexkit::ZipArchive::Open(*map);
+    if (!za) {
+        throw std::runtime_error(
+            "dexllm: '" + apk_path + "' is neither a .dex (no 'dex\\n' magic) nor a "
+            "zip/apk container (no PK signature / invalid central directory)");
+    }
+    const int dex_count = CountClassesDex(*za);
+    if (dex_count == 0) {
+        const bool has_manifest = za->Find("AndroidManifest.xml") != nullptr;
+        throw std::runtime_error(
+            "dexllm: zip container '" + apk_path + "' has no classes*.dex to decompile "
+            "(AndroidManifest.xml " + (has_manifest ? "present" : "absent") + ")");
+    }
+    // Validated container — hand the original path to the core's zip loader.
+    core_ = std::make_unique<dexkit::DexKit>(apk_path);
+}
 
 DexKitExt::~DexKitExt() = default;
 

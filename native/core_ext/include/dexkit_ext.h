@@ -13,8 +13,24 @@
 
 namespace dexkit::ext {
 
+// Lightweight container probe — identifies a file by content (dex magic + zip
+// central directory / PK signature), NOT by its extension. Lets callers verify
+// a disguised .apk (wrong/absent extension) before loading, the way a malware
+// analyst inspects the magic bytes rather than trusting the filename.
+struct ContainerInfo {
+    std::string format;         // "dex" | "zip" | "unknown"
+    bool has_manifest = false;  // AndroidManifest.xml present (zip only)
+    bool is_apk = false;        // zip container that carries an AndroidManifest.xml
+    int dex_count = 0;          // sequential classes*.dex (zip) or 1 (raw .dex)
+};
+
 class DexKitExt {
 public:
+    // Content-based probe; performs no load. Safe on any path. Returns
+    // format=="unknown" when the file is missing/empty or is neither a raw
+    // .dex nor a valid zip/apk container.
+    static ContainerInfo Identify(const std::string& path);
+
     explicit DexKitExt(const std::string& apk_path);
     ~DexKitExt();
 

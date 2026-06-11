@@ -267,6 +267,24 @@ private:
 PYBIND11_MODULE(_dexkit_core, m) {
     m.doc() = "dexllm native module (L1)";
 
+    // Content-based container probe (no load). Identifies a file by its magic
+    // bytes / zip central directory rather than its extension, so a disguised
+    // .apk can be proven before loading.
+    m.def(
+        "identify",
+        [](const std::string& path) {
+            auto info = dexkit::ext::DexKitExt::Identify(path);
+            py::dict d;
+            d["format"] = info.format;        // "dex" | "zip" | "unknown"
+            d["is_apk"] = info.is_apk;        // zip carrying an AndroidManifest.xml
+            d["has_manifest"] = info.has_manifest;
+            d["dex_count"] = info.dex_count;  // classes*.dex count (zip) or 1 (dex)
+            return d;
+        },
+        py::arg("path"),
+        "Probe a file by content (dex magic / PK zip signature + AndroidManifest.xml) "
+        "without loading it. Returns {format, is_apk, has_manifest, dex_count}.");
+
     py::class_<dexkit::ext::ExternalTypeRef>(m, "ExternalTypeRef")
         .def_readonly("descriptor", &dexkit::ext::ExternalTypeRef::descriptor)
         .def_readonly("referenced_in_dex_ids",
@@ -412,7 +430,11 @@ PYBIND11_MODULE(_dexkit_core, m) {
         });
 
     py::class_<PyDexKit>(m, "DexKit")
-        .def(py::init<const std::string&>(), py::arg("apk_path"))
+        .def(py::init<const std::string&>(), py::arg("apk_path"),
+             "Load a DEX source. Accepts a zip container (.apk/.jar/.zip — all "
+             "classes*.dex inside are loaded) or a bare .dex file (detected by "
+             "its 'dex\\n' magic). The arg keeps the name apk_path for "
+             "backward compatibility.")
         .def("dex_count", &PyDexKit::dex_count)
         .def("apk_path", &PyDexKit::apk_path)
         .def("locate_class_dex", &PyDexKit::locate_class_dex,

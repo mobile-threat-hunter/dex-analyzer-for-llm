@@ -33,6 +33,7 @@ from ._dexkit_core import (
     ExternalMethodRef,
     ExternalTypeRef,
     ResolvedCallSite,
+    identify,
     is_framework_descriptor,
 )
 from .capability import (
@@ -81,6 +82,7 @@ __all__ = [
     "find_call_sites_to_ref",
     "format_class",
     "format_class_summary",
+    "identify",
     "is_framework_descriptor",
     "is_timeout_marker",
     "java_to_descriptor",

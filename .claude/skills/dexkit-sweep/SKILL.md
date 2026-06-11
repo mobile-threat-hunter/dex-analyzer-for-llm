@@ -30,7 +30,10 @@ python /tmp/full_sweep.py
 
 If `/tmp/full_sweep.py` is missing, recreate it. It must:
 - Glob every `*.apk` in `test_apk/APK/`
-- Skip APKs with `dex_count() == 0` (resources-only)
+- Skip APKs with `dexllm.identify(apk)["dex_count"] == 0` (resources-only) **before**
+  constructing `DexKit(apk)` — the constructor now raises on a container with no
+  `classes*.dex` (validated load), so probe with `identify()` first instead of
+  loading and checking `dex_count()`
 - For each APK, enumerate classes via `androguard.misc.AnalyzeAPK` (DexKit has no class
   enumeration API)
 - Call `dk.decompile_class_java(class_descriptor)` for each class

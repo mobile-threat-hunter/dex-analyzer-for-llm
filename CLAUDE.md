@@ -161,7 +161,9 @@ Deferred residual ~7.6%: see [[project-deferred-decompiler-tasks]] memory — do
 
 ### Decompiler API surface (pybind11)
 
-Exposed via `dexllm.DexKit(apk_path)`. The constructor accepts a zip container (`.apk`/`.jar`/`.zip` — all `classes*.dex` loaded) **or a bare `.dex` file** (sniffed by its `dex\n` magic, loaded via the core's `AddImage`; the zip path is unchanged). Detection lives in `DexKitExt::DexKitExt` ([dexkit_ext.cpp](native/core_ext/dexkit_ext.cpp)). Arg name stays `apk_path` for backward compatibility.
+Exposed via `dexllm.DexKit(apk_path)`. The constructor identifies the file **by content, not extension** — a `dex\n` magic loads as a bare `.dex` via the core's `AddImage`; otherwise it must prove out as a real zip/apk container (PK signature + parseable central directory via `ZipArchive::Open`) and carry at least one sequential `classes*.dex`. A disguised `.apk` (renamed, wrong, or absent extension) therefore still loads; a non-dex/non-zip file or a zip with no `classes*.dex` now raises a clear `std::runtime_error` (the error reports whether `AndroidManifest.xml` was present) instead of the old silent 0-dex load. Detection lives in `DexKitExt::DexKitExt` ([dexkit_ext.cpp](native/core_ext/dexkit_ext.cpp)). Arg name stays `apk_path` for backward compatibility.
+
+`dexllm.identify(path)` is the load-free probe behind the same logic — returns `{format: "dex"|"zip"|"unknown", is_apk, has_manifest, dex_count}` without constructing a `DexKit`. Use it to pre-filter resources-only containers (0-dex) before loading, e.g. in sweep harnesses (`dexkit_ext.cpp::Identify`, bound in [module.cpp](native/binding/module.cpp)).
 
 | Method | Purpose |
 |---|---|
@@ -170,6 +172,7 @@ Exposed via `dexllm.DexKit(apk_path)`. The constructor accepts a zip container (
 | `decompile_method_ast(desc, include_source=True)` → dict | Signature components + Java `source` + full DAD `dast.py` nested-list `ast` (`{triple, flags, ret, params, comments, body}`). `include_source=False` skips the separate text-emit pipeline (AST and text emitters each mutate the graph, so they can't share one run) — ~1.7× faster for AST-only consumers. |
 | `list_classes()` → list[str] | Every declared class descriptor across all loaded dexes. Replaces androguard's `AnalyzeAPK→get_classes` (100×+ faster). |
 | `list_class_methods(cls_desc)` → list[str] | Every declared method's full Dalvik descriptor. |
+| `identify(path)` → dict | Module-level. Content-based probe (no load): `{format, is_apk, has_manifest, dex_count}`. Proves a disguised `.apk` and pre-filters 0-dex containers. |
 | `decompiler_set_cache_capacity(n)` / `decompiler_cache_capacity()` | LRU cache cap (default 4096, 0 = unbounded). |
 | `decompiler_clear_cache()` / `decompiler_cache_size()` | Cache lifecycle. |
 | L1-L7 search family | Pre-existing find/match APIs (class/method/field by name/strings/annotation/etc). |
