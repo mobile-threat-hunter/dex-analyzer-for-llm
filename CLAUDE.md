@@ -226,6 +226,7 @@ State a brief plan with verification steps. For decompiler work, verification is
 - **Tools allowed**: in-process androguard, custom C++. **Forbidden**: jadx, any JVM/subprocess decompiler, prebuild of full APK.
 - **Decompile model**: lazy per-class on-demand (JEB-style). Cache results.
 - **Permissions**: `--dangerously-skip-permissions` is set — no pre-approval for tool calls.
+- **Docs gate**: a `PreToolUse(Bash)` hook ([.claude/docs-precommit-check.sh](.claude/docs-precommit-check.sh)) blocks `git commit` / `git push` until the project docs (`README.md`, `CLAUDE.md`, `docs/*.md`) have been reviewed for drift against the change and any inaccuracies fixed in the same commit. After reviewing, re-run the same command prefixed with `DOCS_CHECKED=1` to bypass (e.g. `DOCS_CHECKED=1 git commit -m "..."`).
 
 ## C++ → Python rebuild loop
 
