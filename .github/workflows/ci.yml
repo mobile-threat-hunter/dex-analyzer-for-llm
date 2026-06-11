@@ -1,0 +1,74 @@
+name: CI
+
+# Build the native extension and run the self-contained regression gates on
+# Linux and macOS. The APK-dependent suites (llm_backend_integration, the
+# full sweep, bench_vs_androguard) need the gitignored test_apk/ corpus and
+# are intentionally NOT run here — the C++ parity suites are the APK-free gate.
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test:
+    name: build+test (${{ matrix.os }}, py${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python: ["3.11", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      # DexKit Core links zlib. Linux runners need the dev headers; macOS
+      # ships zlib + an Apple Clang with C++20 via the Xcode Command Line Tools.
+      - name: System deps (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y zlib1g-dev
+
+      - name: Build + install the native extension
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .
+
+      - name: Toolchain for the C++ parity gate
+        run: pip install "cmake>=3.20" ninja pytest
+
+      - name: Import smoke
+        run: python -c "import dexllm; print('dexllm', dexllm.__version__, '-', len(dexllm.tools.tool_definitions()), 'tools')"
+
+      - name: Python suite (APK-dependent tests skip without a corpus)
+        run: pytest tests -q
+
+      - name: C++ parity suites (primary regression gate — APK-free)
+        shell: bash
+        run: |
+          B="$(find build -maxdepth 2 -name build.ninja -exec dirname {} \; | head -1)"
+          test -n "$B" || { echo "no scikit-build-core build dir under build/"; exit 1; }
+          echo "build dir: $B"
+          cmake --build "$B" --target parity_tests
+          ctest --test-dir "$B" --output-on-failure
+
+  lint:
+    name: lint (black / ruff / mypy)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: pip install black ruff mypy
+      - run: black --check src/dexllm
+      - run: ruff check src/dexllm
+      - run: mypy
