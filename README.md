@@ -60,21 +60,24 @@ analysis). Full-APK decompile of the same 4135 classes:
 
 | dexllm | wall | speedup |
 |---|---|---|
-| sequential (1 thread) | 1.86 s | 1.0× |
-| 32 threads (shared instance) | **0.13 s** | **14.3×** |
+| sequential (1 thread) | 1.85 s | 1.0× |
+| 32 threads (shared instance) | **188 ms** | **9.9×** |
 
-Speedup is workload-dependent: ~12–14× here, but it drops to ~3× on a 39k-class app because
-returning hundreds of MB of decompiled text becomes GIL-bound. The APK-load gap also widens with
-size (≈1800× on the 39k-class app — lazy slicer parse is near-constant-time).
+Speedup is workload-dependent. Here it peaks at **~10.5× near the 16 physical cores** (Ryzen 9
+9950X is 16C/32T); the 32 logical (SMT) threads regress slightly to ~9.9× from scheduler
+contention, so `bench_vs_androguard.py` (which uses `os.cpu_count()` = 32) reports the 32-thread
+figure above. On a 39k-class app the speedup drops to ~3× because returning hundreds of MB of
+decompiled text becomes GIL-bound. The APK-load gap instead widens with size (≈1800× on the
+39k-class app — lazy slicer parse is near-constant-time).
 
 **Each tool at its realistic max** — dexllm parallel (32 threads) vs androguard single-threaded
 (its *only* mode), full-APK decompile, end-to-end:
 
 | stage | dexllm (parallel) | androguard (single) | speedup |
 |---|---|---|---|
-| APK load | 24.6 ms | 2.88 s | 117× |
-| full decompile (4135 classes) | **0.13 s** | 10.13 s | 77× |
-| **END-TO-END** | **0.16 s** | 13.01 s | **83×** |
+| APK load | 23.5 ms | 2.78 s | 118× |
+| full decompile (4135 classes) | **188 ms** | 9.91 s | 53× |
+| **END-TO-END** | **0.21 s** | 12.69 s | **60×** |
 
 ## Repository layout
 
@@ -82,7 +85,7 @@ size (≈1800× on the 39k-class app — lazy slicer parse is near-constant-time
 .
 ├── pyproject.toml          scikit-build-core build config
 ├── CMakeLists.txt          native build (drives vendor/ + native/)
-├── dexllm/                 Python package: DexKit, tools, mcp_server, server, capability, …
+├── src/dexllm/             Python package: DexKit, tools, mcp_server, server, capability, …
 ├── native/                 C++ sources
 │   ├── core_ext/             extension over upstream DexKit (search / ref enumeration)
 │   ├── dad_cpp/              DAD-aligned Java decompiler (graph/dataflow/control_flow/writer/dast)
