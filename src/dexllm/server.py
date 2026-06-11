@@ -20,9 +20,10 @@ Design notes
 - The agentic loop is intentionally manual (not the SDK's BetaToolRunner) so
   we can stream events to the browser as they happen and gracefully cap the
   number of turns.
-- We default to **adaptive thinking** (`thinking: {type: "adaptive"}`) on
-  Opus 4.8 — the only on-mode thinking shape (`budget_tokens` 400s), and the
-  best cost/quality tradeoff for analysis tasks. No sampling params allowed.
+- We default to **adaptive thinking** (`thinking: {type: "adaptive",
+  display: "summarized"}`) on Opus 4.8 — the only on-mode thinking shape
+  (`budget_tokens` 400s), with `display: "summarized"` so the otherwise-omitted
+  reasoning streams to the browser. No sampling params allowed.
 - Tool calls hold the GIL only briefly; the underlying DexKit C++ releases
   it during decompile, so concurrent sessions can analyse in parallel.
 
@@ -242,7 +243,10 @@ async def _run_agent(sess: Session, prompt: str) -> AsyncIterator[dict]:
                 system=SYSTEM_PROMPT,
                 tools=tools,
                 messages=messages,
-                thinking={"type": "adaptive"},
+                # display="summarized": Opus 4.8 omits thinking text by default,
+                # which would make the SSE `thinking` events empty; opt in so the
+                # reasoning is streamed to the browser.
+                thinking={"type": "adaptive", "display": "summarized"},
             )
         except Exception as e:
             yield _sse(
