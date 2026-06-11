@@ -9,7 +9,7 @@ Adds capabilities that upstream DexKit doesn't expose, oriented for **security a
 - **Capability / permission summary** — API → category aggregation (LOCATION, CRYPTO, REFLECTION, …)
 - **Intra-method dataflow** — track ConstString / NewInstance / argument origin per call site
 - **Smali rendering** — baksmali-style, no JVM needed
-- **Java decompiler** — full DAD-aligned C++ port in `dad_cpp/`: `decompile_method_java`, `decompile_class_java`, and `decompile_method_ast` (the complete androguard `dast.py` nested AST). ~92% byte / ~98% line parity vs androguard DAD, 0-crash on a 22-APK / 443k-method corpus, and 2–9× faster (see [comparison](#performance)).
+- **Java decompiler** — full DAD-aligned C++ port in `dad_cpp/`: `decompile_method_java`, `decompile_class_java`, and `decompile_method_ast` (the complete androguard `dast.py` nested AST). ~92% byte / ~98% line parity vs androguard DAD, 0-crash on a 22-APK / 443k-method corpus, and ~4.5× faster per method than androguard (see [comparison](#performance)).
 - **LLM backends** — a shared tool catalog (`dexllm.tools`) exposed via an MCP stdio server and a FastAPI/SSE web backend.
 
 All of L1–L7 below are operational. The decompiler is a strict function-by-function port of androguard's DAD (`decompiler/*.py`: graph → dataflow → control_flow → writer/dast); see [CLAUDE.md](../CLAUDE.md#dad-aligned-development-policy) for the port roadmap.
@@ -35,18 +35,29 @@ pip install -e . --no-build-isolation --force-reinstall   # force a clean native
 import dexllm
 
 dk = dexllm.DexKit("/path/to/app.apk")
-print(dk.dex_count, "dex files,", dk.apk_path)
+print(dk.dex_count(), "dex files,", dk.apk_path())
 # Optional: warm all analysis caches upfront (one-time ~200ms on a 50-dex APK).
 # Otherwise caches warm lazily on first access of each analyser.
 dk.warm_analysis_caches()
 ```
 
-`DexKit(path)` accepts either a **zip container** (`.apk` / `.jar` / `.zip` — every `classes*.dex` inside is loaded) or a **bare `.dex` file** (detected by its `dex\n` magic, loaded directly — no need to repackage it into a zip):
+`DexKit(path)` identifies the file **by content, not by extension** — a `dex\n` magic loads as a bare `.dex`, anything else must prove out as a real zip/apk container (PK signature + a valid central directory) carrying at least one `classes*.dex`. So a **disguised or extension-less APK** (a renamed `.png`, no extension, …) still loads, while a non-dex/non-zip file or a zip with no `classes*.dex` raises a clear error instead of silently loading nothing.
 
 ```python
-dk = dexllm.DexKit("classes2.dex")            # raw secondary dex, loaded directly
+dk = dexllm.DexKit("classes2.dex")            # raw secondary dex (dex\n magic), loaded directly
+dk = dexllm.DexKit("/tmp/evil.png")           # disguised APK — loaded by its PK content
 print(dk.decompile_class_java("Lcom/blafoo/bar/Blafoo;"))
 ```
+
+Probe a file **without loading it** with `dexllm.identify(path)` — handy for triaging a directory of unknown blobs:
+
+```python
+dexllm.identify("/path/to/suspect")
+# → {'format': 'zip', 'is_apk': True, 'has_manifest': True, 'dex_count': 2}
+#   format: "dex" | "zip" | "unknown";  is_apk = a zip carrying an AndroidManifest.xml
+```
+
+In a multidex APK, a class declared in more than one `classes*.dex` resolves **first-wins by lowest dex_id** (classes.dex before classes2.dex), deterministically — matching ART/AOSP, so packer collisions decompile to the body that actually runs (see [DEX-handling comparison](dexkit-vs-art-dex-handling.md)).
 
 The constructor argument is still named `apk_path` for backward compatibility. A zip APK loads in ~150ms for a 50-dex app using zero-copy slicer-based dex parsing. Subsequent operations cache aggressively — the second call is always ≤1µs marshalling overhead plus the algorithm cost.
 
@@ -347,17 +358,17 @@ Vendored DexKit Core fork lives at `vendor/dexkit_core/`. Public accessors added
 Python ↔ C++ marshalling overhead stays under 1 ms per call.
 
 <a name="performance"></a>
-### vs androguard / JandroGuard (decompile, Telegram 12.7.3 — 39,146 classes)
+### vs androguard (decompile, Telegram 12.7.3 — 39,146 classes)
 
-| | dexllm (C++) | androguard (Python) | JandroGuard (Java) |
-|---|---|---|---|
-| APK load | **15 ms** | 28.8 s | (bundled) |
-| Full decompile (1 thread) | **54 s** | impractical | 169 s |
-| Full decompile (parallel) | **18.5 s** (GIL released) | — | n/a (single-threaded) |
-| Peak RSS | **523 MB** | — | 9.9 GB |
-| Crashes | 0 | — | 0 |
+| | dexllm (C++) | androguard (Python) |
+|---|---|---|
+| APK load | **15 ms** | 28.8 s |
+| Full decompile (1 thread) | **54 s** | impractical |
+| Full decompile (parallel) | **18.5 s** (GIL released) | — (GIL-bound) |
+| Peak RSS | **523 MB** | — |
+| Crashes | 0 | — |
 
-Single-thread decompile is ~3× faster than JandroGuard and ~4.5× faster per-method than androguard; load is 100–1800× faster (lazy slicer parsing); memory is ~19–37× lighter. Search (L1–L7) is 3–6× faster than androguard's scan.
+Per-method decompile is ~4.5× faster than androguard; APK load is 100–1800× faster (lazy slicer parsing). On this heavy app the parallel speedup is ~3× — returning hundreds of MB of decompiled text is GIL-bound, so small/medium APKs scale higher (~10× on tvleanback). Search (L1–L7) is 3–6× faster than androguard's scan.
 
 Reproduce the androguard comparison on any APK: [`bench/bench_vs_androguard.py`](../bench/bench_vs_androguard.py) (`pip install -e ".[dev]"`, then `python bench/bench_vs_androguard.py app.apk`). It prints a paste-ready table of load / decompile / search timings plus byte-parity.
 
