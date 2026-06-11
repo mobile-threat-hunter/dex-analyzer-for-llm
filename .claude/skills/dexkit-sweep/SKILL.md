@@ -29,7 +29,7 @@ python /tmp/full_sweep.py
 ```
 
 If `/tmp/full_sweep.py` is missing, recreate it. It must:
-- Glob every `*.apk` in `/home/nyahumi/Project/Dexkit/test_apk/APK/`
+- Glob every `*.apk` in `test_apk/APK/`
 - Skip APKs with `dex_count() == 0` (resources-only)
 - For each APK, enumerate classes via `androguard.misc.AnalyzeAPK` (DexKit has no class
   enumeration API)
@@ -51,7 +51,7 @@ python << 'EOF'
 import sys, time; sys.stdout.reconfigure(line_buffering=True)
 from loguru import logger; logger.remove()
 import dexllm; from androguard.misc import AnalyzeAPK
-APK = "/home/nyahumi/Project/Dexkit/test_apk/APK/com.example.android.tvleanback.apk"
+APK = "test_apk/APK/com.example.android.tvleanback.apk"
 dk = dexllm.DexKit(APK)
 _, d_list, _ = AnalyzeAPK(APK)
 classes = [c.get_name() for dex in d_list for c in dex.get_classes()]

@@ -1,0 +1,92 @@
+[build-system]
+requires = ["scikit-build-core>=0.10", "pybind11>=2.13"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "dexllm"
+version = "0.0.1"
+description = "LLM-facing DEX/APK analyzer — pybind11 wrapper around DexKit Core with an embedded DAD-aligned Java decompiler, MCP server, and FastAPI/SSE backend"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "Apache-2.0" }
+authors = [{ name = "dex-analyzer-for-llm contributors" }]
+keywords = ["android", "apk", "dex", "decompiler", "static-analysis", "androguard", "dexkit", "mcp", "llm"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: C++",
+    "Topic :: Security",
+    "Topic :: Software Development :: Disassemblers",
+    "License :: OSI Approved :: Apache Software License",
+]
+# Core (`import dexllm`) has no Python runtime deps — the analyzer is native.
+dependencies = []
+
+[project.optional-dependencies]
+# MCP stdio server (Claude Desktop / Cursor / Continue): `python -m dexllm.mcp_server`
+mcp = ["mcp>=1.0"]
+# FastAPI + SSE web backend: `uvicorn dexllm.server:app`
+server = [
+    "fastapi>=0.110",
+    "uvicorn>=0.29",
+    "sse-starlette>=2.0",
+    "python-multipart>=0.0.9",
+    "anthropic>=0.40",
+]
+# Everything LLM-facing (MCP + server + agent).
+all = ["dexllm[mcp,server]"]
+# Tests + parity/bench tooling. androguard is the decompile parity ground truth.
+dev = ["pytest>=8.0", "androguard>=4.1", "black>=25.0", "ruff>=0.6", "mypy>=1.11"]
+
+[project.scripts]
+dexllm-mcp = "dexllm.mcp_server:main"
+
+[tool.scikit-build]
+minimum-version = "build-system.requires"
+cmake.version = ">=3.20"
+ninja.make-fallback = false
+wheel.packages = ["src/dexllm"]
+wheel.install-dir = "dexllm"
+build-dir = "build/{wheel_tag}"
+
+[tool.scikit-build.cmake.define]
+# Override if vendored DexKit Core lives elsewhere.
+# DEXKIT_CORE_ROOT = "/abs/path/to/vendor/dexkit_core"
+
+# --- Python code quality (PEP 8 / PEP 484) ---
+
+[tool.black]
+line-length = 88
+target-version = ["py39"]
+
+[tool.ruff]
+line-length = 88
+target-version = "py39"
+
+[tool.ruff.lint]
+# E/W = pycodestyle (PEP 8), F = pyflakes (correctness), I = isort (import order),
+# D = pydocstyle (PEP 257 docstring conventions).
+select = ["E", "W", "F", "I", "D"]
+# E501 (line length) is owned by Black; let the formatter handle wrapping.
+ignore = ["E501"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "pep257"
+
+[tool.mypy]
+files = ["src/dexllm"]
+# The native extension (`_dexkit_core`) and optional deps (androguard, mcp,
+# fastapi) ship no type stubs — don't fail on their missing imports.
+ignore_missing_imports = true
+# PEP 484: require every function in the package to carry annotations.
+disallow_untyped_defs = true
+
+[tool.ruff.lint.per-file-ignores]
+# These scripts must call `logger.remove()` to silence androguard's INFO spam
+# before importing androguard — a deliberate import-after-statement (E402).
+"bench/bench_vs_androguard.py" = ["E402"]
+"tests/dvclass_parity.py" = ["E402"]
+# Docstrings (D) are enforced on the package only; example/bench/test scripts
+# are self-documenting harnesses, not a public API surface.
+"examples/*" = ["D"]
+"bench/*" = ["D"]
+"tests/*" = ["D"]

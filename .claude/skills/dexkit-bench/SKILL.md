@@ -33,7 +33,7 @@ import dexllm
 from androguard.misc import AnalyzeAPK
 from androguard.decompiler.decompile import DvMethod
 
-APK = "/home/nyahumi/Project/Dexkit/test_apk/APK/com.example.android.tvleanback.apk"
+APK = "test_apk/APK/com.example.android.tvleanback.apk"
 N = 500
 
 dk = dexllm.DexKit(APK)

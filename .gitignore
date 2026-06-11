@@ -8,15 +8,16 @@
 local.properties
 .dexkit-sysroot/
 
-/docs
-/doc
 /apk
 
-# Python / pybind11 build artifacts under dex_analyzer/
-dex_analyzer/build/
-dex_analyzer/*.egg-info/
+# Python / pybind11 build artifacts
+/build/
+*.egg-info/
 __pycache__/
 *.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
 
 # Test corpus (binary APKs) — fetched separately for regression runs
 /test_apk/

@@ -1,0 +1,118 @@
+"""Python-level smoke/regression tests for dexllm.
+
+Self-contained tests (import, API surface) always run. APK-dependent tests
+use the `dk`/`sample_method` fixtures and skip when no test APK is present.
+
+Run:  pytest tests -v
+"""
+
+import re
+
+import dexllm
+
+# ── self-contained (no APK) ──────────────────────────────────────────────────
+
+
+def test_import_and_version():
+    assert isinstance(dexllm.__version__, str)
+    assert dexllm.DexKit is not None
+
+
+def test_tools_catalog():
+    defs = dexllm.tools.tool_definitions()
+    assert len(defs) >= 10
+    names = {d["name"] for d in defs}
+    assert {"decompile_method", "list_classes", "find_methods_using_strings"} <= names
+
+
+# ── enumeration ──────────────────────────────────────────────────────────────
+
+
+def test_enumeration(dk):
+    classes = dk.list_classes()
+    assert len(classes) > 0
+    methods = dk.list_class_methods(classes[0])
+    assert isinstance(methods, list)
+
+
+# ── decompile: Java ──────────────────────────────────────────────────────────
+
+
+def test_decompile_method_java(dk, sample_method):
+    src = dk.decompile_method_java(sample_method)
+    assert src and "{" in src
+
+
+def test_decompile_class_java(dk):
+    for cls in dk.list_classes():
+        out = dk.decompile_class_java(cls)
+        if out:
+            assert out.lstrip().startswith(
+                ("package", "public", "class", "final", "abstract", "interface", "enum")
+            )
+            return
+
+
+def test_external_method_returns_empty(dk):
+    # External / framework methods must decompile to "" (graceful — androguard crashes).
+    out = dk.decompile_method_java(
+        "Landroid/util/Log;->d(Ljava/lang/String;Ljava/lang/String;)I"
+    )
+    assert out == ""
+
+
+# ── decompile: AST (dast.py port) ────────────────────────────────────────────
+
+
+def test_decompile_method_ast_shape(dk, sample_method):
+    res = dk.decompile_method_ast(sample_method)
+    assert res["found"] is True
+    ast = res["ast"]
+    assert set(ast.keys()) == {"triple", "flags", "ret", "params", "comments", "body"}
+    assert ast["body"][0] == "BlockStatement"  # nested-list AST tag
+    assert len(ast["triple"]) == 3
+
+
+def test_decompile_method_ast_include_source(dk, sample_method):
+    full = dk.decompile_method_ast(sample_method)  # source + ast
+    ast_only = dk.decompile_method_ast(sample_method, include_source=False)
+    assert ast_only["source"] == ""
+    assert ast_only["ast"] == full["ast"]  # AST identical regardless of source
+
+
+# ── search (L1–L7) ───────────────────────────────────────────────────────────
+
+
+def test_search_classes_by_name(dk):
+    hits = dk.find_classes_by_name("a", "contains")
+    assert isinstance(hits, list)
+
+
+def test_search_call_sites(dk):
+    sites = dk.find_call_sites_to_api(
+        "Landroid/util/Log;->d(Ljava/lang/String;Ljava/lang/String;)I"
+    )
+    assert isinstance(sites, list)  # may be empty if the APK never logs
+
+
+# ── external API enumeration ─────────────────────────────────────────────────
+
+
+def test_external_refs(dk):
+    refs = dk.list_external_method_refs(framework_only=True)
+    assert isinstance(refs, list)
+    if refs:
+        r = refs[0]
+        assert r.class_descriptor and r.name and r.java_signature
+
+
+# ── regression: EncodedValue must emit valid Java literals, not Python ones ───
+
+
+def test_no_python_literals_in_output(dk):
+    """null/true/false, never None/True/False (androguard-bug fix)."""
+    pat = re.compile(r"=\s*(None|True|False)\b")
+    for cls in dk.list_classes()[:500]:
+        out = dk.decompile_class_java(cls)
+        if out:
+            assert not pat.search(out), f"python literal leaked in {cls}"

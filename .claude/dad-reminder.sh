@@ -2,8 +2,8 @@
 # Pre-edit hook for DAD-aligned C++ sources.
 # Reads tool_input JSON from stdin (Claude Code hook protocol).
 # Emits a system reminder enforcing DAD-reference development when the target
-# file is under vendor/dexkit_core/Core/, dex_analyzer/binding/, dex_analyzer/dad_cpp/,
-# or dex_analyzer/core_ext/.
+# file is under vendor/dexkit_core/Core/, native/binding/, native/dad_cpp/,
+# or native/core_ext/.
 #
 # Removed subsystems (2026-05-26 audit, do NOT reintroduce):
 #   - Legacy expr-tree pipeline (Phase 2a/2b/3/4/5/6/8e)
@@ -17,22 +17,26 @@
 # advisory, not enforced.
 set -u
 
+# Local checkout of androguard's DAD reference source. Override per-machine:
+#   export DAD_REF=/path/to/androguard-master/androguard/decompiler
+DAD_REF="${DAD_REF:-/home/nyahumi/Downloads/androguard-master/androguard/decompiler}"
+
 path="$(jq -r '.tool_input.file_path // empty' 2>/dev/null || true)"
 if [[ -z "$path" ]]; then
     exit 0
 fi
 if ! [[ "$path" =~ /vendor/dexkit_core/Core/.*\.(cpp|cc|h|hpp)$ ]] && \
-   ! [[ "$path" =~ /dex_analyzer/binding/.*\.(cpp|cc|h|hpp)$ ]] && \
-   ! [[ "$path" =~ /dex_analyzer/dad_cpp/.*\.(cpp|cc|h|hpp)$ ]] && \
-   ! [[ "$path" =~ /dex_analyzer/core_ext/.*\.(cpp|cc|h|hpp)$ ]]; then
+   ! [[ "$path" =~ /native/binding/.*\.(cpp|cc|h|hpp)$ ]] && \
+   ! [[ "$path" =~ /native/dad_cpp/.*\.(cpp|cc|h|hpp)$ ]] && \
+   ! [[ "$path" =~ /native/core_ext/.*\.(cpp|cc|h|hpp)$ ]]; then
     exit 0
 fi
 
-cat <<'MSG'
+cat <<MSG
 🔬 DAD-aligned source. Before editing this file:
 
   1. Identify the corresponding DAD algorithm in androguard:
-     /home/nyahumi/Downloads/androguard-master/androguard/decompiler/
+     ${DAD_REF}/
        basic_blocks.py | control_flow.py | dast.py | dataflow.py
        decompile.py    | graph.py        | instruction.py | node.py
        opcode_ins.py   | util.py         | writer.py
