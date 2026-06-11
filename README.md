@@ -11,9 +11,11 @@ parallel-safe — rather than Xposed module development.
 
 | | dexllm |
 |---|---|
+| Input | `.apk`/`.jar`/`.zip`, a bare `.dex`, or a disguised/extension-less container — identified by content (PK / `dex\n` magic), not filename; `identify()` probes without loading |
 | APK load | ~15 ms (lazy slicer parse — 100–1800× faster than androguard) |
-| Decompile | DAD-quality Java; ~2–9× faster than the Java port (JandroGuard), 4.5× faster per-method than androguard |
-| Memory | ~520 MB on a 39k-class app (vs 9.9 GB for the JVM port) |
+| Decompile | DAD-quality Java; 4.5× faster per-method than androguard |
+| Multidex | first-wins duplicate-class resolution, deterministic — matches ART/AOSP, so a packer's class collisions decompile to the body that actually runs |
+| Memory | ~520 MB on a 39k-class app — embeddable in-process, no JVM |
 | Parallel | C++ releases the GIL → real multi-threaded decompile from one in-process instance |
 | Search | L1–L7 (name / string / annotation / super / API call-site / xref) — 3–6× faster than androguard |
 | AST | `decompile_method_ast` returns the full androguard `dast.py` nested AST |
@@ -21,6 +23,8 @@ parallel-safe — rather than Xposed module development.
 
 See [docs/usage.md](docs/usage.md) for the full API walkthrough (L1–L7 + decompile),
 [docs/architecture.md](docs/architecture.md) for the ports-&-adapters boundary map,
+[docs/dexkit-vs-art-dex-handling.md](docs/dexkit-vs-art-dex-handling.md) for how dexllm's
+DEX handling compares to AOSP/ART (verification, multidex, cross-dex),
 and [CLAUDE.md](CLAUDE.md) for the decompiler port internals.
 
 ## Benchmark vs androguard
@@ -124,7 +128,10 @@ cd - && pip install -e . --no-build-isolation   # 2. reinstall from repo root
 ```python
 import dexllm
 
-dk = dexllm.DexKit("/path/to/app.apk")   # .apk/.jar/.zip, or a bare .dex file
+# Probe a file by content without loading it (handles disguised/extension-less APKs)
+dexllm.identify("/path/to/suspect")   # → {format, is_apk, has_manifest, dex_count}
+
+dk = dexllm.DexKit("/path/to/app.apk")   # .apk/.jar/.zip, a bare .dex, or a disguised container
 
 # What framework APIs does it touch? (capability / threat triage)
 for ref in dk.list_external_method_refs(framework_only=True)[:10]:
