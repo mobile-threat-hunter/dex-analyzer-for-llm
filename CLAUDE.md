@@ -39,6 +39,8 @@ Builder runs in 7 stages: decode → leaders → exception table → block split
 
 `DexItemCodeSource` (in `core_ext/`) wraps `dexkit::DexKit` — only file with both `dad_cpp/` and DexKit Core includes. `dad_cpp/` itself depends only on slicer headers, not DexKit internals.
 
+This is a **hexagonal (ports & adapters)** boundary: `IDexCodeSource` is the port, `DexItemCodeSource` (prod) + `MockCodeSource` (test) are the adapters, and `dad_cpp/` is the domain core. Full map + role table in [docs/architecture.md](docs/architecture.md). The invariant — `dad_cpp/` must not `#include` DexKit / FlatBuffers / zip / core_ext — is enforced by [scripts/check_dad_boundary.sh](scripts/check_dad_boundary.sh) (run it after touching includes under `dad_cpp/`). Do **not** push hexagonal layering deeper into `dad_cpp/` internals: it would break the `// DAD:` 1:1 traceability and risk parity for no gain (pure transform pipeline, no internal I/O to isolate) — see the doc's rationale.
+
 ### Removed (no longer applicable)
 
 - `data_provider.h` — old IDexDataProvider interface. Deleted. Replaced by `IDexCodeSource` + `MethodSnapshot`.

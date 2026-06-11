@@ -19,7 +19,8 @@ parallel-safe — rather than Xposed module development.
 | AST | `decompile_method_ast` returns the full androguard `dast.py` nested AST |
 | LLM | `dexllm.tools` catalog → MCP stdio server + FastAPI/SSE web backend |
 
-See [docs/usage.md](docs/usage.md) for the full API walkthrough (L1–L7 + decompile)
+See [docs/usage.md](docs/usage.md) for the full API walkthrough (L1–L7 + decompile),
+[docs/architecture.md](docs/architecture.md) for the ports-&-adapters boundary map,
 and [CLAUDE.md](CLAUDE.md) for the decompiler port internals.
 
 ## Benchmark vs androguard
