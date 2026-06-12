@@ -51,8 +51,15 @@ DEFAULT_CLASS_CHARS = 8000
 
 
 def _paginate(items: list, offset: int = 0, limit: int = DEFAULT_LIST_LIMIT) -> dict:
-    """Build the standard list-response shape for tools."""
+    """Build the standard list-response shape for tools.
+
+    `offset` is clamped to [0, total] and `limit` to >= 1 so a caller can never
+    poison `next_offset` (negative offset, or limit=0 -> next_offset==offset,
+    which would loop forever).
+    """
     total = len(items)
+    offset = max(0, min(int(offset), total))
+    limit = max(1, int(limit))
     end = min(offset + limit, total)
     return {
         "total": total,
@@ -65,6 +72,7 @@ def _paginate(items: list, offset: int = 0, limit: int = DEFAULT_LIST_LIMIT) -> 
 
 def _truncate(text: str, max_chars: int) -> dict:
     """Build the standard text-response shape for decompile/render tools."""
+    max_chars = max(0, int(max_chars))  # negative would drop trailing content
     full = len(text)
     if full <= max_chars:
         return {"text": text, "truncated": False, "full_chars": full}
@@ -137,31 +145,44 @@ def _t_find_classes_by_name(
     match_type: str = "contains",
     ignore_case: bool = False,
     limit: int = 50,
+    offset: int = 0,
 ) -> dict:
     hits = dk.find_classes_by_name(name, match_type=match_type, ignore_case=ignore_case)
     items = [_match_to_desc(h) for h in hits]
-    return _paginate(items, 0, limit)
+    return _paginate(items, offset, limit)
 
 
 def _t_find_classes_by_super(
-    dk: DexKit, super_class: str, match_type: str = "equals", limit: int = 50
+    dk: DexKit,
+    super_class: str,
+    match_type: str = "equals",
+    limit: int = 50,
+    offset: int = 0,
 ) -> dict:
     hits = dk.find_classes_by_super(super_class, match_type=match_type)
-    return _paginate([_match_to_desc(h) for h in hits], 0, limit)
+    return _paginate([_match_to_desc(h) for h in hits], offset, limit)
 
 
 def _t_find_classes_implementing(
-    dk: DexKit, interface_class: str, match_type: str = "equals", limit: int = 50
+    dk: DexKit,
+    interface_class: str,
+    match_type: str = "equals",
+    limit: int = 50,
+    offset: int = 0,
 ) -> dict:
     hits = dk.find_classes_implementing(interface_class, match_type=match_type)
-    return _paginate([_match_to_desc(h) for h in hits], 0, limit)
+    return _paginate([_match_to_desc(h) for h in hits], offset, limit)
 
 
 def _t_find_classes_by_annotation(
-    dk: DexKit, annotation_class: str, match_type: str = "equals", limit: int = 50
+    dk: DexKit,
+    annotation_class: str,
+    match_type: str = "equals",
+    limit: int = 50,
+    offset: int = 0,
 ) -> dict:
     hits = dk.find_classes_by_annotation(annotation_class, match_type=match_type)
-    return _paginate([_match_to_desc(h) for h in hits], 0, limit)
+    return _paginate([_match_to_desc(h) for h in hits], offset, limit)
 
 
 def _t_find_classes_using_strings(
@@ -170,11 +191,12 @@ def _t_find_classes_using_strings(
     match_type: str = "contains",
     ignore_case: bool = False,
     limit: int = 50,
+    offset: int = 0,
 ) -> dict:
     hits = dk.find_classes_using_strings(
         strings, match_type=match_type, ignore_case=ignore_case
     )
-    return _paginate([_match_to_desc(h) for h in hits], 0, limit)
+    return _paginate([_match_to_desc(h) for h in hits], offset, limit)
 
 
 def _t_find_methods_by_name(
@@ -184,6 +206,7 @@ def _t_find_methods_by_name(
     declaring_class: str = "",
     ignore_case: bool = False,
     limit: int = 50,
+    offset: int = 0,
 ) -> dict:
     hits = dk.find_methods_by_name(
         name,
@@ -191,7 +214,7 @@ def _t_find_methods_by_name(
         declaring_class=declaring_class,
         ignore_case=ignore_case,
     )
-    return _paginate([_match_to_desc(h) for h in hits], 0, limit)
+    return _paginate([_match_to_desc(h) for h in hits], offset, limit)
 
 
 def _t_find_methods_using_strings(
@@ -200,14 +223,17 @@ def _t_find_methods_using_strings(
     match_type: str = "contains",
     ignore_case: bool = False,
     limit: int = 50,
+    offset: int = 0,
 ) -> dict:
     hits = dk.find_methods_using_strings(
         strings, match_type=match_type, ignore_case=ignore_case
     )
-    return _paginate([_match_to_desc(h) for h in hits], 0, limit)
+    return _paginate([_match_to_desc(h) for h in hits], offset, limit)
 
 
-def _t_find_call_sites_to_api(dk: DexKit, api_descriptor: str, limit: int = 50) -> dict:
+def _t_find_call_sites_to_api(
+    dk: DexKit, api_descriptor: str, limit: int = 50, offset: int = 0
+) -> dict:
     sites = dk.find_call_sites_to_api(api_descriptor)
     items = []
     for s in sites:
@@ -217,7 +243,7 @@ def _t_find_call_sites_to_api(dk: DexKit, api_descriptor: str, limit: int = 50) 
                 "raw": str(s),
             }
         )
-    return _paginate(items, 0, limit)
+    return _paginate(items, offset, limit)
 
 
 def _t_get_class_summary(dk: DexKit, class_descriptor: str) -> dict:
@@ -239,12 +265,37 @@ def _t_render_method_smali(
     return {"descriptor": method_descriptor, **_truncate(out, max_chars)}
 
 
-def _t_capability_report(dk: DexKit, max_chars: int = DEFAULT_CLASS_CHARS) -> dict:
+def _t_capability_report(dk: DexKit, limit: int = 50) -> dict:
+    """Bounded, LLM-friendly capability summary.
+
+    Returns top permissions/categories and the `limit` most-invoked APIs. The
+    raw report's per-caller sets (`by_caller`, `ApiHit.callers`) can be huge on
+    a large APK, so they are intentionally omitted here to keep the response
+    within the model's context.
+    """
     from .capability import summarize_capabilities
 
     rep = summarize_capabilities(dk)
-    # CapabilityReport is a dataclass; expose its public fields.
-    return {k: v for k, v in rep.__dict__.items() if not k.startswith("_")}
+    limit = max(1, int(limit))
+    hits = sorted(rep.api_hits, key=lambda h: h.call_site_count, reverse=True)
+    return {
+        "total_call_sites": rep.total_call_sites,
+        "matched_apis": rep.matched_apis,
+        "catalog_size": rep.catalog_size,
+        "top_permissions": rep.top_permissions(20),
+        "top_categories": rep.top_categories(20),
+        "api_hits": [
+            {
+                "api": h.api_signature,
+                "permissions": h.permissions,
+                "categories": h.categories,
+                "call_sites": h.call_site_count,
+            }
+            for h in hits[:limit]
+        ],
+        "api_hits_total": len(rep.api_hits),
+        "api_hits_truncated": len(rep.api_hits) > limit,
+    }
 
 
 # ─── Tool catalog (Anthropic API / MCP JSON-Schema) ───────────────────────
@@ -353,6 +404,7 @@ TOOL_DEFINITIONS: list[dict] = [
                 },
                 "ignore_case": {"type": "boolean", "default": False},
                 "limit": {"type": "integer", "default": 50},
+                "offset": {"type": "integer", "default": 0},
             },
             "required": ["name"],
         },
@@ -369,6 +421,7 @@ TOOL_DEFINITIONS: list[dict] = [
                 },
                 "match_type": {"type": "string", "default": "equals"},
                 "limit": {"type": "integer", "default": 50},
+                "offset": {"type": "integer", "default": 0},
             },
             "required": ["super_class"],
         },
@@ -382,6 +435,7 @@ TOOL_DEFINITIONS: list[dict] = [
                 "interface_class": {"type": "string"},
                 "match_type": {"type": "string", "default": "equals"},
                 "limit": {"type": "integer", "default": 50},
+                "offset": {"type": "integer", "default": 0},
             },
             "required": ["interface_class"],
         },
@@ -395,6 +449,7 @@ TOOL_DEFINITIONS: list[dict] = [
                 "annotation_class": {"type": "string"},
                 "match_type": {"type": "string", "default": "equals"},
                 "limit": {"type": "integer", "default": 50},
+                "offset": {"type": "integer", "default": 0},
             },
             "required": ["annotation_class"],
         },
@@ -409,6 +464,7 @@ TOOL_DEFINITIONS: list[dict] = [
                 "match_type": {"type": "string", "default": "contains"},
                 "ignore_case": {"type": "boolean", "default": False},
                 "limit": {"type": "integer", "default": 50},
+                "offset": {"type": "integer", "default": 0},
             },
             "required": ["strings"],
         },
@@ -424,6 +480,7 @@ TOOL_DEFINITIONS: list[dict] = [
                 "declaring_class": {"type": "string", "default": ""},
                 "ignore_case": {"type": "boolean", "default": False},
                 "limit": {"type": "integer", "default": 50},
+                "offset": {"type": "integer", "default": 0},
             },
             "required": ["name"],
         },
@@ -438,6 +495,7 @@ TOOL_DEFINITIONS: list[dict] = [
                 "match_type": {"type": "string", "default": "contains"},
                 "ignore_case": {"type": "boolean", "default": False},
                 "limit": {"type": "integer", "default": 50},
+                "offset": {"type": "integer", "default": 0},
             },
             "required": ["strings"],
         },
@@ -455,6 +513,7 @@ TOOL_DEFINITIONS: list[dict] = [
             "properties": {
                 "api_descriptor": {"type": "string"},
                 "limit": {"type": "integer", "default": 50},
+                "offset": {"type": "integer", "default": 0},
             },
             "required": ["api_descriptor"],
         },
@@ -490,7 +549,16 @@ TOOL_DEFINITIONS: list[dict] = [
             "and sensitive system APIs the app touches. Good first probe "
             "to orient analysis before drilling into specific classes."
         ),
-        "input_schema": {"type": "object", "properties": {}},
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "limit": {
+                    "type": "integer",
+                    "default": 50,
+                    "description": "max api_hits to return (by call-site count)",
+                }
+            },
+        },
     },
 ]
 

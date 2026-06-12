@@ -95,7 +95,8 @@ std::string Mutf8ToUtf8(std::string_view raw) {
         if (bad) { emit_cp(c); ++p; continue; }
         // MUTF-8 surrogate pair: high surrogate followed by low surrogate.
         if (cp >= 0xD800 && cp <= 0xDBFF && p + n + 3 <= end &&
-            (p[n] & 0xF0) == 0xE0) {
+            (p[n] & 0xF0) == 0xE0 && (p[n + 1] & 0xC0) == 0x80 &&
+            (p[n + 2] & 0xC0) == 0x80) {
             uint32_t lo = ((p[n] & 0x0F) << 12) | ((p[n + 1] & 0x3F) << 6) |
                           (p[n + 2] & 0x3F);
             if (lo >= 0xDC00 && lo <= 0xDFFF) {

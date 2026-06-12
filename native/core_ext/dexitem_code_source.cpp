@@ -2,6 +2,7 @@
 
 #include "dexitem_code_source.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <stdexcept>
@@ -9,6 +10,7 @@
 #include <utility>
 
 #include "dex_item.h"
+#include "mmap.h"  // dexkit::MemMap (GetDexImageRange bounds)
 #include "slicer/dex_format.h"
 #include "slicer/reader.h"
 #include "util.h"  // dad::GetType — for TYPE/ENUM EncodedValue rendering
@@ -174,8 +176,9 @@ std::string DecodeEncodedValueText(const U1*& p,
             size_t n = std::min<size_t>(nbytes, 4);
             for (size_t i = 0; i < n && p < end; ++i) buf[i] = *p++;
             // Consume any excess bytes the encoder claimed (shouldn't happen
-            // for well-formed dex, but keep the cursor honest).
-            if (nbytes > 4) p += (nbytes - 4);
+            // for well-formed dex), clamped so the cursor never passes `end`.
+            if (nbytes > 4)
+                p += std::min<size_t>(nbytes - 4, p < end ? (end - p) : 0);
             uint32_t bits = 0;
             for (int i = 0; i < 4; ++i) bits |= static_cast<uint32_t>(buf[i]) << (i * 8);
             float f;
@@ -192,7 +195,8 @@ std::string DecodeEncodedValueText(const U1*& p,
             uint8_t buf[8] = {0};
             size_t n = std::min<size_t>(nbytes, 8);
             for (size_t i = 0; i < n && p < end; ++i) buf[i] = *p++;
-            if (nbytes > 8) p += (nbytes - 8);
+            if (nbytes > 8)
+                p += std::min<size_t>(nbytes - 8, p < end ? (end - p) : 0);
             uint64_t bits = 0;
             for (int i = 0; i < 8; ++i) bits |= static_cast<uint64_t>(buf[i]) << (i * 8);
             double d;
@@ -290,7 +294,12 @@ OrderedFields ParseClassFieldOrder(const dexkit::DexItem& item,
     const auto& reader = item.GetReader();
     const U1* data = reader.dataPtr<U1>(cdef.class_data_off);
     if (!data) return out;
-    const U1* data_end = data + (1u << 20);  // generous mmap cap per class
+    const U1* data_end = data + (1u << 20);  // generous cap per class
+    if (auto* img = item.GetImage()) {       // clamp to the real mmap end
+        const U1* mmap_end =
+            reinterpret_cast<const U1*>(img->data()) + img->len();
+        if (mmap_end < data_end) data_end = mmap_end;
+    }
 
     uint32_t static_n   = ReadULEB128(data, data_end);
     uint32_t instance_n = ReadULEB128(data, data_end);
@@ -328,6 +337,11 @@ DecodeStaticInitMap(const dexkit::DexItem& item,
     const U1* sv = reader.dataPtr<U1>(cdef.static_values_off);
     if (!sv) return init_map;
     const U1* sv_end = sv + (1u << 20);
+    if (auto* img = item.GetImage()) {       // clamp to the real mmap end
+        const U1* mmap_end =
+            reinterpret_cast<const U1*>(img->data()) + img->len();
+        if (mmap_end < sv_end) sv_end = mmap_end;
+    }
     uint32_t value_count = ReadULEB128(sv, sv_end);
     if (value_count > static_field_idxs.size()) {
         value_count = static_field_idxs.size();
@@ -446,6 +460,16 @@ const dex::Code* DexItemCodeSource::GetMethodCode(uint16_t dex_id,
     DexItem* item = SafeGetDexItem(core_, dex_id);
     if (!item) return nullptr;
     return item->GetMethodCode(midx);
+}
+
+std::pair<const uint8_t*, const uint8_t*>
+DexItemCodeSource::GetDexImageRange(uint16_t dex_id) {
+    DexItem* item = SafeGetDexItem(core_, dex_id);
+    if (!item) return {nullptr, nullptr};
+    dexkit::MemMap* img = item->GetImage();
+    if (!img || !img->ok()) return {nullptr, nullptr};
+    const uint8_t* base = reinterpret_cast<const uint8_t*>(img->data());
+    return {base, base + img->len()};
 }
 
 std::string_view

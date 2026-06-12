@@ -16,6 +16,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 // Forward-declare slicer's dex::Code to avoid pulling its full header into
@@ -44,6 +45,13 @@ public:
     // Returns nullptr if method has no code (native / abstract).
     virtual const dex::Code*   GetMethodCode(uint16_t dex_id,
                                              uint32_t method_idx) = 0;
+
+    // Absolute [begin, end) of the mmap'd dex image backing `dex_id`. Used to
+    // bound raw reads (exception tables) against malformed/crafted input. The
+    // default {nullptr, nullptr} means "bounds unknown" (callers fall back to a
+    // conservative local cap). Production/test sources override this.
+    virtual std::pair<const uint8_t*, const uint8_t*>
+    GetDexImageRange(uint16_t /*dex_id*/) { return {nullptr, nullptr}; }
 
     // ─── Const-pool resolution (string_views point into source's tables) ─
     virtual std::string_view   GetString(uint16_t dex_id, uint32_t idx) = 0;

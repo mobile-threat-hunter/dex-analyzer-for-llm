@@ -45,29 +45,33 @@ inline std::string FormatBlockName(uint32_t byte_off) {
     return std::string(buf);
 }
 
-// uleb128 decoder — advances `p`.
-uint32_t ReadUleb128(const uint8_t*& p) {
+// uleb128 decoder — advances `p`, never reads at or past `end` (malformed-dex
+// safe: a missing terminator stops at `end` rather than running off the buffer).
+uint32_t ReadUleb128(const uint8_t*& p, const uint8_t* end) {
     uint32_t result = 0;
     int shift = 0;
-    while (true) {
+    while (p < end) {
         uint8_t b = *p++;
         result |= static_cast<uint32_t>(b & 0x7F) << shift;
         if ((b & 0x80) == 0) break;
         shift += 7;
+        if (shift >= 35) break;  // overlong guard
     }
     return result;
 }
 
-// sleb128 decoder — advances `p`.
-int32_t ReadSleb128(const uint8_t*& p) {
+// sleb128 decoder — advances `p`, bounded by `end`.
+int32_t ReadSleb128(const uint8_t*& p, const uint8_t* end) {
     int32_t result = 0;
     int shift = 0;
-    uint8_t b;
-    do {
+    uint8_t b = 0;
+    while (p < end) {
         b = *p++;
         result |= static_cast<int32_t>(b & 0x7F) << shift;
         shift += 7;
-    } while (b & 0x80);
+        if ((b & 0x80) == 0) break;
+        if (shift >= 35) break;  // overlong guard
+    }
     if (shift < 32 && (b & 0x40)) {
         result |= -(int32_t{1} << shift);  // sign-extend
     }
@@ -165,20 +169,30 @@ ConstRef ResolveConstRef(const dex::Instruction& decoded, dex::Opcode op,
 
 // ─── payload extraction ───────────────────────────────────────────────────
 
-PayloadVariant ParsePackedSwitchPayload(const dex::u2* p) {
+// Payloads live inside `insns[]`; `end` = insns + insns_size. The declared
+// element count comes straight from (possibly malformed) dex bytes, so each
+// parser clamps it to what actually fits before reading the tail — preventing
+// an out-of-bounds read on a crafted payload near the end of the code item.
+PayloadVariant ParsePackedSwitchPayload(const dex::u2* p, const dex::u2* end) {
     PayloadPackedSwitch ps;
     // layout: u2 ident=0x0100, u2 size, s4 first_key, s4 targets[size]
+    if (p + 4 > end) return std::monostate{};
     uint16_t size = p[1];
     ps.first_key = *reinterpret_cast<const int32_t*>(p + 2);
     const int32_t* tgts = reinterpret_cast<const int32_t*>(p + 4);
+    const size_t avail = static_cast<size_t>(end - (p + 4)) / 2;  // s4 = 2 u2
+    if (size > avail) size = static_cast<uint16_t>(avail);
     ps.targets.assign(tgts, tgts + size);
     return ps;
 }
 
-PayloadVariant ParseSparseSwitchPayload(const dex::u2* p) {
+PayloadVariant ParseSparseSwitchPayload(const dex::u2* p, const dex::u2* end) {
     PayloadSparseSwitch ss;
     // layout: u2 ident=0x0200, u2 size, s4 keys[size], s4 targets[size]
+    if (p + 2 > end) return std::monostate{};
     uint16_t size = p[1];
+    const size_t avail = static_cast<size_t>(end - (p + 2)) / 4;  // keys+targets
+    if (size > avail) size = static_cast<uint16_t>(avail);
     const int32_t* keys = reinterpret_cast<const int32_t*>(p + 2);
     const int32_t* tgts = keys + size;
     ss.keys.assign(keys, keys + size);
@@ -186,22 +200,26 @@ PayloadVariant ParseSparseSwitchPayload(const dex::u2* p) {
     return ss;
 }
 
-PayloadVariant ParseFillArrayPayload(const dex::u2* p) {
+PayloadVariant ParseFillArrayPayload(const dex::u2* p, const dex::u2* end) {
     PayloadFillArray pa;
     // layout: u2 ident=0x0300, u2 element_width, u4 size, u1 data[size*ew]
+    if (p + 4 > end) return std::monostate{};
     pa.element_width = p[1];
     pa.size = *reinterpret_cast<const uint32_t*>(p + 2);
     const uint8_t* data = reinterpret_cast<const uint8_t*>(p + 4);
     size_t total = static_cast<size_t>(pa.element_width) * pa.size;
+    const size_t avail_bytes = static_cast<size_t>(end - (p + 4)) * 2;
+    if (total > avail_bytes) total = avail_bytes;
     pa.data.assign(data, data + total);
     return pa;
 }
 
-PayloadVariant ParsePayloadAt(const dex::u2* p) {
+PayloadVariant ParsePayloadAt(const dex::u2* p, const dex::u2* end) {
+    if (p + 1 > end) return std::monostate{};
     switch (p[0]) {
-        case 0x0100: return ParsePackedSwitchPayload(p);
-        case 0x0200: return ParseSparseSwitchPayload(p);
-        case 0x0300: return ParseFillArrayPayload(p);
+        case 0x0100: return ParsePackedSwitchPayload(p, end);
+        case 0x0200: return ParseSparseSwitchPayload(p, end);
+        case 0x0300: return ParseFillArrayPayload(p, end);
         default: return std::monostate{};
     }
 }
@@ -235,6 +253,10 @@ DecodePass DecodeAllInsns(const dex::Code* code, IDexCodeSource& src,
                     "malformed dex: zero-width instruction at offset "
                     + std::to_string((p - code->insns) * 2));
             }
+            if (p + w > end_p) {
+                throw std::runtime_error(
+                    "malformed dex: instruction extends past insns");
+            }
             if (!IsPayloadMarker(*p)) ++cnt;
             p += w;
         }
@@ -247,6 +269,10 @@ DecodePass DecodeAllInsns(const dex::Code* code, IDexCodeSource& src,
     const dex::u2* end_p = base + code->insns_size;
     while (p < end_p) {
         size_t w = dex::GetWidthFromBytecode(p);
+        if (w == 0 || p + w > end_p) {
+            throw std::runtime_error(
+                "malformed dex: instruction extends past insns");
+        }
         uint32_t byte_off = static_cast<uint32_t>((p - base) * 2);
         if (IsPayloadMarker(*p)) {
             p += w;
@@ -322,7 +348,7 @@ void ComputeLeaders(DecodePass& pass, const dex::Code* code) {
             uint32_t payload_byte_off = it->second;
             if (payload_byte_off + 4 > pass.insns_byte_size) continue;
             const dex::u2* pp = code->insns + (payload_byte_off / 2);
-            PayloadVariant pv = ParsePayloadAt(pp);
+            PayloadVariant pv = ParsePayloadAt(pp, code->insns + code->insns_size);
             if (auto* ps = std::get_if<PayloadPackedSwitch>(&pv)) {
                 for (int32_t off_cu : ps->targets) {
                     int64_t t = static_cast<int64_t>(ri.byte_off)
@@ -356,7 +382,8 @@ struct ParsedTry {
 
 std::vector<ParsedTry> ParseExceptions(const dex::Code* code,
                                        IDexCodeSource& src,
-                                       uint16_t dex_id) {
+                                       uint16_t dex_id,
+                                       const uint8_t* img_end) {
     std::vector<ParsedTry> result;
     if (code->tries_size == 0) return result;
 
@@ -367,9 +394,19 @@ std::vector<ParsedTry> ParseExceptions(const dex::Code* code,
     const uint8_t* handlers_base =
         reinterpret_cast<const uint8_t*>(tries + code->tries_size);
 
+    // The tries[] array and handler list live after insns in the dex image.
+    // `end` bounds every raw read against the mmap'd image so a crafted
+    // tries_size / handler_off / leb128 can't run off the buffer. When the
+    // source can't report image bounds (default impl), fall back to a small
+    // local cap — handler lists are tiny.
+    const uint8_t* end = img_end ? img_end : handlers_base + (1u << 16);
+    if (reinterpret_cast<const uint8_t*>(tries + code->tries_size) > end) {
+        return result;  // tries array itself overflows the image — malformed
+    }
+
     // handlers_size is uleb128 at handlers_base; advances pointer
     const uint8_t* hp = handlers_base;
-    ReadUleb128(hp);  // handlers_size (used only as a sanity hint)
+    ReadUleb128(hp, end);  // handlers_size (used only as a sanity hint)
 
     for (uint16_t i = 0; i < code->tries_size; ++i) {
         const dex::TryBlock& tb = tries[i];
@@ -378,6 +415,7 @@ std::vector<ParsedTry> ParseExceptions(const dex::Code* code,
         pt.end_byte = (tb.start_addr + tb.insn_count) * 2;
 
         const uint8_t* p = handlers_base + tb.handler_off;
+        if (p < handlers_base || p >= end) continue;  // bad handler_off
         // Re-read handlers_size? No — handler_off is from handlers_base.
         // Actually per DEX spec, handler_off is offset from start of
         // encoded_catch_handler_list (which begins with uleb128 size, then
@@ -386,20 +424,20 @@ std::vector<ParsedTry> ParseExceptions(const dex::Code* code,
         // identically. handler_off here points to the start of an
         // encoded_catch_handler.
 
-        int32_t size = ReadSleb128(p);
+        int32_t size = ReadSleb128(p, end);
         bool has_catch_all = (size <= 0);
         int32_t typed_count = std::abs(size);
 
-        for (int32_t j = 0; j < typed_count; ++j) {
-            uint32_t type_idx = ReadUleb128(p);
-            uint32_t handler_addr_cu = ReadUleb128(p);
+        for (int32_t j = 0; j < typed_count && p < end; ++j) {
+            uint32_t type_idx = ReadUleb128(p, end);
+            uint32_t handler_addr_cu = ReadUleb128(p, end);
             ParsedHandler ph;
             ph.type = src.GetTypeName(dex_id, type_idx);
             ph.handler_byte_off = handler_addr_cu * 2;
             pt.handlers.push_back(ph);
         }
         if (has_catch_all) {
-            uint32_t handler_addr_cu = ReadUleb128(p);
+            uint32_t handler_addr_cu = ReadUleb128(p, end);
             ParsedHandler ph;
             ph.type = {};  // empty = catch-all
             ph.handler_byte_off = handler_addr_cu * 2;
@@ -513,7 +551,7 @@ void ComputeChildEdges(MethodSnapshot& snap, const DecodePass& pass,
             if (it != pass.owner_to_payload.end()) {
                 uint32_t payload_byte_off = it->second;
                 const dex::u2* pp = code->insns + (payload_byte_off / 2);
-                PayloadVariant pv = ParsePayloadAt(pp);
+                PayloadVariant pv = ParsePayloadAt(pp, code->insns + code->insns_size);
                 if (auto* ps = std::get_if<PayloadPackedSwitch>(&pv)) {
                     for (size_t k = 0; k < ps->targets.size(); ++k) {
                         int64_t t = static_cast<int64_t>(last.byte_off)
@@ -560,7 +598,7 @@ void ComputeChildEdges(MethodSnapshot& snap, const DecodePass& pass,
             if (it == pass.owner_to_payload.end()) continue;
             uint32_t payload_byte_off = it->second;
             const dex::u2* pp = code->insns + (payload_byte_off / 2);
-            blk.payloads[ri.byte_off] = ParsePayloadAt(pp);
+            blk.payloads[ri.byte_off] = ParsePayloadAt(pp, code->insns + code->insns_size);
         }
     }
 }
@@ -674,7 +712,8 @@ MethodSnapshotBuilder::Build(IDexCodeSource& source,
     ComputeLeaders(pass, code);
 
     // 3. Parse exception table; handler entries are also leaders.
-    auto tries = ParseExceptions(code, source, dex_id);
+    auto tries = ParseExceptions(code, source, dex_id,
+                                 source.GetDexImageRange(dex_id).second);
     for (const auto& pt : tries) {
         pass.leader_byte_offs.insert(pt.start_byte);
         for (const auto& ph : pt.handlers) {
