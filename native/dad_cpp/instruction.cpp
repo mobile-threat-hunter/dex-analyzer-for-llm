@@ -267,6 +267,12 @@ std::string AssignExpression::ToString() const {
 
 // DAD: instruction.py:248 MoveExpression.__init__(lhs, rhs)
 MoveExpression::MoveExpression(IRFormPtr lhs, IRFormPtr rhs) {
+    // Malformed bytecode (e.g. move-result with no preceding invoke) can leave
+    // an operand null. DAD raises AttributeError on None here and the caller
+    // skips the method; throw to match (a segfault would be a divergence).
+    if (!lhs || !rhs) {
+        throw std::runtime_error("malformed bytecode: null operand to MoveExpression");
+    }
     lhs_ = lhs->Vid();
     rhs_ = rhs->Vid();
     var_map[lhs->Vid()] = lhs;

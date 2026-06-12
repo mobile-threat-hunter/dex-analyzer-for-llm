@@ -132,6 +132,31 @@ bool IsPayloadMarker(dex::u2 first_unit) {
     return first_unit == 0x0100 || first_unit == 0x0200 || first_unit == 0x0300;
 }
 
+// Code units dex::GetWidthFromBytecode reads to compute a width: it dereferences
+// the payload size field (packed/sparse read p[1] = 2 units; fill-array reads
+// p[1..3] = 4 units); a regular opcode reads only p[0].
+size_t PayloadHeaderUnits(dex::u2 first_unit) {
+    if (first_unit == 0x0100 || first_unit == 0x0200) return 2;
+    if (first_unit == 0x0300) return 4;
+    return 1;
+}
+
+// Bounds-checked instruction width. Guards the size-field read GetWidthFromBytecode
+// performs (which OOB-reads on a payload marker near the buffer end), then
+// validates the full instruction fits. Throws on malformed/truncated input —
+// the per-method try/catch turns that into an empty decompile, not a crash.
+size_t SafeWidth(const dex::u2* p, const dex::u2* end) {
+    if (p >= end || p + PayloadHeaderUnits(*p) > end) {
+        throw std::runtime_error(
+            "malformed dex: truncated instruction/payload header");
+    }
+    size_t w = dex::GetWidthFromBytecode(p);
+    if (w == 0 || p + w > end) {
+        throw std::runtime_error("malformed dex: instruction extends past insns");
+    }
+    return w;
+}
+
 // ─── const-pool resolution ────────────────────────────────────────────────
 
 ConstRef ResolveConstRef(const dex::Instruction& decoded, dex::Opcode op,
@@ -239,24 +264,32 @@ struct DecodePass {
 DecodePass DecodeAllInsns(const dex::Code* code, IDexCodeSource& src,
                           uint16_t dex_id) {
     DecodePass pass;
-    pass.insns_byte_size = code->insns_size * 2;
+
+    // `code->insns_size` is read from the (possibly corrupt) code-item header,
+    // so a garbage value would make end_p point past the mmap and the decode
+    // loop march into unmapped memory. Clamp the instruction span to the dex
+    // image so end_p never exceeds it.
+    const dex::u2* base = code->insns;
+    size_t insns_units = code->insns_size;
+    auto [img_begin, img_end] = src.GetDexImageRange(dex_id);
+    if (img_end) {
+        const dex::u2* img_end_u2 = reinterpret_cast<const dex::u2*>(img_end);
+        if (base < reinterpret_cast<const dex::u2*>(img_begin) ||
+            base >= img_end_u2) {
+            return pass;  // insns pointer itself out of image — fully malformed
+        }
+        size_t max_units = static_cast<size_t>(img_end_u2 - base);
+        if (insns_units > max_units) insns_units = max_units;
+    }
+    const dex::u2* end_p = base + insns_units;
+    pass.insns_byte_size = static_cast<uint32_t>(insns_units * 2);
 
     // First pass: count real instructions (skip payloads) to reserve storage.
     {
-        const dex::u2* p = code->insns;
-        const dex::u2* end_p = p + code->insns_size;
+        const dex::u2* p = base;
         size_t cnt = 0;
         while (p < end_p) {
-            size_t w = dex::GetWidthFromBytecode(p);
-            if (w == 0) {
-                throw std::runtime_error(
-                    "malformed dex: zero-width instruction at offset "
-                    + std::to_string((p - code->insns) * 2));
-            }
-            if (p + w > end_p) {
-                throw std::runtime_error(
-                    "malformed dex: instruction extends past insns");
-            }
+            size_t w = SafeWidth(p, end_p);
             if (!IsPayloadMarker(*p)) ++cnt;
             p += w;
         }
@@ -264,15 +297,9 @@ DecodePass DecodeAllInsns(const dex::Code* code, IDexCodeSource& src,
     }
 
     // Second pass: build RawIns (skipping payloads).
-    const dex::u2* base = code->insns;
     const dex::u2* p = base;
-    const dex::u2* end_p = base + code->insns_size;
     while (p < end_p) {
-        size_t w = dex::GetWidthFromBytecode(p);
-        if (w == 0 || p + w > end_p) {
-            throw std::runtime_error(
-                "malformed dex: instruction extends past insns");
-        }
+        size_t w = SafeWidth(p, end_p);
         uint32_t byte_off = static_cast<uint32_t>((p - base) * 2);
         if (IsPayloadMarker(*p)) {
             p += w;

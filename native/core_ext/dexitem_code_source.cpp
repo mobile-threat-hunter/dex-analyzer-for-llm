@@ -25,25 +25,54 @@ std::string BuildProto(const dexkit::DexItem& item,
                        const dex::ProtoId& proto_id) {
     const auto& type_names = item.GetTypeNames();
     const auto& reader = item.GetReader();
+    // Indices come from the (possibly corrupt) proto/type tables — bound every
+    // type-name lookup against the table size to avoid an OOB vector read.
+    auto type_name = [&](uint32_t idx) -> std::string_view {
+        return idx < type_names.size() ? type_names[idx] : std::string_view{};
+    };
     std::string out;
     out += '(';
     if (proto_id.parameters_off != 0) {
         const auto* type_list =
             reader.dataPtr<dex::TypeList>(proto_id.parameters_off);
-        if (type_list != nullptr && type_list->size > 0) {
-            for (uint32_t i = 0; i < type_list->size; ++i) {
-                out += std::string(type_names[type_list->list[i].type_idx]);
+        if (type_list != nullptr) {
+            uint32_t n = type_list->size;
+            // `size` is read from the image; clamp so list[n] can't run off the
+            // mmap on a corrupt parameters_off / size.
+            if (auto* img = item.GetImage()) {
+                const auto* img_end =
+                    reinterpret_cast<const uint8_t*>(img->data()) + img->len();
+                const auto* list0 =
+                    reinterpret_cast<const uint8_t*>(type_list->list);
+                size_t maxn = list0 <= img_end
+                                  ? static_cast<size_t>(img_end - list0) /
+                                        sizeof(type_list->list[0])
+                                  : 0;
+                if (n > maxn) n = static_cast<uint32_t>(maxn);
+            }
+            for (uint32_t i = 0; i < n; ++i) {
+                out += std::string(type_name(type_list->list[i].type_idx));
             }
         }
     }
     out += ')';
-    out += std::string(type_names[proto_id.return_type_idx]);
+    out += std::string(type_name(proto_id.return_type_idx));
     return out;
 }
 
 DexItem* SafeGetDexItem(dexkit::DexKit& core, uint16_t dex_id) {
     if (dex_id >= core.GetDexNum()) return nullptr;
     return core.GetDexItem(dex_id);
+}
+
+// Bounds-checked table lookup. Secondary indices (name_idx, type_idx,
+// proto_idx, …) come from the dex tables and may be corrupt on a malformed
+// .dex, so every index into the string / type-name tables goes through here to
+// avoid an OOB vector read. Returns a default-constructed element if out of
+// range.
+template <typename V>
+typename V::value_type SafeAt(const V& v, size_t i) {
+    return i < v.size() ? v[i] : typename V::value_type{};
 }
 
 // ─── Encoded value / array byte-stream parsers ────────────────────────────
@@ -235,9 +264,9 @@ std::string DecodeEncodedValueText(const U1*& p,
             if (idx >= field_ids.size()) return {};
             const auto& f = field_ids[idx];
             std::string out;
-            out += dexkit::dad::GetType(type_names[f.class_idx]);
+            out += dexkit::dad::GetType(SafeAt(type_names, f.class_idx));
             out += '.';
-            out.append(strings[f.name_idx]);
+            out.append(SafeAt(strings, f.name_idx));
             return out;
         }
         case 0x1a: {  // METHOD — no Java literal form (method reflection isn't
@@ -389,7 +418,7 @@ DexItemCodeSource::LocateMethod(std::string_view descriptor) {
     for (size_t i = 0; i < method_ids.size(); ++i) {
         const auto& m = method_ids[i];
         if (m.class_idx != type_idx) continue;
-        if (strings[m.name_idx] != name) continue;
+        if (SafeAt(strings, m.name_idx) != name) continue;
         if (BuildProto(*dex_item, proto_ids[m.proto_idx]) != proto) continue;
         return dexkit::dad::IDexCodeSource::MethodLocator{
             static_cast<uint16_t>(dex_item->GetDexId()), static_cast<uint32_t>(i)};
@@ -430,7 +459,7 @@ std::string_view DexItemCodeSource::GetMethodClassName(uint16_t dex_id,
     const auto& type_names = item->GetTypeNames();
     const auto method_ids = reader.MethodIds();
     if (midx >= method_ids.size()) return {};
-    return type_names[method_ids[midx].class_idx];
+    return SafeAt(type_names, method_ids[midx].class_idx);
 }
 
 std::string_view DexItemCodeSource::GetMethodName(uint16_t dex_id,
@@ -441,7 +470,7 @@ std::string_view DexItemCodeSource::GetMethodName(uint16_t dex_id,
     const auto& strings = item->GetStrings();
     const auto method_ids = reader.MethodIds();
     if (midx >= method_ids.size()) return {};
-    return strings[method_ids[midx].name_idx];
+    return SafeAt(strings, method_ids[midx].name_idx);
 }
 
 std::string DexItemCodeSource::GetMethodProto(uint16_t dex_id,
@@ -451,8 +480,10 @@ std::string DexItemCodeSource::GetMethodProto(uint16_t dex_id,
     const auto& reader = item->GetReader();
     const auto method_ids = reader.MethodIds();
     if (midx >= method_ids.size()) return {};
-    const auto& proto_id = reader.ProtoIds()[method_ids[midx].proto_idx];
-    return BuildProto(*item, proto_id);
+    const auto proto_ids = reader.ProtoIds();
+    uint32_t pidx = method_ids[midx].proto_idx;
+    if (pidx >= proto_ids.size()) return {};
+    return BuildProto(*item, proto_ids[pidx]);
 }
 
 const dex::Code* DexItemCodeSource::GetMethodCode(uint16_t dex_id,
@@ -482,8 +513,9 @@ DexItemCodeSource::GetProtoCached(uint16_t dex_id, uint32_t proto_idx) {
     }
     DexItem* item = SafeGetDexItem(core_, dex_id);
     if (!item) return {};
-    const auto& proto_id = item->GetReader().ProtoIds()[proto_idx];
-    std::string proto = BuildProto(*item, proto_id);
+    const auto proto_ids = item->GetReader().ProtoIds();
+    if (proto_idx >= proto_ids.size()) return {};
+    std::string proto = BuildProto(*item, proto_ids[proto_idx]);
     std::lock_guard lock(proto_cache_mutex_);
     auto [it, _] = proto_cache_.emplace(key, std::move(proto));
     return it->second;
@@ -524,8 +556,8 @@ DexItemCodeSource::GetMethodRefTriple(uint16_t dex_id, uint32_t midx) {
     // Simplest correct path: keep a per-DexItem proto cache in this
     // adapter. Allocate on first call, return string_view into it.
     std::array<std::string_view, 3> out;
-    out[0] = type_names[m.class_idx];
-    out[1] = strings[m.name_idx];
+    out[0] = SafeAt(type_names, m.class_idx);
+    out[1] = SafeAt(strings, m.name_idx);
     out[2] = GetProtoCached(dex_id, m.proto_idx);
     return out;
 }
@@ -540,7 +572,8 @@ DexItemCodeSource::GetFieldRefTriple(uint16_t dex_id, uint32_t fidx) {
     const auto field_ids = reader.FieldIds();
     if (fidx >= field_ids.size()) return {{}};
     const auto& f = field_ids[fidx];
-    return {type_names[f.class_idx], strings[f.name_idx], type_names[f.type_idx]};
+    return {SafeAt(type_names, f.class_idx), SafeAt(strings, f.name_idx),
+            SafeAt(type_names, f.type_idx)};
 }
 
 // DAD: decompile.py:269 DvClass.__init__ — supplies metadata used by
@@ -563,16 +596,28 @@ DexItemCodeSource::GetClassInfo(std::string_view class_descriptor) {
     info.type_idx = type_idx;
     info.access_flags = cdef.access_flags;
     if (cdef.superclass_idx != dex::kNoIndex) {
-        info.superclass = type_names[cdef.superclass_idx];
+        info.superclass = SafeAt(type_names, cdef.superclass_idx);
     }
     if (cdef.interfaces_off != 0) {
         const auto* type_list =
             reader.dataPtr<dex::TypeList>(cdef.interfaces_off);
         if (type_list != nullptr) {
-            info.interfaces.reserve(type_list->size);
-            for (uint32_t i = 0; i < type_list->size; ++i) {
+            uint32_t n = type_list->size;
+            if (auto* img = item->GetImage()) {  // clamp size to the mmap
+                const auto* img_end =
+                    reinterpret_cast<const uint8_t*>(img->data()) + img->len();
+                const auto* list0 =
+                    reinterpret_cast<const uint8_t*>(type_list->list);
+                size_t maxn = list0 <= img_end
+                                  ? static_cast<size_t>(img_end - list0) /
+                                        sizeof(type_list->list[0])
+                                  : 0;
+                if (n > maxn) n = static_cast<uint32_t>(maxn);
+            }
+            info.interfaces.reserve(n);
+            for (uint32_t i = 0; i < n; ++i) {
                 info.interfaces.push_back(
-                    type_names[type_list->list[i].type_idx]);
+                    SafeAt(type_names, type_list->list[i].type_idx));
             }
         }
     }
@@ -613,8 +658,8 @@ DexItemCodeSource::GetFieldInfo(uint16_t dex_id, uint32_t fidx) {
     const auto field_ids = reader.FieldIds();
     if (fidx >= field_ids.size()) return info;
     const auto& f = field_ids[fidx];
-    info.name = strings[f.name_idx];
-    info.type = type_names[f.type_idx];
+    info.name = SafeAt(strings, f.name_idx);
+    info.type = SafeAt(type_names, f.type_idx);
     const auto& access = item->GetFieldAccessFlags();
     if (fidx < access.size()) info.access_flags = access[fidx];
     return info;
