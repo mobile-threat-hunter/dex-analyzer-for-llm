@@ -28,6 +28,7 @@ find_package(pybind11 CONFIG REQUIRED)
 add_library(dexkit_ext STATIC
     native/core_ext/dexkit_ext.cpp
     native/core_ext/dexitem_code_source.cpp
+    native/core_ext/dex_verifier.cpp
 )
 target_include_directories(dexkit_ext PUBLIC native/core_ext/include native/dad_cpp/include)
 target_link_libraries(dexkit_ext PUBLIC dexkit_static)

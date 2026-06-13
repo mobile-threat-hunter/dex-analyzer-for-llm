@@ -205,8 +205,7 @@ PayloadVariant ParsePackedSwitchPayload(const dex::u2* p, const dex::u2* end) {
     uint16_t size = p[1];
     ps.first_key = *reinterpret_cast<const int32_t*>(p + 2);
     const int32_t* tgts = reinterpret_cast<const int32_t*>(p + 4);
-    const size_t avail = static_cast<size_t>(end - (p + 4)) / 2;  // s4 = 2 u2
-    if (size > avail) size = static_cast<uint16_t>(avail);
+    // size fits by construction: VerifyInsns width-bounded this payload at load.
     ps.targets.assign(tgts, tgts + size);
     return ps;
 }
@@ -216,8 +215,7 @@ PayloadVariant ParseSparseSwitchPayload(const dex::u2* p, const dex::u2* end) {
     // layout: u2 ident=0x0200, u2 size, s4 keys[size], s4 targets[size]
     if (p + 2 > end) return std::monostate{};
     uint16_t size = p[1];
-    const size_t avail = static_cast<size_t>(end - (p + 2)) / 4;  // keys+targets
-    if (size > avail) size = static_cast<uint16_t>(avail);
+    // size fits by construction: VerifyInsns width-bounded this payload at load.
     const int32_t* keys = reinterpret_cast<const int32_t*>(p + 2);
     const int32_t* tgts = keys + size;
     ss.keys.assign(keys, keys + size);
@@ -232,9 +230,8 @@ PayloadVariant ParseFillArrayPayload(const dex::u2* p, const dex::u2* end) {
     pa.element_width = p[1];
     pa.size = *reinterpret_cast<const uint32_t*>(p + 2);
     const uint8_t* data = reinterpret_cast<const uint8_t*>(p + 4);
+    // total fits by construction: VerifyInsns width-bounded this payload at load.
     size_t total = static_cast<size_t>(pa.element_width) * pa.size;
-    const size_t avail_bytes = static_cast<size_t>(end - (p + 4)) * 2;
-    if (total > avail_bytes) total = avail_bytes;
     pa.data.assign(data, data + total);
     return pa;
 }
@@ -265,22 +262,13 @@ DecodePass DecodeAllInsns(const dex::Code* code, IDexCodeSource& src,
                           uint16_t dex_id) {
     DecodePass pass;
 
-    // `code->insns_size` is read from the (possibly corrupt) code-item header,
-    // so a garbage value would make end_p point past the mmap and the decode
-    // loop march into unmapped memory. Clamp the instruction span to the dex
-    // image so end_p never exceeds it.
+    // PRECONDITION: this dex passed dexkit::ext::VerifyDex at load (see
+    // native/core_ext/dex_verifier.h), so VerifyCodeItem's CheckListSize already
+    // proved code->insns_size fits within the dex image — base+insns_units never
+    // exceeds the mmap. The instruction-span clamp that used to re-defend a
+    // corrupt insns_size here was removed as redundant with the verifier.
     const dex::u2* base = code->insns;
     size_t insns_units = code->insns_size;
-    auto [img_begin, img_end] = src.GetDexImageRange(dex_id);
-    if (img_end) {
-        const dex::u2* img_end_u2 = reinterpret_cast<const dex::u2*>(img_end);
-        if (base < reinterpret_cast<const dex::u2*>(img_begin) ||
-            base >= img_end_u2) {
-            return pass;  // insns pointer itself out of image — fully malformed
-        }
-        size_t max_units = static_cast<size_t>(img_end_u2 - base);
-        if (insns_units > max_units) insns_units = max_units;
-    }
     const dex::u2* end_p = base + insns_units;
     pass.insns_byte_size = static_cast<uint32_t>(insns_units * 2);
 
@@ -315,12 +303,11 @@ DecodePass DecodeAllInsns(const dex::Code* code, IDexCodeSource& src,
         // Branch target pre-computation.
         if (IsBranchOpcode(ri.opcode)) {
             int32_t off_cu = ExtractBranchOffsetCodeUnits(ri.decoded, ri.opcode);
+            // Target in-range by construction: VerifyInsns validated every branch
+            // /switch/array-data target lands inside insns[] at load (the bounds
+            // throw that used to live here was removed as redundant).
             int64_t target = static_cast<int64_t>(ri.byte_off)
                            + static_cast<int64_t>(off_cu) * 2;
-            if (target < 0 || target >= static_cast<int64_t>(pass.insns_byte_size)) {
-                throw std::runtime_error(
-                    "malformed dex: branch target out of range");
-            }
             // For switches and fill-array, target is the PAYLOAD location.
             if (IsSwitch(ri.opcode) || ri.opcode == dex::OP_FILL_ARRAY_DATA) {
                 pass.payload_to_owner[static_cast<uint32_t>(target)] = ri.byte_off;

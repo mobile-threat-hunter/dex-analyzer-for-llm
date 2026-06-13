@@ -67,6 +67,11 @@ def header_fields(src: str) -> str:
 
 def parity_for_apk(apk: str, n: int) -> tuple[int, int, int, list[tuple[str, str]]]:
     """Returns (matched, total, timeouts, mismatches[:3])."""
+    # Validated load raises on a 0-dex container (resources-only APK); pre-filter
+    # by content so those are skipped instead of aborting the run.
+    if dexllm.identify(apk)["dex_count"] == 0:
+        print("  skip: no classes*.dex", flush=True)
+        return 0, 0, 0, []
     dk = dexllm.DexKit(apk)
     try:
         _a, d_list, dx = AnalyzeAPK(apk)

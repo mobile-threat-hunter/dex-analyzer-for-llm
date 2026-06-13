@@ -11,6 +11,7 @@
 #include <utility>
 
 #include "analyze.h"  // kMethodInvoking et al.
+#include "dex_verifier.h"  // VerifyDex — load-boundary structural gate
 #include "dexitem_code_source.h"  // for GetCodeSource()
 #include "mmap.h"  // dexkit::MemMap (raw-dex load path)
 #include "schema/querys_generated.h"
@@ -322,6 +323,15 @@ DexKitExt::DexKitExt(const std::string& apk_path) : apk_path_(apk_path) {
     }
     if (LooksLikeRawDex(*map)) {
         core_ = std::make_unique<dexkit::DexKit>();
+        // Structural gate (DexVerifier) BEFORE the core parses the image — a
+        // malformed dex is screened out here so the core/slicer never touch it.
+        auto vr = VerifyDex(reinterpret_cast<const uint8_t*>(map->data()),
+                            map->len());
+        verify_status_.push_back({0, apk_path, vr.ok, vr.reason});
+        if (!vr.ok) {
+            throw std::runtime_error(
+                "dexllm: '" + apk_path + "' failed dex verification: " + vr.reason);
+        }
         core_->AddImage(std::move(map));
         return;
     }
@@ -341,8 +351,40 @@ DexKitExt::DexKitExt(const std::string& apk_path) : apk_path_(apk_path) {
             "dexllm: zip container '" + apk_path + "' has no classes*.dex to decompile "
             "(AndroidManifest.xml " + (has_manifest ? "present" : "absent") + ")");
     }
-    // Validated container — hand the original path to the core's zip loader.
-    core_ = std::make_unique<dexkit::DexKit>(apk_path);
+    // Extract each classes*.dex ourselves, verify at the load boundary, and feed
+    // only structurally-valid dexes to the core via AddImage. This replaces the
+    // core's internal zip loader (DexKit(apk_path) → AddZipPath) so a malformed
+    // dex is screened out *before* the core parses it — no vendored-core change.
+    // A rejected dex is recorded (verify_report) and skipped; sibling dexes in
+    // the multidex still load (per-dex rejection).
+    core_ = std::make_unique<dexkit::DexKit>();
+    std::vector<std::unique_ptr<dexkit::MemMap>> valid_dexes;
+    for (int idx = 1; idx <= dex_count; ++idx) {
+        auto name = "classes" + (idx == 1 ? std::string() : std::to_string(idx)) + ".dex";
+        const auto* entry = za->Find(name);
+        if (entry == nullptr) continue;  // counted above; defensive
+        auto mm = za->GetUncompressData(*entry);
+        if (!mm.ok()) {
+            verify_status_.push_back({-1, name, false, "decompression failed"});
+            continue;
+        }
+        auto vr = VerifyDex(reinterpret_cast<const uint8_t*>(mm.data()), mm.len());
+        if (!vr.ok) {
+            verify_status_.push_back({-1, name, false, vr.reason});
+            continue;
+        }
+        verify_status_.push_back(
+            {static_cast<int>(valid_dexes.size()), name, true, {}});
+        valid_dexes.push_back(std::make_unique<dexkit::MemMap>(std::move(mm)));
+    }
+    if (valid_dexes.empty()) {
+        const std::string& first = verify_status_.empty() ? std::string{"unknown"}
+                                                          : verify_status_.front().reason;
+        throw std::runtime_error(
+            "dexllm: all " + std::to_string(dex_count) + " dex(es) in '" + apk_path +
+            "' failed verification (first: " + first + ")");
+    }
+    core_->AddImage(std::move(valid_dexes));
 }
 
 DexKitExt::~DexKitExt() = default;

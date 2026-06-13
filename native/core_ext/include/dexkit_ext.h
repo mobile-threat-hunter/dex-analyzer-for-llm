@@ -24,6 +24,18 @@ struct ContainerInfo {
     int dex_count = 0;          // sequential classes*.dex (zip) or 1 (raw .dex)
 };
 
+// Per-dex structural-verification verdict (DexVerifier at the load boundary).
+// A rejected dex is never handed to the core, so it contributes no
+// classes/methods; `reason` names the first structural violation (ART
+// DexFileVerifier-style). `name` is the source entry (e.g. "classes2.dex") or
+// the file path for a raw .dex.
+struct DexVerifyStatus {
+    int dex_id = 0;
+    std::string name;
+    bool valid = true;
+    std::string reason;         // empty when valid
+};
+
 class DexKitExt {
 public:
     // Content-based probe; performs no load. Safe on any path. Returns
@@ -43,6 +55,13 @@ public:
 
     [[nodiscard]] int DexCount() const;
     [[nodiscard]] const std::string& GetApkPath() const { return apk_path_; }
+
+    // Structural-verification report, one entry per dex the loader considered.
+    // Rejected dexes (valid==false) were screened out at the load boundary with
+    // a specific reason and never reached the core.
+    [[nodiscard]] const std::vector<DexVerifyStatus>& VerifyReport() const {
+        return verify_status_;
+    }
 
     // Locate which dex_id defines the given class descriptor; -1 if not declared
     // in any loaded dex (i.e. external Android API or app-external reference).
@@ -193,6 +212,7 @@ private:
     std::unique_ptr<dexkit::DexKit> core_;
     bool analysis_caches_warm_ = false;
     std::unique_ptr<DexItemCodeSource> code_source_;  // lazy-constructed
+    std::vector<DexVerifyStatus> verify_status_;      // load-boundary verdicts
 };
 
 // Public for testing/customisation: returns true if the descriptor is a

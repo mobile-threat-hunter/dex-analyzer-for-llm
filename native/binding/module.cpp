@@ -116,6 +116,18 @@ public:
     std::vector<std::string> list_classes() const {
         return ext_.ListClasses();
     }
+    py::list verify_report() const {
+        py::list out;
+        for (const auto& s : ext_.VerifyReport()) {
+            py::dict d;
+            d["dex_id"] = s.dex_id;
+            d["name"] = s.name;
+            d["valid"] = s.valid;
+            d["reason"] = s.reason;
+            out.append(std::move(d));
+        }
+        return out;
+    }
     std::vector<std::string>
     list_class_methods(const std::string& class_descriptor) const {
         return ext_.ListClassMethods(class_descriptor);
@@ -445,6 +457,11 @@ PYBIND11_MODULE(_dexkit_core, m) {
              "L8: Return every class descriptor declared in any loaded dex "
              "(e.g. `Lcom/foo/Bar;`). Replaces androguard's "
              "AnalyzeAPK→get_classes for decompile drivers.")
+        .def("verify_report", &PyDexKit::verify_report,
+             "Structural-verification report, one dict per dex considered at "
+             "load: {dex_id, name, valid, reason}. A dex with valid==False was "
+             "screened out at the load boundary (DexVerifier — AOSP "
+             "DexFileVerifier criteria port) with a specific reason.")
         .def("list_class_methods", &PyDexKit::list_class_methods,
              py::arg("class_descriptor"),
              "L8: Return full Dalvik method descriptors "

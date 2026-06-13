@@ -65,15 +65,14 @@ DexItem* SafeGetDexItem(dexkit::DexKit& core, uint16_t dex_id) {
     return core.GetDexItem(dex_id);
 }
 
-// Bounds-checked table lookup. Secondary indices (name_idx, type_idx,
-// proto_idx, …) come from the dex tables and may be corrupt on a malformed
-// .dex, so every index into the string / type-name tables goes through here to
-// avoid an OOB vector read. Returns a default-constructed element if out of
-// range.
-template <typename V>
-typename V::value_type SafeAt(const V& v, size_t i) {
-    return i < v.size() ? v[i] : typename V::value_type{};
-}
+// PRECONDITION: every DexItem reaching this adapter was structurally validated
+// at load by dexkit::ext::VerifyDex (see native/core_ext/dex_verifier.h — the
+// single malformed-dex safety gate). So secondary dex-table indices (a verified
+// field_id's class_idx/name_idx/type_idx, method_id's class_idx, etc.) are
+// in-range by construction; we index the string / type-name tables directly. The
+// old SafeAt() bounds-checked accessor was removed as redundant with the verifier.
+// Indices from EXTERNAL callers (the `*idx` parameters below) are NOT covered by
+// the verifier and keep their own `if (idx >= table.size())` guards.
 
 // ─── Encoded value / array byte-stream parsers ────────────────────────────
 // dex spec: https://source.android.com/docs/core/runtime/dex-format#encoded-value
@@ -241,7 +240,7 @@ std::string DecodeEncodedValueText(const U1*& p,
         case 0x17: {  // STRING
             uint64_t idx = ReadIntLE(p, end, nbytes);
             const auto& strings = item.GetStrings();
-            if (idx >= strings.size()) return std::string("\"\"");
+            // idx validated in-range by VerifyEncodedValue (static_values gate).
             std::string_view raw = strings[idx];
             if (raw.empty()) return std::string("\"\"");
             return std::string("\"") + PythonUnicodeEscape(raw) + "\"";
@@ -249,7 +248,7 @@ std::string DecodeEncodedValueText(const U1*& p,
         case 0x18: {  // TYPE — class literal "pkg.Cls.class" or "int[].class"
             uint64_t idx = ReadIntLE(p, end, nbytes);
             const auto& type_names = item.GetTypeNames();
-            if (idx >= type_names.size()) return {};
+            // idx validated in-range by VerifyEncodedValue (static_values gate).
             // dad::GetType handles primitives (V/Z/B/.../J → void/boolean/...),
             // reference types ("Lpkg/Cls;" → "pkg.Cls"), and arrays.
             return dexkit::dad::GetType(type_names[idx]) + ".class";
@@ -261,12 +260,13 @@ std::string DecodeEncodedValueText(const U1*& p,
             const auto& strings = item.GetStrings();
             const auto& type_names = item.GetTypeNames();
             const auto field_ids = reader.FieldIds();
-            if (idx >= field_ids.size()) return {};
+            // idx validated in-range by VerifyEncodedValue (static_values gate);
+            // a verified field_id's class_idx/name_idx are in-range by CheckIntra.
             const auto& f = field_ids[idx];
             std::string out;
-            out += dexkit::dad::GetType(SafeAt(type_names, f.class_idx));
+            out += dexkit::dad::GetType(type_names[f.class_idx]);
             out += '.';
-            out.append(SafeAt(strings, f.name_idx));
+            out.append(strings[f.name_idx]);
             return out;
         }
         case 0x1a: {  // METHOD — no Java literal form (method reflection isn't
@@ -418,7 +418,7 @@ DexItemCodeSource::LocateMethod(std::string_view descriptor) {
     for (size_t i = 0; i < method_ids.size(); ++i) {
         const auto& m = method_ids[i];
         if (m.class_idx != type_idx) continue;
-        if (SafeAt(strings, m.name_idx) != name) continue;
+        if (strings[m.name_idx] != name) continue;
         if (BuildProto(*dex_item, proto_ids[m.proto_idx]) != proto) continue;
         return dexkit::dad::IDexCodeSource::MethodLocator{
             static_cast<uint16_t>(dex_item->GetDexId()), static_cast<uint32_t>(i)};
@@ -458,8 +458,8 @@ std::string_view DexItemCodeSource::GetMethodClassName(uint16_t dex_id,
     const auto& reader = item->GetReader();
     const auto& type_names = item->GetTypeNames();
     const auto method_ids = reader.MethodIds();
-    if (midx >= method_ids.size()) return {};
-    return SafeAt(type_names, method_ids[midx].class_idx);
+    if (midx >= method_ids.size()) return {};  // external caller index — guarded
+    return type_names[method_ids[midx].class_idx];
 }
 
 std::string_view DexItemCodeSource::GetMethodName(uint16_t dex_id,
@@ -469,8 +469,8 @@ std::string_view DexItemCodeSource::GetMethodName(uint16_t dex_id,
     const auto& reader = item->GetReader();
     const auto& strings = item->GetStrings();
     const auto method_ids = reader.MethodIds();
-    if (midx >= method_ids.size()) return {};
-    return SafeAt(strings, method_ids[midx].name_idx);
+    if (midx >= method_ids.size()) return {};  // external caller index — guarded
+    return strings[method_ids[midx].name_idx];
 }
 
 std::string DexItemCodeSource::GetMethodProto(uint16_t dex_id,
@@ -556,8 +556,8 @@ DexItemCodeSource::GetMethodRefTriple(uint16_t dex_id, uint32_t midx) {
     // Simplest correct path: keep a per-DexItem proto cache in this
     // adapter. Allocate on first call, return string_view into it.
     std::array<std::string_view, 3> out;
-    out[0] = SafeAt(type_names, m.class_idx);
-    out[1] = SafeAt(strings, m.name_idx);
+    out[0] = type_names[m.class_idx];
+    out[1] = strings[m.name_idx];
     out[2] = GetProtoCached(dex_id, m.proto_idx);
     return out;
 }
@@ -570,10 +570,10 @@ DexItemCodeSource::GetFieldRefTriple(uint16_t dex_id, uint32_t fidx) {
     const auto& type_names = item->GetTypeNames();
     const auto& strings = item->GetStrings();
     const auto field_ids = reader.FieldIds();
-    if (fidx >= field_ids.size()) return {{}};
+    if (fidx >= field_ids.size()) return {{}};  // external caller index — guarded
     const auto& f = field_ids[fidx];
-    return {SafeAt(type_names, f.class_idx), SafeAt(strings, f.name_idx),
-            SafeAt(type_names, f.type_idx)};
+    return {type_names[f.class_idx], strings[f.name_idx],
+            type_names[f.type_idx]};
 }
 
 // DAD: decompile.py:269 DvClass.__init__ — supplies metadata used by
@@ -596,7 +596,7 @@ DexItemCodeSource::GetClassInfo(std::string_view class_descriptor) {
     info.type_idx = type_idx;
     info.access_flags = cdef.access_flags;
     if (cdef.superclass_idx != dex::kNoIndex) {
-        info.superclass = SafeAt(type_names, cdef.superclass_idx);
+        info.superclass = type_names[cdef.superclass_idx];
     }
     if (cdef.interfaces_off != 0) {
         const auto* type_list =
@@ -617,7 +617,7 @@ DexItemCodeSource::GetClassInfo(std::string_view class_descriptor) {
             info.interfaces.reserve(n);
             for (uint32_t i = 0; i < n; ++i) {
                 info.interfaces.push_back(
-                    SafeAt(type_names, type_list->list[i].type_idx));
+                    type_names[type_list->list[i].type_idx]);
             }
         }
     }
@@ -656,10 +656,10 @@ DexItemCodeSource::GetFieldInfo(uint16_t dex_id, uint32_t fidx) {
     const auto& strings = item->GetStrings();
     const auto& type_names = item->GetTypeNames();
     const auto field_ids = reader.FieldIds();
-    if (fidx >= field_ids.size()) return info;
+    if (fidx >= field_ids.size()) return info;  // external caller index — guarded
     const auto& f = field_ids[fidx];
-    info.name = SafeAt(strings, f.name_idx);
-    info.type = SafeAt(type_names, f.type_idx);
+    info.name = strings[f.name_idx];
+    info.type = type_names[f.type_idx];
     const auto& access = item->GetFieldAccessFlags();
     if (fidx < access.size()) info.access_flags = access[fidx];
     return info;

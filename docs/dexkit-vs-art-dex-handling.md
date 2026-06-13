@@ -14,12 +14,12 @@ AOSP `file:line` anchors drift on re-sync — re-verify before quoting.
 | | AOSP/ART | dexllm (DexKit) |
 |---|---|---|
 | Purpose | load DEX to **execute** it | load DEX to **statically analyze / decompile** it |
-| Consequence | verification is a **security boundary** | verification unneeded; **lenient parsing** is the virtue |
-| Parser | ART `DexFileLoader` + `DexFileVerifier` (`art/libdexfile/dex/`) | Google **slicer** (`reader.cc`), vendored |
+| Consequence | verification is a **security boundary** (false-accept → exploit) | verification is a **crash-safety boundary** (false-accept → at worst an analyzer crash, never code-exec) |
+| Parser | ART `DexFileLoader` + `DexFileVerifier` (`art/libdexfile/dex/`) | Google **slicer** (`reader.cc`), vendored, **gated by a load-time `VerifyDex` port of `DexFileVerifier`** (`native/core_ext/dex_verifier.{h,cpp}`) |
 
 Every difference below follows from this.
 
-## 1. Verification depth — the big structural gap
+## 1. Verification depth — gap now closed by a load-time verifier
 
 **AOSP** — `dex::Verify` (`dex_file_verifier.cc:3541`) runs **4 upfront phases** on
 every untrusted DEX:
@@ -34,18 +34,31 @@ every untrusted DEX:
 This is the **trust boundary**, and it is **skipped entirely** when a matching
 `vdex` exists (`verify = (vdex==nullptr) && IsVerificationEnabled()`).
 
-**DexKit** — slicer `Reader::ValidateHeader()` does **header + map sanity only**:
-header_size (v40/v41), `endian_tag`, all offsets 4-byte aligned, type/proto_ids
-< 65536, map bounds, link section == 0, container bounds. It does **not** verify
-the adler32 checksum or SHA-1 signature, has **no** inter-section ordering/
-uniqueness check, and **no** MUTF-8 validity gate. Per-item problems surface
-**lazily** as `SLICER_CHECK` → `std::runtime_error` during decode, skipping just
-that method (process survives — CLAUDE.md policy).
+**DexKit** — dexllm now **reproduces `DexFileVerifier`** as a self-contained
+load-time gate, `dexkit::ext::VerifyDex` (`native/core_ext/dex_verifier.{h,cpp}`),
+run by `DexKitExt` before the slicer parses any dex (raw `.dex` and each
+`classes*.dex`; reject → throw with a byte-level reason, surfaced by
+`dk.verify_report()`). It is a readable 1:1 port of all four ART phases
+(`// ART :NNNN` anchors) — header/map/intra (incl. code_item, MUTF-8,
+encoded_array) / inter (id ordering+uniqueness, descriptor + member-name syntax,
+class_def semantics) — **plus** `VerifyInsns`, an instruction-operand bounds pass
+that ART keeps in the *runtime* method_verifier (deliberately not vendored), here
+re-derived from the Dalvik bytecode spec. **Intentional differences from ART:**
+adler32/SHA-1 still **not** checked (policy — checksums are not a crash vector and
+malware routinely lies about them); instruction *dataflow* semantics, annotations,
+call_site/method_handle, debug_info are out of scope (documented in
+`dex_verifier.h`). The slicer's own `Reader::ValidateHeader()` still runs after as
+a second cheap sanity layer; per-item decode problems beyond the verifier's scope
+still surface lazily as `SLICER_CHECK` → `std::runtime_error`, skipping that method.
 
-> **Implication:** a malformed DEX that ART's `DexFileVerifier` would *reject*,
-> dexllm will happily parse (good for analysis). Conversely, "dexllm parsed it"
-> is **not** a guarantee ART would load it — checksums and cross-refs are
-> unchecked. Anti-analysis structural tricks are visible to dexllm but unverified.
+> **Implication:** dexllm verifies for **crash-safety**, not as an execution trust
+> boundary — a structurally-malformed DEX that would crash the analyzer is now
+> rejected at load (ASan-validated 0 heap-overflow/UAF/SEGV on a malformed-dex
+> fuzz that was 66/120 SEGV before the verifier), with a byte-level reason. It is
+> still intentionally lenient where ART is strict for *execution* safety
+> (checksums, dataflow), so "ART would reject this" and "dexllm rejects this" are
+> not identical sets — but the structural crash surface ART's `DexFileVerifier`
+> covers is now covered here too.
 
 ## 2. Multidex duplicate-class resolution — now aligned (was the one divergence)
 
@@ -113,6 +126,9 @@ by extracting the raw `.dex` and loading it individually.
 1. **Multidex duplicate classes now resolve like ART** (first-wins by lowest
    `dex_id`, deterministic — fixed 2026-06-12). dexllm no longer disagrees with
    runtime on which class body a packer's collision resolves to.
-2. dexllm **does not reproduce `DexFileVerifier`** — structural anti-analysis tricks
-   are *more* visible (lenient parse), but "dexllm parsed it" ≠ "ART loads it"
-   (adler32 / cross-refs unchecked). This is the remaining intentional divergence.
+2. dexllm now **reproduces `DexFileVerifier`** at the load boundary (`VerifyDex`,
+   §1) — a structurally-malformed DEX is rejected with a byte-level reason instead
+   of crashing the analyzer (ASan-validated 0-crash). It stays intentionally
+   lenient on *execution-trust* checks (adler32/SHA-1, instruction dataflow), so
+   "dexllm loads it" still ≠ "ART executes it" — but the structural crash surface
+   is now covered, and `dk.verify_report()` exposes per-dex verdicts.
