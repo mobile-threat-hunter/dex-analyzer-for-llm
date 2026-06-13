@@ -52,13 +52,13 @@ a second cheap sanity layer; per-item decode problems beyond the verifier's scop
 still surface lazily as `SLICER_CHECK` → `std::runtime_error`, skipping that method.
 
 > **Implication:** dexllm verifies for **crash-safety**, not as an execution trust
-> boundary — a structurally-malformed DEX that would crash the analyzer is now
-> rejected at load (ASan-validated 0 heap-overflow/UAF/SEGV on a malformed-dex
-> fuzz that was 66/120 SEGV before the verifier), with a byte-level reason. It is
-> still intentionally lenient where ART is strict for *execution* safety
-> (checksums, dataflow), so "ART would reject this" and "dexllm rejects this" are
-> not identical sets — but the structural crash surface ART's `DexFileVerifier`
-> covers is now covered here too.
+> boundary — a structurally-malformed DEX that would crash the analyzer is rejected
+> at load with a byte-level reason (ASan-validated 0 heap-overflow/UAF/SEGV on a
+> malformed-dex fuzz that segfaults 66/120 with no structural verifier). It is
+> intentionally lenient where ART is strict for *execution* safety (checksums,
+> dataflow), so "ART would reject this" and "dexllm rejects this" are not identical
+> sets — but the structural crash surface ART's `DexFileVerifier` covers is covered
+> here too.
 
 ### Per-check breakdown
 
@@ -108,27 +108,24 @@ goes beyond it); every divergence is either an *execution-trust* check (checksum
 access flags, type-map, dataflow) that a read-only analyzer does not need, or a
 documented lazy/out-of-scope section.
 
-## 2. Multidex duplicate-class resolution — now aligned (was the one divergence)
+## 2. Multidex duplicate-class resolution — aligned with ART
 
-Historically the one place dexllm output could disagree with runtime reality;
-**fixed 2026-06-12** so both are now first-wins.
+When the same class descriptor is defined in more than one dex, dexllm resolves it
+the way ART does — **first-wins, deterministic**:
 
-- **AOSP/ART: first-wins, deterministic.** `PathClassLoader` → `ClassLinker::FindClass`
-  (loader delegation) walks the dex element list **in order**; the **first dex that
-  defines the class wins** (libcore `DexPathList.findClass` returns the first match).
-- **DexKit: now first-wins, deterministic** (was last-wins + non-deterministic).
-  `DexKit::PutDeclaredClass` (`vendor/dexkit_core/Core/dexkit/dexkit.cpp`) used to
-  unconditionally overwrite the `class_declare_dex_map`; parallel `DexItem`
-  construction calls it in a non-deterministic order, so the winner varied across
-  runs (and serial runs took the *last* dex). It now keeps the **lowest `dex_id`**
-  (classes.dex before classes2.dex). Because `dex_id` is fixed by load order, the
-  result is order-independent → deterministic **and** matches ART's first-wins.
+- **AOSP/ART:** `PathClassLoader` → `ClassLinker::FindClass` (loader delegation) walks
+  the dex element list **in order**; the **first dex that defines the class wins**
+  (libcore `DexPathList.findClass` returns the first match).
+- **DexKit:** `DexKit::PutDeclaredClass` (`vendor/dexkit_core/Core/dexkit/dexkit.cpp`)
+  keeps the **lowest `dex_id`** (classes.dex before classes2.dex). Because `dex_id`
+  is fixed by load order, the result is order-independent → deterministic **and**
+  matches ART's first-wins.
 
-→ `locate_class_dex` / decompile of a descriptor declared in multiple dex now
-resolves to the same class body ART would execute, regardless of thread count.
-Standard APKs were already unaffected (R8/D8 dedups); this fix matters for
-**packer / merged-dex** analysis. Verified: a 2-dex container with every class
-duplicated resolves all duplicates to dex0, stable across repeated loads.
+→ `locate_class_dex` / decompile of a descriptor declared in multiple dex resolves
+to the same class body ART would execute, regardless of thread count. Standard APKs
+are unaffected (R8/D8 dedups); this matters for **packer / merged-dex** analysis: a
+2-dex container with every class duplicated resolves all duplicates to dex0, stable
+across repeated loads.
 
 ## 3. Multidex loading scope — essentially the same
 
@@ -171,12 +168,12 @@ by extracting the raw `.dex` and loading it individually.
 
 ## Bottom line for a threat hunter
 
-1. **Multidex duplicate classes now resolve like ART** (first-wins by lowest
-   `dex_id`, deterministic — fixed 2026-06-12). dexllm no longer disagrees with
-   runtime on which class body a packer's collision resolves to.
-2. dexllm now **reproduces `DexFileVerifier`** at the load boundary (`VerifyDex`,
-   §1) — a structurally-malformed DEX is rejected with a byte-level reason instead
-   of crashing the analyzer (ASan-validated 0-crash). It stays intentionally
-   lenient on *execution-trust* checks (adler32/SHA-1, instruction dataflow), so
-   "dexllm loads it" still ≠ "ART executes it" — but the structural crash surface
-   is now covered, and `dk.verify_report()` exposes per-dex verdicts.
+1. **Multidex duplicate classes resolve like ART** — first-wins by lowest `dex_id`,
+   deterministic — so dexllm agrees with runtime on which class body a packer's
+   collision resolves to.
+2. dexllm **reproduces `DexFileVerifier`** at the load boundary (`VerifyDex`, §1) —
+   a structurally-malformed DEX is rejected with a byte-level reason instead of
+   crashing the analyzer (ASan-validated 0-crash). It stays intentionally lenient on
+   *execution-trust* checks (adler32/SHA-1, instruction dataflow), so "dexllm loads
+   it" ≠ "ART executes it" — but the structural crash surface is covered, and
+   `dk.verify_report()` exposes per-dex verdicts.

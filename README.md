@@ -48,10 +48,10 @@ analyzer, or out of the structural scope: adler32/SHA-1 checksums, instruction
 proto shorty-match, access-flag bitmasks, and the offset→map-type cross-check.
 
 **Validated:** clean corpus 0 false-reject · 25/25 C++ parity · ASan corpus +
-malformed-dex fuzz **0 heap-overflow/UAF/SEGV** (was 66/120 SEGV before the
-verifier). The verifier adds ~58% to load time (still ~100× faster than
-androguard); decompile throughput is unaffected. Full per-check breakdown:
-[docs/dexkit-vs-art-dex-handling.md](docs/dexkit-vs-art-dex-handling.md) §1.
+malformed-dex fuzz **0 heap-overflow/UAF/SEGV** (the same fuzz segfaults 66/120
+with no structural verifier). The verifier adds ~58% to load time (still ~100×
+faster than androguard); decompile throughput is unaffected. Full per-check
+breakdown: [docs/dexkit-vs-art-dex-handling.md](docs/dexkit-vs-art-dex-handling.md) §1.
 
 ## Benchmark vs androguard
 
