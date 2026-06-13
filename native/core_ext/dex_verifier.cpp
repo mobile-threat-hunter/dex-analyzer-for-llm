@@ -23,6 +23,7 @@
 #include "dex_verifier.h"
 
 #include <cstring>
+#include <exception>
 #include <vector>
 
 #include "slicer/dex_bytecode.h"  // VerifyInsns: decode + VerifyFlags/IndexType
@@ -1076,9 +1077,18 @@ bool DexVerifier::FindFirstClassDataDefiner(u4 off, u4* out) {
 }  // namespace
 
 DexVerifyResult VerifyDex(const u1* data, size_t size) {
-    DexVerifier v(data, size);
-    if (v.Verify()) return {true, {}};
-    return {false, v.reason()};
+    try {
+        DexVerifier v(data, size);
+        if (v.Verify()) return {true, {}};
+        return {false, v.reason()};
+    } catch (const std::exception& e) {
+        // VerifyInsns decodes instructions via the slicer (GetWidthFromBytecode /
+        // DecodeInstruction) — the one place the verifier uses slicer *logic* — and
+        // those throw `SLICER_CHECK` on malformed bytecode (e.g. an invalid 35c arg
+        // count). Catch any such throw and report it as a rejection so VerifyDex
+        // itself is total: it returns {ok,reason} and never propagates / crashes.
+        return {false, std::string("malformed dex: ") + e.what()};
+    }
 }
 
 }  // namespace dexkit::ext

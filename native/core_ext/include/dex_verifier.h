@@ -15,9 +15,11 @@
 // adapter, core_ext/dexkit_ext.cpp) calls it before the core parses ANY dex —
 // raw .dex before AddImage, each classes*.dex before feeding the core. A reject
 // throws with a human reason; siblings in an apk still load. Guarantees:
-//   * VerifyDex never reads outside [data, data+size) and never crashes, on
-//     ANY input — every read goes through a bounded primitive (CheckListSize /
-//     ReadUleb / OffsetToPtr+bounds / SafeWidth).
+//   * VerifyDex is total on ANY input: it never reads outside [data, data+size),
+//     never crashes, and never propagates an exception — every read goes through a
+//     bounded primitive (CheckListSize / ReadUleb / OffsetToPtr+bounds / SafeWidth),
+//     and the one slicer-logic call (the VerifyInsns decoder, which throws
+//     SLICER_CHECK on malformed bytecode) is wrapped: any throw becomes a rejection.
 //   * A dex that PASSES has valid structure for every section the core and the
 //     decompile path dereference (see "covered" below) → no OOB in InitBaseCache
 //     or the dad_cpp pipeline from structural malformation.
