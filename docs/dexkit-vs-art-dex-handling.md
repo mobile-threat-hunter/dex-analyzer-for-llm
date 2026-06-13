@@ -1,4 +1,4 @@
-# DexKit vs AOSP/ART — how each handles DEX
+# dexllm vs AOSP/ART — how each handles DEX
 
 How dexllm (DexKit Core + the slicer dex reader) treats a `.dex` differs from how
 AOSP/ART loads, verifies, and resolves one. This matters for **malware triage**:
@@ -11,7 +11,7 @@ AOSP `file:line` anchors drift on re-sync — re-verify before quoting.
 
 ## 0. Root difference — execute vs analyze
 
-| | AOSP/ART | dexllm (DexKit) |
+| | AOSP/ART | dexllm |
 |---|---|---|
 | Purpose | load DEX to **execute** it | load DEX to **statically analyze / decompile** it |
 | Consequence | verification is a **security boundary** (false-accept → exploit) | verification is a **crash-safety boundary** (false-accept → at worst an analyzer crash, never code-exec) |
@@ -34,7 +34,7 @@ every untrusted DEX:
 This is the **trust boundary**, and it is **skipped entirely** when a matching
 `vdex` exists (`verify = (vdex==nullptr) && IsVerificationEnabled()`).
 
-**DexKit** — dexllm now **reproduces `DexFileVerifier`** as a self-contained
+**dexllm** — **reproduces `DexFileVerifier`** as a self-contained
 load-time gate, `dexkit::ext::VerifyDex` (`native/core_ext/dex_verifier.{h,cpp}`),
 run by `DexKitExt` before the slicer parses any dex (raw `.dex` and each
 `classes*.dex`; reject → throw with a byte-level reason, surfaced by
@@ -116,7 +116,7 @@ the way ART does — **first-wins, deterministic**:
 - **AOSP/ART:** `PathClassLoader` → `ClassLinker::FindClass` (loader delegation) walks
   the dex element list **in order**; the **first dex that defines the class wins**
   (libcore `DexPathList.findClass` returns the first match).
-- **DexKit:** `DexKit::PutDeclaredClass` (`vendor/dexkit_core/Core/dexkit/dexkit.cpp`)
+- **dexllm:** `DexKit::PutDeclaredClass` (`vendor/dexkit_core/Core/dexkit/dexkit.cpp`)
   keeps the **lowest `dex_id`** (classes.dex before classes2.dex). Because `dex_id`
   is fixed by load order, the result is order-independent → deterministic **and**
   matches ART's first-wins.
@@ -131,8 +131,8 @@ across repeated loads.
 
 - AOSP `GetMultiDexClassesDexName`: index0 = `classes.dex`, N = `classes{N+1}.dex`,
   loop until not-found (warn at 100).
-- DexKit `AddZipPath`: `classes.dex`, `classes2.dex`, … sequential, **stop at the
-  first gap**.
+- dexllm (DexKit `AddZipPath`): `classes.dex`, `classes2.dex`, … sequential, **stop
+  at the first gap**.
 
 Both load only `classes*.dex` from the ZIP. `assets/*.dex`, non-standard names, and
 secondary dex (`DexClassLoader`) are outside this path for both — dexllm covers them
@@ -143,28 +143,28 @@ by extracting the raw `.dex` and loading it individually.
 - **AOSP**: `ClassLinker` resolves at runtime via `FindClass` → `ResolveType/Method/
   Field`, following classloader delegation, caching pointers in the **DexCache**. A
   dex depends on external definitions **at runtime**.
-- **DexKit**: a dex carries external refs as **descriptor strings** in its own
+- **dexllm**: a dex carries external refs as **descriptor strings** in its own
   method/proto/type tables → loading **only that dex** decompiles use-sites
   **byte-identically** to loading both (CLAUDE.md: cross-dex self-contained). Missing
   the defining dex only loses (a) that class itself and (b) cross-dex xrefs.
 
-## 5. AOSP-only security mechanisms (no DexKit analog)
+## 5. AOSP-only security mechanisms (no dexllm analog)
 
 - **Janus (CVE-2017-13156)**: from a ZIP, ART's `location_checksum` = **ZIP CRC32**,
-  not the DEX adler32 (`dex_file_loader.cc:564`). DexKit reads no checksum at all.
+  not the DEX adler32 (`dex_file_loader.cc:564`). dexllm reads no checksum at all.
 - **vdex skip-verify**, **`access(W_OK)` writable-dex block** (`dalvik_system_DexFile.cc:380`),
   **`VerifyMode::kNone`** — all *execution-trust* mechanisms, irrelevant to a
   read-only analyzer.
 
-## 6. Versions & encoding — mostly aligned, DexKit just emits more
+## 6. Versions & encoding — mostly aligned, dexllm just emits more
 
 - **Versions**: slicer `kMinVersion=35, kMaxVersion=41` → **v041 container support**,
   same range as AOSP android16 (`035–041`).
-- **MUTF-8**: AOSP validates then stores as-is; DexKit **decodes to UTF-8 / `\uXXXX`**
+- **MUTF-8**: AOSP validates then stores as-is; dexllm **decodes to UTF-8 / `\uXXXX`**
   for output.
-- **EncodedValue**: AOSP reads per spec and stores; DexKit **decodes IEEE754 float/
+- **EncodedValue**: AOSP reads per spec and stores; dexllm **decodes IEEE754 float/
   double and null/true/false into spec-correct Java literals** for decompiler output
-  (a vs-androguard fix, but the intent — Java-source correctness — is DexKit-specific).
+  (a vs-androguard fix, but the intent — Java-source correctness — is dexllm-specific).
 
 ## Bottom line for a threat hunter
 
