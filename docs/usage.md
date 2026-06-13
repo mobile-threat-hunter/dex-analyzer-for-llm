@@ -57,6 +57,19 @@ dexllm.identify("/path/to/suspect")
 #   format: "dex" | "zip" | "unknown";  is_apk = a zip carrying an AndroidManifest.xml
 ```
 
+Every loaded dex is **structurally verified at load** (a port of ART's
+`DexFileVerifier`) before the core parses it — malformed or crafted input is
+rejected with a byte-level reason instead of crashing the analyzer. Inspect the
+per-dex verdicts with `dk.verify_report()`:
+
+```python
+for r in dk.verify_report():
+    print(r)   # → {'dex_id': 0, 'name': 'classes.dex', 'valid': True, 'reason': ''}
+```
+
+A container whose every dex fails verification raises at construction. See the
+[DEX-handling comparison](dexkit-vs-art-dex-handling.md) §1 for exactly what's checked.
+
 In a multidex APK, a class declared in more than one `classes*.dex` resolves **first-wins by lowest dex_id** (classes.dex before classes2.dex), deterministically — matching ART/AOSP, so packer collisions decompile to the body that actually runs (see [DEX-handling comparison](dexkit-vs-art-dex-handling.md)).
 
 The constructor argument is still named `apk_path` for backward compatibility. A zip APK loads in ~150ms for a 50-dex app using zero-copy slicer-based dex parsing. Subsequent operations cache aggressively — the second call is always ≤1µs marshalling overhead plus the algorithm cost.
@@ -362,13 +375,13 @@ Python ↔ C++ marshalling overhead stays under 1 ms per call.
 
 | | dexllm (C++) | androguard (Python) |
 |---|---|---|
-| APK load | **15 ms** | 28.8 s |
+| APK load (incl. structural verification) | **~120 ms** | 28.8 s |
 | Full decompile (1 thread) | **54 s** | impractical |
 | Full decompile (parallel) | **18.5 s** (GIL released) | — (GIL-bound) |
 | Peak RSS | **523 MB** | — |
 | Crashes | 0 | — |
 
-Per-method decompile is ~4.5× faster than androguard; APK load is 100–1800× faster (lazy slicer parsing). On this heavy app the parallel speedup is ~3× — returning hundreds of MB of decompiled text is GIL-bound, so small/medium APKs scale higher (~10× on tvleanback). Search (L1–L7) is 3–6× faster than androguard's scan.
+Per-method decompile is ~4.5× faster than androguard; APK load is ~100× faster (lazy slicer parse + load-time structural verification), and the gap grows with APK size — this 39k-class app loads ~240× faster than androguard's 28.8 s. On this heavy app the parallel decompile speedup is ~3× — returning hundreds of MB of decompiled text is GIL-bound, so small/medium APKs scale higher (~10× on tvleanback). Search (L1–L7) is 3–6× faster than androguard's scan.
 
 Reproduce the androguard comparison on any APK: [`bench/bench_vs_androguard.py`](../bench/bench_vs_androguard.py) (`pip install -e ".[dev]"`, then `python bench/bench_vs_androguard.py app.apk`). It prints a paste-ready table of load / decompile / search timings plus byte-parity.
 
