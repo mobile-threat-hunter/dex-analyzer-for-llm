@@ -70,7 +70,9 @@ before-all = "dnf install -y zlib-devel || yum install -y zlib-devel"
 
 [tool.cibuildwheel.macos]
 archs = ["x86_64", "arm64"]
-environment = { MACOSX_DEPLOYMENT_TARGET = "11.0" }
+# 13.3 (not lower): dad_cpp/dast.cpp uses std::to_chars for float/double, whose
+# libc++ symbol is only available from macOS 13.3 — a lower target fails to build.
+environment = { MACOSX_DEPLOYMENT_TARGET = "13.3" }
 
 # --- Python code quality (PEP 8 / PEP 484) ---
 
