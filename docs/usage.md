@@ -235,7 +235,7 @@ ast_only = dk.decompile_method_ast(desc, include_source=False)
 API surface: `decompile_method_java` / `decompile_class_java` / `decompile_method_ast` / `render_method_smali`, plus cache control
 (`decompiler_clear_cache`, `decompiler_cache_size`, `decompiler_set_cache_capacity`). External / native / abstract methods return `""` (graceful — androguard crashes on these).
 
-The decompiler is a strict, function-by-function port of androguard's `decompiler/*.py` (graph → dataflow → control_flow → writer/dast) under `dad_cpp/`, validated by 25 C++ parity suites (`ninja parity_tests && ctest`) and an end-to-end diff vs androguard. A few spec-correctness divergences are intentional (valid `null`/`true`/`false` where androguard leaks `None`/`True`/`False`; IEEE754 floats) — see [CLAUDE.md](../CLAUDE.md) "Upstream DAD bug fixes".
+The decompiler is a strict, function-by-function port of androguard's `decompiler/*.py` (graph → dataflow → control_flow → writer/dast) under `dad_cpp/`, validated by 25 DAD parity suites (`ninja parity_tests && ctest`) and an end-to-end diff vs androguard. A few spec-correctness divergences are intentional (valid `null`/`true`/`false` where androguard leaks `None`/`True`/`False`; IEEE754 floats) — see [CLAUDE.md](../CLAUDE.md) "Upstream DAD bug fixes".
 
 ---
 

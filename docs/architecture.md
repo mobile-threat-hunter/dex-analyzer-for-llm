@@ -45,7 +45,7 @@ loaded, talking to the outside world through one narrow port.
 | **DTO** | `MethodSnapshot` — immutable, pointer-stable per-method snapshot (meta + decoded instructions + CFG blocks). The data the port hands across the boundary. | [native/dad_cpp/include/method_snapshot.h](../native/dad_cpp/include/method_snapshot.h) |
 
 The payoff is concrete, not theoretical: because the domain only knows the port,
-`MockCodeSource` lets the 25 parity suites exercise the full pipeline **without a
+`MockCodeSource` lets the 25 DAD parity suites exercise the full pipeline **without a
 real APK or DexKit** — the same property hexagonal architecture exists to provide.
 
 ## Load-time verification — anti-corruption at the input boundary
@@ -88,7 +88,7 @@ Enforced by [scripts/check_dad_boundary.sh](../scripts/check_dad_boundary.sh):
 ## Why we don't push hexagonal *deeper* into `dad_cpp`
 
 The domain core is a **1:1 faithful port of androguard DAD** — every function
-carries a `// DAD: <file.py>:<lineno>` trace, and the 25 parity suites assert
+carries a `// DAD: <file.py>:<lineno>` trace, and the 25 DAD parity suites assert
 byte-identical output so the port can be re-synced against DAD upstream.
 
 Splitting the *internal* pipeline (graph / dataflow / writer) into further
