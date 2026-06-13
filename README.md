@@ -12,7 +12,7 @@ parallel-safe — rather than Xposed module development.
 | | dexllm |
 |---|---|
 | Input | `.apk`/`.jar`/`.zip`, a bare `.dex`, or a disguised/extension-less container — identified by content (PK / `dex\n` magic), not filename; `identify()` probes without loading |
-| APK load | ~15 ms (lazy slicer parse — 100–1800× faster than androguard) |
+| APK load | ~28 ms (lazy slicer parse + load-time structural verification — ~100× faster than androguard; multiple grows with APK size: Telegram's 39 k classes / 5 dex load in ~120 ms) |
 | Decompile | DAD-quality Java; 4.5× faster per-method than androguard |
 | Multidex | first-wins duplicate-class resolution, deterministic — matches ART/AOSP, so a packer's class collisions decompile to the body that actually runs |
 | Memory | ~520 MB on a 39k-class app — embeddable in-process, no JVM |
@@ -43,7 +43,7 @@ python bench/bench_vs_androguard.py /path/to/app.apk
 
 | Operation | dexllm | androguard | speedup |
 |---|---|---|---|
-| APK load | **24.5 ms** | 2.84 s | 116× |
+| APK load (incl. structural verification) | **27.8 ms** | 2.83 s | 102× |
 | Decompile — method (500) | **28.4 ms** | 128.9 ms | 4.5× |
 | └ per method | **0.06 ms** | 0.26 ms | 4.5× |
 | Decompile — whole class (200) | **77.6 ms** | 368.7 ms | 4.8× |
@@ -72,17 +72,18 @@ Speedup is workload-dependent. Here it peaks at **~10.5× near the 16 physical c
 9950X is 16C/32T); the 32 logical (SMT) threads regress slightly to ~9.9× from scheduler
 contention, so `bench_vs_androguard.py` (which uses `os.cpu_count()` = 32) reports the 32-thread
 figure above. On a 39k-class app the speedup drops to ~3× because returning hundreds of MB of
-decompiled text becomes GIL-bound. The APK-load gap instead widens with size (≈1800× on the
-39k-class app — lazy slicer parse is near-constant-time).
+decompiled text becomes GIL-bound. The APK-load gap instead widens with size: that 39k-class /
+5-dex app loads in ~120 ms (lazy slicer parse + linear structural verification) versus
+androguard's multi-second whole-program analysis.
 
 **Each tool at its realistic max** — dexllm parallel (32 threads) vs androguard single-threaded
 (its *only* mode), full-APK decompile, end-to-end:
 
 | stage | dexllm (parallel) | androguard (single) | speedup |
 |---|---|---|---|
-| APK load | 23.5 ms | 2.78 s | 118× |
+| APK load (incl. structural verification) | 27.8 ms | 2.78 s | 100× |
 | full decompile (4135 classes) | **188 ms** | 9.91 s | 53× |
-| **END-TO-END** | **0.21 s** | 12.69 s | **60×** |
+| **END-TO-END** | **0.22 s** | 12.69 s | **59×** |
 
 ## Repository layout
 
