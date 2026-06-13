@@ -1,0 +1,92 @@
+name: release
+
+# Build platform wheels on a version tag and publish them to a SEPARATE PUBLIC
+# repo's Releases — the "private source + public binaries" pattern. The source
+# (this repo) stays private; users download pre-built wheels from the public repo.
+#
+# ── ONE-TIME SETUP (see docs/RELEASING.md) ───────────────────────────────────
+#   1. Create the public release repo (e.g. mobile-threat-hunter/dexllm-releases).
+#   2. Make a fine-grained PAT scoped to ONLY that repo, Contents: read+write.
+#   3. Add it here as the Actions secret  RELEASE_REPO_TOKEN.
+#   4. Set PUBLIC_RELEASE_REPO below to that repo.
+# ─────────────────────────────────────────────────────────────────────────────
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to (re)build & publish, e.g. v0.1.0"
+        required: true
+
+env:
+  PUBLIC_RELEASE_REPO: mobile-threat-hunter/dexllm-releases  # <-- EDIT to your public repo
+
+concurrency:
+  group: release-${{ github.event.inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  guard:
+    # Fail fast unless the tag matches [project].version in pyproject.toml.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: tag == pyproject version
+        run: |
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          VER="v$(sed -nE 's/^version = "([^"]+)".*/\1/p' pyproject.toml | head -1)"
+          echo "tag=$TAG  pyproject=$VER"
+          if [ "$TAG" != "$VER" ]; then
+            echo "::error::tag '$TAG' != pyproject version '$VER' — bump [project].version first"
+            exit 1
+          fi
+
+  wheels:
+    needs: guard
+    name: wheels (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v6
+      - name: Build wheels
+        uses: pypa/cibuildwheel@v2.21.3   # bump as needed; >=2.16 for cp313
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ matrix.os }}
+          path: wheelhouse/*.whl
+
+  sdist:
+    needs: guard
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Build sdist
+        run: pipx run build --sdist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sdist
+          path: dist/*.tar.gz
+
+  publish:
+    needs: [wheels, sdist]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Publish to the public release repo
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_REPO_TOKEN }}
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          ls -la dist
+          NOTES="Pre-built dexllm wheels for ${TAG} — Linux (manylinux_2_28 x86_64) + macOS (x86_64+arm64), CPython 3.9-3.13. Download a matching wheel below, then: pip install <wheel-url>"
+          # Create the release if absent, else upload/replace assets (re-runnable).
+          gh release create "$TAG" dist/* --repo "$PUBLIC_RELEASE_REPO" --title "$TAG" --notes "$NOTES" \
+            || gh release upload "$TAG" dist/* --repo "$PUBLIC_RELEASE_REPO" --clobber

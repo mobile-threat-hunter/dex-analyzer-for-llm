@@ -52,6 +52,26 @@ build-dir = "build/{wheel_tag}"
 # Override if vendored DexKit Core lives elsewhere.
 # DEXKIT_CORE_ROOT = "/abs/path/to/vendor/dexkit_core"
 
+# --- Pre-built wheels (cibuildwheel; driven by .github/workflows/release.yml) ---
+[tool.cibuildwheel]
+build = "cp39-* cp310-* cp311-* cp312-* cp313-*"
+# musllinux: vendored C++20 core + Alpine toolchain is extra hassle; glibc
+# manylinux covers the server/analysis fleet. PyPy: native ext, skip.
+skip = "*-musllinux* pp*"
+# Smoke the wheel post-build: native ext imports + content-probe runs.
+test-command = 'python -c "import dexllm; print(dexllm.__version__); dexllm.identify(\"/etc/hostname\")"'
+
+[tool.cibuildwheel.linux]
+# C++20 needs a modern GCC — manylinux_2_28 ships GCC 12 (the default 2014 image's
+# GCC 10 is too old for parts of the slicer/dad_cpp C++20).
+manylinux-x86_64-image = "manylinux_2_28"
+archs = ["x86_64"]
+before-all = "dnf install -y zlib-devel || yum install -y zlib-devel"
+
+[tool.cibuildwheel.macos]
+archs = ["x86_64", "arm64"]
+environment = { MACOSX_DEPLOYMENT_TARGET = "11.0" }
+
 # --- Python code quality (PEP 8 / PEP 484) ---
 
 [tool.black]
