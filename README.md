@@ -27,6 +27,32 @@ See [docs/usage.md](docs/usage.md) for the full API walkthrough (L1–L7 + decom
 DEX handling compares to AOSP/ART (verification, multidex, cross-dex),
 and [CLAUDE.md](CLAUDE.md) for the decompiler port internals.
 
+## Malformed-dex verification (vs ART `DexFileVerifier`)
+
+dexllm processes adversarial input, so every dex passes a load-time structural
+verifier — `VerifyDex` ([native/core_ext/dex_verifier.h](native/core_ext/include/dex_verifier.h),
+the single safety contract) — before the core parses it. A reject throws with a
+byte-level reason (`dk.verify_report()`); valid dexes are unaffected. It is a
+readable 1:1 port of AOSP ART's `DexFileVerifier` (`// ART :NNNN` anchors,
+spec-reference not runtime dep), turned to **crash-safety**, not execution trust.
+
+| Phase (ART `dex_file_verifier.cc`) | vs ART |
+|---|---|
+| `CheckHeader` / `CheckMap` | ✅ parity — magic/version/sizes/endian, section bounds, map ordering/alignment/required |
+| `CheckIntraSection` | ✅ parity — string_data MUTF-8, id indices, type_list, code_item, class_data, encoded_array · **⊕ plus `VerifyInsns`** (per-instruction operand bounds, which ART keeps in the *runtime* method verifier, not the structural one) |
+| `CheckInterSection` | ✅ parity — id ordering/uniqueness, descriptor + member-name syntax, class_def semantics (dup / self-inherit / definer-match) |
+
+**Deliberately not checked** — execution-trust mechanics irrelevant to a read-only
+analyzer, or out of the structural scope: adler32/SHA-1 checksums, instruction
+*dataflow* semantics, annotations, debug_info, call_site/method_handle,
+proto shorty-match, access-flag bitmasks, and the offset→map-type cross-check.
+
+**Validated:** clean corpus 0 false-reject · 25/25 C++ parity · ASan corpus +
+malformed-dex fuzz **0 heap-overflow/UAF/SEGV** (was 66/120 SEGV before the
+verifier). The verifier adds ~58% to load time (still ~100× faster than
+androguard); decompile throughput is unaffected. Full per-check breakdown:
+[docs/dexkit-vs-art-dex-handling.md](docs/dexkit-vs-art-dex-handling.md) §1.
+
 ## Benchmark vs androguard
 
 dexllm ports androguard's DAD decompiler to C++, so the comparison is pure runtime

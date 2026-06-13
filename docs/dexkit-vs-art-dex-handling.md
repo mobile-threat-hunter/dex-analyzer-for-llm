@@ -60,6 +60,54 @@ still surface lazily as `SLICER_CHECK` → `std::runtime_error`, skipping that m
 > not identical sets — but the structural crash surface ART's `DexFileVerifier`
 > covers is now covered here too.
 
+### Per-check breakdown
+
+Legend: ✅ ported (behavioural parity) · ⊕ beyond ART's *structural* verifier ·
+⊖ intentionally skipped (policy) · ◐ out of scope (lazy-parsed / not dereferenced)
+· ⚠ minor gap (ART has it, low crash-value).
+
+**CheckHeader (ART :617) / CheckMap (:738)**
+
+| ART check | VerifyDex |
+|---|---|
+| magic / version / header_size / file_size / endian_tag | ✅ |
+| every section offset+size (overflow-safe `CheckValidOffsetAndSize`) | ✅ |
+| type_ids / proto_ids < 65536 (`CheckSizeLimit`) | ✅ |
+| adler32 checksum / SHA-1 signature | ⊖ (not a crash vector; malware forges them) |
+| map ordering / in-bounds / alignment / unknown+dup types / required sections | ✅ |
+
+**CheckIntraSection (ART :2450)**
+
+| ART check | VerifyDex |
+|---|---|
+| string_data — MUTF-8 + length + NUL | ✅ `VerifyStringData`/`VerifyMutf8` |
+| type / proto / field / method / class id index validity | ✅ |
+| type_list (proto params, interfaces) — incl. `type_idx < count` | ✅ `VerifyTypeList` |
+| code_item — registers / ins / outs / insns / try / handler offsets | ✅ `VerifyCodeItem` (= ART `CheckIntraCodeItem` :1726) |
+| encoded_array / encoded_value — recursive index validity | ✅ `VerifyEncodedArrayAt` (= ART `CheckEncodedArray` :1225) |
+| class_data_item | ✅ `VerifyClassData` |
+| **per-instruction operand bounds** (reg / index / branch / switch / array target) | ⊕ `VerifyInsns` — **not in ART's structural verifier** (it lives in the 6032-line runtime `method_verifier`); re-derived from the Dalvik spec via the slicer's VerifyFlags/IndexType tables |
+| debug_info_item | ◐ dexllm never parses it |
+| annotation_item / annotations_directory / hiddenapi | ◐ lazy, not on the decompile path |
+| method / field access_flags validity | ⚠ not checked (raw flags used; not a crash vector) |
+
+**CheckInterSection (ART :3477)**
+
+| ART check | VerifyDex |
+|---|---|
+| string / type / proto id ordering + uniqueness (verbatim UTF-16 comparator) | ✅ |
+| field_id — class `L`, type ≠ `V`, member-name, ordering | ✅ `VerifyTypeDescriptor` + `IsValidMemberName` |
+| method_id — class `L`/`[`, member-name, proto bound, ordering | ✅ |
+| class_def — class/super/interface `L`, dup, self-inherit, super-defined-before, dup interface, class_data definer-match | ✅ `VerifyClassDefs` (= ART `CheckInterClassDefItem` :2935) |
+| proto shorty ↔ descriptor match | ◐ correctness-only (descriptors themselves are verified) |
+| annotations definer-match · call_site / method_handle inter | ◐ not dereferenced |
+| `CheckOffsetToTypeMap` (offset matches its declared map-item type) | ⚠ not checked — contents are validated directly (`VerifyTypeList`/`VerifyClassData`/`VerifyEncodedArrayAt`) so it stays crash-safe, but type-confusion of an offset is caught by ART, not here |
+
+**Bottom line:** the structural crash surface is at ART parity (plus `VerifyInsns`
+goes beyond it); every divergence is either an *execution-trust* check (checksums,
+access flags, type-map, dataflow) that a read-only analyzer does not need, or a
+documented lazy/out-of-scope section.
+
 ## 2. Multidex duplicate-class resolution — now aligned (was the one divergence)
 
 Historically the one place dexllm output could disagree with runtime reality;
