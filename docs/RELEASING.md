@@ -8,7 +8,7 @@ toolchain. This repo (the source) stays **private**; wheels are published to a
 mobile-threat-hunter/dex-analyzer-for-llm   (PRIVATE)  ── source + CI
         │  push tag vX.Y.Z → .github/workflows/release.yml
         │  cibuildwheel (Linux manylinux_2_28 x86_64, macOS x86_64+arm64, cp39–cp313)
-        ▼  gh release create  (auth: RELEASE_REPO_TOKEN)
+        ▼  gh release create  (auth: DEXLLM_UPLOAD)
 mobile-threat-hunter/dexllm        (PUBLIC)   ── Releases only (wheels + sdist)
 ```
 
@@ -25,7 +25,7 @@ mobile-threat-hunter/dexllm        (PUBLIC)   ── Releases only (wheels + sdi
    - Copy the token.
 
 3. **Add the token to THIS (private) repo** — Settings → Secrets and variables →
-   Actions → New repository secret → name `RELEASE_REPO_TOKEN`, value = the token.
+   Actions → New repository secret → name `DEXLLM_UPLOAD`, value = the token.
 
 4. **Point the workflow at the public repo** — edit `PUBLIC_RELEASE_REPO` at the
    top of [.github/workflows/release.yml](../.github/workflows/release.yml) if the

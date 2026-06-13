@@ -7,7 +7,7 @@ name: release
 # ── ONE-TIME SETUP (see docs/RELEASING.md) ───────────────────────────────────
 #   1. Create the public release repo (e.g. mobile-threat-hunter/dexllm).
 #   2. Make a fine-grained PAT scoped to ONLY that repo, Contents: read+write.
-#   3. Add it here as the Actions secret  RELEASE_REPO_TOKEN.
+#   3. Add it here as the Actions secret  DEXLLM_UPLOAD.
 #   4. Set PUBLIC_RELEASE_REPO below to that repo.
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -82,7 +82,7 @@ jobs:
           merge-multiple: true
       - name: Publish to the public release repo
         env:
-          GH_TOKEN: ${{ secrets.RELEASE_REPO_TOKEN }}
+          GH_TOKEN: ${{ secrets.DEXLLM_UPLOAD }}
           TAG: ${{ github.event.inputs.tag || github.ref_name }}
         run: |
           ls -la dist
