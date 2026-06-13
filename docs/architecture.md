@@ -48,6 +48,26 @@ The payoff is concrete, not theoretical: because the domain only knows the port,
 `MockCodeSource` lets the 25 parity suites exercise the full pipeline **without a
 real APK or DexKit** — the same property hexagonal architecture exists to provide.
 
+## Load-time verification — anti-corruption at the input boundary
+
+dexllm processes adversarial input, so before any dex reaches the core (let alone
+the domain) the production load path screens it with a self-contained structural
+verifier, `VerifyDex` ([native/core_ext/dex_verifier.h](../native/core_ext/include/dex_verifier.h)).
+`DexKitExt` runs it on every raw `.dex` and every `classes*.dex` extracted from an
+apk **before** `AddImage` hands the bytes to the DexKit Core / slicer — a reject
+throws with a byte-level reason (surfaced by `dk.verify_report()`), so malformed or
+crafted input never reaches the parser.
+
+It mirrors the boundary invariant from the input side: like `dad_cpp`, the verifier
+depends only on the slicer dex value types (`slicer/dex_format.h`, `dex_bytecode.h`)
+— no DexKit, FlatBuffers, or zip internals — so it is testable and auditable in
+isolation. It is a readable 1:1 port of AOSP ART's `DexFileVerifier`, scoped to
+**crash-safety** (never crash the analyzer on malformed input) rather than the
+execution trust ART needs. Because it owns structural validity at the boundary, the
+decode / IR paths downstream may assume verified input and drop their own redundant
+bounds guards. Full per-check breakdown + the ART comparison:
+[dexkit-vs-art-dex-handling.md](dexkit-vs-art-dex-handling.md) §1.
+
 ## The boundary invariant
 
 > `native/dad_cpp/` must never `#include` DexKit Core, FlatBuffers schema, the zip
