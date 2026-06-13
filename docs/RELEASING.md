@@ -9,12 +9,12 @@ mobile-threat-hunter/dex-analyzer-for-llm   (PRIVATE)  ── source + CI
         │  push tag vX.Y.Z → .github/workflows/release.yml
         │  cibuildwheel (Linux manylinux_2_28 x86_64, macOS x86_64+arm64, cp39–cp313)
         ▼  gh release create  (auth: RELEASE_REPO_TOKEN)
-mobile-threat-hunter/dexllm-releases        (PUBLIC)   ── Releases only (wheels + sdist)
+mobile-threat-hunter/dexllm        (PUBLIC)   ── Releases only (wheels + sdist)
 ```
 
 ## One-time setup
 
-1. **Create the public release repo** — e.g. `mobile-threat-hunter/dexllm-releases`,
+1. **Create the public release repo** — e.g. `mobile-threat-hunter/dexllm`,
    visibility **Public**. It holds only Releases (no source). A short README that
    points at the latest release is enough.
 
@@ -56,7 +56,7 @@ tag without re-pushing.
 
 ```bash
 # from the public Releases page, or directly:
-pip install https://github.com/mobile-threat-hunter/dexllm-releases/releases/download/vX.Y.Z/dexllm-X.Y.Z-cp313-cp313-manylinux_2_28_x86_64.whl
+pip install https://github.com/mobile-threat-hunter/dexllm/releases/download/vX.Y.Z/dexllm-X.Y.Z-cp313-cp313-manylinux_2_28_x86_64.whl
 ```
 
 LLM backends still need the extras: `pip install "dexllm[all] @ <wheel-url>"`.

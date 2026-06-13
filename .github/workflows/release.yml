@@ -5,7 +5,7 @@ name: release
 # (this repo) stays private; users download pre-built wheels from the public repo.
 #
 # ── ONE-TIME SETUP (see docs/RELEASING.md) ───────────────────────────────────
-#   1. Create the public release repo (e.g. mobile-threat-hunter/dexllm-releases).
+#   1. Create the public release repo (e.g. mobile-threat-hunter/dexllm).
 #   2. Make a fine-grained PAT scoped to ONLY that repo, Contents: read+write.
 #   3. Add it here as the Actions secret  RELEASE_REPO_TOKEN.
 #   4. Set PUBLIC_RELEASE_REPO below to that repo.
@@ -21,7 +21,7 @@ on:
         required: true
 
 env:
-  PUBLIC_RELEASE_REPO: mobile-threat-hunter/dexllm-releases  # <-- EDIT to your public repo
+  PUBLIC_RELEASE_REPO: mobile-threat-hunter/dexllm  # public release repo (wheels land here)
 
 concurrency:
   group: release-${{ github.event.inputs.tag || github.ref_name }}
