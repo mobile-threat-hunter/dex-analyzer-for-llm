@@ -134,6 +134,23 @@ androguard's multi-second whole-program analysis.
 
 ## Install
 
+### Pre-built wheels (recommended — no toolchain)
+
+Wheels for **Linux** (`manylinux_2_28` x86_64) and **macOS** (x86_64 + arm64, requires
+macOS 13.3+), CPython 3.9–3.13, are published to the public release repo
+[`mobile-threat-hunter/dexllm`](https://github.com/mobile-threat-hunter/dexllm/releases).
+`pip` picks the wheel matching your platform/Python — no C++ compiler needed:
+
+```bash
+pip install dexllm --find-links https://github.com/mobile-threat-hunter/dexllm/releases/expanded_assets/v0.1.0
+# + LLM backends (MCP + FastAPI); the extra deps resolve from PyPI:
+pip install "dexllm[all]" --find-links https://github.com/mobile-threat-hunter/dexllm/releases/expanded_assets/v0.1.0
+```
+
+(Or download a specific `.whl` from the [Releases page](https://github.com/mobile-threat-hunter/dexllm/releases) and `pip install ./that-file.whl`.)
+
+### Build from source (development)
+
 Requirements: Python 3.9+ and a **C++20 compiler**. CMake / Ninja / pybind11 / scikit-build-core
 are build-time deps that `pip` provisions automatically — you don't install them by hand.
 
