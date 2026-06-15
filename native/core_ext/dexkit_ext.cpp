@@ -106,6 +106,10 @@ bool IsClassDescriptor(std::string_view d) {
 // Build "(II)Ljava/lang/String;" from a ProtoId's parameters + return type.
 // parameters_off == 0 in dex means "no parameters" — must NOT dereference, as
 // dataPtr() returns base+0 (pointing into the dex header), giving garbage size.
+// PRECONDITION: the DexItem was loaded through DexKitExt, i.e. its dex passed
+// dexkit::ext::VerifyDex — so the type_list type_idx values and return_type_idx
+// are in range and the indexing below is unchecked by design (the load-boundary
+// verifier owns that bound; see native/core_ext/dex_verifier.h).
 std::string BuildProtoDescriptor(const dexkit::DexItem& item,
                                  const dex::ProtoId& proto_id) {
     const auto& type_names = item.GetTypeNames();
@@ -336,7 +340,7 @@ DexKitExt::DexKitExt(const std::string& apk_path) : apk_path_(apk_path) {
     Probe p = ProbeContainer(apk_path);  // one content-based classification
 
     if (p.format == "unknown") {
-        if (!p.map || !p.map->ok()) {
+        if (!p.map->ok()) {  // ProbeContainer always sets map; ok() distinguishes
             throw std::runtime_error(
                 "dexllm: cannot open '" + apk_path + "' (file not found or empty)");
         }
@@ -456,20 +460,7 @@ DexKitExt::ListClassMethods(std::string_view class_descriptor) const {
                     type_names[m.class_idx].size());
         desc += "->";
         desc.append(strings[m.name_idx].data(), strings[m.name_idx].size());
-        // proto (args)ret
-        const auto& proto = proto_ids[m.proto_idx];
-        desc += '(';
-        if (proto.parameters_off != 0) {
-            const auto* type_list =
-                reader.dataPtr<dex::TypeList>(proto.parameters_off);
-            if (type_list != nullptr && type_list->size > 0) {
-                for (uint32_t k = 0; k < type_list->size; ++k) {
-                    desc.append(type_names[type_list->list[k].type_idx]);
-                }
-            }
-        }
-        desc += ')';
-        desc.append(type_names[proto.return_type_idx]);
+        desc += BuildProtoDescriptor(*dex_item, proto_ids[m.proto_idx]);
         out.push_back(std::move(desc));
     }
     return out;
