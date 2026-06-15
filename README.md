@@ -137,17 +137,17 @@ androguard's multi-second whole-program analysis.
 ### Pre-built wheels (recommended — no toolchain)
 
 Wheels for **Linux** (`manylinux_2_28` x86_64) and **macOS** (x86_64 + arm64, requires
-macOS 13.3+), CPython 3.9–3.13, are published to the public release repo
-[`mobile-threat-hunter/dexllm`](https://github.com/mobile-threat-hunter/dexllm/releases).
+macOS 13.3+), CPython 3.9–3.13, are attached to this repo's
+[Releases](https://github.com/mobile-threat-hunter/dex-analyzer-for-llm/releases).
 `pip` picks the wheel matching your platform/Python — no C++ compiler needed:
 
 ```bash
-pip install dexllm --find-links https://github.com/mobile-threat-hunter/dexllm/releases/expanded_assets/v0.1.0
+pip install dexllm --find-links https://github.com/mobile-threat-hunter/dex-analyzer-for-llm/releases/expanded_assets/v0.1.2
 # + LLM backends (MCP + FastAPI); the extra deps resolve from PyPI:
-pip install "dexllm[all]" --find-links https://github.com/mobile-threat-hunter/dexllm/releases/expanded_assets/v0.1.0
+pip install "dexllm[all]" --find-links https://github.com/mobile-threat-hunter/dex-analyzer-for-llm/releases/expanded_assets/v0.1.2
 ```
 
-(Or download a specific `.whl` from the [Releases page](https://github.com/mobile-threat-hunter/dexllm/releases) and `pip install ./that-file.whl`.)
+(Or download a specific `.whl` from the [Releases page](https://github.com/mobile-threat-hunter/dex-analyzer-for-llm/releases) and `pip install ./that-file.whl`.)
 
 ### Build from source (development)
 

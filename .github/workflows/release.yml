@@ -1,15 +1,8 @@
 name: release
 
-# Build platform wheels on a version tag and publish them to a SEPARATE PUBLIC
-# repo's Releases — the "private source + public binaries" pattern. The source
-# (this repo) stays private; users download pre-built wheels from the public repo.
-#
-# ── ONE-TIME SETUP (see docs/RELEASING.md) ───────────────────────────────────
-#   1. Create the public release repo (e.g. mobile-threat-hunter/dexllm).
-#   2. Make a fine-grained PAT scoped to ONLY that repo, Contents: read+write.
-#   3. Add it here as the Actions secret  DEXLLM_UPLOAD.
-#   4. Set PUBLIC_RELEASE_REPO below to that repo.
-# ─────────────────────────────────────────────────────────────────────────────
+# Build platform wheels on a version tag and attach them to THIS repo's Releases.
+# No setup needed — the publish job uses the built-in GITHUB_TOKEN (contents:write)
+# to create the release in the same repo. See docs/RELEASING.md.
 
 on:
   push:
@@ -19,9 +12,6 @@ on:
       tag:
         description: "Existing tag to (re)build & publish, e.g. v0.1.0"
         required: true
-
-env:
-  PUBLIC_RELEASE_REPO: mobile-threat-hunter/dexllm  # public release repo (wheels land here)
 
 concurrency:
   group: release-${{ github.event.inputs.tag || github.ref_name }}
@@ -75,18 +65,20 @@ jobs:
   publish:
     needs: [wheels, sdist]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write   # GITHUB_TOKEN needs write to create this repo's release
     steps:
       - uses: actions/download-artifact@v4
         with:
           path: dist
           merge-multiple: true
-      - name: Publish to the public release repo
+      - name: Publish to this repo's Releases
         env:
-          GH_TOKEN: ${{ secrets.DEXLLM_UPLOAD }}
+          GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.event.inputs.tag || github.ref_name }}
         run: |
           ls -la dist
           NOTES="Pre-built dexllm wheels for ${TAG} — Linux (manylinux_2_28 x86_64) + macOS (x86_64+arm64), CPython 3.9-3.13. Download a matching wheel below, then: pip install <wheel-url>"
           # Create the release if absent, else upload/replace assets (re-runnable).
-          gh release create "$TAG" dist/* --repo "$PUBLIC_RELEASE_REPO" --title "$TAG" --notes "$NOTES" \
-            || gh release upload "$TAG" dist/* --repo "$PUBLIC_RELEASE_REPO" --clobber
+          gh release create "$TAG" dist/* --title "$TAG" --notes "$NOTES" \
+            || gh release upload "$TAG" dist/* --clobber
