@@ -287,83 +287,98 @@ int CountClassesDex(const dexkit::ZipArchive& za) {
     return count;
 }
 
+// One content-based classification of a path, shared by Identify() (which
+// reports) and the constructor (which loads) so the detection rule lives in ONE
+// place and the two can't drift. `map` is always populated — even when not ok —
+// so the caller can distinguish "can't open (missing/empty)" from "opened but not
+// a recognized container". `za` (held for the zip load path) borrows `map`, so it
+// is declared after `map` → destroyed before it.
+struct Probe {
+    std::unique_ptr<dexkit::MemMap> map;
+    std::unique_ptr<dexkit::ZipArchive> za;
+    std::string format = "unknown";  // "dex" | "zip" | "unknown"
+    int dex_count = 0;
+    bool has_manifest = false;
+};
+
+Probe ProbeContainer(const std::string& path) {
+    Probe p;
+    p.map = std::make_unique<dexkit::MemMap>(path);
+    if (!p.map->ok()) return p;  // unknown: missing or empty
+    if (LooksLikeRawDex(*p.map)) {
+        p.format = "dex";
+        p.dex_count = 1;
+        return p;
+    }
+    // Not a raw .dex — prove a zip/apk by content (PK signature + parseable
+    // central directory), not by extension.
+    p.za = dexkit::ZipArchive::Open(*p.map);
+    if (!p.za) return p;  // unknown: not a zip either
+    p.format = "zip";
+    p.has_manifest = p.za->Find("AndroidManifest.xml") != nullptr;
+    p.dex_count = CountClassesDex(*p.za);
+    return p;
+}
+
 }  // namespace
 
 ContainerInfo DexKitExt::Identify(const std::string& path) {
+    Probe p = ProbeContainer(path);
     ContainerInfo info;
-    dexkit::MemMap map(path);
-    if (!map.ok()) {
-        info.format = "unknown";  // missing or empty
-        return info;
-    }
-    if (LooksLikeRawDex(map)) {
-        info.format = "dex";
-        info.dex_count = 1;
-        return info;
-    }
-    // Not a raw .dex — probe for a zip/apk by content (PK signature + a valid
-    // central directory), independent of the file's extension.
-    auto za = dexkit::ZipArchive::Open(map);
-    if (!za) {
-        info.format = "unknown";
-        return info;
-    }
-    info.format = "zip";
-    info.has_manifest = za->Find("AndroidManifest.xml") != nullptr;
-    info.is_apk = info.has_manifest;
-    info.dex_count = CountClassesDex(*za);
+    info.format = p.format;
+    info.dex_count = p.dex_count;
+    info.has_manifest = p.has_manifest;
+    info.is_apk = p.has_manifest;  // a zip carrying an AndroidManifest.xml
     return info;
 }
 
 DexKitExt::DexKitExt(const std::string& apk_path) : apk_path_(apk_path) {
-    auto map = std::make_unique<dexkit::MemMap>(apk_path);
-    if (!map->ok()) {
+    Probe p = ProbeContainer(apk_path);  // one content-based classification
+
+    if (p.format == "unknown") {
+        if (!p.map || !p.map->ok()) {
+            throw std::runtime_error(
+                "dexllm: cannot open '" + apk_path + "' (file not found or empty)");
+        }
+        // Opened, but neither a raw .dex nor a parseable zip/apk container.
         throw std::runtime_error(
-            "dexllm: cannot open '" + apk_path + "' (file not found or empty)");
+            "dexllm: '" + apk_path + "' is neither a .dex (no 'dex\\n' magic) nor a "
+            "zip/apk container (no PK signature / invalid central directory)");
     }
-    if (LooksLikeRawDex(*map)) {
-        core_ = std::make_unique<dexkit::DexKit>();
+
+    core_ = std::make_unique<dexkit::DexKit>();
+
+    if (p.format == "dex") {
         // Structural gate (DexVerifier) BEFORE the core parses the image — a
         // malformed dex is screened out here so the core/slicer never touch it.
-        auto vr = VerifyDex(reinterpret_cast<const uint8_t*>(map->data()),
-                            map->len());
+        auto vr = VerifyDex(reinterpret_cast<const uint8_t*>(p.map->data()),
+                            p.map->len());
         verify_status_.push_back({0, apk_path, vr.ok, vr.reason});
         if (!vr.ok) {
             throw std::runtime_error(
                 "dexllm: '" + apk_path + "' failed dex verification: " + vr.reason);
         }
-        core_->AddImage(std::move(map));
+        core_->AddImage(std::move(p.map));
         return;
     }
-    // Not a raw .dex. Prove it is an actual zip/apk container by its content —
-    // PK signature + parseable central directory — rather than trusting the
-    // extension, so a disguised .apk (renamed/extension-less) still loads.
-    auto za = dexkit::ZipArchive::Open(*map);
-    if (!za) {
-        throw std::runtime_error(
-            "dexllm: '" + apk_path + "' is neither a .dex (no 'dex\\n' magic) nor a "
-            "zip/apk container (no PK signature / invalid central directory)");
-    }
-    const int dex_count = CountClassesDex(*za);
-    if (dex_count == 0) {
-        const bool has_manifest = za->Find("AndroidManifest.xml") != nullptr;
+
+    // p.format == "zip": extract each classes*.dex, verify at the load boundary,
+    // and feed only structurally-valid dexes to the core via AddImage. This
+    // replaces the core's internal zip loader (DexKit(apk_path) → AddZipPath) so a
+    // malformed dex is screened out *before* the core parses it — no vendored-core
+    // change. A rejected dex is recorded (verify_report) and skipped; sibling
+    // dexes in the multidex still load (per-dex rejection).
+    if (p.dex_count == 0) {
         throw std::runtime_error(
             "dexllm: zip container '" + apk_path + "' has no classes*.dex to decompile "
-            "(AndroidManifest.xml " + (has_manifest ? "present" : "absent") + ")");
+            "(AndroidManifest.xml " + (p.has_manifest ? "present" : "absent") + ")");
     }
-    // Extract each classes*.dex ourselves, verify at the load boundary, and feed
-    // only structurally-valid dexes to the core via AddImage. This replaces the
-    // core's internal zip loader (DexKit(apk_path) → AddZipPath) so a malformed
-    // dex is screened out *before* the core parses it — no vendored-core change.
-    // A rejected dex is recorded (verify_report) and skipped; sibling dexes in
-    // the multidex still load (per-dex rejection).
-    core_ = std::make_unique<dexkit::DexKit>();
     std::vector<std::unique_ptr<dexkit::MemMap>> valid_dexes;
-    for (int idx = 1; idx <= dex_count; ++idx) {
+    for (int idx = 1; idx <= p.dex_count; ++idx) {
         auto name = "classes" + (idx == 1 ? std::string() : std::to_string(idx)) + ".dex";
-        const auto* entry = za->Find(name);
-        if (entry == nullptr) continue;  // counted above; defensive
-        auto mm = za->GetUncompressData(*entry);
+        const auto* entry = p.za->Find(name);
+        if (entry == nullptr) continue;  // counted by ProbeContainer; defensive
+        auto mm = p.za->GetUncompressData(*entry);
         if (!mm.ok()) {
             verify_status_.push_back({-1, name, false, "decompression failed"});
             continue;
@@ -381,7 +396,7 @@ DexKitExt::DexKitExt(const std::string& apk_path) : apk_path_(apk_path) {
         const std::string& first = verify_status_.empty() ? std::string{"unknown"}
                                                           : verify_status_.front().reason;
         throw std::runtime_error(
-            "dexllm: all " + std::to_string(dex_count) + " dex(es) in '" + apk_path +
+            "dexllm: all " + std::to_string(p.dex_count) + " dex(es) in '" + apk_path +
             "' failed verification (first: " + first + ")");
     }
     core_->AddImage(std::move(valid_dexes));
