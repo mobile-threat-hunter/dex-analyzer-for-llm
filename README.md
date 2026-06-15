@@ -142,9 +142,9 @@ macOS 13.3+), CPython 3.9–3.13, are attached to this repo's
 `pip` picks the wheel matching your platform/Python — no C++ compiler needed:
 
 ```bash
-pip install dexllm --find-links https://github.com/mobile-threat-hunter/dex-analyzer-for-llm/releases/expanded_assets/v0.1.2
+pip install dexllm --find-links https://github.com/mobile-threat-hunter/dex-analyzer-for-llm/releases/expanded_assets/v0.1.3
 # + LLM backends (MCP + FastAPI); the extra deps resolve from PyPI:
-pip install "dexllm[all]" --find-links https://github.com/mobile-threat-hunter/dex-analyzer-for-llm/releases/expanded_assets/v0.1.2
+pip install "dexllm[all]" --find-links https://github.com/mobile-threat-hunter/dex-analyzer-for-llm/releases/expanded_assets/v0.1.3
 ```
 
 (Or download a specific `.whl` from the [Releases page](https://github.com/mobile-threat-hunter/dex-analyzer-for-llm/releases) and `pip install ./that-file.whl`.)
