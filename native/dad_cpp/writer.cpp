@@ -390,8 +390,20 @@ public:
         // MoveException's own `type` field, which always holds the catch
         // type from the snapshot's exception handler.
         std::string vt = var->get_type();
-        if (vt.empty() && data) vt = data->get_type();
-        if (vt.empty()) vt = "unknownType";
+        // A caught exception is always a reference type (a Throwable subclass);
+        // a catch type descriptor is always `Lcls;`. When type inference put an
+        // invalid descriptor on the catch variable (a primitive like "I"/"Z" or
+        // an array "[..."), `catch (int v)` / `catch (Object[] v)` is uncompilable
+        // Java. DAD emits these verbatim (its `Constant`/type-inference quirk);
+        // we deliberately diverge to spec-correct output: prefer the actual
+        // catch-handler type carried on the MoveException, else Throwable.
+        auto is_ref_catch = [](const std::string& t) {
+            return t.size() >= 2 && t.front() == 'L' && t.back() == ';';
+        };
+        if (!is_ref_catch(vt)) {
+            if (data && is_ref_catch(data->get_type())) vt = data->get_type();
+            else vt = "Ljava/lang/Throwable;";
+        }
         w_->Write(GetType(vt));
         w_->Write(" v");
         std::string nm = var->name;
