@@ -138,14 +138,14 @@ public:
         w_->Write(buf);
     }
     void visit_constant_string(std::string_view value) override {
-        // DAD: visit_constant uses `string()` (escape) for str instances.
-        // The "true"/"false" bool case passes a Python str already.
-        // Heuristic: if value is "true"/"false" emit as-is; else escape.
-        if (value == "true" || value == "false") {
-            w_->Write(value);
-        } else {
-            w_->Write(EscapeJavaString(value));
-        }
+        // DAD writer.py:734 visit_constant → `string(cst)` ALWAYS quotes/escapes
+        // a str constant. A const-string whose value is "true"/"false" is still a
+        // String literal (e.g. `Boolean.parseBoolean("true")`) — quote it. The
+        // boolean (type "Z") path is visit_constant_bool, kept separate.
+        w_->Write(EscapeJavaString(value));
+    }
+    void visit_constant_bool(bool value) override {
+        w_->Write(value ? "true" : "false");
     }
 
     // ─── visit_base_class: DAD writer.py:468 ─────────────────────────────
@@ -802,7 +802,9 @@ void Writer::EmitLoop(LoopBlock* loop) {
         DecIndent();
         WriteIndent(); Write("}\n");
     } else if (loop->looptype.is_endless()) {
-        WriteIndent(); Write("while (true) {\n");
+        // DAD writer.py:254 emits `while(true)` WITHOUT a space (unlike the
+        // pretest `while (cond)` form) — match it exactly.
+        WriteIndent(); Write("while(true) {\n");
         IncIndent();
         loop_follow_.push_back(follow);
         // DAD writer.py:262 visit_node(loop.cond) — the wrapped header node

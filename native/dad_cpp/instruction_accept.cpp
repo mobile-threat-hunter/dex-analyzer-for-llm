@@ -28,7 +28,7 @@ void Constant::Accept(Visitor& v) {
     if (type == "Z") {
         int64_t i = std::holds_alternative<int64_t>(cst_)
                           ? std::get<int64_t>(cst_) : 0;
-        v.visit_constant_string(i == 0 ? "false" : "true");
+        v.visit_constant_bool(i != 0);
         return;
     }
     if (type == "Ljava/lang/Class;") {

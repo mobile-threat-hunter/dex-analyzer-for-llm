@@ -63,6 +63,10 @@ public:
     virtual void visit_constant_int(int64_t /*value*/)              {}
     virtual void visit_constant_double(double /*value*/)            {}
     virtual void visit_constant_string(std::string_view /*value*/)  {}
+    // Boolean (Constant.type == "Z") — emitted as the bare keyword true/false,
+    // NOT as a quoted string. Kept separate from visit_constant_string so a real
+    // String constant whose value happens to be "true"/"false" still gets quoted.
+    virtual void visit_constant_bool(bool /*value*/)                {}
     virtual void visit_base_class(std::string_view /*cls*/)         {}
     virtual void visit_variable(Variable* /*var*/)                  {}
     // DAD: visit_param(self.v, data=self.type) — int register + type str.
