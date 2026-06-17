@@ -606,8 +606,23 @@ void WhileBlockStruct(Graph& graph,
         // T[] v2.length)`). Restore n's FORWARD successor edges so the body walk
         // continues. Safe: n is out of graph.nodes/rpo, so later passes ignore it;
         // only the Writer's forward `sucs(n)` walk reads these.
+        //
+        // ONE-WAY (edges[n] only, NOT reverse_edges[suc]): this mirrors DAD's
+        // remove_node, which leaves edges[node] populated while the reverse side
+        // was already cleaned. One-way is REQUIRED for nested loops: a two-way
+        // add_edge would re-insert `n` into reverse_edges[suc], so when the INNER
+        // loop header (== suc) is later wrapped and remove_node'd, its pred-walk
+        // (`for pred in reverse_edges[suc]: edges[pred].remove(suc)`) would erase
+        // this restored edge — truncating the OUTER loop body to just the
+        // header's own instructions (e.g. gson JsonReader.skipQuotedValue lost
+        // its whole `if (v1_0 >= v2) {...}` chain). Adding only to edges[n] keeps
+        // the stale edge invisible to those pred-walks, exactly like DAD.
         for (NodeBase* s : lsuccs) {
-            graph.add_edge(n, MapGet(node_map, s));
+            NodeBase* ms = MapGet(node_map, s);
+            auto& es = graph.edges[n];
+            if (std::find(es.begin(), es.end(), ms) == es.end()) {
+                es.push_back(ms);
+            }
         }
     }
     if (change) graph.compute_rpo();
