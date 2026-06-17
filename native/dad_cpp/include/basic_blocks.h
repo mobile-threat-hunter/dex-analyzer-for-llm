@@ -357,12 +357,16 @@ public:
     // OR a CondBlock (single-instruction header). We expose both as
     // overloads; ToString / neg / etc. pick whichever is set.
     LoopBlock(std::string name, std::shared_ptr<Condition> cond);
-    LoopBlock(std::string name, CondBlock* cond_block);
+    // Wraps the loop header — ANY BasicBlock (DAD: `self.cond = node`). cond_block
+    // is derived (non-null iff the header is a CondBlock); cond_node ALWAYS holds
+    // the header so endless loops with a StatementBlock header (the SplitIfNodes
+    // case) keep their body reachable instead of collapsing to `while () {}`.
+    LoopBlock(std::string name, BasicBlock* node);
 
-    // DAD: basic_blocks.py:232 get_ins — delegate to cond.
+    // DAD: basic_blocks.py:232 get_ins — delegate to cond (the wrapped header).
     std::vector<IRFormPtr> loop_get_ins() const {
         if (cond) return cond->get_ins();
-        if (cond_block) return cond_block->get_ins();
+        if (cond_node) return cond_node->get_ins();
         return {};
     }
     // DAD: basic_blocks.py:235 neg — cond.neg() (no ins-len check).
@@ -373,7 +377,7 @@ public:
     // DAD: basic_blocks.py:238 get_loc_with_ins — delegate to cond.
     std::vector<std::pair<int, IRFormPtr>> loop_get_loc_with_ins() const {
         if (cond) return cond->get_loc_with_ins();
-        if (cond_block) return cond_block->get_loc_with_ins();
+        if (cond_node) return cond_node->get_loc_with_ins();
         return {};
     }
     // DAD: basic_blocks.py:241 visit → visit_loop_node.
@@ -391,7 +395,8 @@ public:
     std::string ToString() const override;
 
     std::shared_ptr<Condition> cond;
-    CondBlock* cond_block = nullptr;  // alternative form (DAD duck typing)
+    CondBlock* cond_block = nullptr;  // non-null iff the header is a CondBlock
+    BasicBlock* cond_node = nullptr;  // the wrapped header (any block type)
 };
 
 // =============================================================================

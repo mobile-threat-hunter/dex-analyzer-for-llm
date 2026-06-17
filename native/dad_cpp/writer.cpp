@@ -783,7 +783,10 @@ void Writer::EmitLoop(LoopBlock* loop) {
         WriteIndent(); Write("while (true) {\n");
         IncIndent();
         loop_follow_.push_back(follow);
-        if (loop->cond_block) VisitNode(loop->cond_block);
+        // DAD writer.py:262 visit_node(loop.cond) — the wrapped header node
+        // (any block type), NOT only a CondBlock; a StatementBlock header here
+        // carries the entire loop body.
+        if (loop->cond_node) VisitNode(loop->cond_node);
         VisitNode(loop->latch);
         loop_follow_.pop_back();
         DecIndent();
@@ -793,7 +796,7 @@ void Writer::EmitLoop(LoopBlock* loop) {
         IncIndent();
         loop_follow_.push_back(follow);
         latch_node_.push_back(loop->latch);
-        if (loop->cond_block) VisitNode(loop->cond_block);
+        if (loop->cond_node) VisitNode(loop->cond_node);
         latch_node_.pop_back();
         loop_follow_.pop_back();
         DecIndent();

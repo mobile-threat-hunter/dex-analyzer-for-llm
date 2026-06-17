@@ -155,10 +155,15 @@ void LoopType(NodeBase* start, NodeBase* end,
         return n && std::find(nodes_in_loop.begin(), nodes_in_loop.end(), n) !=
                        nodes_in_loop.end();
     };
+    // DAD checks the `.type.is_cond` FLAG, not the runtime class. This matters
+    // for LoopBlock: it subclasses CondBlock (so dynamic_cast is always
+    // non-null) but copy_from() copied the WRAPPED header's type — a LoopBlock
+    // wrapping a StatementBlock has type.is_cond == false. Using RTTI here
+    // forced every such loop to `pretest` (→ empty `while ()`); the flag
+    // correctly yields `endless` (`while (true)`), matching DAD.
     auto* s_cond = dynamic_cast<CondBlock*>(start);
-    auto* e_cond = dynamic_cast<CondBlock*>(end);
-    const bool s_is_cond = s_cond != nullptr;
-    const bool e_is_cond = e_cond != nullptr;
+    const bool s_is_cond = sb->type.is_cond();
+    const bool e_is_cond = eb && eb->type.is_cond();
     if (e_is_cond && eb) {
         if (s_is_cond) {
             if (in_loop(s_cond->true_branch) &&
@@ -529,9 +534,14 @@ void WhileBlockStruct(Graph& graph,
     for (NodeBase* n : snapshot) {
         auto* nn = dynamic_cast<Node*>(n);
         if (!nn || !nn->startloop) continue;
-        auto* cb = dynamic_cast<CondBlock*>(n);  // may be null for non-cond
+        // DAD: LoopBlock(node.name, node) wraps the loop header REGARDLESS of
+        // type. A header that SplitIfNodes turned into a plain StatementBlock
+        // (the common endless-loop case) must still be wrapped; passing the
+        // generic BasicBlock* (not a CondBlock* that dynamic_cast's to null)
+        // keeps the body reachable. cond_block is derived inside the ctor.
+        auto* bb = dynamic_cast<BasicBlock*>(n);
         change = true;
-        auto* new_node = graph.MakeNode<LoopBlock>(nn->name, cb);
+        auto* new_node = graph.MakeNode<LoopBlock>(nn->name, bb);
         node_map[n] = new_node;
         new_node->CopyFrom(*nn);
 
@@ -545,7 +555,8 @@ void WhileBlockStruct(Graph& graph,
             graph.add_edge(new_node, MapGet(node_map, s));
         }
         if (entry) graph.entry = new_node;
-        if (cb && cb->type.is_cond()) {
+        // DAD: if node.type.is_cond: new_node.true = node.true; .false = .false
+        if (auto* cb = dynamic_cast<CondBlock*>(n); cb && cb->type.is_cond()) {
             new_node->true_branch = cb->true_branch;
             new_node->false_branch = cb->false_branch;
         }

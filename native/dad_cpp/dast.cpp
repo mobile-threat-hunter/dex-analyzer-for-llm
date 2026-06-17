@@ -527,8 +527,8 @@ void JSONWriter::visit_loop_node(LoopBlock* loop) {
         if (loop->looptype.is_pretest()) {
             visit_node(loop->true_branch);
         } else {
-            // DAD: visit_node(loop.cond)
-            if (loop->cond_block) visit_node(loop->cond_block);
+            // DAD: visit_node(loop.cond) — wrapped header (any block type).
+            if (loop->cond_node) visit_node(loop->cond_node);
         }
         loop_follow_.pop_back();
 

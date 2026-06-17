@@ -351,9 +351,12 @@ LoopBlock::LoopBlock(std::string nm, std::shared_ptr<Condition> c)
     // DAD: basic_blocks.py:229 super().__init__(name, None)
     : CondBlock(std::move(nm), {}), cond(std::move(c)) {}
 
-// Overload: wrap a CondBlock* directly (DAD's duck-typed alternative).
-LoopBlock::LoopBlock(std::string nm, CondBlock* cb)
-    : CondBlock(std::move(nm), {}), cond_block(cb) {}
+// Wrap any header node (DAD's duck-typed `self.cond = node`). cond_block is the
+// CondBlock view (null for a StatementBlock header); cond_node always holds it.
+LoopBlock::LoopBlock(std::string nm, BasicBlock* node)
+    : CondBlock(std::move(nm), {}),
+      cond_block(dynamic_cast<CondBlock*>(node)),
+      cond_node(node) {}
 
 void LoopBlock::Visit(Visitor& /*visitor*/) {
     // DAD: basic_blocks.py:241 visitor.visit_loop_node(self).
