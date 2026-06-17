@@ -22,10 +22,11 @@ __pycache__/
 # Test corpus (binary APKs) — fetched separately for regression runs
 /test_apk/
 
-# androguard's runtime sqlite cache
+# androguard's runtime sqlite cache + log
 /androguard.db
 /androguard.db-shm
 /androguard.db-wal
+/androguard.log
 # Claude Code runtime state / per-user preferences
 .claude/settings.local.json
 .claude/scheduled_tasks.lock
