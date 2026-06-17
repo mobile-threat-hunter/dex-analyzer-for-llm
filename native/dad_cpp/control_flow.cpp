@@ -561,6 +561,18 @@ void WhileBlockStruct(Graph& graph,
             new_node->false_branch = cb->false_branch;
         }
         graph.remove_node(n);
+        // The LoopBlock wraps `n` as its cond_node; the Writer emits the do-while
+        // / endless BODY via visit_node(loop.cond) (== n) and follows n's OWN
+        // successors (EmitStatement → graph.sucs(n)). DAD relies on remove_node
+        // leaving those stale edges intact; our remove_node erases them (the
+        // ShortCircuit hang fix), which truncates the loop body at the header's
+        // own ins and leaves body-local vars undeclared (e.g. `} while (int v3 >=
+        // T[] v2.length)`). Restore n's FORWARD successor edges so the body walk
+        // continues. Safe: n is out of graph.nodes/rpo, so later passes ignore it;
+        // only the Writer's forward `sucs(n)` walk reads these.
+        for (NodeBase* s : lsuccs) {
+            graph.add_edge(n, MapGet(node_map, s));
+        }
     }
     if (change) graph.compute_rpo();
 }
