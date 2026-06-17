@@ -201,6 +201,18 @@ void SwitchBlock::UpdateAttributeWith(
         auto it = n_map.find(c);
         if (it != n_map.end()) c = it->second;
     }
+    // default_case: NOT remapped in DAD's update_attribute_with — DAD derives
+    // `self.default` in order_cases() (which runs AFTER split_if_nodes) from the
+    // already-remapped `cases`, so it is implicitly correct. Our port sets
+    // default_case at Construct time (pre-split) and defers order_cases, so we
+    // MUST remap it here. Without this, split_if_nodes turning the default
+    // target into `-pre`/`-cond` leaves default_case dangling at the removed
+    // original node → the Writer visits that stale multi-ins node and emits an
+    // empty `if ()` (its ins.size() != 1).
+    if (default_case) {
+        auto it = n_map.find(default_case);
+        if (it != n_map.end()) default_case = it->second;
+    }
     // DAD: for node1, node2 in n_map.items():
     //          if node1 in self.node_to_case:
     //              self.node_to_case[node2] = self.node_to_case.pop(node1)
