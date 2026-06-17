@@ -609,28 +609,59 @@ std::unique_ptr<Graph> Construct(const MethodSnapshot& snap,
         }
     }
 
-    std::vector<BasicBlock*> nodes;
-    nodes.reserve(snap.blocks.size());
-    for (size_t i = 0; i < snap.blocks.size(); ++i) {
-        const RawBlock& rb = snap.blocks[i];
-        auto block_node = BuildNodeFromBlock(rb, vmap, gen_ret,
-                                              exception_type_for[i]);
-        // Transfer ownership to Graph via owned_nodes_; we re-implement the
-        // adopt-and-add pattern of MakeNode here since we can't construct
-        // in-place (BuildNodeFromBlock owns).
-        BasicBlock* raw = block_node.get();
-        g->owned_nodes_.push_back(std::move(block_node));
-        g->add_node(raw);
-        nodes.push_back(raw);
+    // DAD graph.py:511-524 — `for block in bfs(start_block): make_node(...)`.
+    // We build nodes ONLY for entry-reachable blocks, and in DAD's exact
+    // bfs ORDER (not block_id order). Order is observable: BuildNodeFromBlock
+    // runs the opcode handlers, which mutate the SHARED register Variables via
+    // get_variables()/set_type() and bump the gen_ret tmp counter. Two effects:
+    //   (a) an UNREACHABLE block must not build — a dead `move-result vN` after
+    //       a (char)-returning invoke would set vN's type to "C", overwriting
+    //       the Throwable a reachable move-exception assigned → `catch (char vN)`.
+    //   (b) among reachable blocks, the last set_type on a reused register wins,
+    //       so the build order must match DAD's bfs to land on the same type and
+    //       the same tmp%d numbering.
+    // DAD's bfs (graph.py:bfs): FIFO queue; on each node, enqueue exception-
+    // handler successors first, then childs (mirrors node.exception_analysis
+    // then node.childs). nodes[] stays block_id-indexed (unreachable = nullptr)
+    // so the edge-wiring loop below keeps using block_id lookups.
+    std::vector<BasicBlock*> nodes(snap.blocks.size(), nullptr);
+    {
+        std::vector<uint32_t> queue;
+        std::vector<char> seen(snap.blocks.size(), 0);
+        queue.push_back(*snap.entry_block_id);
+        if (*snap.entry_block_id < seen.size()) seen[*snap.entry_block_id] = 1;
+        for (size_t head = 0; head < queue.size(); ++head) {
+            uint32_t bid = queue[head];
+            const RawBlock& rb = snap.blocks[bid];
+            auto block_node = BuildNodeFromBlock(rb, vmap, gen_ret,
+                                                 exception_type_for[bid]);
+            // Transfer ownership to Graph via owned_nodes_; we re-implement the
+            // adopt-and-add pattern of MakeNode here since we can't construct
+            // in-place (BuildNodeFromBlock owns).
+            BasicBlock* raw = block_node.get();
+            g->owned_nodes_.push_back(std::move(block_node));
+            g->add_node(raw);
+            nodes[bid] = raw;
+            auto enqueue = [&](uint32_t tgt) {
+                if (tgt < seen.size() && !seen[tgt]) {
+                    seen[tgt] = 1;
+                    queue.push_back(tgt);
+                }
+            };
+            for (const auto& ci : rb.exception_handlers) enqueue(ci.handler_block_id);
+            for (const auto& edge : rb.childs) enqueue(edge.target_block_id);
+        }
     }
 
     // STEP 2: Wire edges.
     for (size_t i = 0; i < snap.blocks.size(); ++i) {
         const RawBlock& rb = snap.blocks[i];
         BasicBlock* node = nodes[i];
+        if (!node) continue;  // unreachable block — never built (DAD bfs)
         for (const auto& edge : rb.childs) {
             if (edge.target_block_id >= nodes.size()) continue;
             BasicBlock* tgt = nodes[edge.target_block_id];
+            if (!tgt) continue;  // edge into unreachable region
             g->add_edge(node, tgt);
             // Type-specific wiring
             if (auto* cb = dynamic_cast<CondBlock*>(node)) {
@@ -658,6 +689,7 @@ std::unique_ptr<Graph> Construct(const MethodSnapshot& snap,
         for (const auto& ci : rb.exception_handlers) {
             if (ci.handler_block_id >= nodes.size()) continue;
             BasicBlock* handler = nodes[ci.handler_block_id];
+            if (!handler) continue;  // handler in unreachable region
             handler->in_catch = true;
             // DAD graph.py:470-471 — set_catch_type on both the try block
             // and the catch handler. Empty ci.catch_type means catch-all;
