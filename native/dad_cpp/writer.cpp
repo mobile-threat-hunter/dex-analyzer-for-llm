@@ -801,9 +801,14 @@ void Writer::EmitLoop(LoopBlock* loop) {
         loop_follow_.pop_back();
         DecIndent();
         WriteIndent(); Write("} while (");
+        // DAD writer.py:271 loop.latch.visit_cond(self). visit_cond dispatches
+        // virtually: a plain CondBlock latch emits its single ins; a
+        // ShortCircuitBlock latch (compound `&&`/`||` do-while condition) emits
+        // the whole Condition tree. The old `get_ins().back()` path only handled
+        // the single-ins case → short-circuit do-while conditions emitted as
+        // empty `} while ()`.
         if (auto* latch_cond = dynamic_cast<CondBlock*>(loop->latch)) {
-            if (!latch_cond->get_ins().empty())
-                latch_cond->get_ins().back()->Accept(wi);
+            latch_cond->visit_cond(wi);
         }
         Write(");\n");
     }
