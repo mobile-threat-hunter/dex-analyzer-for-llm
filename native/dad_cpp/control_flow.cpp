@@ -300,6 +300,18 @@ std::unordered_set<NodeBase*> IfStruct(
             if (node == idom) {
                 const auto rit = graph.reverse_edges.find(n);
                 if (rit != graph.reverse_edges.end() && rit->second.size() > 1) {
+                    // An if's follow is the merge point of its branches, which
+                    // live in the same exception context as the cond. A node
+                    // reachable only through catch handlers (in_catch) when the
+                    // cond is NOT in_catch is a catch-handler tail, not a valid
+                    // structured-if follow — selecting it (it often has the max
+                    // num) pulls the catch body into the try region, leaving the
+                    // catch variable undeclared (`Log.e(.., Object[] vN, vM)`).
+                    // DAD's graph/num state never selects it; we exclude it
+                    // explicitly. (When the cond itself is in_catch, an in_catch
+                    // follow is legitimate, so only filter the context mismatch.)
+                    auto* nn = dynamic_cast<Node*>(n);
+                    if (nn && nn->in_catch && !cb->in_catch) continue;
                     ldominates.push_back(n);
                 }
             }
