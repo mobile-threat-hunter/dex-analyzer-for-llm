@@ -5,6 +5,8 @@
 
 #include "node.h"
 
+#include <algorithm>
+
 namespace dexkit::dad {
 
 // DAD: node.py:84 Node.__init__
@@ -53,7 +55,13 @@ void Node::UpdateAttributeWith(
         auto it = n_map.find(n);
         dedup.insert(it != n_map.end() ? it->second : n);
     }
+    // DETERMINISM: `dedup` is a pointer-keyed unordered_set, so assigning its
+    // iteration order to loop_nodes is ASLR-dependent. loop_nodes is consumed as
+    // a membership set (order-independent), but pin a stable order (post-order
+    // num) anyway so no downstream order-dependence can leak non-determinism.
     loop_nodes.assign(dedup.begin(), dedup.end());
+    std::sort(loop_nodes.begin(), loop_nodes.end(),
+              [](NodeBase* a, NodeBase* b) { return a->num < b->num; });
 }
 
 // DAD: node.py:124 Interval.__init__

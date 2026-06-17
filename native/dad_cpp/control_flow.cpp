@@ -71,8 +71,18 @@ IntervalResult Intervals(Graph& graph) {
     }
 
     // DAD: for interval, heads in edges.items(): for head in heads: ...
-    for (const auto& [interv, header_list] : edges) {
-        for (NodeBase* h : header_list) {
+    // DETERMINISM: `edges` is a pointer-keyed unordered_map, so iterating it
+    // directly gives ASLR-dependent order — and that order seeds the interval
+    // graph's edges → compute_rpo → loop detection, making loop structuring
+    // non-deterministic across runs. DAD's `edges` (a Python dict) iterates in
+    // INSERTION order, which here equals interval-creation order (each interval
+    // appends its own edges as it is processed). Iterate owned_intervals (that
+    // exact creation order) to match DAD and be reproducible.
+    for (const auto& iv_ptr : owned_intervals) {
+        Interval* interv = iv_ptr.get();
+        auto eit = edges.find(interv);
+        if (eit == edges.end()) continue;
+        for (NodeBase* h : eit->second) {
             auto it = interv_heads.find(h);
             if (it != interv_heads.end()) {
                 interval_graph.add_edge(interv, it->second);
@@ -589,6 +599,12 @@ void CatchStruct(Graph& graph,
     // We iterate the keys (a copy, since we mutate graph).
     std::vector<NodeBase*> catch_keys;
     for (const auto& [k, _] : graph.reverse_catch_edges) catch_keys.push_back(k);
+    // DETERMINISM: reverse_catch_edges is a pointer-keyed unordered_map, so the
+    // collection order above is ASLR-dependent (pointer hash) — DAD iterates a
+    // Python dict in insertion order, deterministically. Sort by post-order num
+    // (stable, ASLR-independent) so the try/catch structuring is reproducible.
+    std::sort(catch_keys.begin(), catch_keys.end(),
+              [](NodeBase* a, NodeBase* b) { return a->num < b->num; });
 
     for (NodeBase* catch_block : catch_keys) {
         // Skip if this block itself has outgoing catch edges (handler of an
