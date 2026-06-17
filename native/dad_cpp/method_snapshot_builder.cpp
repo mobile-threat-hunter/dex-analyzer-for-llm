@@ -547,10 +547,22 @@ void ComputeChildEdges(MethodSnapshot& snap, const DecodePass& pass,
                                                      last.branch_target);
             uint32_t false_id = FindBlockIdForByteOff(snap.blocks,
                                                       blk.end_byte);
-            if (true_id != UINT32_MAX)
-                blk.childs.push_back({ChildEdge::Kind::Branch, true_id});
+            // Child ORDER must match androguard's, because DAD consumes
+            // node.childs order for bfs() construction (→ shared-vmap set_type
+            // winner / tmp numbering) AND for graph.sucs() (→ compute_rpo
+            // post-order → ins numbering). androguard's `determineNext` for the
+            // `if` opcodes (0x32-0x3D) returns `[fall-through, branch-target]`
+            // (core/dex/__init__.py: `[cur_idx + length, off + cur_idx]`), so
+            // the FALSE (fall-through) edge is listed before the TRUE (branch)
+            // edge. Emitting them branch-first reversed the bfs traversal of a
+            // diamond's two arms, landing reused registers on the wrong
+            // unified type vs DAD (e.g. `catch (Heastindian)` where DAD gives
+            // `catch (Nevanescent)`). Kind tags drive true_branch/false_branch
+            // wiring in Construct, so order is free to match androguard here.
             if (false_id != UINT32_MAX)
                 blk.childs.push_back({ChildEdge::Kind::BranchFalse, false_id});
+            if (true_id != UINT32_MAX)
+                blk.childs.push_back({ChildEdge::Kind::Branch, true_id});
             continue;
         }
 
