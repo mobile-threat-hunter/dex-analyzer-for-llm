@@ -421,11 +421,25 @@ NodeBase* MergeShortCircuit(Graph& graph,
     idom.erase(node2);
     new_node->CopyFrom(*node1);
 
-    for (NodeBase* pred : lpreds) {
+    // DETERMINISM: lpreds/ldests are pointer-keyed unordered_sets, so iterating
+    // them to add_edge wires new_node's pred/suc vectors in ASLR-dependent order.
+    // That order seeds the next post_order() the merge loop walks, which changes
+    // which short-circuits merge and with what De-Morgan polarity → fully
+    // non-deterministic output (DAD's Python `set` has the same flaw). Sort by
+    // post-order num (ties broken by the deterministic block name) so the merge
+    // sequence — and the decompiled output — is reproducible across processes.
+    auto by_num = [](NodeBase* a, NodeBase* b) {
+        return a->num != b->num ? a->num < b->num : a->name < b->name;
+    };
+    std::vector<NodeBase*> lpreds_v(lpreds.begin(), lpreds.end());
+    std::vector<NodeBase*> ldests_v(ldests.begin(), ldests.end());
+    std::sort(lpreds_v.begin(), lpreds_v.end(), by_num);
+    std::sort(ldests_v.begin(), ldests_v.end(), by_num);
+    for (NodeBase* pred : lpreds_v) {
         pred->UpdateAttributeWith(node_map);
         graph.add_edge(MapGet(node_map, pred), new_node);
     }
-    for (NodeBase* dest : ldests) {
+    for (NodeBase* dest : ldests_v) {
         graph.add_edge(new_node, MapGet(node_map, dest));
     }
     if (entry) graph.entry = new_node;
