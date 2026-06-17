@@ -701,6 +701,28 @@ void Writer::EmitIf(CondBlock* cond) {
         Write("// }\n");
         return;
     }
+    // DAD writer.py:318-328 — break form. When a branch of this if leaves the
+    // enclosing loop (targets loop_follow), emit `if (cond) { break; }` and then
+    // continue with the in-loop branch. Without this the loop-exit edge produced
+    // an empty `if (cond) {}` with the break silently dropped.
+    NodeBase* loop_follow = loop_follow_.empty() ? nullptr : loop_follow_.back();
+    if (loop_follow != nullptr && cond->false_branch == loop_follow) {
+        cond->neg();
+        std::swap(cond->true_branch, cond->false_branch);
+    }
+    if (loop_follow != nullptr &&
+        (cond->true_branch == loop_follow || cond->false_branch == loop_follow)) {
+        WriteIndent(); Write("if (");
+        WriterImpl wib(this); wib.constructor_ = is_constructor_;
+        cond->visit_cond(wib);
+        Write(") {\n");
+        IncIndent();
+        WriteIndent(); Write("break;\n");
+        DecIndent();
+        WriteIndent(); Write("}\n");
+        if (cond->false_branch) VisitNode(cond->false_branch);
+        return;
+    }
     NodeBase* follow = nullptr;
     auto it = cond->follow.find("if");
     if (it != cond->follow.end()) follow = it->second;
