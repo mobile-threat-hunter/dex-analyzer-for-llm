@@ -756,18 +756,41 @@ IRFormPtr GenInvokeRetName::New() {
 // Interval::ComputeEnd — DAD node.py:149
 // =============================================================================
 void Interval::ComputeEnd(Graph& graph) {
-    // DAD: e_max = -inf; for sucs in self.content: for end in graph.sucs(sucs):
-    //          if end not in self.content and e_max < end.num:
-    //              self.end = end; e_max = end.num
-    int e_max = std::numeric_limits<int>::min();
+    // DAD node.py:149 compute_end:
+    //   for node in self.content:
+    //       for suc in graph.sucs(node):
+    //           if suc not in self.content:
+    //               self.end = node          # the MEMBER, not the successor
+    //   self.end = self.end or self.head
+    //
+    // DAD sets `end` to the content MEMBER that has an external successor,
+    // taking the last such member in Python set-iteration order. That order is
+    // id/ASLR-dependent and non-deterministic across runs — we observed DAD
+    // pick member 0x3e on one run and 0x11a on another for the very same
+    // interval (both valid members, both yield correct loop structuring).
+    // Our content() is an unordered_set with no insertion order to mirror, so
+    // we pick the MAX-num member with an external successor as a deterministic,
+    // ASLR-proof canonical choice (reproduces DAD's typical 0x3e here).
+    //
+    // The earlier port assigned `end_ = the successor` and maximized the
+    // SUCCESSOR's num. That could select a node OUTSIDE the interval (e.g. a
+    // nested-loop head like 0x40), corrupting the loop latch and truncating
+    // the loop body into a spurious do/while. Assigning the member is the
+    // 1:1-faithful behavior.
+    end_ = nullptr;
+    int n_max = std::numeric_limits<int>::min();
     for (NodeBase* member : content()) {
-        for (NodeBase* end : graph.sucs(member)) {
-            if (content().count(end) == 0 && e_max < end->num) {
-                end_ = end;
-                e_max = end->num;
+        for (NodeBase* suc : graph.sucs(member)) {
+            if (content().count(suc) == 0) {
+                if (member->num > n_max) {
+                    n_max = member->num;
+                    end_ = member;
+                }
+                break;  // one external successor qualifies the member
             }
         }
     }
+    if (!end_) end_ = head();  // DAD: self.end = self.end or self.head
 }
 
 // =============================================================================
