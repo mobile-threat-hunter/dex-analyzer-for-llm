@@ -14,6 +14,7 @@
 #include <sstream>
 #include <string>
 
+#include "mutf8.h"
 #include "opcode_ins.h"  // Op::EQUAL etc.
 #include "util.h"
 #include "visitor.h"
@@ -59,93 +60,31 @@ std::string FormatDoubleLiteral(double d) {
 // EscapeJavaString
 // ============================================================================
 std::string EscapeJavaString(std::string_view raw) {
-    // Dex strings are MUTF-8 (modified UTF-8): NUL as C0 80, and supplementary
-    // chars encoded as surrogate PAIRS (each surrogate a 3-byte 0xED sequence).
-    // We decode MUTF-8 and re-emit every non-ASCII codepoint as PROPER UTF-8 —
-    // the actual character (연결, 中文, 😀), not a `\uXXXX` escape. This diverges
-    // from DAD (writer.py:757 `string()` ASCII-escapes via `unicode-escape`)
-    // but is far more useful for a triage tool reading e.g. localized phishing
-    // strings, matches the AST path (dast.cpp Mutf8ToUtf8), and is valid UTF-8
-    // for pybind11 (supplementary chars become 4-byte sequences, NOT the
-    // 0xED-prefixed surrogates pybind11's strict decode rejects). Only control
-    // chars and undecodable bytes keep the `\uXXXX` / `\n` form.
+    // Dex strings are MUTF-8. We decode them to the SAME UTF-16 code units ART
+    // builds in a mirror::String (mutf8::Mutf8ToUtf16), then render each unit as
+    // Java source text: a BMP non-surrogate becomes readable UTF-8 (연결, 中文),
+    // a surrogate or control char becomes a `\uXXXX` escape (so a supplementary
+    // char stays the `😀`-style surrogate PAIR ART keeps in memory). This
+    // diverges from DAD (writer.py:757 `string()` ASCII-escapes everything via
+    // `unicode-escape`) but is far more useful for a triage tool reading e.g.
+    // localized phishing strings, agrees with the AST path (dast.cpp), and is
+    // valid UTF-8 for pybind11. Java-source metacharacters are escaped first.
     std::string out;
     out.reserve(raw.size() + 2);
     out += '"';
-    const uint8_t* p = reinterpret_cast<const uint8_t*>(raw.data());
-    const uint8_t* end = p + raw.size();
-    auto emit_u = [&](uint32_t cp) {
-        char buf[8];
-        std::snprintf(buf, sizeof(buf), "\\u%04x", cp);
-        out += buf;
-    };
-    auto emit_utf8 = [&](uint32_t cp) {
-        if (cp < 0x80) {
-            out += static_cast<char>(cp);
-        } else if (cp < 0x800) {
-            out += static_cast<char>(0xC0 | (cp >> 6));
-            out += static_cast<char>(0x80 | (cp & 0x3F));
-        } else if (cp < 0x10000) {
-            out += static_cast<char>(0xE0 | (cp >> 12));
-            out += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
-            out += static_cast<char>(0x80 | (cp & 0x3F));
-        } else {
-            out += static_cast<char>(0xF0 | (cp >> 18));
-            out += static_cast<char>(0x80 | ((cp >> 12) & 0x3F));
-            out += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
-            out += static_cast<char>(0x80 | (cp & 0x3F));
+    for (uint16_t u : mutf8::Mutf8ToUtf16(raw)) {
+        switch (u) {
+            case '\\': out += "\\\\"; continue;
+            case '"':  out += "\\\""; continue;
+            // DAD writer.py:766 escapes single-quote in string literals too.
+            // Java doesn't require it but DAD always emits `\'` — match for parity.
+            case '\'': out += "\\'";  continue;
+            case '\n': out += "\\n";  continue;
+            case '\r': out += "\\r";  continue;
+            case '\t': out += "\\t";  continue;
+            default: break;
         }
-    };
-    while (p < end) {
-        uint8_t c = *p;
-        if (c == '\\')      { out += "\\\\"; ++p; continue; }
-        if (c == '"')       { out += "\\\""; ++p; continue; }
-        // DAD writer.py:766 escapes single-quote in string literals too.
-        // Java doesn't require it but DAD always emits `\'` — match for parity.
-        if (c == '\'')      { out += "\\'";  ++p; continue; }
-        if (c == '\n')      { out += "\\n";  ++p; continue; }
-        if (c == '\r')      { out += "\\r";  ++p; continue; }
-        if (c == '\t')      { out += "\\t";  ++p; continue; }
-        if (c < 0x20)       { emit_u(c); ++p; continue; }
-        if (c < 0x80)       { out += static_cast<char>(c); ++p; continue; }
-        // Non-ASCII MUTF-8 sequence — decode codepoint and re-emit as UTF-8.
-        uint32_t cp = 0;
-        size_t n = 0;
-        if ((c & 0xE0) == 0xC0)      { cp = c & 0x1F; n = 2; }  // 110xxxxx
-        else if ((c & 0xF0) == 0xE0) { cp = c & 0x0F; n = 3; }  // 1110xxxx
-        else if ((c & 0xF8) == 0xF0) { cp = c & 0x07; n = 4; }  // 11110xxx
-        else                         { emit_u(c); ++p; continue; }  // bad lead
-        if (p + n > end)             { emit_u(c); ++p; continue; }  // truncated
-        bool bad = false;
-        for (size_t i = 1; i < n; ++i) {
-            if ((p[i] & 0xC0) != 0x80) { bad = true; break; }
-            cp = (cp << 6) | (p[i] & 0x3F);
-        }
-        if (bad)                     { emit_u(c); ++p; continue; }
-        // A decoded control char (notably MUTF-8's NUL `C0 80` → U+0000, or any
-        // overlong control) must stay a `\uXXXX` escape, not a raw byte in the
-        // string literal.
-        // Emit per UTF-16 CODE UNIT, exactly as ART decodes MUTF-8 into a
-        // `mirror::String` (ConvertModifiedUtf8ToUtf16): each MUTF-8 surrogate
-        // (a 3-byte 0xED sequence) stays its own code unit — supplementary
-        // chars are kept as a `😀`-style surrogate PAIR, NOT folded
-        // into a 4-byte UTF-8 codepoint. A BMP non-surrogate is emitted as
-        // readable UTF-8; a surrogate or a decoded control char is a `\uXXXX`
-        // escape (the only valid text form, and pybind11-decodable).
-        auto emit_unit = [&](uint32_t u) {
-            if (u < 0x20 || (u >= 0xD800 && u <= 0xDFFF)) emit_u(u);
-            else                                          emit_utf8(u);
-        };
-        if (cp <= 0xFFFF) {
-            emit_unit(cp);
-        } else {
-            // A genuine 4-byte sequence (non-canonical for dex MUTF-8) → the
-            // UTF-16 surrogate pair, matching ART's in-memory representation.
-            uint32_t v = cp - 0x10000;
-            emit_u(0xD800 | (v >> 10));
-            emit_u(0xDC00 | (v & 0x3FF));
-        }
-        p += n;
+        mutf8::AppendUtf16Escaped(out, u);
     }
     out += '"';
     return out;

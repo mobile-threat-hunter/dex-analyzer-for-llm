@@ -9,6 +9,7 @@
 
 #include "decompile.h"
 #include "method_snapshot.h"
+#include "mutf8.h"
 #include "util.h"
 
 namespace dexkit::dad {
@@ -16,74 +17,40 @@ namespace dexkit::dad {
 namespace {
 
 // Sanitize the decompiled source so it's valid UTF-8 for Python's strict
-// decoder, WITHOUT mangling readable text. Dex strings/identifiers are MUTF-8:
-// supplementary codepoints are encoded as surrogate PAIRS (two 3-byte 0xED
-// sequences) which strict UTF-8 rejects. We re-emit PROPER UTF-8 — pass valid
-// sequences through unchanged (so 연결 / 中文 stay readable), combine a
-// surrogate pair into one 4-byte codepoint, and escape only a LONE surrogate
-// or a malformed byte as `\uXXXX`. (Previously this escaped *every* non-ASCII
-// codepoint to pure ASCII, which made e.g. Korean phishing strings unreadable
-// — and undid the Writer's EscapeJavaString, which already emits proper UTF-8.)
+// decoder, WITHOUT mangling readable text. Identifiers (class/method/field
+// names) reach the output as raw dex MUTF-8 — not routed through the Writer's
+// string escaper — so a whole-output pass cleans them here. We decode to the
+// SAME UTF-16 code units ART builds (mutf8::Mutf8ToUtf16) and render each unit
+// as text: BMP non-surrogate → readable UTF-8 (so 연결 / 中文 stay legible),
+// surrogate/control → `\uXXXX` (supplementary chars stay surrogate PAIRS,
+// matching ART's mirror::String, and never the raw 0xED bytes pybind11's strict
+// decode rejects). Already-emitted ASCII and the Writer's proper-UTF-8 string
+// bytes decode 1:1, so this is idempotent over them.
 std::string SanitizeUtf8(std::string_view in) {
     std::string out;
     out.reserve(in.size());
     const uint8_t* p = reinterpret_cast<const uint8_t*>(in.data());
-    const uint8_t* end = p + in.size();
-    auto emit_u = [&](uint32_t cp) {
-        char buf[8];
-        std::snprintf(buf, sizeof(buf), "\\u%04x", cp);
-        out += buf;
-    };
-    auto emit_utf8 = [&](uint32_t cp) {
-        if (cp < 0x80) {
-            out += static_cast<char>(cp);
-        } else if (cp < 0x800) {
-            out += static_cast<char>(0xC0 | (cp >> 6));
-            out += static_cast<char>(0x80 | (cp & 0x3F));
-        } else if (cp < 0x10000) {
-            out += static_cast<char>(0xE0 | (cp >> 12));
-            out += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
-            out += static_cast<char>(0x80 | (cp & 0x3F));
-        } else {
-            out += static_cast<char>(0xF0 | (cp >> 18));
-            out += static_cast<char>(0x80 | ((cp >> 12) & 0x3F));
-            out += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
-            out += static_cast<char>(0x80 | (cp & 0x3F));
+    const size_t len = in.size();
+    size_t i = 0;
+    while (i < len) {
+        if (p[i] < 0x80) {
+            // Native ASCII — including the structural '\n'/' ' that lay out the
+            // Java source and the `\uXXXX` escapes the Writer already emitted —
+            // passes through verbatim (do NOT escape these control bytes).
+            out += static_cast<char>(p[i]);
+            ++i;
+            continue;
         }
-    };
-    while (p < end) {
-        uint8_t c = *p;
-        if (c < 0x80) { out += static_cast<char>(c); ++p; continue; }
-        uint32_t cp = 0;
-        size_t n = 0;
-        if ((c & 0xE0) == 0xC0) { cp = c & 0x1F; n = 2; }
-        else if ((c & 0xF0) == 0xE0) { cp = c & 0x0F; n = 3; }
-        else if ((c & 0xF8) == 0xF0) { cp = c & 0x07; n = 4; }
-        else { emit_u(c); ++p; continue; }
-        if (p + n > end) { emit_u(c); ++p; continue; }
-        bool ok = true;
-        for (size_t i = 1; i < n; ++i) {
-            uint8_t t = p[i];
-            if ((t & 0xC0) != 0x80) { ok = false; break; }
-            cp = (cp << 6) | (t & 0x3F);
+        // Maximal run of non-ASCII bytes: a MUTF-8 multibyte sequence is a lead
+        // byte (>= 0xC0) plus continuation bytes (0x80-0xBF), all >= 0x80, so a
+        // run boundary never splits a sequence. Decode it via the shared ART
+        // decoder and escape per UTF-16 code unit (surrogate/control → \uXXXX,
+        // BMP → readable UTF-8).
+        const size_t start = i;
+        while (i < len && p[i] >= 0x80) ++i;
+        for (uint16_t u : mutf8::Mutf8ToUtf16(in.substr(start, i - start))) {
+            mutf8::AppendUtf16Escaped(out, u);
         }
-        if (!ok) { emit_u(c); ++p; continue; }
-        // Emit per UTF-16 code unit, matching ART's MUTF-8→mirror::String decode
-        // (see EscapeJavaString): a MUTF-8 surrogate keeps its own code unit
-        // (supplementary chars stay surrogate PAIRS, not folded to 4-byte);
-        // BMP non-surrogate → readable UTF-8; surrogate/control → \uXXXX.
-        auto emit_unit = [&](uint32_t u) {
-            if (u < 0x20 || (u >= 0xD800 && u <= 0xDFFF)) emit_u(u);
-            else                                          emit_utf8(u);
-        };
-        if (cp <= 0xFFFF) {
-            emit_unit(cp);
-        } else {
-            uint32_t v = cp - 0x10000;
-            emit_u(0xD800 | (v >> 10));
-            emit_u(0xDC00 | (v & 0x3FF));
-        }
-        p += n;
     }
     return out;
 }

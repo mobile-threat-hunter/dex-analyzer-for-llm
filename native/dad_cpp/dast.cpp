@@ -15,6 +15,7 @@
 #include <cstring>
 #include <string>
 
+#include "mutf8.h"
 #include "opcode_ins.h"  // Op::EQUAL
 #include "util.h"
 
@@ -55,63 +56,12 @@ std::string PyFloatRepr(double f) {
     return s;
 }
 
-// Decode dex MUTF-8 → standard UTF-8 so the string survives pybind11's strict
-// UTF-8 decode. (DAD stores the Python-decoded str; we store valid UTF-8.)
+// Decode dex MUTF-8 → standard UTF-8 (the AST stores the decoded string VALUE,
+// like DAD's Python str). Delegates to the shared ART-faithful decoder: MUTF-8 →
+// UTF-16 code units → UTF-8 with valid surrogate pairs combined into one 4-byte
+// code point. See native/dad_cpp/mutf8.h.
 std::string Mutf8ToUtf8(std::string_view raw) {
-    std::string out;
-    out.reserve(raw.size());
-    const uint8_t* p = reinterpret_cast<const uint8_t*>(raw.data());
-    const uint8_t* end = p + raw.size();
-    auto emit_cp = [&](uint32_t cp) {
-        if (cp < 0x80) {
-            out += static_cast<char>(cp);
-        } else if (cp < 0x800) {
-            out += static_cast<char>(0xC0 | (cp >> 6));
-            out += static_cast<char>(0x80 | (cp & 0x3F));
-        } else if (cp < 0x10000) {
-            out += static_cast<char>(0xE0 | (cp >> 12));
-            out += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
-            out += static_cast<char>(0x80 | (cp & 0x3F));
-        } else {
-            out += static_cast<char>(0xF0 | (cp >> 18));
-            out += static_cast<char>(0x80 | ((cp >> 12) & 0x3F));
-            out += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
-            out += static_cast<char>(0x80 | (cp & 0x3F));
-        }
-    };
-    while (p < end) {
-        uint8_t c = *p;
-        if (c < 0x80) { out += static_cast<char>(c); ++p; continue; }
-        uint32_t cp = 0;
-        size_t n = 0;
-        if ((c & 0xE0) == 0xC0) { cp = c & 0x1F; n = 2; }
-        else if ((c & 0xF0) == 0xE0) { cp = c & 0x0F; n = 3; }
-        else if ((c & 0xF8) == 0xF0) { cp = c & 0x07; n = 4; }
-        else { emit_cp(c); ++p; continue; }
-        if (p + n > end) { emit_cp(c); ++p; continue; }
-        bool bad = false;
-        for (size_t i = 1; i < n; ++i) {
-            if ((p[i] & 0xC0) != 0x80) { bad = true; break; }
-            cp = (cp << 6) | (p[i] & 0x3F);
-        }
-        if (bad) { emit_cp(c); ++p; continue; }
-        // MUTF-8 surrogate pair: high surrogate followed by low surrogate.
-        if (cp >= 0xD800 && cp <= 0xDBFF && p + n + 3 <= end &&
-            (p[n] & 0xF0) == 0xE0 && (p[n + 1] & 0xC0) == 0x80 &&
-            (p[n + 2] & 0xC0) == 0x80) {
-            uint32_t lo = ((p[n] & 0x0F) << 12) | ((p[n + 1] & 0x3F) << 6) |
-                          (p[n + 2] & 0x3F);
-            if (lo >= 0xDC00 && lo <= 0xDFFF) {
-                cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
-                emit_cp(cp);
-                p += n + 3;
-                continue;
-            }
-        }
-        emit_cp(cp);
-        p += n;
-    }
-    return out;
+    return mutf8::Mutf8ToUtf8(raw);
 }
 
 // ── AST factory helpers (DAD dast.py:600-766 static methods) ─────────────────

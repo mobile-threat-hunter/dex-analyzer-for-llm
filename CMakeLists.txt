@@ -36,6 +36,7 @@ target_link_libraries(dexkit_ext PUBLIC dexkit_static)
 # DexKit-DAD decompiler.
 add_library(dexkit_dad STATIC
     native/dad_cpp/decompiler.cpp
+    native/dad_cpp/mutf8.cpp
     native/dad_cpp/util.cpp
     native/dad_cpp/node.cpp
     native/dad_cpp/basic_blocks.cpp
