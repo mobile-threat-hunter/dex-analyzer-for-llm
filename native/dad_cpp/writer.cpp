@@ -125,24 +125,26 @@ std::string EscapeJavaString(std::string_view raw) {
         // A decoded control char (notably MUTF-8's NUL `C0 80` → U+0000, or any
         // overlong control) must stay a `\uXXXX` escape, not a raw byte in the
         // string literal.
-        if (cp < 0x20)               { emit_u(cp); p += n; continue; }
-        // MUTF-8 surrogate pair: a high surrogate followed by a 3-byte low
-        // surrogate combines into one supplementary codepoint (4-byte UTF-8).
-        if (cp >= 0xD800 && cp <= 0xDBFF && p + n + 3 <= end &&
-            (p[n] & 0xF0) == 0xE0 && (p[n + 1] & 0xC0) == 0x80 &&
-            (p[n + 2] & 0xC0) == 0x80) {
-            uint32_t lo = ((p[n] & 0x0F) << 12) | ((p[n + 1] & 0x3F) << 6) |
-                          (p[n + 2] & 0x3F);
-            if (lo >= 0xDC00 && lo <= 0xDFFF) {
-                emit_utf8(0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00));
-                p += n + 3;
-                continue;
-            }
+        // Emit per UTF-16 CODE UNIT, exactly as ART decodes MUTF-8 into a
+        // `mirror::String` (ConvertModifiedUtf8ToUtf16): each MUTF-8 surrogate
+        // (a 3-byte 0xED sequence) stays its own code unit — supplementary
+        // chars are kept as a `😀`-style surrogate PAIR, NOT folded
+        // into a 4-byte UTF-8 codepoint. A BMP non-surrogate is emitted as
+        // readable UTF-8; a surrogate or a decoded control char is a `\uXXXX`
+        // escape (the only valid text form, and pybind11-decodable).
+        auto emit_unit = [&](uint32_t u) {
+            if (u < 0x20 || (u >= 0xD800 && u <= 0xDFFF)) emit_u(u);
+            else                                          emit_utf8(u);
+        };
+        if (cp <= 0xFFFF) {
+            emit_unit(cp);
+        } else {
+            // A genuine 4-byte sequence (non-canonical for dex MUTF-8) → the
+            // UTF-16 surrogate pair, matching ART's in-memory representation.
+            uint32_t v = cp - 0x10000;
+            emit_u(0xD800 | (v >> 10));
+            emit_u(0xDC00 | (v & 0x3FF));
         }
-        // A lone surrogate is not valid UTF-8 — keep it as a \uXXXX escape so the
-        // result stays pybind11-decodable.
-        if (cp >= 0xD800 && cp <= 0xDFFF) emit_u(cp);
-        else                              emit_utf8(cp);
         p += n;
     }
     out += '"';

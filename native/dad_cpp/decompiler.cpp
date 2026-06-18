@@ -68,24 +68,21 @@ std::string SanitizeUtf8(std::string_view in) {
             cp = (cp << 6) | (t & 0x3F);
         }
         if (!ok) { emit_u(c); ++p; continue; }
-        // Decoded control char (e.g. MUTF-8 NUL `C0 80`) stays a \uXXXX escape.
-        if (cp < 0x20) { emit_u(cp); p += n; continue; }
-        // MUTF-8 surrogate pair → one supplementary codepoint (4-byte UTF-8).
-        if (cp >= 0xD800 && cp <= 0xDBFF && p + n + 3 <= end &&
-            (p[n] & 0xF0) == 0xE0 && (p[n + 1] & 0xC0) == 0x80 &&
-            (p[n + 2] & 0xC0) == 0x80) {
-            uint32_t lo = ((p[n] & 0x0F) << 12) | ((p[n + 1] & 0x3F) << 6) |
-                          (p[n + 2] & 0x3F);
-            if (lo >= 0xDC00 && lo <= 0xDFFF) {
-                emit_utf8(0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00));
-                p += n + 3;
-                continue;
-            }
+        // Emit per UTF-16 code unit, matching ART's MUTF-8→mirror::String decode
+        // (see EscapeJavaString): a MUTF-8 surrogate keeps its own code unit
+        // (supplementary chars stay surrogate PAIRS, not folded to 4-byte);
+        // BMP non-surrogate → readable UTF-8; surrogate/control → \uXXXX.
+        auto emit_unit = [&](uint32_t u) {
+            if (u < 0x20 || (u >= 0xD800 && u <= 0xDFFF)) emit_u(u);
+            else                                          emit_utf8(u);
+        };
+        if (cp <= 0xFFFF) {
+            emit_unit(cp);
+        } else {
+            uint32_t v = cp - 0x10000;
+            emit_u(0xD800 | (v >> 10));
+            emit_u(0xDC00 | (v & 0x3FF));
         }
-        // Lone surrogate (D800-DFFF) is invalid UTF-8 — escape it; everything
-        // else passes through as proper UTF-8.
-        if (cp >= 0xD800 && cp <= 0xDFFF) emit_u(cp);
-        else                              emit_utf8(cp);
         p += n;
     }
     return out;
