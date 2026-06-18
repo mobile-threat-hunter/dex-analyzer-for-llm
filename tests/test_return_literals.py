@@ -170,6 +170,68 @@ def test_nonfinite_returns_render_as_java_constants(scanned):
                          r"NEGATIVE_INFINITY)", s), s
 
 
+# canonical IEEE-754 binary64 bit patterns of common double constants. A
+# genuine 64-bit long that is *exactly* one of these is astronomically unlikely,
+# so their appearance as a bare integer literal means raw double bits leaked into
+# a float/double context (comparison / arithmetic / compound-assign / arg) — the
+# bug the fp-const correction fixes.
+_DOUBLE_BIT_PATTERNS = {
+    "4607182418800017408",  # 1.0
+    "4611686018427387904",  # 2.0
+    "4613937818241073152",  # 3.0
+    "4616189618054758400",  # 4.0
+    "4617315517961601024",  # 5.0
+    "4621819117588971520",  # 10.0
+    "4636737291354636288",  # 100.0
+    "4602678819172646912",  # 0.5
+    "4599075939470750515",  # 0.1 (approx)
+    "-4616189618054758400", # -4.0 etc. (sign-flipped forms)
+}
+
+
+def test_double_bit_patterns_largely_eliminated():
+    """Canonical double bit-patterns must be rendered as their value (2.0, not
+    4611686018427387904) in every position where the F/D context is known
+    (binary expr / comparison / compound-assign / method-arg / plain-assign /
+    array-store). The fp-const correction took these from ~hundreds to a small
+    residual on the bundled corpus; the residual is type-inference-limited (a
+    variable that holds a double but was not inferred as `D`, so no F/D context
+    is visible) plus the field-store position — both deferred. This is a
+    regression guard: a broken fixed-position would spike the count back to the
+    hundreds.
+    """
+    apks = _apks()
+    if not apks:
+        pytest.skip("no test APK")
+    leaks = []
+    pat = re.compile(r"(?<![\w.])(-?\d{16,})(?![\w.])")
+    for apk in apks:
+        try:
+            if dexllm.identify(apk).get("dex_count", 0) == 0:
+                continue
+            dk = dexllm.DexKit(apk)
+        except Exception:
+            continue
+        per = 0
+        for c in dk.list_classes():
+            if per >= 3000:
+                break
+            try:
+                src = dk.decompile_class_java(c)
+            except Exception:
+                continue
+            per += 1
+            for line in src.splitlines():
+                for m in pat.finditer(line):
+                    if m.group(1) in _DOUBLE_BIT_PATTERNS:
+                        leaks.append((c.split("/")[-1][:24], line.strip()[:70]))
+    # generous bound (observed ~8) — catches gross regression of a fixed position
+    assert len(leaks) <= 25, (
+        f"{len(leaks)} raw double-bit-pattern leak(s) — a fixed position likely "
+        f"regressed; first: {leaks[:8]}"
+    )
+
+
 def test_text_and_ast_agree_on_corrected_returns():
     """For a handful of corrected returns, decompile_method_ast must not emit a
     raw int / lowercase -inf where decompile_method_java emits the literal."""

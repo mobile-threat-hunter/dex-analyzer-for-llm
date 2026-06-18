@@ -851,10 +851,40 @@ AstValue JSONWriter::write_inplace_if_possible(IRForm* lhs, IRForm* rhs) {
             if ((bop == "+" || bop == "-") && cst && cst->get_int_value() == 1) {
                 return UnaryPostfix(visit_expr(lhs), bop + bop);
             }
-            return Assignment(visit_expr(lhs), visit_expr(exp_rhs), bop);
+            return Assignment(visit_expr(lhs),
+                              visit_expr_fp(exp_rhs, lhs), bop);
         }
     }
-    return Assignment(visit_expr(lhs), visit_expr(rhs));
+    // plain assignment: `double v = <raw-bits int const>` → reinterpret the rhs
+    // const against the lhs F/D type (mirrors writer.cpp write_ind_visit_end).
+    return Assignment(visit_expr(lhs),
+                      visit_expr_fp_typed(rhs, lhs ? lhs->get_type()
+                                                   : std::string_view()));
+}
+
+AstValue JSONWriter::visit_expr_fp_typed(IRForm* operand,
+                                         std::string_view target) {
+    if (operand && (target == "F" || target == "D")) {
+        if (auto* c = dynamic_cast<Constant*>(operand); c && c->is_const()) {
+            const std::string ct = c->get_type();
+            if (ct == "I" || ct == "J" || ct == "B" || ct == "S" || ct == "C") {
+                const int64_t iv = c->get_int_value();
+                if (target == "F") {
+                    const uint32_t bits = static_cast<uint32_t>(iv);
+                    float f; std::memcpy(&f, &bits, sizeof(f));
+                    return LiteralFloatChecked(f);
+                }
+                const uint64_t bits = static_cast<uint64_t>(iv);
+                double d; std::memcpy(&d, &bits, sizeof(d));
+                return LiteralDoubleChecked(d);
+            }
+        }
+    }
+    return visit_expr(operand);
+}
+AstValue JSONWriter::visit_expr_fp(IRForm* operand, IRForm* sib) {
+    return visit_expr_fp_typed(operand, sib ? sib->get_type()
+                                            : std::string_view());
 }
 
 // DAD: dast.py:401 visit_expr.
@@ -873,9 +903,15 @@ AstValue JSONWriter::visit_expr(IRForm* op) {
                            visit_expr(MapGet(x, x->idx_id())));
     }
     if (auto* x = dynamic_cast<ArrayStoreInstruction*>(op)) {
-        AstValue arr = ArrayAccess(visit_expr(MapGet(x, x->array_id())),
+        IRForm* array = MapGet(x, x->array_id());
+        AstValue arr = ArrayAccess(visit_expr(array),
                                    visit_expr(MapGet(x, x->index_id())));
-        return Assignment(std::move(arr), visit_expr(MapGet(x, x->rhs_id())));
+        const std::string at = array ? array->get_type() : std::string();
+        const std::string_view comp =
+            (at.size() >= 2 && at[0] == '[') ? std::string_view(at).substr(1)
+                                             : std::string_view();
+        return Assignment(std::move(arr),
+                          visit_expr_fp_typed(MapGet(x, x->rhs_id()), comp));
     }
     if (auto* x = dynamic_cast<AssignExpression*>(op)) {
         auto lhs_id = x->GetLhsId();
@@ -888,9 +924,10 @@ AstValue JSONWriter::visit_expr(IRForm* op) {
         return ParseDescriptor(x->clsdesc());
     }
     if (auto* x = dynamic_cast<BinaryExpression*>(op)) {
-        AstValue expr = BinaryInfix(x->op(),
-                                    visit_expr(MapGet(x, x->arg1_id())),
-                                    visit_expr(MapGet(x, x->arg2_id())));
+        IRForm* a1 = MapGet(x, x->arg1_id());
+        IRForm* a2 = MapGet(x, x->arg2_id());
+        AstValue expr = BinaryInfix(x->op(), visit_expr_fp(a1, a2),
+                                    visit_expr_fp(a2, a1));
         if (!dynamic_cast<BinaryCompExpression*>(op)) expr = Parenthesis(std::move(expr));
         return expr;
     }
@@ -899,8 +936,10 @@ AstValue JSONWriter::visit_expr(IRForm* op) {
                                 visit_expr(MapGet(x, x->arg_id()))));
     }
     if (auto* x = dynamic_cast<ConditionalExpression*>(op)) {
-        return BinaryInfix(x->op(), visit_expr(MapGet(x, x->arg1_id())),
-                           visit_expr(MapGet(x, x->arg2_id())));
+        IRForm* a1 = MapGet(x, x->arg1_id());
+        IRForm* a2 = MapGet(x, x->arg2_id());
+        return BinaryInfix(x->op(), visit_expr_fp(a1, a2),
+                           visit_expr_fp(a2, a1));
     }
     if (auto* x = dynamic_cast<ConditionalZExpression*>(op)) {
         IRForm* arg = MapGet(x, x->arg_id());
@@ -963,7 +1002,13 @@ AstValue JSONWriter::visit_expr(IRForm* op) {
     if (auto* x = dynamic_cast<InvokeInstruction*>(op)) {
         IRForm* base = MapGet(x, x->base());
         std::vector<AstValue> params;
-        for (const auto& a : x->args()) params.push_back(visit_expr(MapGet(x, a)));
+        const auto& argids = x->args();
+        const auto& pt = x->ptype();
+        for (size_t i = 0; i < argids.size(); ++i) {
+            const std::string_view target =
+                i < pt.size() ? std::string_view(pt[i]) : std::string_view();
+            params.push_back(visit_expr_fp_typed(MapGet(x, argids[i]), target));
+        }
         // DAD's op.triple comes from androguard get_triple(): triple[0] is the
         // internal class name (no L;). Our InvokeInstruction stores the raw
         // descriptor, so strip it here for parity.

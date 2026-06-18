@@ -127,6 +127,13 @@ private:
     AstValue ins_to_stmt(IRForm* op, bool is_ctor);      // _visit_ins
     AstValue write_inplace_if_possible(IRForm* lhs, IRForm* rhs);
     AstValue visit_expr(IRForm* op);
+    // visit_expr, but if `operand` is an integer Constant in an F/D context (a
+    // raw-IEEE-bits float/double const), emit the reinterpreted literal —
+    // mirrors writer.cpp emit_fp_const_typed so the AST agrees with the text
+    // path. `_fp` takes the sibling binary operand; `_fp_typed` the target type
+    // directly (e.g. a method param type).
+    AstValue visit_expr_fp(IRForm* operand, IRForm* sib);
+    AstValue visit_expr_fp_typed(IRForm* operand, std::string_view target);
     AstValue visit_arr_data(const std::vector<int64_t>& value);
     AstValue visit_decl(Variable* var, AstValue init = AstValue::Null());
 

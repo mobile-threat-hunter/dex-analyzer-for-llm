@@ -263,7 +263,13 @@ public:
         w_->Write("[");
         visit_ins(index);
         w_->Write("] = ");
-        visit_ins(rhs);
+        // `dArr[i] = <raw-bits int const>` → the element type (array type minus
+        // one `[`) gives the F/D context.
+        const std::string at = array ? array->get_type() : std::string();
+        const std::string_view comp =
+            (at.size() >= 2 && at[0] == '[') ? std::string_view(at).substr(1)
+                                             : std::string_view();
+        if (!emit_fp_const_typed(rhs, comp)) visit_ins(rhs);
         w_->EndIns();
     }
 
@@ -299,7 +305,7 @@ public:
 
     // ─── visit_invoke: DAD writer.py:542 ─────────────────────────────────
     void visit_invoke(std::string_view name, IRForm* base,
-                      const std::vector<std::string>& /*ptype*/,
+                      const std::vector<std::string>& ptype,
                       std::string_view /*rtype*/,
                       const std::vector<IRForm*>& args,
                       InvokeInstruction* invokeInstr) override {
@@ -328,10 +334,15 @@ public:
         }
         w_->Write("(");
         bool first = true;
-        for (IRForm* arg : args) {
+        for (size_t i = 0; i < args.size(); ++i) {
             if (!first) w_->Write(", ");
             first = false;
-            visit_ins(arg);
+            // A float/double param passed a raw-IEEE-bits int constant — emit
+            // the literal (e.g. `Math.pow(x, 2.4)` not `Math.pow(x, raw-bits)`).
+            const std::string_view pt = i < ptype.size()
+                                            ? std::string_view(ptype[i])
+                                            : std::string_view();
+            if (!emit_fp_const_typed(args[i], pt)) visit_ins(args[i]);
         }
         w_->Write(")");
     }
@@ -514,14 +525,49 @@ public:
         w_->EndIns();
     }
 
+    // Beyond-DAD: in a Dalvik float/double binary op (add/sub/mul/div/rem/cmp-
+    // float|double) BOTH operands are the same F/D type, so an integer-typed
+    // Constant operand here is the raw IEEE bit pattern (const-wide loads it as
+    // "J"; const as "I"). DAD emits the raw int — invalid VALUE (Java widens the
+    // long to double, e.g. `* 4611686018427387904` instead of `* 2.0`). When the
+    // SIBLING operand is F/D-typed, reinterpret the constant to the spec-correct
+    // literal. Same precedent/formatters as the return fix. Returns true if it
+    // emitted; the integer-type guard leaves typed-reference constants alone.
+    bool emit_fp_const_typed(IRForm* operand, std::string_view target) {
+        if (target != "F" && target != "D") return false;
+        auto* c = dynamic_cast<Constant*>(operand);
+        if (!c || !c->is_const()) return false;
+        const std::string ct = c->get_type();
+        if (ct != "I" && ct != "J" && ct != "B" && ct != "S" && ct != "C") {
+            return false;
+        }
+        const int64_t iv = c->get_int_value();
+        if (target == "F") {
+            const uint32_t bits = static_cast<uint32_t>(iv);
+            float f; std::memcpy(&f, &bits, sizeof(f));
+            w_->Write(FormatFloatLiteral(f));
+        } else {
+            const uint64_t bits = static_cast<uint64_t>(iv);
+            double d; std::memcpy(&d, &bits, sizeof(d));
+            w_->Write(FormatDoubleLiteral(d));
+        }
+        return true;
+    }
+    // Sibling-operand form: the other operand of a binary op identifies the F/D
+    // context (Dalvik fp ops have both operands the same type).
+    bool maybe_emit_fp_const(IRForm* operand, IRForm* sib) {
+        return (operand && sib) ? emit_fp_const_typed(operand, sib->get_type())
+                                : false;
+    }
+
     void visit_binary_expression(std::string_view op, IRForm* arg1,
                                   IRForm* arg2) override {
         w_->Write("(");
-        visit_ins(arg1);
+        if (!maybe_emit_fp_const(arg1, arg2)) visit_ins(arg1);
         w_->Write(" ");
         w_->Write(op);
         w_->Write(" ");
-        visit_ins(arg2);
+        if (!maybe_emit_fp_const(arg2, arg1)) visit_ins(arg2);
         w_->Write(")");
     }
     void visit_unary_expression(std::string_view op, IRForm* arg) override {
@@ -540,11 +586,11 @@ public:
     }
     void visit_cond_expression(std::string_view op, IRForm* arg1,
                                 IRForm* arg2) override {
-        visit_ins(arg1);
+        if (!maybe_emit_fp_const(arg1, arg2)) visit_ins(arg1);
         w_->Write(" ");
         w_->Write(op);
         w_->Write(" ");
-        visit_ins(arg2);
+        if (!maybe_emit_fp_const(arg2, arg1)) visit_ins(arg2);
     }
     void visit_condz_expression(std::string_view op, IRForm* arg) override {
         // DAD writer.py:727-730 — if condz wraps a BinaryCompExpression (long
@@ -596,7 +642,11 @@ private:
         w_->WriteIndent();
         visit_ins(lhs);
         w_->Write(sep);
-        if (rhs) visit_ins(rhs);
+        // `double v = <raw-bits int const>` → `double v = 0.5`: when assigning to
+        // an F/D-typed lhs, reinterpret a raw-IEEE-bits integer constant rhs.
+        if (rhs && !(lhs && emit_fp_const_typed(rhs, lhs->get_type()))) {
+            visit_ins(rhs);
+        }
         w_->EndIns();
     }
 
@@ -620,7 +670,9 @@ private:
                 w_->Write(" ");
                 w_->Write(bin->op());
                 w_->Write("= ");
-                visit_ins(arg2);
+                // lhs is the F/D-typed sibling for arg2 (a raw-bits int const in
+                // a double/float compound assign, e.g. `p2 *= 2.0`).
+                if (!maybe_emit_fp_const(arg2, lhs)) visit_ins(arg2);
                 w_->EndIns();
                 return;
             }
