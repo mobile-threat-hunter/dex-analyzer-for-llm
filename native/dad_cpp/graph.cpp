@@ -625,6 +625,19 @@ std::unique_ptr<Graph> Construct(const MethodSnapshot& snap,
     // then node.childs). nodes[] stays block_id-indexed (unreachable = nullptr)
     // so the edge-wiring loop below keeps using block_id lookups.
     std::vector<BasicBlock*> nodes(snap.blocks.size(), nullptr);
+    // DAD in_catch seed (graph.py:468 make_node): `exception_node.in_catch =
+    // True` is set ONLY when the handler node is created fresh — i.e. the
+    // exception edge is the FIRST reference to that block. A block reached by
+    // normal flow first (created as a normal node, or first-enqueued via a
+    // child edge) is NEVER seeded in_catch, even if a later exception edge
+    // targets it. We mirror this by recording, at first-enqueue time, whether
+    // that first reference was an exception edge. (The old code set
+    // `handler->in_catch = true` unconditionally during edge-wiring, which
+    // over-marked merge-point blocks that double as handlers — e.g. a
+    // try-body merge node that is also a catch target. IfStruct's in_catch
+    // follow filter then wrongly excluded such a node as an if-follow, leaving
+    // the cond unresolved → mis-scoped try and dropped/negated bodies.)
+    std::vector<char> catch_seed(snap.blocks.size(), 0);
     {
         std::vector<uint32_t> queue;
         std::vector<char> seen(snap.blocks.size(), 0);
@@ -642,14 +655,24 @@ std::unique_ptr<Graph> Construct(const MethodSnapshot& snap,
             g->owned_nodes_.push_back(std::move(block_node));
             g->add_node(raw);
             nodes[bid] = raw;
-            auto enqueue = [&](uint32_t tgt) {
-                if (tgt < seen.size() && !seen[tgt]) {
-                    seen[tgt] = 1;
-                    queue.push_back(tgt);
+            if (catch_seed[bid]) raw->in_catch = true;
+            // Exception handlers first (DAD make_node processes exceptions
+            // before childs); mark catch_seed on the FIRST enqueue only.
+            for (const auto& ci : rb.exception_handlers) {
+                uint32_t h = ci.handler_block_id;
+                if (h < seen.size() && !seen[h]) {
+                    catch_seed[h] = 1;
+                    seen[h] = 1;
+                    queue.push_back(h);
                 }
-            };
-            for (const auto& ci : rb.exception_handlers) enqueue(ci.handler_block_id);
-            for (const auto& edge : rb.childs) enqueue(edge.target_block_id);
+            }
+            for (const auto& edge : rb.childs) {
+                uint32_t t = edge.target_block_id;
+                if (t < seen.size() && !seen[t]) {
+                    seen[t] = 1;
+                    queue.push_back(t);
+                }
+            }
         }
     }
 
@@ -690,7 +713,12 @@ std::unique_ptr<Graph> Construct(const MethodSnapshot& snap,
             if (ci.handler_block_id >= nodes.size()) continue;
             BasicBlock* handler = nodes[ci.handler_block_id];
             if (!handler) continue;  // handler in unreachable region
-            handler->in_catch = true;
+            // NOTE: in_catch is seeded in the bfs build loop above (only when a
+            // block is FIRST reached via an exception edge — DAD make_node's
+            // `if exception_node is None: exception_node.in_catch = True`). We
+            // deliberately do NOT set it here: a block that is both a normal
+            // merge point and a catch target must stay in_catch=False (matches
+            // DAD), or IfStruct's follow filter wrongly excludes it.
             // DAD graph.py:470-471 — set_catch_type on both the try block
             // and the catch handler. Empty ci.catch_type means catch-all;
             // we keep the empty string here and let MoveException default
