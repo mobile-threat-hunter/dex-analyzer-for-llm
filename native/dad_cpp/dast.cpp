@@ -9,6 +9,7 @@
 
 #include <array>
 #include <charconv>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -214,6 +215,29 @@ AV LiteralLong(int64_t b) { return Literal(AV::Str(std::to_string(b) + "L"), Tup
 AV LiteralFloat(double f) { return Literal(AV::Str(PyFloatRepr(f) + "f"), Tuple2(".float", 0)); }
 AV LiteralDouble(double f){ return Literal(AV::Str(PyFloatRepr(f)), Tuple2(".double", 0)); }
 AV LiteralBool(bool b)    { return Literal(AV::Str(b ? "true" : "false"), Tuple2(".boolean", 0)); }
+// NaN/±Inf-aware variants used by the beyond-DAD return-literal correction
+// (a F/D method returning the raw IEEE bits). PyFloatRepr renders NaN/Inf as
+// "nan"/"-inf" (invalid Java, and inconsistent with the text Writer's
+// Float.NaN / Double.NEGATIVE_INFINITY); emit the same Java tokens the text
+// path uses so decompile_method_ast agrees with decompile_method_java.
+AV LiteralFloatChecked(float f) {
+    if (std::isnan(f)) return Literal(AV::Str("Float.NaN"), Tuple2(".float", 0));
+    if (std::isinf(f)) {
+        return Literal(AV::Str(f > 0 ? "Float.POSITIVE_INFINITY"
+                                     : "Float.NEGATIVE_INFINITY"),
+                       Tuple2(".float", 0));
+    }
+    return LiteralFloat(static_cast<double>(f));
+}
+AV LiteralDoubleChecked(double d) {
+    if (std::isnan(d)) return Literal(AV::Str("Double.NaN"), Tuple2(".double", 0));
+    if (std::isinf(d)) {
+        return Literal(AV::Str(d > 0 ? "Double.POSITIVE_INFINITY"
+                                     : "Double.NEGATIVE_INFINITY"),
+                       Tuple2(".double", 0));
+    }
+    return LiteralDouble(d);
+}
 AV LiteralString(std::string s) {
     return Literal(AV::Str(Mutf8ToUtf8(s)), Tuple2("java/lang/String", 0));
 }
@@ -751,12 +775,12 @@ AstValue JSONWriter::ins_to_stmt(IRForm* op, bool is_ctor) {
                         const uint32_t bits = static_cast<uint32_t>(iv);
                         float f;
                         std::memcpy(&f, &bits, sizeof(f));
-                        expr = LiteralFloat(static_cast<double>(f));
+                        expr = LiteralFloatChecked(f);
                     } else if (rt == "D") {
                         const uint64_t bits = static_cast<uint64_t>(iv);
                         double d;
                         std::memcpy(&d, &bits, sizeof(d));
-                        expr = LiteralDouble(d);
+                        expr = LiteralDoubleChecked(d);
                     } else {
                         expr = visit_expr(a);
                     }

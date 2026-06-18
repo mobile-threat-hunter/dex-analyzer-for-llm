@@ -10,7 +10,7 @@ A `PreToolUse` hook injects this reminder when editing `vendor/dexkit_core/Core/
 
 ### Port status — `native/dad_cpp/` (COMPLETE — end-to-end pipeline working)
 
-All 12 DAD modules ported. `dk.decompile_method_java(descriptor)` returns DAD-quality Java text on real APKs. 26 parity suites pass (25 DAD-module + 1 verifier regression/fuzz; ~770+ cumulative checks), 0 regressions.
+All 12 DAD modules ported. `dk.decompile_method_java(descriptor)` returns DAD-quality Java text on real APKs. 27 parity suites pass (25 DAD-module + 1 verifier regression/fuzz + 1 return-literal beyond-DAD; ~790+ cumulative checks), 0 regressions.
 
 | C++ Module | DAD source | Status |
 |---|---|---|
@@ -228,7 +228,7 @@ Every `const*` opcode builds the value as an **integer-typed** `Constant` (DAD `
 - **`F` (float):** the int holds the raw IEEE-754 binary32 bits → reinterpret + `%.9gf` (e.g. `return 1065353216;` → `return 1f;` for `1.0f`; widening would otherwise give the wrong value `1.07e9`). NaN/±Inf → `Float.NaN`/`Float.POSITIVE_INFINITY`/…
 - **`D` (double):** the long holds raw binary64 bits → reinterpret + `%.17g` (`getMAX_VALUE()D` → `1.7976931348623157e+308`, `getMIN_VALUE()D` → `4.9406564584124654e-324`, `getNEGATIVE_INFINITY()D` → `Double.NEGATIVE_INFINITY`). Whole-number doubles (0.0/1.0) render as `0`/`1` — valid & correctly-valued via int→double widening.
 
-Float/double literal formatting mirrors the core_ext EncodedValue IEEE754 helper (`FormatFloatLiteral`/`FormatDoubleLiteral`). Beyond-DAD divergence, catch-clamp precedent (no `*DADFaithful` sibling — parity suites don't assert return emission; e2e *improves* where DAD was invalid). parity 26/26, sweep 0-crash/0-timeout/159,305. tvleanback byte-match-vs-DAD dips 98.0%→96.8% (methods now emit valid `false`/`null`/float-literal where DAD emits invalid `0`/`1`/raw-bits — a metric artifact of being more correct than the reference, not a regression; verified the new mismatches are all this divergence, and 2480 genuine `null` / 783 string / 48 class-literal returns are preserved).
+Float/double literal formatting mirrors the core_ext EncodedValue IEEE754 helper (`FormatFloatLiteral`/`FormatDoubleLiteral`). Beyond-DAD divergence, catch-clamp precedent (no `*DADFaithful` sibling — parity suites don't assert return emission; e2e *improves* where DAD was invalid). The **AST path** (`decompile_method_ast`, dast.cpp `ins_to_stmt` ReturnInstruction) applies the identical correction (same integer-constant guard; NaN/±Inf via `LiteralFloatChecked`/`LiteralDoubleChecked` so the AST emits `Double.NEGATIVE_INFINITY` not `to_chars`'s invalid `-inf`) so the text and AST APIs agree. The const\*/high16 pre-shift uses the well-defined unsigned-shift idiom (negative `bbbb` left-shift is UB pre-C++20, and the F/D reinterpret consumes those bits). Locked in by **`tests/parity/return_literal_parity_test.cpp`** (27th suite, 24 checks: text+AST × Z/ref/F/D, NaN/±Inf, high16 negative shift, and regression guards that int/char returns stay numeric). parity 27/27, sweep 0-crash/0-timeout/159,305. tvleanback byte-match-vs-DAD dips 98.0%→96.8% (methods now emit valid `false`/`null`/float-literal where DAD emits invalid `0`/`1`/raw-bits — a metric artifact of being more correct than the reference, not a regression; verified the new mismatches are all this divergence, and 2480 genuine `null` / 783 string / 48 class-literal returns are preserved).
 
 ### Writer constant/keyword nits — string `"true"` + `while(true)` (2026-06-17)
 
