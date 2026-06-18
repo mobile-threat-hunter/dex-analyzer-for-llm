@@ -89,11 +89,11 @@ void ArrayStoreInstruction::Accept(Visitor& v) {
 }
 
 void StaticInstruction::Accept(Visitor& v) {
-    v.visit_put_static(cls_, name_, MapGet(*this, rhs_));
+    v.visit_put_static(cls_, name_, ftype(), MapGet(*this, rhs_));
 }
 
 void InstanceInstruction::Accept(Visitor& v) {
-    v.visit_put_instance(MapGet(*this, lhs_), name_, MapGet(*this, rhs_));
+    v.visit_put_instance(MapGet(*this, lhs_), name_, atype(), MapGet(*this, rhs_));
 }
 
 // =============================================================================

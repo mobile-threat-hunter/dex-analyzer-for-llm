@@ -275,25 +275,26 @@ public:
 
     // ─── visit_put_static: DAD writer.py:518 ─────────────────────────────
     void visit_put_static(std::string_view cls, std::string_view name,
-                          IRForm* rhs) override {
+                          std::string_view ftype, IRForm* rhs) override {
         w_->WriteIndent();
         w_->Write(cls);
         w_->Write(".");
         w_->Write(name);
         w_->Write(" = ");
-        visit_ins(rhs);
+        if (!emit_fp_const_typed(rhs, ftype)) visit_ins(rhs);
         w_->EndIns();
     }
 
     // ─── visit_put_instance: DAD writer.py:524 ───────────────────────────
     void visit_put_instance(IRForm* lhs, std::string_view name,
-                            IRForm* rhs) override {
+                            std::string_view ftype, IRForm* rhs) override {
         w_->WriteIndent();
         visit_ins(lhs);
         w_->Write(".");
         w_->Write(name);
         w_->Write(" = ");
-        visit_ins(rhs);
+        // `this.doubleField = <raw-bits int const>` → `= 0.5`.
+        if (!emit_fp_const_typed(rhs, ftype)) visit_ins(rhs);
         w_->EndIns();
     }
 

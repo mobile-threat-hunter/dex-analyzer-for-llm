@@ -997,7 +997,8 @@ AstValue JSONWriter::visit_expr(IRForm* op) {
     if (auto* x = dynamic_cast<InstanceInstruction*>(op)) {
         std::array<std::string, 3> tr{StripL(x->clsdesc()), x->name(), x->atype()};
         AstValue lhs = FieldAccess(TripleAV(tr), visit_expr(MapGet(x, x->lhs_id())));
-        return Assignment(std::move(lhs), visit_expr(MapGet(x, x->rhs_id())));
+        return Assignment(std::move(lhs),
+                          visit_expr_fp_typed(MapGet(x, x->rhs_id()), x->atype()));
     }
     if (auto* x = dynamic_cast<InvokeInstruction*>(op)) {
         IRForm* base = MapGet(x, x->base());
@@ -1070,7 +1071,8 @@ AstValue JSONWriter::visit_expr(IRForm* op) {
     if (auto* x = dynamic_cast<StaticInstruction*>(op)) {
         std::array<std::string, 3> tr{StripL(x->clsdesc()), x->name(), x->ftype()};
         AstValue lhs = FieldAccess(TripleAV(tr), ParseDescriptor(x->clsdesc()));
-        return Assignment(std::move(lhs), visit_expr(MapGet(x, x->rhs_id())));
+        return Assignment(std::move(lhs),
+                          visit_expr_fp_typed(MapGet(x, x->rhs_id()), x->ftype()));
     }
     if (auto* x = dynamic_cast<SwitchExpression*>(op)) {
         return visit_expr(MapGet(x, x->src_id()));
