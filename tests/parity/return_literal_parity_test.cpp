@@ -10,10 +10,12 @@
 // const-class returns keep their class literal, not null).
 #include "dast.h"
 #include "decompile.h"
+#include "instruction.h"
 #include "method_snapshot.h"
 #include "mock_code_source.h"
 #include "slicer/dex_bytecode.h"
 #include <cstdio>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -139,6 +141,27 @@ int main() {
         std::string tc = TextOf({CONST4_V0_1, RETURN_V0}, "()C", 1, 61);
         check_contains("char stays 1 TEXT", tc, "return 1;");
         check_absent("char not true", tc, "true");
+    }
+
+    // 7. INVARIANT: a ConditionalExpression (int/ref two-register `if-eq`/`if-lt`
+    //    comparison) must NOT carry an F/D type. visit_cond_expression is shared
+    //    with BinaryCompExpression (cmp-long/float/double); the fp-const
+    //    reinterpretation keys off that `etype`, so if a ConditionalExpression
+    //    ever reported "F"/"D" an integer comparison constant (e.g. the int
+    //    1065353216, which is also the bit pattern of 1.0f) would be silently
+    //    mangled into `1f`. This pins the empty-type invariant the safety of the
+    //    shared visitor relies on.
+    {
+        using namespace dad;
+        auto a1 = std::make_shared<Constant>(ConstantValue{int64_t{0}}, "I");
+        auto a2 = std::make_shared<Constant>(
+            ConstantValue{int64_t{1065353216}}, "I");
+        ConditionalExpression ce("==", a1, a2);
+        const std::string t = ce.get_type();
+        bool ok = (t != "F" && t != "D");
+        if (!ok) ++g_fail;
+        std::printf("%s ConditionalExpression etype not F/D   got=\"%s\"\n",
+                    ok ? "[ok]  " : "[FAIL]", t.c_str());
     }
 
     std::printf("\n%s — %d failure(s)\n", g_fail ? "FAIL" : "PASS", g_fail);
