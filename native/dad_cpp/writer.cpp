@@ -318,6 +318,25 @@ public:
     void visit_return(IRForm* arg) override {
         w_->WriteIndent();
         w_->Write("return ");
+        // Beyond-DAD: a Z (boolean) method that returns an integer constant
+        // must emit `true`/`false`, not `1`/`0`. In Dalvik a boolean is an int
+        // 0/1, and `const/4` carries no boolean type — so the returned Constant
+        // is typed "I" and would route to visit_constant_int → `0`, producing
+        // `return 0;` in a `boolean` method (uncompilable). DAD emits the int
+        // verbatim (its own bug); we correct it. Same precedent as the
+        // catch (primitive) → Throwable clamp. Only 0/1 are remapped; any other
+        // value (shouldn't occur for a Z return in valid dex) is left untouched.
+        if (w_->snap_ && w_->snap_->meta.ret_type == "Z") {
+            if (auto* c = dynamic_cast<Constant*>(arg);
+                c && c->is_const()) {
+                const int64_t iv = c->get_int_value();
+                if (iv == 0 || iv == 1) {
+                    w_->Write(iv ? "true" : "false");
+                    w_->EndIns();
+                    return;
+                }
+            }
+        }
         visit_ins(arg);
         w_->EndIns();
     }
