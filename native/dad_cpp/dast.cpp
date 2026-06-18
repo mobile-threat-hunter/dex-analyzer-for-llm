@@ -11,6 +11,7 @@
 #include <charconv>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <string>
 
 #include "opcode_ins.h"  // Op::EQUAL
@@ -725,7 +726,44 @@ AstValue JSONWriter::ins_to_stmt(IRForm* op, bool is_ctor) {
     if (auto* r = dynamic_cast<ReturnInstruction*>(op)) {
         AstValue expr = AstValue::Null();
         if (r->arg()) {
-            if (auto* a = MapGet(r, *r->arg())) expr = visit_expr(a);
+            if (auto* a = MapGet(r, *r->arg())) {
+                // Beyond-DAD: mirror writer.cpp visit_return so the AST agrees
+                // with the text path. A const* return value is integer-typed;
+                // the declared return type is the truth. Emit the type-correct
+                // Literal (Z→bool, reference→null, F/D→IEEE literal), gated on a
+                // genuine integer constant so const-class / const-string (typed
+                // references whose get_int_value() is 0) are NOT nulled.
+                auto* c = dynamic_cast<Constant*>(a);
+                auto is_int_const = [](const std::string& ct) {
+                    return ct == "I" || ct == "J" || ct == "B" || ct == "S" ||
+                           ct == "C" || ct == "Z";
+                };
+                const std::string& rt = snap_->meta.ret_type;
+                if (c && c->is_const() && !rt.empty() &&
+                    is_int_const(c->get_type())) {
+                    const int64_t iv = c->get_int_value();
+                    if (rt == "Z" && (iv == 0 || iv == 1)) {
+                        expr = LiteralBool(iv != 0);
+                    } else if ((rt.front() == 'L' || rt.front() == '[') &&
+                               iv == 0) {
+                        expr = LiteralNull();
+                    } else if (rt == "F") {
+                        const uint32_t bits = static_cast<uint32_t>(iv);
+                        float f;
+                        std::memcpy(&f, &bits, sizeof(f));
+                        expr = LiteralFloat(static_cast<double>(f));
+                    } else if (rt == "D") {
+                        const uint64_t bits = static_cast<uint64_t>(iv);
+                        double d;
+                        std::memcpy(&d, &bits, sizeof(d));
+                        expr = LiteralDouble(d);
+                    } else {
+                        expr = visit_expr(a);
+                    }
+                } else {
+                    expr = visit_expr(a);
+                }
+            }
         }
         return ReturnStmt(std::move(expr));
     }
