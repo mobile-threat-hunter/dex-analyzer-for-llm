@@ -554,21 +554,15 @@ public:
         }
         return true;
     }
-    // Sibling-operand form: the other operand of a binary op identifies the F/D
-    // context (Dalvik fp ops have both operands the same type).
-    bool maybe_emit_fp_const(IRForm* operand, IRForm* sib) {
-        return (operand && sib) ? emit_fp_const_typed(operand, sib->get_type())
-                                : false;
-    }
 
-    void visit_binary_expression(std::string_view op, IRForm* arg1,
-                                  IRForm* arg2) override {
+    void visit_binary_expression(std::string_view op, std::string_view etype,
+                                  IRForm* arg1, IRForm* arg2) override {
         w_->Write("(");
-        if (!maybe_emit_fp_const(arg1, arg2)) visit_ins(arg1);
+        if (!emit_fp_const_typed(arg1, etype)) visit_ins(arg1);
         w_->Write(" ");
         w_->Write(op);
         w_->Write(" ");
-        if (!maybe_emit_fp_const(arg2, arg1)) visit_ins(arg2);
+        if (!emit_fp_const_typed(arg2, etype)) visit_ins(arg2);
         w_->Write(")");
     }
     void visit_unary_expression(std::string_view op, IRForm* arg) override {
@@ -585,13 +579,13 @@ public:
         visit_ins(arg);
         w_->Write(")");
     }
-    void visit_cond_expression(std::string_view op, IRForm* arg1,
-                                IRForm* arg2) override {
-        if (!maybe_emit_fp_const(arg1, arg2)) visit_ins(arg1);
+    void visit_cond_expression(std::string_view op, std::string_view etype,
+                                IRForm* arg1, IRForm* arg2) override {
+        if (!emit_fp_const_typed(arg1, etype)) visit_ins(arg1);
         w_->Write(" ");
         w_->Write(op);
         w_->Write(" ");
-        if (!maybe_emit_fp_const(arg2, arg1)) visit_ins(arg2);
+        if (!emit_fp_const_typed(arg2, etype)) visit_ins(arg2);
     }
     void visit_condz_expression(std::string_view op, IRForm* arg) override {
         // DAD writer.py:727-730 — if condz wraps a BinaryCompExpression (long
@@ -671,9 +665,10 @@ private:
                 w_->Write(" ");
                 w_->Write(bin->op());
                 w_->Write("= ");
-                // lhs is the F/D-typed sibling for arg2 (a raw-bits int const in
-                // a double/float compound assign, e.g. `p2 *= 2.0`).
-                if (!maybe_emit_fp_const(arg2, lhs)) visit_ins(arg2);
+                // the binary op's own type is the F/D context for arg2 (a
+                // raw-bits int const in a double/float compound assign, e.g.
+                // `p2 *= 2.0`).
+                if (!emit_fp_const_typed(arg2, bin->get_type())) visit_ins(arg2);
                 w_->EndIns();
                 return;
             }

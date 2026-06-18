@@ -123,7 +123,12 @@ public:
     virtual void visit_monitor_enter(IRForm* /*ref*/)               {}
     virtual void visit_monitor_exit(IRForm* /*ref*/)                {}
     virtual void visit_throw(IRForm* /*ref*/)                       {}
+    // `etype` is the expression's own Dalvik type ("D"/"F" for double/float
+    // ops) — the reliable F/D context for reinterpreting raw-IEEE-bits integer
+    // constant operands (an operand variable may not be inferred as D, but the
+    // operation is).
     virtual void visit_binary_expression(std::string_view /*op*/,
+                                          std::string_view /*etype*/,
                                           IRForm* /*arg1*/,
                                           IRForm* /*arg2*/)           {}
     virtual void visit_unary_expression(std::string_view /*op*/,
@@ -131,6 +136,7 @@ public:
     virtual void visit_cast(std::string_view /*op*/,
                             IRForm* /*arg*/)                          {}
     virtual void visit_cond_expression(std::string_view /*op*/,
+                                        std::string_view /*etype*/,
                                         IRForm* /*arg1*/,
                                         IRForm* /*arg2*/)              {}
     virtual void visit_condz_expression(std::string_view /*op*/,

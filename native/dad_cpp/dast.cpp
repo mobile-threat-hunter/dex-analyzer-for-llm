@@ -852,7 +852,7 @@ AstValue JSONWriter::write_inplace_if_possible(IRForm* lhs, IRForm* rhs) {
                 return UnaryPostfix(visit_expr(lhs), bop + bop);
             }
             return Assignment(visit_expr(lhs),
-                              visit_expr_fp(exp_rhs, lhs), bop);
+                              visit_expr_fp_typed(exp_rhs, bin->get_type()), bop);
         }
     }
     // plain assignment: `double v = <raw-bits int const>` → reinterpret the rhs
@@ -881,10 +881,6 @@ AstValue JSONWriter::visit_expr_fp_typed(IRForm* operand,
         }
     }
     return visit_expr(operand);
-}
-AstValue JSONWriter::visit_expr_fp(IRForm* operand, IRForm* sib) {
-    return visit_expr_fp_typed(operand, sib ? sib->get_type()
-                                            : std::string_view());
 }
 
 // DAD: dast.py:401 visit_expr.
@@ -924,10 +920,13 @@ AstValue JSONWriter::visit_expr(IRForm* op) {
         return ParseDescriptor(x->clsdesc());
     }
     if (auto* x = dynamic_cast<BinaryExpression*>(op)) {
+        // the expression's own type ("D"/"F") is the reliable F/D context for a
+        // raw-bits int-const operand (mirrors writer.cpp visit_binary_expression).
+        const std::string et = x->get_type();
         IRForm* a1 = MapGet(x, x->arg1_id());
         IRForm* a2 = MapGet(x, x->arg2_id());
-        AstValue expr = BinaryInfix(x->op(), visit_expr_fp(a1, a2),
-                                    visit_expr_fp(a2, a1));
+        AstValue expr = BinaryInfix(x->op(), visit_expr_fp_typed(a1, et),
+                                    visit_expr_fp_typed(a2, et));
         if (!dynamic_cast<BinaryCompExpression*>(op)) expr = Parenthesis(std::move(expr));
         return expr;
     }
@@ -936,10 +935,11 @@ AstValue JSONWriter::visit_expr(IRForm* op) {
                                 visit_expr(MapGet(x, x->arg_id()))));
     }
     if (auto* x = dynamic_cast<ConditionalExpression*>(op)) {
+        const std::string et = x->get_type();
         IRForm* a1 = MapGet(x, x->arg1_id());
         IRForm* a2 = MapGet(x, x->arg2_id());
-        return BinaryInfix(x->op(), visit_expr_fp(a1, a2),
-                           visit_expr_fp(a2, a1));
+        return BinaryInfix(x->op(), visit_expr_fp_typed(a1, et),
+                           visit_expr_fp_typed(a2, et));
     }
     if (auto* x = dynamic_cast<ConditionalZExpression*>(op)) {
         IRForm* arg = MapGet(x, x->arg_id());

@@ -179,11 +179,13 @@ void ThrowExpression::Accept(Visitor& v) {
 // Binary / unary / cast / conditional / instance/static-expr
 // =============================================================================
 void BinaryExpression::Accept(Visitor& v) {
-    v.visit_binary_expression(op_, MapGet(*this, arg1_), MapGet(*this, arg2_));
+    v.visit_binary_expression(op_, get_type(), MapGet(*this, arg1_),
+                              MapGet(*this, arg2_));
 }
 
 void BinaryCompExpression::Accept(Visitor& v) {
-    v.visit_cond_expression(op_, MapGet(*this, arg1_), MapGet(*this, arg2_));
+    v.visit_cond_expression(op_, get_type(), MapGet(*this, arg1_),
+                            MapGet(*this, arg2_));
 }
 
 void UnaryExpression::Accept(Visitor& v) {
@@ -195,7 +197,8 @@ void CastExpression::Accept(Visitor& v) {
 }
 
 void ConditionalExpression::Accept(Visitor& v) {
-    v.visit_cond_expression(op_, MapGet(*this, arg1_), MapGet(*this, arg2_));
+    v.visit_cond_expression(op_, get_type(), MapGet(*this, arg1_),
+                            MapGet(*this, arg2_));
 }
 
 void ConditionalZExpression::Accept(Visitor& v) {

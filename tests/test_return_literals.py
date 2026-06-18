@@ -225,8 +225,10 @@ def test_double_bit_patterns_largely_eliminated():
                 for m in pat.finditer(line):
                     if m.group(1) in _DOUBLE_BIT_PATTERNS:
                         leaks.append((c.split("/")[-1][:24], line.strip()[:70]))
-    # generous bound (observed ~8) — catches gross regression of a fixed position
-    assert len(leaks) <= 25, (
+    # observed 0 on the bundled corpus once the binary/comparison positions use
+    # the EXPRESSION type (reliable) instead of the operand-variable type. Small
+    # bound to tolerate corpus drift while still catching a regressed position.
+    assert len(leaks) <= 3, (
         f"{len(leaks)} raw double-bit-pattern leak(s) — a fixed position likely "
         f"regressed; first: {leaks[:8]}"
     )
