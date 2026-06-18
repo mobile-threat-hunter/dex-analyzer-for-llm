@@ -352,6 +352,8 @@ print(dk.decompile_method_java(
 
 Vendored DexKit Core fork lives at `vendor/dexkit_core/`. Public accessors added to upstream's `DexItem` class live in `vendor/dexkit_core/Core/dexkit/{include/dex_item.h,dex_item.cpp}`. The fork stays small and re-rebases easily on upstream updates.
 
+For the ports & adapters boundary see [architecture.md](architecture.md); for the end-to-end runtime flows (load → verify → decompile → agent) as diagrams see [workflow.md](workflow.md).
+
 ---
 
 ## Performance (representative 50-dex APK)

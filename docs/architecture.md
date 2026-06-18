@@ -1,5 +1,9 @@
 # Architecture — ports & adapters
 
+This is the **static structure** — where each piece lives and the boundary between
+them. For the *runtime* view (load → verify → search → decompile → agent, as
+flow/sequence diagrams) see [workflow.md](workflow.md).
+
 The decompiler already follows a **hexagonal (ports & adapters)** shape at the
 boundary that matters: a domain core that knows nothing about how dex bytes are
 loaded, talking to the outside world through one narrow port.

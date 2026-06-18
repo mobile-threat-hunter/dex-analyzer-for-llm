@@ -21,7 +21,9 @@ parallel-safe — rather than Xposed module development.
 | AST | `decompile_method_ast` returns the full androguard `dast.py` nested AST |
 | LLM | `dexllm.tools` catalog → MCP stdio server + FastAPI/SSE web backend |
 
-See [docs/usage.md](docs/usage.md) for the full API walkthrough (L1–L7 + decompile),
+See [docs/workflow.md](docs/workflow.md) for how dexllm operates end to end (load →
+verify → search → decompile → agent, all diagrammed),
+[docs/usage.md](docs/usage.md) for the full API walkthrough (L1–L7 + decompile),
 [docs/architecture.md](docs/architecture.md) for the ports-&-adapters boundary map,
 [docs/dexkit-vs-art-dex-handling.md](docs/dexkit-vs-art-dex-handling.md) for how dexllm's
 DEX handling compares to AOSP/ART (verification, multidex, cross-dex),
@@ -66,21 +68,9 @@ flowchart TB
 The boundary is enforced by [`scripts/check_dad_boundary.sh`](scripts/check_dad_boundary.sh):
 `native/dad_cpp/` may never `#include` DexKit, FlatBuffers, the zip reader, or `core_ext`.
 
-**Decompile pipeline** — each pass mirrors androguard `decompile.py:DvMethod.process` step for step:
-
-```mermaid
-flowchart LR
-    A["method<br/>descriptor"] --> B["DexItemCodeSource<br/>locate"]
-    B --> C["MethodSnapshotBuilder<br/>decode, CFG, snapshot"]
-    subgraph pipe["DAD IR pipeline: native/dad_cpp"]
-        D["Construct"] --> E["BuildDefUse"] --> F["SplitVariables"] --> G["DeadCodeElimination"]
-        G --> H["RegisterPropagation"] --> I["PlaceDeclarations"] --> J["SplitIfNodes"]
-        J --> K["Simplify"] --> L["IdentifyStructures"]
-    end
-    C --> D
-    L --> W["Writer / JSONWriter"]
-    W --> O["Java text | AST"]
-```
+**Runtime flows** — the load/verify path, the DAD decompile pipeline (`Construct →
+BuildDefUse → … → IdentifyStructures → Writer`), the L1–L7 capability ladder, and agent
+(MCP/FastAPI) integration are all diagrammed in **[docs/workflow.md](docs/workflow.md)**.
 
 ## Malformed-dex verification (vs ART `DexFileVerifier`)
 
