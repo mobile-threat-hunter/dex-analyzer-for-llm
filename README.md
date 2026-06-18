@@ -83,7 +83,19 @@ method byte-identical **92.4%** (462/500) · whole-class byte-identical **56.5%*
 line-overlap **94.0%**. (Byte-identical at class scale is strict — one differing line fails the
 whole class; line-overlap is the fairer "how close" measure.) Residual mismatches are
 semantic-equivalent (variable-name suffixes) or cases where dexllm emits spec-correct Java that
-androguard gets wrong.
+androguard gets wrong:
+
+- **Unicode strings/identifiers** — dexllm decodes dex MUTF-8 to the exact UTF-16 code units
+  ART builds in a `mirror::String` (decoder ported 1:1 from `art/libdexfile/dex/utf-inl.h`),
+  emitting readable UTF-8 for BMP text (한글/CJK) and a `\uXXXX` escape only for surrogates/control
+  chars. A supplementary (astral) char is kept as a **surrogate pair**, exactly like ART. androguard
+  DAD instead emits one `\u` followed by the full codepoint hex — e.g. a real-corpus `U+DFFFD` comes
+  out as `"\udfffd"` (**5 hex digits → invalid Java**: the lexer reads `\udfff` + a literal `d`,
+  silently corrupting the string), where dexllm emits the valid `"\udb3f\udffd"`. (Verified against
+  the actual AOSP source — see [docs/dexkit-vs-art-dex-handling.md](docs/dexkit-vs-art-dex-handling.md).)
+- **Literals** — boolean `return false/true` (not `return 0/1`), `return null` for a null reference,
+  IEEE-754 `float`/`double` literals (`1.0f`, `Double.NaN`) where androguard prints the raw integer
+  bits, and `null`/`true`/`false` field initializers (not Python `None`/`True`/`False`).
 
 **Parallel decompile** — dexllm releases the GIL in `decompile_*`, so threads give real
 parallelism on one shared instance; androguard cannot use threads at all (GIL + non-thread-safe
