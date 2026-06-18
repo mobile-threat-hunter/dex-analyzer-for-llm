@@ -4,6 +4,37 @@ The decompiler already follows a **hexagonal (ports & adapters)** shape at the
 boundary that matters: a domain core that knows nothing about how dex bytes are
 loaded, talking to the outside world through one narrow port.
 
+```mermaid
+flowchart TB
+    PY["Python API · MCP stdio · FastAPI/SSE"]
+    BIND["pybind11 binding<br/>native/binding/module.cpp"]
+    FACADE["Decompiler facade + LRU cache<br/>native/dad_cpp/decompiler.cpp"]
+
+    subgraph core["Domain core — native/dad_cpp/ · 1:1 androguard DAD port"]
+        direction TB
+        SNAP["MethodSnapshot (immutable DTO)"]
+        PIPE["graph → dataflow → control_flow"]
+        EMIT["writer / dast"]
+        SNAP --> PIPE --> EMIT
+    end
+
+    PORT{{"PORT · IDexCodeSource<br/>pure abstract (= 0)"}}
+    PROD["DexItemCodeSource<br/>core_ext · production (wraps DexKit Core)"]
+    MOCK["MockCodeSource<br/>tests · no DexKit"]
+    VERIFY["VerifyDex · structural verifier<br/>1:1 AOSP DexFileVerifier port"]
+    DEXKIT["DexKit Core + slicer"]
+    OUT["Java text | nested AST"]
+
+    PY --> BIND --> FACADE -->|drives| core
+    core -->|"depends on (points inward)"| PORT
+    PORT --- PROD
+    PORT --- MOCK
+    BYTES["raw .dex / classes*.dex"] --> VERIFY -->|verified bytes| DEXKIT --> PROD
+    EMIT --> OUT
+```
+
+The same structure in detail (text fallback):
+
 ```
         ┌─────────────────── driving (primary) adapter ─────────────────┐
         │  native/binding/module.cpp        pybind11  C++ ↔ Python       │

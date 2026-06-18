@@ -27,6 +27,62 @@ See [docs/usage.md](docs/usage.md) for the full API walkthrough (L1–L7 + decom
 DEX handling compares to AOSP/ART (verification, multidex, cross-dex),
 and [CLAUDE.md](CLAUDE.md) for the decompiler port internals.
 
+## Architecture
+
+Hexagonal (ports & adapters): the DAD-aligned decompiler core knows nothing about how
+dex bytes are loaded — it talks to the outside through one narrow port (`IDexCodeSource`),
+so the same pipeline runs on a real APK (production adapter) or hand-built snapshots
+(test adapter). Every byte crosses a load-time structural verifier first.
+
+```mermaid
+flowchart TB
+    PY["Python API · MCP stdio · FastAPI/SSE"]
+    BIND["pybind11 binding<br/>native/binding/module.cpp"]
+    FACADE["Decompiler facade + LRU cache<br/>native/dad_cpp/decompiler.cpp"]
+
+    subgraph core["Domain core — native/dad_cpp/ · 1:1 androguard DAD port"]
+        direction TB
+        SNAP["MethodSnapshot (immutable DTO)"]
+        PIPE["graph → dataflow → control_flow"]
+        EMIT["writer / dast"]
+        SNAP --> PIPE --> EMIT
+    end
+
+    PORT{{"PORT · IDexCodeSource<br/>pure abstract (= 0)"}}
+    PROD["DexItemCodeSource<br/>core_ext · production adapter"]
+    MOCK["MockCodeSource<br/>tests · no DexKit"]
+    VERIFY["VerifyDex · structural verifier<br/>1:1 AOSP DexFileVerifier port"]
+    DEXKIT["DexKit Core + slicer"]
+    OUT["Java text | nested AST"]
+
+    PY --> BIND --> FACADE -->|drives| core
+    core -->|"depends on (points inward)"| PORT
+    PORT --- PROD
+    PORT --- MOCK
+    BYTES["raw .dex / classes*.dex"] --> VERIFY -->|verified bytes| DEXKIT --> PROD
+    EMIT --> OUT
+```
+
+The boundary is enforced by [`scripts/check_dad_boundary.sh`](scripts/check_dad_boundary.sh):
+`native/dad_cpp/` may never `#include` DexKit, FlatBuffers, the zip reader, or `core_ext`.
+
+**Decompile pipeline** — each pass mirrors androguard `decompile.py:DvMethod.process` step for step:
+
+```mermaid
+flowchart LR
+    A["method<br/>descriptor"] --> B["DexItemCodeSource<br/>locate"]
+    B --> C["MethodSnapshotBuilder<br/>decode → CFG → snapshot"]
+    subgraph pipe["DAD IR pipeline (native/dad_cpp/)"]
+        direction LR
+        D["Construct"] --> E["BuildDefUse"] --> F["SplitVariables"] --> G["DeadCodeElimination"]
+        G --> H["RegisterPropagation"] --> I["PlaceDeclarations"] --> J["SplitIfNodes"]
+        J --> K["Simplify"] --> L["IdentifyStructures"]
+    end
+    C --> D
+    L --> W["Writer / JSONWriter"]
+    W --> O["Java text | AST"]
+```
+
 ## Malformed-dex verification (vs ART `DexFileVerifier`)
 
 dexllm processes adversarial input, so every dex passes a load-time structural
