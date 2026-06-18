@@ -60,11 +60,15 @@ std::string FormatDoubleLiteral(double d) {
 // ============================================================================
 std::string EscapeJavaString(std::string_view raw) {
     // Dex strings are MUTF-8 (modified UTF-8): NUL as C0 80, and supplementary
-    // chars encoded as surrogate pairs (each surrogate as 3 bytes with 0xED
-    // prefix). pybind11 returns std::string→Python str via strict UTF-8 decode
-    // which REJECTS the 0xED-prefixed surrogates. To stay safe, decode MUTF-8
-    // and re-emit every non-ASCII codepoint as a Java \uXXXX escape (which is
-    // always valid UTF-8 ASCII).
+    // chars encoded as surrogate PAIRS (each surrogate a 3-byte 0xED sequence).
+    // We decode MUTF-8 and re-emit every non-ASCII codepoint as PROPER UTF-8 —
+    // the actual character (연결, 中文, 😀), not a `\uXXXX` escape. This diverges
+    // from DAD (writer.py:757 `string()` ASCII-escapes via `unicode-escape`)
+    // but is far more useful for a triage tool reading e.g. localized phishing
+    // strings, matches the AST path (dast.cpp Mutf8ToUtf8), and is valid UTF-8
+    // for pybind11 (supplementary chars become 4-byte sequences, NOT the
+    // 0xED-prefixed surrogates pybind11's strict decode rejects). Only control
+    // chars and undecodable bytes keep the `\uXXXX` / `\n` form.
     std::string out;
     out.reserve(raw.size() + 2);
     out += '"';
@@ -74,6 +78,23 @@ std::string EscapeJavaString(std::string_view raw) {
         char buf[8];
         std::snprintf(buf, sizeof(buf), "\\u%04x", cp);
         out += buf;
+    };
+    auto emit_utf8 = [&](uint32_t cp) {
+        if (cp < 0x80) {
+            out += static_cast<char>(cp);
+        } else if (cp < 0x800) {
+            out += static_cast<char>(0xC0 | (cp >> 6));
+            out += static_cast<char>(0x80 | (cp & 0x3F));
+        } else if (cp < 0x10000) {
+            out += static_cast<char>(0xE0 | (cp >> 12));
+            out += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
+            out += static_cast<char>(0x80 | (cp & 0x3F));
+        } else {
+            out += static_cast<char>(0xF0 | (cp >> 18));
+            out += static_cast<char>(0x80 | ((cp >> 12) & 0x3F));
+            out += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
+            out += static_cast<char>(0x80 | (cp & 0x3F));
+        }
     };
     while (p < end) {
         uint8_t c = *p;
@@ -87,31 +108,37 @@ std::string EscapeJavaString(std::string_view raw) {
         if (c == '\t')      { out += "\\t";  ++p; continue; }
         if (c < 0x20)       { emit_u(c); ++p; continue; }
         if (c < 0x80)       { out += static_cast<char>(c); ++p; continue; }
-        // Non-ASCII MUTF-8 sequence — decode codepoint and re-emit as \uXXXX.
+        // Non-ASCII MUTF-8 sequence — decode codepoint and re-emit as UTF-8.
         uint32_t cp = 0;
         size_t n = 0;
-        if ((c & 0xE0) == 0xC0 && p + 1 < end + 1) {           // 110xxxxx
-            cp = (c & 0x1F);
-            n = 2;
-        } else if ((c & 0xF0) == 0xE0 && p + 2 < end + 1) {    // 1110xxxx
-            cp = (c & 0x0F);
-            n = 3;
-        } else if ((c & 0xF8) == 0xF0 && p + 3 < end + 1) {    // 11110xxx
-            cp = (c & 0x07);
-            n = 4;
-        } else {
-            // Invalid leading byte — emit as raw escape to avoid UTF-8 error.
-            emit_u(c);
-            ++p;
-            continue;
-        }
-        if (p + n > end) { emit_u(c); ++p; continue; }
+        if ((c & 0xE0) == 0xC0)      { cp = c & 0x1F; n = 2; }  // 110xxxxx
+        else if ((c & 0xF0) == 0xE0) { cp = c & 0x0F; n = 3; }  // 1110xxxx
+        else if ((c & 0xF8) == 0xF0) { cp = c & 0x07; n = 4; }  // 11110xxx
+        else                         { emit_u(c); ++p; continue; }  // bad lead
+        if (p + n > end)             { emit_u(c); ++p; continue; }  // truncated
+        bool bad = false;
         for (size_t i = 1; i < n; ++i) {
-            uint8_t t = p[i];
-            if ((t & 0xC0) != 0x80) { cp = c; n = 1; break; }
-            cp = (cp << 6) | (t & 0x3F);
+            if ((p[i] & 0xC0) != 0x80) { bad = true; break; }
+            cp = (cp << 6) | (p[i] & 0x3F);
         }
-        emit_u(cp);
+        if (bad)                     { emit_u(c); ++p; continue; }
+        // MUTF-8 surrogate pair: a high surrogate followed by a 3-byte low
+        // surrogate combines into one supplementary codepoint (4-byte UTF-8).
+        if (cp >= 0xD800 && cp <= 0xDBFF && p + n + 3 <= end &&
+            (p[n] & 0xF0) == 0xE0 && (p[n + 1] & 0xC0) == 0x80 &&
+            (p[n + 2] & 0xC0) == 0x80) {
+            uint32_t lo = ((p[n] & 0x0F) << 12) | ((p[n + 1] & 0x3F) << 6) |
+                          (p[n + 2] & 0x3F);
+            if (lo >= 0xDC00 && lo <= 0xDFFF) {
+                emit_utf8(0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00));
+                p += n + 3;
+                continue;
+            }
+        }
+        // A lone surrogate is not valid UTF-8 — keep it as a \uXXXX escape so the
+        // result stays pybind11-decodable.
+        if (cp >= 0xD800 && cp <= 0xDFFF) emit_u(cp);
+        else                              emit_utf8(cp);
         p += n;
     }
     out += '"';

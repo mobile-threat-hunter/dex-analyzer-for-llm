@@ -83,6 +83,29 @@ int main() {
         check_contains("foo with param", out, "foo(int p1)");
     }
 
+    // Test 4: EscapeJavaString emits readable UTF-8 (not \uXXXX) for non-ASCII.
+    {
+        // "연결" = U+C5F0 U+ACB0, MUTF-8/UTF-8 = EC 97 B0 EA B2 B0.
+        std::string korean = "\xEC\x97\xB0\xEA\xB2\xB0";
+        std::string esc = dad::EscapeJavaString(korean);
+        std::printf("\n=== Test 4 (EscapeJavaString UTF-8) ===\n%s\n", esc.c_str());
+        check_contains("korean utf8 passthrough", esc, "\xEC\x97\xB0\xEA\xB2\xB0");
+        bool no_u = esc.find("\\u") == std::string::npos;
+        if (!no_u) ++g_fail;
+        std::printf("%s %-42s\n", no_u ? "[ok]  " : "[FAIL]",
+                    "no \\uXXXX escape for BMP char");
+        // backslash / quote still escaped; control char still \\u.
+        std::string ctrl = std::string("a\x01\"\\", 4);
+        std::string e2 = dad::EscapeJavaString(ctrl);
+        check_contains("control char escaped", e2, "\\u0001");
+        check_contains("quote escaped", e2, "\\\"");
+        check_contains("backslash escaped", e2, "\\\\");
+        // 4-byte supplementary (😀 U+1F600 = F0 9F 98 80) passes through as UTF-8.
+        std::string emoji = "\xF0\x9F\x98\x80";
+        std::string e3 = dad::EscapeJavaString(emoji);
+        check_contains("emoji 4-byte utf8 passthrough", e3, "\xF0\x9F\x98\x80");
+    }
+
     std::printf("\n%s — %d failure(s)\n", g_fail ? "FAIL" : "PASS", g_fail);
     return g_fail ? 1 : 0;
 }

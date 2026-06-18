@@ -15,11 +15,15 @@ namespace dexkit::dad {
 
 namespace {
 
-// Sanitize a string so it's valid UTF-8 for Python's strict decoder.
-// Dex strings (and identifiers derived from them) are MUTF-8: supplementary
-// codepoints are encoded as 3-byte surrogates (0xED prefix) which strict
-// UTF-8 rejects. Replace any non-ASCII byte sequence's actual codepoint
-// with a Java \uXXXX escape so the output is pure ASCII.
+// Sanitize the decompiled source so it's valid UTF-8 for Python's strict
+// decoder, WITHOUT mangling readable text. Dex strings/identifiers are MUTF-8:
+// supplementary codepoints are encoded as surrogate PAIRS (two 3-byte 0xED
+// sequences) which strict UTF-8 rejects. We re-emit PROPER UTF-8 — pass valid
+// sequences through unchanged (so 연결 / 中文 stay readable), combine a
+// surrogate pair into one 4-byte codepoint, and escape only a LONE surrogate
+// or a malformed byte as `\uXXXX`. (Previously this escaped *every* non-ASCII
+// codepoint to pure ASCII, which made e.g. Korean phishing strings unreadable
+// — and undid the Writer's EscapeJavaString, which already emits proper UTF-8.)
 std::string SanitizeUtf8(std::string_view in) {
     std::string out;
     out.reserve(in.size());
@@ -29,6 +33,23 @@ std::string SanitizeUtf8(std::string_view in) {
         char buf[8];
         std::snprintf(buf, sizeof(buf), "\\u%04x", cp);
         out += buf;
+    };
+    auto emit_utf8 = [&](uint32_t cp) {
+        if (cp < 0x80) {
+            out += static_cast<char>(cp);
+        } else if (cp < 0x800) {
+            out += static_cast<char>(0xC0 | (cp >> 6));
+            out += static_cast<char>(0x80 | (cp & 0x3F));
+        } else if (cp < 0x10000) {
+            out += static_cast<char>(0xE0 | (cp >> 12));
+            out += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
+            out += static_cast<char>(0x80 | (cp & 0x3F));
+        } else {
+            out += static_cast<char>(0xF0 | (cp >> 18));
+            out += static_cast<char>(0x80 | ((cp >> 12) & 0x3F));
+            out += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
+            out += static_cast<char>(0x80 | (cp & 0x3F));
+        }
     };
     while (p < end) {
         uint8_t c = *p;
@@ -47,9 +68,22 @@ std::string SanitizeUtf8(std::string_view in) {
             cp = (cp << 6) | (t & 0x3F);
         }
         if (!ok) { emit_u(c); ++p; continue; }
-        // Always escape — including surrogate halves (D800-DFFF) which are
-        // the actual culprit.
-        emit_u(cp);
+        // MUTF-8 surrogate pair → one supplementary codepoint (4-byte UTF-8).
+        if (cp >= 0xD800 && cp <= 0xDBFF && p + n + 3 <= end &&
+            (p[n] & 0xF0) == 0xE0 && (p[n + 1] & 0xC0) == 0x80 &&
+            (p[n + 2] & 0xC0) == 0x80) {
+            uint32_t lo = ((p[n] & 0x0F) << 12) | ((p[n + 1] & 0x3F) << 6) |
+                          (p[n + 2] & 0x3F);
+            if (lo >= 0xDC00 && lo <= 0xDFFF) {
+                emit_utf8(0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00));
+                p += n + 3;
+                continue;
+            }
+        }
+        // Lone surrogate (D800-DFFF) is invalid UTF-8 — escape it; everything
+        // else passes through as proper UTF-8.
+        if (cp >= 0xD800 && cp <= 0xDFFF) emit_u(cp);
+        else                              emit_utf8(cp);
         p += n;
     }
     return out;
