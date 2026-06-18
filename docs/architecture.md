@@ -6,30 +6,30 @@ loaded, talking to the outside world through one narrow port.
 
 ```mermaid
 flowchart TB
-    PY["Python API · MCP stdio · FastAPI/SSE"]
+    PY["Python API, MCP stdio, FastAPI/SSE"]
     BIND["pybind11 binding<br/>native/binding/module.cpp"]
     FACADE["Decompiler facade + LRU cache<br/>native/dad_cpp/decompiler.cpp"]
+    BYTES["raw .dex / classes*.dex"]
+    VERIFY["VerifyDex structural verifier<br/>1:1 AOSP DexFileVerifier port"]
+    DEXKIT["DexKit Core + slicer"]
+    PROD["DexItemCodeSource<br/>core_ext, production (wraps DexKit Core)"]
+    MOCK["MockCodeSource<br/>tests, no DexKit"]
+    PORT{{"PORT: IDexCodeSource<br/>pure abstract"}}
+    OUT["Java text | nested AST"]
 
-    subgraph core["Domain core — native/dad_cpp/ · 1:1 androguard DAD port"]
-        direction TB
-        SNAP["MethodSnapshot (immutable DTO)"]
-        PIPE["graph → dataflow → control_flow"]
+    subgraph core["Domain core: native/dad_cpp - 1:1 androguard DAD port"]
+        SNAP["MethodSnapshot, immutable DTO"]
+        PIPE["graph, dataflow, control_flow"]
         EMIT["writer / dast"]
         SNAP --> PIPE --> EMIT
     end
 
-    PORT{{"PORT · IDexCodeSource<br/>pure abstract (= 0)"}}
-    PROD["DexItemCodeSource<br/>core_ext · production (wraps DexKit Core)"]
-    MOCK["MockCodeSource<br/>tests · no DexKit"]
-    VERIFY["VerifyDex · structural verifier<br/>1:1 AOSP DexFileVerifier port"]
-    DEXKIT["DexKit Core + slicer"]
-    OUT["Java text | nested AST"]
-
-    PY --> BIND --> FACADE -->|drives| core
-    core -->|"depends on (points inward)"| PORT
-    PORT --- PROD
-    PORT --- MOCK
-    BYTES["raw .dex / classes*.dex"] --> VERIFY -->|verified bytes| DEXKIT --> PROD
+    PY --> BIND --> FACADE
+    FACADE -->|drives| SNAP
+    BYTES --> VERIFY --> DEXKIT --> PROD
+    PROD -->|implements| PORT
+    MOCK -->|implements| PORT
+    PORT -->|reads method code| SNAP
     EMIT --> OUT
 ```
 
