@@ -227,6 +227,8 @@ Two text-Writer divergences surfaced by a same-line-count DAD differential:
 
 tvleanback 500-sample exact-match 96.6%→96.8%, bench 97.2%→97.6%; parity 26/26, sweep 0-crash unchanged.
 
+**Follow-up — posttest do-while latch spacing (2026-06-18):** DAD writer.py:269 emits the posttest latch as `} while(` WITHOUT a space (same as endless `while(true)`; only pretest `while (` keeps the space). We emitted `} while (`. Fixed to `} while(` ([writer.cpp](native/dad_cpp/writer.cpp) `EmitLoop` posttest path). `JsonReader.skipQuotedValue` now byte-identical to DAD. parity 26/26, sweep 0-crash, tvleanback 500-sample 98.0% identical mismatch set (no posttest do-while loops in that sample's diff lines).
+
 ### Decompiler API surface (pybind11)
 
 Exposed via `dexllm.DexKit(apk_path)`. The constructor identifies the file **by content, not extension** — a `dex\n` magic loads as a bare `.dex` via the core's `AddImage`; otherwise it must prove out as a real zip/apk container (PK signature + parseable central directory via `ZipArchive::Open`) and carry at least one sequential `classes*.dex`. A disguised `.apk` (renamed, wrong, or absent extension) therefore still loads; a non-dex/non-zip file or a zip with no `classes*.dex` now raises a clear `std::runtime_error` (the error reports whether `AndroidManifest.xml` was present) instead of the old silent 0-dex load. Detection lives in `DexKitExt::DexKitExt` ([dexkit_ext.cpp](native/core_ext/dexkit_ext.cpp)). Arg name stays `apk_path` for backward compatibility.

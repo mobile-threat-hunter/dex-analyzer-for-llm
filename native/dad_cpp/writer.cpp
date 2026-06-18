@@ -836,7 +836,10 @@ void Writer::EmitLoop(LoopBlock* loop) {
         latch_node_.pop_back();
         loop_follow_.pop_back();
         DecIndent();
-        WriteIndent(); Write("} while (");
+        // DAD writer.py:269 emits the posttest latch as `} while(` WITHOUT a
+        // space (unlike the pretest `while (` form, like the endless
+        // `while(true)`). Match it exactly.
+        WriteIndent(); Write("} while(");
         // DAD writer.py:271 loop.latch.visit_cond(self). visit_cond dispatches
         // virtually: a plain CondBlock latch emits its single ins; a
         // ShortCircuitBlock latch (compound `&&`/`||` do-while condition) emits
