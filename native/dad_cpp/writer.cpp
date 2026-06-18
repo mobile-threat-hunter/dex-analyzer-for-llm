@@ -7,8 +7,10 @@
 #include "writer.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <sstream>
 #include <string>
 
@@ -25,6 +27,30 @@ std::string_view StripClassDesc(std::string_view d) {
         return d.substr(1, d.size() - 2);
     }
     return d;
+}
+
+// Beyond-DAD return-literal helpers. The Java float/double literal style mirrors
+// the EncodedValue IEEE754 formatter in core_ext (Float.NaN / %.9gf round-trip,
+// Double.NaN / %.17g) so static-field and method-return float/double rendering
+// agree. Used by visit_return when a F/D method returns the raw IEEE bits as an
+// integer constant.
+std::string FormatFloatLiteral(float f) {
+    if (std::isnan(f)) return "Float.NaN";
+    if (std::isinf(f)) {
+        return f > 0 ? "Float.POSITIVE_INFINITY" : "Float.NEGATIVE_INFINITY";
+    }
+    char buf[40];
+    std::snprintf(buf, sizeof(buf), "%.9gf", static_cast<double>(f));
+    return buf;
+}
+std::string FormatDoubleLiteral(double d) {
+    if (std::isnan(d)) return "Double.NaN";
+    if (std::isinf(d)) {
+        return d > 0 ? "Double.POSITIVE_INFINITY" : "Double.NEGATIVE_INFINITY";
+    }
+    char buf[48];
+    std::snprintf(buf, sizeof(buf), "%.17g", d);
+    return buf;
 }
 
 }  // namespace
@@ -318,23 +344,61 @@ public:
     void visit_return(IRForm* arg) override {
         w_->WriteIndent();
         w_->Write("return ");
-        // Beyond-DAD: a Z (boolean) method that returns an integer constant
-        // must emit `true`/`false`, not `1`/`0`. In Dalvik a boolean is an int
-        // 0/1, and `const/4` carries no boolean type — so the returned Constant
-        // is typed "I" and would route to visit_constant_int → `0`, producing
-        // `return 0;` in a `boolean` method (uncompilable). DAD emits the int
-        // verbatim (its own bug); we correct it. Same precedent as the
-        // catch (primitive) → Throwable clamp. Only 0/1 are remapped; any other
-        // value (shouldn't occur for a Z return in valid dex) is left untouched.
-        if (w_->snap_ && w_->snap_->meta.ret_type == "Z") {
-            if (auto* c = dynamic_cast<Constant*>(arg);
-                c && c->is_const()) {
-                const int64_t iv = c->get_int_value();
-                if (iv == 0 || iv == 1) {
-                    w_->Write(iv ? "true" : "false");
-                    w_->EndIns();
-                    return;
-                }
+        // Beyond-DAD: every `const*` opcode builds the value as an integer-typed
+        // Constant (DAD opcode_ins.py:263+ — `Constant(val, 'I'/'J')`), so the
+        // returned constant carries no boolean/reference/float/double type. DAD
+        // emits the raw int verbatim, which is uncompilable when the method
+        // returns Z / a reference / F / D. The declared return type is the
+        // ground truth, so we render a spec-correct literal. Same precedent as
+        // the catch (primitive) → Throwable clamp (no *DADFaithful sibling —
+        // parity suites don't assert return emission; e2e improves where DAD
+        // was invalid). Non-constant returns and type-matched returns fall
+        // through to normal emission.
+        static const std::string kEmptyRet;
+        const std::string& rt =
+            w_->snap_ ? w_->snap_->meta.ret_type : kEmptyRet;
+        // Only a genuine INTEGER constant (const/const-wide → type I/J/…)
+        // carries a type-less raw value that the return type reinterprets. A
+        // typed reference constant — const-class (`Ljava/lang/Class;`, a Class
+        // literal) or const-string — is NOT null and must emit normally; its
+        // get_int_value() is 0, so without this guard a `Ljava/lang/Class;`
+        // method returning `Foo.class` would be wrongly rewritten to `null`.
+        auto is_int_const = [](const std::string& ct) {
+            return ct == "I" || ct == "J" || ct == "B" || ct == "S" ||
+                   ct == "C" || ct == "Z";
+        };
+        if (auto* c = dynamic_cast<Constant*>(arg);
+            c && c->is_const() && !rt.empty() && is_int_const(c->get_type())) {
+            const int64_t iv = c->get_int_value();
+            // boolean: Dalvik boolean is int 0/1
+            if (rt == "Z" && (iv == 0 || iv == 1)) {
+                w_->Write(iv ? "true" : "false");
+                w_->EndIns();
+                return;
+            }
+            // reference / array: a 0 in an object register is the null reference
+            if ((rt.front() == 'L' || rt.front() == '[') && iv == 0) {
+                w_->Write("null");
+                w_->EndIns();
+                return;
+            }
+            // float: the int holds the raw IEEE-754 binary32 bit pattern
+            if (rt == "F") {
+                const uint32_t bits = static_cast<uint32_t>(iv);
+                float f;
+                std::memcpy(&f, &bits, sizeof(f));
+                w_->Write(FormatFloatLiteral(f));
+                w_->EndIns();
+                return;
+            }
+            // double: the long holds the raw IEEE-754 binary64 bit pattern
+            if (rt == "D") {
+                const uint64_t bits = static_cast<uint64_t>(iv);
+                double d;
+                std::memcpy(&d, &bits, sizeof(d));
+                w_->Write(FormatDoubleLiteral(d));
+                w_->EndIns();
+                return;
             }
         }
         visit_ins(arg);
