@@ -183,13 +183,17 @@ IRFormPtr Const(std::string_view aa, int64_t bbbbbbbb, Vmap& v)       { return C
 // 32-bit int; the low 16 are zero). Our slicer hands us the raw `bbbb`, so
 // we shift here to match DAD's value semantics. Without this, `1.0f` (bits
 // 0x3F800000 = 1065353216) printed as the truncated 0x3F80 = 16256.
-IRFormPtr ConstHigh16(std::string_view aa, int64_t bbbb, Vmap& v)     { return ConstNumImpl(aa, bbbb << 16, "I", v); }
+// Shift via uint64_t: a sign-extended negative `bbbb` (e.g. -1.0f high16 0xBF80)
+// left-shifted as a signed int64 is UB before C++20; the unsigned idiom is
+// well-defined and bit-identical on two's-complement. The F/D return fix
+// (writer.cpp visit_return) reinterprets these bit patterns, so keep them exact.
+IRFormPtr ConstHigh16(std::string_view aa, int64_t bbbb, Vmap& v)     { return ConstNumImpl(aa, static_cast<int64_t>(static_cast<uint64_t>(bbbb) << 16), "I", v); }
 IRFormPtr ConstWide16(std::string_view aa, int64_t bbbb, Vmap& v)     { return ConstNumImpl(aa, bbbb, "J", v); }
 IRFormPtr ConstWide32(std::string_view aa, int64_t bbbbbbbb, Vmap& v) { return ConstNumImpl(aa, bbbbbbbb, "J", v); }
 IRFormPtr ConstWide(std::string_view aa, int64_t b64, Vmap& v)        { return ConstNumImpl(aa, b64, "J", v); }
 // DAD: const-wide/high16 — same pre-shift, but to the high 16 bits of a
 // 64-bit long (shift by 48).
-IRFormPtr ConstWideHigh16(std::string_view aa, int64_t bbbb, Vmap& v) { return ConstNumImpl(aa, bbbb << 48, "J", v); }
+IRFormPtr ConstWideHigh16(std::string_view aa, int64_t bbbb, Vmap& v) { return ConstNumImpl(aa, static_cast<int64_t>(static_cast<uint64_t>(bbbb) << 48), "J", v); }
 
 // DAD: opcode_ins.py:319-340 const-string / const-class.
 IRFormPtr ConstString(std::string_view aa, std::string_view raw_string,
