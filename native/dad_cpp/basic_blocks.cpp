@@ -423,7 +423,22 @@ std::string LoopBlock::ToString() const {
 TryBlock::TryBlock(NodeBase* node)
     // DAD: basic_blocks.py:265 super().__init__('Try-%s' % node.name, None)
     : BasicBlock("Try-" + (node ? node->name : std::string{}), {}),
-      try_start(node) {}
+      try_start(node) {
+    // DAD: basic_blocks.py:270 `num` is a @property returning try_start.num
+    // (live). C++ has no properties, and every reader uses the inherited `num`
+    // FIELD via `->num` (EmitIf's backward-jump heuristic, IfStruct, post_order).
+    // Mirror the property's value by copying try_start's num here. CatchStruct
+    // (the only TryBlock creator) runs after compute_rpo/number_ins and is the
+    // last structuring pass, so try_start->num is final at this point — the
+    // static copy equals DAD's live value at every subsequent read.
+    //
+    // Without this the inherited field stayed 0, so EmitIf's
+    // `cond.num > cond.true.num` backward-jump test misfired whenever an if's
+    // true-branch was a TryBlock (num 0 < any cond.num) — it spuriously negated
+    // the condition, emptied the body, and dropped the try/catch (Kotlin
+    // `when(String)` cases vanished as `if (!s.equals("X")) {}`).
+    if (node) num = node->num;
+}
 
 void TryBlock::Visit(Visitor& /*visitor*/) {
     // DAD: basic_blocks.py:281 visitor.visit_try_node(self).
