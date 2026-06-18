@@ -68,6 +68,8 @@ std::string SanitizeUtf8(std::string_view in) {
             cp = (cp << 6) | (t & 0x3F);
         }
         if (!ok) { emit_u(c); ++p; continue; }
+        // Decoded control char (e.g. MUTF-8 NUL `C0 80`) stays a \uXXXX escape.
+        if (cp < 0x20) { emit_u(cp); p += n; continue; }
         // MUTF-8 surrogate pair → one supplementary codepoint (4-byte UTF-8).
         if (cp >= 0xD800 && cp <= 0xDBFF && p + n + 3 <= end &&
             (p[n] & 0xF0) == 0xE0 && (p[n + 1] & 0xC0) == 0x80 &&

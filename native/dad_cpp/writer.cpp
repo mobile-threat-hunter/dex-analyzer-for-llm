@@ -122,6 +122,10 @@ std::string EscapeJavaString(std::string_view raw) {
             cp = (cp << 6) | (p[i] & 0x3F);
         }
         if (bad)                     { emit_u(c); ++p; continue; }
+        // A decoded control char (notably MUTF-8's NUL `C0 80` → U+0000, or any
+        // overlong control) must stay a `\uXXXX` escape, not a raw byte in the
+        // string literal.
+        if (cp < 0x20)               { emit_u(cp); p += n; continue; }
         // MUTF-8 surrogate pair: a high surrogate followed by a 3-byte low
         // surrogate combines into one supplementary codepoint (4-byte UTF-8).
         if (cp >= 0xD800 && cp <= 0xDBFF && p + n + 3 <= end &&
