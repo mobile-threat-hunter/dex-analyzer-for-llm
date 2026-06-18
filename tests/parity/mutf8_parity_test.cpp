@@ -124,6 +124,12 @@ int main() {
         check("genuine 4-byte F0 9F 98 80 -> D83D DE00",
               u("\xF0\x9F\x98\x80", 4) ==
                   std::vector<uint16_t>{0xD83D, 0xDE00});
+        // Real-corpus regression: U+DFFFD stored dex-canonically as two 3-byte
+        // MUTF-8 sequences (a surrogate pair) must stay two units — verified
+        // against the actual AOSP utf-inl.h source (docs/dexkit-vs-art-dex-handling.md).
+        check("U+DFFFD pair ED AC BF ED BF BD -> DB3F DFFD",
+              u("\xED\xAC\xBF\xED\xBF\xBD", 6) ==
+                  std::vector<uint16_t>{0xDB3F, 0xDFFD});
     }
 
     // 3. Bounded-safety divergence: a truncated trailing sequence must NOT read

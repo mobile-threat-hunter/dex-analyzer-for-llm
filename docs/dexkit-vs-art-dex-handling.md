@@ -160,8 +160,26 @@ by extracting the raw `.dex` and loading it individually.
 
 - **Versions**: slicer `kMinVersion=35, kMaxVersion=41` → **v041 container support**,
   same range as AOSP android16 (`035–041`).
-- **MUTF-8**: AOSP validates then stores as-is; dexllm **decodes to UTF-8 / `\uXXXX`**
-  for output.
+- **MUTF-8**: AOSP validates then stores as-is; dexllm **decodes to the exact UTF-16
+  code units ART builds in a `mirror::String`** (shared decoder ported 1:1 from
+  `art/libdexfile/dex/utf-inl.h GetUtf16FromUtf8` — see
+  [`native/dad_cpp/mutf8.h`](../native/dad_cpp/include/mutf8.h)), then renders each
+  unit for output: a BMP non-surrogate → readable UTF-8 (한글/CJK), a surrogate or
+  control char → `\uXXXX` (the only valid, pybind11-decodable text form).
+  - **Supplementary chars are kept as a surrogate PAIR, exactly like ART** — NOT
+    folded into one 4-byte UTF-8 code point. ART decodes each 3-byte MUTF-8 sequence
+    to one UTF-16 unit, so a dex-canonical supplementary char (two 3-byte sequences)
+    stays two units. Verified against the **real AOSP source**: compiling the
+    checkout's actual `utf-inl.h` and feeding it the on-disk bytes of a supplementary
+    char (e.g. U+DFFFD, MUTF-8 `ED AC BF  ED BF BD`) yields the two units
+    `0xDB3F, 0xDFFD` — byte-identical to our decoder and to our decompiled output
+    `"\udb3f\udffd"`. (Locked in by the surrogate-pair cases in
+    [`tests/parity/mutf8_parity_test.cpp`](../tests/parity/mutf8_parity_test.cpp),
+    which differentially compares our port against an inline verbatim copy of ART's
+    `GetUtf16FromUtf8`.)
+  - This diverges from androguard/Python, which collapses the pair to one code point,
+    and from DAD, which ASCII-escapes everything (`unicode-escape`). dexllm matches
+    **ART's in-memory representation**.
 - **EncodedValue**: AOSP reads per spec and stores; dexllm **decodes IEEE754 float/
   double and null/true/false into spec-correct Java literals** for decompiler output
   (a vs-androguard fix, but the intent — Java-source correctness — is dexllm-specific).
