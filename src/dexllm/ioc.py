@@ -78,8 +78,26 @@ _PLATFORM_ROOTS = frozenset(
 )
 _DROP_ROOTS = _RDN_ROOTS | _PLATFORM_ROOTS
 
-# Explicit benign infrastructure: a real host, but pure noise for triage.
-_DROP_HOSTS = frozenset({"schemas.android.com", "www.w3.org", "xmlpull.org"})
+# XML-namespace / schema authority hosts. A URI like
+# `http://schemas.android.com/apk/res/android` is an XML namespace *identifier*
+# (xmlns:android=...), not a network endpoint the app contacts — so these are
+# dropped from BOTH the urls and domains buckets even though urls are otherwise
+# never denoised (these hosts are never C2). Curated, not pattern-based.
+_NAMESPACE_HOSTS = frozenset(
+    {
+        "schemas.android.com",
+        "schemas.xmlsoap.org",
+        "schemas.microsoft.com",
+        "schemas.openxmlformats.org",
+        "xmlpull.org",
+        "www.xmlpull.org",
+        "www.w3.org",
+        "w3.org",
+        "java.sun.com",
+        "ns.adobe.com",
+        "purl.org",
+    }
+)
 
 # A package label inside a type descriptor `Lpkg/sub/Class;`.
 _PKG_LABEL = re.compile(r"[a-z0-9_$]+")
@@ -111,7 +129,7 @@ def _dex_package_prefixes(descriptors: list[str]) -> frozenset[str]:
 def _is_package_like(host: str, dex_packages: frozenset[str]) -> bool:
     """Return True if ``host`` is a Java/Android package, not a network domain."""
     low = host.lower()
-    if low in _DROP_HOSTS:
+    if low in _NAMESPACE_HOSTS:
         return True
     if low in dex_packages:  # the dex declares it as a package (authoritative)
         return True
@@ -166,7 +184,11 @@ def extract_iocs(
 
     for s in strings:
         for m in _URL.finditer(s):
-            urls.add(m.group(0).rstrip(".,);"))
+            url = m.group(0).rstrip(".,);")
+            # XML namespace URIs (xmlns=...) are identifiers, not endpoints — drop.
+            if denoise and _host_of(url).split(":", 1)[0].lower() in _NAMESPACE_HOSTS:
+                continue
+            urls.add(url)
         for m in _ONION.finditer(s):
             onion.add(m.group(0).lower())
         for m in _IPV4.finditer(s):

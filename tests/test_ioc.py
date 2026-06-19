@@ -132,6 +132,45 @@ def test_denoise_is_dex_derived_and_complete():
     assert not _is_package_like("c2-panel.top", frozenset())
 
 
+def test_namespace_uris_are_not_iocs():
+    """XML namespace URIs (xmlns) are identifiers, not contacted endpoints.
+
+    `http://schemas.android.com/apk/res/android` and the bare host must be dropped
+    from BOTH urls and domains, even though urls are otherwise never denoised.
+    """
+    from dexllm.ioc import _host_of, _is_package_like, _NAMESPACE_HOSTS
+
+    # unit: namespace hosts are dropped from the domains bucket
+    assert _is_package_like("schemas.android.com", frozenset())
+    assert _is_package_like("www.w3.org", frozenset())
+
+    # integration: on a bundled APK that actually carries the namespace URI, it
+    # appears with denoise=False but is gone (urls + domains) with denoise=True.
+    apks = _apks()
+    for apk in apks:
+        try:
+            d = dexllm.DexKit(apk)
+        except Exception:
+            continue
+        if not any("schemas.android.com" in s for s in d.list_strings()):
+            continue
+        raw = dexllm.extract_iocs(d, with_xref=False, denoise=False)
+        clean = dexllm.extract_iocs(d, with_xref=False, denoise=True)
+        raw_ns = [
+            r["value"]
+            for cat in ("urls", "domains")
+            for r in raw[cat]
+            if "schemas.android.com" in r["value"]
+        ]
+        assert raw_ns, "fixture APK should expose the namespace URI when raw"
+        for cat in ("urls", "domains"):
+            for r in clean[cat]:
+                host = _host_of(r["value"]) if "://" in r["value"] else r["value"]
+                assert host.split(":", 1)[0].lower() not in _NAMESPACE_HOSTS
+        return  # one fixture is enough
+    pytest.skip("no bundled APK carries an XML namespace URI in dex strings")
+
+
 def test_mcp_tool_extract_iocs_serialisable(dk):
     out = dexllm.tools.execute("extract_iocs", {"xref_limit": 50}, dk)
     assert "indicators" in out and "counts" in out

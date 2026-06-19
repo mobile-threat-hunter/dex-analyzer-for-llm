@@ -301,7 +301,9 @@ framework package names that look like hosts (`android.app`, `android.intent.ext
 are dropped). Denoising is self-calibrating — it derives the app's package paths from
 its own dex type descriptors and adds generic reverse-DNS / platform roots
 (`com.*`, `org.*`, `android.*`, `java.*`), so it covers every library the app uses
-without a hardcoded list. Set `with_xref=False` to skip the per-indicator L7
+without a hardcoded list. XML-namespace URIs (`http://schemas.android.com/apk/res/android`
+and other `xmlns` identifiers) are dropped from both buckets — they are identifiers,
+not contacted endpoints. Set `with_xref=False` to skip the per-indicator L7
 cross-reference (one search per indicator), or lower `xref_limit` on string-heavy
 apps. Also available as the `extract_iocs` MCP tool (returns `{indicators, counts}`).
 
