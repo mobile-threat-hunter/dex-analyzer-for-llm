@@ -313,6 +313,9 @@ Touch only what the task requires. Don't refactor adjacent code, don't reformat,
 ### 4. Goal-driven execution
 State a brief plan with verification steps. For decompiler work, verification is **always** a sweep delta: counts before vs after the patch.
 
+### 5. Don't silently break a documented principle — ask first
+Before making a change that would **break, contradict, or weaken a principle or claim the README (or core docs) asserts** — e.g. "emits the exact UTF-16 code units ART builds in `mirror::String`", "1:1 DAD-faithful", "0-crash on malformed dex", "byte-identical to androguard", the perf headline numbers — **STOP and ask the user**, even if the change looks like a strict improvement. Name the specific claim and the conflict. A local usability/quality win is not worth quietly invalidating a headline property the project markets. (Origin: a C1/DEL-escaping "fix" diverged from the ART-code-unit claim and had to be reverted — `07f956c`/`76b1cc6`.) If a change *deliberately* diverges (a beyond-DAD production fix), that's allowed — but it must be an explicit, documented divergence with the dual-track/`*DADFaithful` pattern, not a silent redefinition of a claimed invariant.
+
 ## Workflow defaults
 
 - **Language**: Korean for user-facing responses. Code/comments in English.
