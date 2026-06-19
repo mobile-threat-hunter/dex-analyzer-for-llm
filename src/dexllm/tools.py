@@ -314,10 +314,35 @@ def _t_extract_iocs(dk: DexKit, with_xref: bool = True, xref_limit: int = 300) -
     }
 
 
+def _t_dangerous_permission_apis(dk: DexKit) -> dict:
+    """Dangerous-permission framework APIs the APK actually references.
+
+    Joins the AOSP @RequiresPermission permission->API map against the APK's
+    external method refs: which dangerous permissions are exercised through real
+    API calls (stronger than a <uses-permission> declaration).
+    """
+    from .dangerous_api import dangerous_permission_apis
+
+    apis = dangerous_permission_apis(dk)
+    return {
+        "permissions": apis,
+        "counts": {perm: len(v) for perm, v in apis.items()},
+    }
+
+
+def _t_dangerous_permission_callers(dk: DexKit) -> dict:
+    """Dangerous-permission APIs the APK uses, each with the methods that call them."""
+    from .dangerous_api import dangerous_permission_callers
+
+    return {"permissions": dangerous_permission_callers(dk)}
+
+
 # ─── Tool catalog (Anthropic API / MCP JSON-Schema) ───────────────────────
 
 TOOL_IMPLS: dict[str, Callable] = {
     "extract_iocs": _t_extract_iocs,
+    "dangerous_permission_apis": _t_dangerous_permission_apis,
+    "dangerous_permission_callers": _t_dangerous_permission_callers,
     "list_classes": _t_list_classes,
     "list_class_methods": _t_list_class_methods,
     "decompile_method": _t_decompile_method,
@@ -603,6 +628,27 @@ TOOL_DEFINITIONS: list[dict] = [
                 },
             },
         },
+    },
+    {
+        "name": "dangerous_permission_apis",
+        "description": (
+            "Which DANGEROUS Android permissions the APK exercises through real "
+            "framework API calls (not just <uses-permission> claims). Joins AOSP's "
+            "@RequiresPermission permission->API map against the APK's referenced "
+            "APIs. Returns {permission: [pkg.Class#method, ...]} for the gated APIs "
+            "actually used. Strong behavioural signal for triage."
+        ),
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "dangerous_permission_callers",
+        "description": (
+            "Like dangerous_permission_apis, but also returns WHO calls each gated "
+            "API — the caller method descriptors — so you can jump straight to the "
+            "code that uses a dangerous permission (e.g. which method reads "
+            "location or phone state)."
+        ),
+        "input_schema": {"type": "object", "properties": {}},
     },
 ]
 

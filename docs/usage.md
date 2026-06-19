@@ -309,6 +309,39 @@ apps. Also available as the `extract_iocs` MCP tool (returns `{indicators, count
 
 ---
 
+## Dangerous-permission API usage
+
+Which **dangerous** permissions does the APK exercise *through real API calls* —
+not just `<uses-permission>` claims? This joins AOSP's `@RequiresPermission`
+permission→API map ([aosp_data_set](https://github.com/mobile-threat-hunter/aosp_data_set))
+against the APK's referenced framework APIs.
+
+```python
+import dexllm
+
+dk = dexllm.DexKit("app.apk")
+
+# {permission: [pkg.Class#method, ...]} for the gated APIs actually used
+apis = dexllm.dangerous_permission_apis(dk)
+# {'android.permission.ACCESS_FINE_LOCATION':
+#     ['android.location.LocationManager#getLastKnownLocation', ...], ...}
+
+# same, plus WHO calls each gated API (jump straight to the code)
+callers = dexllm.dangerous_permission_callers(dk)
+for perm, rows in callers.items():
+    for row in rows:
+        print(perm, row["api"], "<-", row["callers"][:1])
+# ACCESS_FINE_LOCATION  android.location.LocationManager#getLastKnownLocation
+#   <- ['La2dp/Vol/StoreLoc;->grabGPS()V']
+```
+
+The dangerous-permission→API table ships bundled (the dangerous slice of the AOSP
+dataset). Pass `dataset_path="…/aosp_data_set"` (or set `$DEXLLM_AOSP_DATASET`) to
+use a fresher / wider checkout. Both are also MCP tools
+(`dangerous_permission_apis`, `dangerous_permission_callers`).
+
+---
+
 ## Descriptor helpers
 
 ```python
