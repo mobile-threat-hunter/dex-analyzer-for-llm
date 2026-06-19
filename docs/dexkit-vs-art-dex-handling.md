@@ -19,6 +19,35 @@ AOSP `file:line` anchors drift on re-sync — re-verify before quoting.
 
 Every difference below follows from this.
 
+## 0.5. Parser lineage — slicer (dexter) vs ART libdexfile
+
+dexllm parses with Google's **slicer**; ART parses with **libdexfile**. They are
+**independent AOSP libraries** — cousins that share the on-disk dex *format*
+vocabulary (`dex_format.h` constants, same layout) but are separate
+implementations with different purposes, not shared code.
+
+| | slicer (`tools/dexter/slicer`) | ART libdexfile (`art/libdexfile/dex`) |
+|---|---|---|
+| Purpose | dex **instrumentation / rewriting** — read → IR → transform → **write** | **runtime loader** — load, verify, then execute |
+| Parse model | materializes a **mutable heap IR** (`ir::DexFile` graph; `Reader::GetClass`/`ParseClass`, lazy per-index via placeholder) | **lazy zero-copy accessors** (`ClassAccessor`/`CodeItemDataAccessor` = `DexFile& + const uint8_t* ptr_pos_`, a cursor over the mmap'd bytes) |
+| Mutability | mutable objects (built to round-trip and re-emit) | immutable views (no materialization) |
+| Verification | **none** — only `SLICER_CHECK_*` assertions (index/pointer sanity; upstream aborts, DexKit patches to `throw`) | full structural `dex_file_verifier.cc` + runtime method verifier |
+| Writes dex? | **yes** (`writer.cc`, `instrumentation.cc`) | no (read-only loader) |
+| Malformed input | assertion → abort / throw (no reason) | verifier rejects with a byte-level reason |
+| Versions | `kMinVersion=35 … kMaxVersion=41` (035–041, incl. v041 container) | `StandardDexFile::kDexMagicVersions` (same range) |
+| CompactDex (cdex) | never supported | **removed** from current AOSP → both StandardDex now, aligned |
+| MUTF-8 | `dex_utf8.cc` | `utf.cc` — decode to identical UTF-16 units (see §6) |
+
+**Why dexllm combines them.** slicer is the *parse engine* (we need its decoded
+instructions + IR to build a `MethodSnapshot`), but slicer does **no structural
+verification** — a malformed dex only trips a `SLICER_CHECK` (abort/throw, no
+reason) or, worse, is decoded out of bounds. So dexllm gates every dex through a
+**1:1 port of ART's `DexFileVerifier`** (`VerifyDex`, §1) *before* slicer parses,
+and ports ART's `utf.cc` for MUTF-8 fidelity (§6). The result is **slicer's parsing
+convenience + ART's verification rigor** — which is also why the OOB-prevention
+guards (slicer's `SafeWidth`, the MUTF-8 `cont()` bound) exist:
+[aosp-oob-divergences.md](aosp-oob-divergences.md).
+
 ## 1. Verification depth — gap now closed by a load-time verifier
 
 **AOSP** — `dex::Verify` (`dex_file_verifier.cc:3541`) runs **4 upfront phases** on
