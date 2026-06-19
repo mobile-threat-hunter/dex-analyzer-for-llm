@@ -33,6 +33,29 @@ _BUNDLED = Path(__file__).parent / "data" / "dangerous_perm_api.json"
 # A clean API ref `pkg.Class#methodName` — guards against extraction noise.
 _REF = re.compile(r"^([A-Za-z_][\w.$]*)#([A-Za-z_$][\w$]*)(?:\(\))?$")
 
+# Caller classes that are bundled framework / official-library code. A dangerous
+# API call from here is library plumbing (e.g. androidx permission helpers,
+# Play-services location) rather than the app's own behaviour — `app_only` filters
+# them out. Descriptor-prefix form for cheap caller_descriptor matching.
+_FRAMEWORK_CALLER_PREFIXES = (
+    "Landroidx/",
+    "Landroid/support/",
+    "Landroid/arch/",
+    "Lkotlin/",
+    "Lkotlinx/",
+    "Ljava/",
+    "Ljavax/",
+    "Ldalvik/",
+    "Lcom/google/android/",
+    "Lcom/google/common/",
+    "Lcom/google/gson/",
+)
+
+
+def _is_framework_caller(descriptor: str) -> bool:
+    """Return True if a caller belongs to bundled framework / official-library code."""
+    return descriptor.startswith(_FRAMEWORK_CALLER_PREFIXES)
+
 
 @lru_cache(maxsize=8)
 def _load_dangerous_map(dataset_path: str | None) -> dict[str, tuple[str, ...]]:
@@ -113,7 +136,7 @@ def dangerous_permission_apis(
 
 
 def dangerous_permission_api_callers(
-    dk: DexKit, *, dataset_path: str | None = None
+    dk: DexKit, *, dataset_path: str | None = None, app_only: bool = True
 ) -> dict[str, list[dict[str, Any]]]:
     """Return the dangerous-permission APIs this APK uses, each with its callers.
 
@@ -124,11 +147,16 @@ def dangerous_permission_api_callers(
     Args:
         dk: A loaded ``dexllm.DexKit`` instance.
         dataset_path: Optional dataset override (see :func:`dangerous_permission_apis`).
+        app_only: When True (default), drop callers that are bundled framework /
+            official-library code (``androidx.*``, ``android.support.*``, ``kotlin.*``,
+            ``com.google.android.*``, …) — such a call is library plumbing, not the
+            app's own behaviour. Set False to keep every caller. An API whose only
+            callers are framework code is omitted under ``app_only``.
 
     Returns:
         ``{permission: [{"api", "descriptors", "callers"}, ...]}`` — ``descriptors``
         are the resolved ``Lcls;->name(proto)ret`` forms, ``callers`` the distinct
-        caller method descriptors. Only perms/APIs with ≥1 caller are included.
+        caller method descriptors. Only perms/APIs with ≥1 (kept) caller are included.
     """
     table = _load_dangerous_map(dataset_path)
     index = _external_method_index(dk)
@@ -145,7 +173,10 @@ def dangerous_permission_api_callers(
                 desc = f"{ref.class_descriptor}->{ref.name}{ref.proto}"
                 descriptors.append(desc)
                 for site in dk.find_call_sites_to_api(desc):
-                    callers.add(site.caller_descriptor)
+                    caller = site.caller_descriptor
+                    if app_only and _is_framework_caller(caller):
+                        continue
+                    callers.add(caller)
             if callers:
                 rows.append(
                     {

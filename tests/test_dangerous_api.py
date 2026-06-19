@@ -81,6 +81,42 @@ def test_dangerous_permission_api_callers_attributes_to_methods(dk):
         assert "La2dp/Vol/StoreLoc;->grabGPS()V" in joined
 
 
+def test_app_only_filters_framework_callers(dk):
+    """app_only (default) drops bundled framework/library callers; False keeps them."""
+    from dexllm.dangerous_api import _is_framework_caller
+
+    # unit: descriptor-prefix classification
+    assert _is_framework_caller("Landroidx/core/app/ActivityCompat;->x()V")
+    assert _is_framework_caller("Landroid/support/v7/app/TwilightManager;->y()V")
+    assert _is_framework_caller("Lkotlin/io/Foo;->z()V")
+    assert not _is_framework_caller("La2dp/Vol/StoreLoc;->grabGPS()V")
+
+    # integration: on an APK whose only caller of a gated API is framework code,
+    # app_only=True drops it while app_only=False keeps it.
+    for apk in _apks():
+        try:
+            d = dexllm.DexKit(apk)
+        except Exception:
+            continue
+        full = dexllm.dangerous_permission_api_callers(d, app_only=False)
+        fw_total = sum(
+            1
+            for rows in full.values()
+            for r in rows
+            for c in r["callers"]
+            if _is_framework_caller(c)
+        )
+        if not fw_total:
+            continue
+        app = dexllm.dangerous_permission_api_callers(d, app_only=True)
+        kept = [c for rows in app.values() for r in rows for c in r["callers"]]
+        assert not any(_is_framework_caller(c) for c in kept)
+        full_total = sum(len(r["callers"]) for rows in full.values() for r in rows)
+        assert len(kept) == full_total - fw_total
+        return
+    pytest.skip("no bundled APK has a framework caller of a dangerous API")
+
+
 def test_mcp_tools_registered_and_serialisable(dk):
     names = {t["name"] for t in dexllm.tools.TOOL_DEFINITIONS}
     assert {"dangerous_permission_apis", "dangerous_permission_api_callers"} <= names

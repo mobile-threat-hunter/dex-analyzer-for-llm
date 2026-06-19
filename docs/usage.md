@@ -327,7 +327,7 @@ apis = dexllm.dangerous_permission_apis(dk)
 #     ['android.location.LocationManager#getLastKnownLocation', ...], ...}
 
 # same, plus WHO calls each gated API (jump straight to the code)
-callers = dexllm.dangerous_permission_api_callers(dk)
+callers = dexllm.dangerous_permission_api_callers(dk)   # app_only=True by default
 for perm, rows in callers.items():
     for row in rows:
         print(perm, row["api"], "<-", row["callers"][:1])
@@ -335,10 +335,21 @@ for perm, rows in callers.items():
 #   <- ['La2dp/Vol/StoreLoc;->grabGPS()V']
 ```
 
+By default `app_only=True` drops callers that are bundled framework / official-library
+code (`androidx.*`, `android.support.*`, `kotlin.*`, `com.google.android.*`, …) — a
+dangerous-API call from there (e.g. AppCompat's `TwilightManager` reading location for
+day/night theming) is library plumbing, not the app's own behaviour. Pass
+`app_only=False` to keep every caller:
+
+```python
+dexllm.dangerous_permission_api_callers(dk, app_only=False)   # include framework callers
+```
+
 The dangerous-permission→API table ships bundled (the dangerous slice of the AOSP
 dataset). Pass `dataset_path="…/aosp_data_set"` (or set `$DEXLLM_AOSP_DATASET`) to
 use a fresher / wider checkout. Both are also MCP tools
-(`dangerous_permission_apis`, `dangerous_permission_api_callers`).
+(`dangerous_permission_apis`, `dangerous_permission_api_callers`; the latter takes
+`app_only`).
 
 ---
 

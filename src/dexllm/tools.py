@@ -330,11 +330,11 @@ def _t_dangerous_permission_apis(dk: DexKit) -> dict:
     }
 
 
-def _t_dangerous_permission_api_callers(dk: DexKit) -> dict:
+def _t_dangerous_permission_api_callers(dk: DexKit, app_only: bool = True) -> dict:
     """Dangerous-permission APIs the APK uses, each with the methods that call them."""
     from .dangerous_api import dangerous_permission_api_callers
 
-    return {"permissions": dangerous_permission_api_callers(dk)}
+    return {"permissions": dangerous_permission_api_callers(dk, app_only=app_only)}
 
 
 # ─── Tool catalog (Anthropic API / MCP JSON-Schema) ───────────────────────
@@ -646,9 +646,20 @@ TOOL_DEFINITIONS: list[dict] = [
             "Like dangerous_permission_apis, but also returns WHO calls each gated "
             "API — the caller method descriptors — so you can jump straight to the "
             "code that uses a dangerous permission (e.g. which method reads "
-            "location or phone state)."
+            "location or phone state). By default callers from bundled framework / "
+            "official-library code (androidx, kotlin, play-services, …) are filtered "
+            "out so you see the app's own usage; pass app_only=false to keep them."
         ),
-        "input_schema": {"type": "object", "properties": {}},
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "app_only": {
+                    "type": "boolean",
+                    "default": True,
+                    "description": "drop framework/official-library callers (androidx, kotlin, …)",
+                }
+            },
+        },
     },
 ]
 
