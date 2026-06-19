@@ -42,7 +42,7 @@ from .capability import (
     summarize_capabilities,
 )
 from .dangerous_api import (
-    dangerous_api_callers,
+    dangerous_permission_api_callers,
     dangerous_permission_apis,
 )
 from .descriptors import (
@@ -86,7 +86,7 @@ __all__ = [
     "filter_type_refs",
     "IOC_CATEGORIES",
     "dangerous_permission_apis",
-    "dangerous_api_callers",
+    "dangerous_permission_api_callers",
     "extract_iocs",
     "find_call_sites_to_ref",
     "format_class",

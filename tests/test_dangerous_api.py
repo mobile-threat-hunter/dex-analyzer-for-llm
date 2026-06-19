@@ -63,8 +63,8 @@ def test_dangerous_permission_apis_detects_real_usage(dk):
         assert all("#" in a for a in used)
 
 
-def test_dangerous_api_callers_attributes_to_methods(dk):
-    callers = dexllm.dangerous_api_callers(dk)
+def test_dangerous_permission_api_callers_attributes_to_methods(dk):
+    callers = dexllm.dangerous_permission_api_callers(dk)
     assert callers
     for perm, rows in callers.items():
         for row in rows:
@@ -83,8 +83,8 @@ def test_dangerous_api_callers_attributes_to_methods(dk):
 
 def test_mcp_tools_registered_and_serialisable(dk):
     names = {t["name"] for t in dexllm.tools.TOOL_DEFINITIONS}
-    assert {"dangerous_permission_apis", "dangerous_api_callers"} <= names
-    for tool in ("dangerous_permission_apis", "dangerous_api_callers"):
+    assert {"dangerous_permission_apis", "dangerous_permission_api_callers"} <= names
+    for tool in ("dangerous_permission_apis", "dangerous_permission_api_callers"):
         out = dexllm.tools.execute(tool, {}, dk)
         assert "permissions" in out
         json.dumps(out)  # MCP transport requires JSON-serialisable
