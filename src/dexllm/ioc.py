@@ -85,17 +85,18 @@ _DROP_HOSTS = frozenset({"schemas.android.com", "www.w3.org", "xmlpull.org"})
 _PKG_LABEL = re.compile(r"[a-z0-9_$]+")
 
 
-def _dex_package_prefixes(strings: list[str]) -> frozenset[str]:
-    """Dotted package prefixes that actually appear as type descriptors in the dex.
+def _dex_package_prefixes(descriptors: list[str]) -> frozenset[str]:
+    """Dotted package prefixes from a list of type descriptors.
 
-    From ``Landroid/app/Activity;`` derive ``{"android", "android.app"}``. Denoising
-    then keys off the dex's *own* package names instead of a hardcoded library list,
-    so it is complete (every framework/SDK the app references is covered) and
-    self-calibrating — e.g. a host equal to a declared library package is dropped
-    even for libraries no static list would enumerate.
+    From ``Landroid/app/Activity;`` derive ``{"android", "android.app"}``. The caller
+    supplies the dex's *structured* type tables (internal class defs +
+    external type refs), so denoising keys off real type-ids — not a regex over raw
+    strings and not a hardcoded library list. Complete (every framework/SDK the app
+    references is covered) and self-calibrating: a host equal to a declared library
+    package is dropped even for libraries no static list would enumerate.
     """
     pkgs: set[str] = set()
-    for s in strings:
+    for s in descriptors:
         core = s.lstrip("[")  # arrays: [Landroid/...; -> Landroid/...;
         if not (core.startswith("L") and core.endswith(";") and "/" in core):
             continue
@@ -148,9 +149,14 @@ def extract_iocs(
     """
     strings = dk.list_strings()
 
-    # Self-calibrating denoise set: the app's own package paths, from its dex type
-    # descriptors. A host candidate that equals one is package usage, not a domain.
-    dex_packages = _dex_package_prefixes(strings) if denoise else frozenset()
+    # Self-calibrating denoise set, from the dex's STRUCTURED type tables (not a
+    # regex over raw strings): internal class defs + external type refs -> package
+    # prefixes. A host candidate that equals one is package usage, not a domain.
+    dex_packages: frozenset[str] = frozenset()
+    if denoise:
+        descriptors = list(dk.list_classes())
+        descriptors += [t.descriptor for t in dk.list_external_type_refs(False)]
+        dex_packages = _dex_package_prefixes(descriptors)
 
     urls: set[str] = set()
     ips: set[str] = set()
