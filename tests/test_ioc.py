@@ -102,6 +102,36 @@ def test_ips_have_valid_octets(dk):
         assert all(0 <= int(o) <= 255 for o in octets)
 
 
+def test_denoise_is_dex_derived_and_complete():
+    """Denoising keys off the dex's own packages + structural roots, not a list.
+
+    APK-free unit test of the internal helpers proving the accuracy gains over a
+    hardcoded prefix list: per-app package derivation, generic reverse-DNS / platform
+    roots (no per-library enumeration), and that genuine domains survive.
+    """
+    from dexllm.ioc import _dex_package_prefixes, _is_package_like
+
+    pkgs = _dex_package_prefixes(
+        ["Landroid/app/Activity;", "Lcom/evil/Bot;", "[Lkotlin/io/X;"]
+    )
+    assert {"android", "android.app", "com.evil", "kotlin.io"} <= pkgs
+
+    # (1) dex-derived: a declared package that collides with a TLD-label -> dropped
+    assert _is_package_like("android.app", pkgs)
+    assert _is_package_like("kotlin.io", pkgs)
+    # (2) generic reverse-DNS root — any com.*/org.* package, no enumeration needed
+    assert _is_package_like("org.apache.commons.io", frozenset())
+    assert _is_package_like("com.facebook.internal.cc", frozenset())
+    # (3) platform constant namespace (android.intent.* etc.), not a real host
+    assert _is_package_like("android.intent.extra.cc", frozenset())
+    assert _is_package_like("android.r.id", frozenset())
+    # (4) genuine domains survive — first label is neither a platform nor RDN root
+    assert not _is_package_like("github.com", frozenset())
+    assert not _is_package_like("maps.google.com", frozenset())
+    assert not _is_package_like("app.attacker.io", frozenset())  # 'app' is a gTLD, not a root
+    assert not _is_package_like("c2-panel.top", frozenset())
+
+
 def test_mcp_tool_extract_iocs_serialisable(dk):
     out = dexllm.tools.execute("extract_iocs", {"xref_limit": 50}, dk)
     assert "indicators" in out and "counts" in out

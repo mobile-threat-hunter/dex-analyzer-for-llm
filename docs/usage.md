@@ -297,10 +297,13 @@ all_strings = dk.list_strings()          # every distinct literal across all dex
 ```
 
 `extract_iocs` classifies `list_strings()` with TLD-gated regexes and **denoises**
-framework package names that look like hosts (`android.app`, `java.lang.*` are
-dropped). Set `with_xref=False` to skip the per-indicator L7 cross-reference (one
-search per indicator), or lower `xref_limit` on string-heavy apps. Also available
-as the `extract_iocs` MCP tool (returns `{indicators, counts}`).
+framework package names that look like hosts (`android.app`, `android.intent.extra.cc`
+are dropped). Denoising is self-calibrating — it derives the app's package paths from
+its own dex type descriptors and adds generic reverse-DNS / platform roots
+(`com.*`, `org.*`, `android.*`, `java.*`), so it covers every library the app uses
+without a hardcoded list. Set `with_xref=False` to skip the per-indicator L7
+cross-reference (one search per indicator), or lower `xref_limit` on string-heavy
+apps. Also available as the `extract_iocs` MCP tool (returns `{indicators, counts}`).
 
 ---
 

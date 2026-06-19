@@ -51,44 +51,70 @@ _HOST = re.compile(
 
 # --- denoising --------------------------------------------------------------
 
-# Reverse-DNS roots that are Java/Android package namespaces, not network hosts.
-# A "domain" beginning with one of these is a class/package name false positive.
-_FRAMEWORK_PREFIXES = (
-    "android.",
-    "androidx.",
-    "java.",
-    "javax.",
-    "kotlin.",
-    "kotlinx.",
-    "dalvik.",
-    "sun.",
-    "junit.",
-    "org.w3c.",
-    "org.xml.",
-    "org.json.",
-    "org.intellij.",
-    "org.jetbrains.",
-    "com.android.",
-    "com.google.android.",
-    "com.google.common.",
-    "java.lang.",
+# A hostname whose LEFTMOST label is one of these is a Java package / framework
+# constant namespace, not a network host. Two groups:
+#  - classic reverse-DNS roots (com/org/net/...) — no registrable host starts with
+#    a bare `com.`/`org.`, so this generically covers `com.facebook.*`,
+#    `org.apache.*` etc. WITHOUT enumerating every library.
+#  - platform/runtime roots (android/java/kotlin/...) — trademark namespaces the
+#    framework uses for constants (`android.intent.*`, `android.permission.*`) and
+#    packages. Deliberately excludes gTLDs that are also common subdomains (`io`,
+#    `app`, `dev`, `info`) so real hosts like `app.foo.com` survive.
+# Scheme-ful C2 is never lost to this: URLs are extracted (and surfaced) without
+# denoising — only the bare-domain bucket is filtered.
+_RDN_ROOTS = frozenset({"com", "org", "net", "edu", "gov", "mil", "int"})
+_PLATFORM_ROOTS = frozenset(
+    {
+        "android",
+        "androidx",
+        "java",
+        "javax",
+        "kotlin",
+        "kotlinx",
+        "dalvik",
+        "sun",
+        "junit",
+    }
 )
+_DROP_ROOTS = _RDN_ROOTS | _PLATFORM_ROOTS
 
-# Hosts that are real but near-universally benign infrastructure — kept, but the
-# caller may want to triage these last. We do NOT drop them (a C2 can abuse a CDN);
-# they are merely not noise to suppress.
+# Explicit benign infrastructure: a real host, but pure noise for triage.
 _DROP_HOSTS = frozenset({"schemas.android.com", "www.w3.org", "xmlpull.org"})
 
+# A package label inside a type descriptor `Lpkg/sub/Class;`.
+_PKG_LABEL = re.compile(r"[a-z0-9_$]+")
 
-def _is_package_like(host: str) -> bool:
-    """Return True if ``host`` looks like a Java/Android package, not a domain."""
+
+def _dex_package_prefixes(strings: list[str]) -> frozenset[str]:
+    """Dotted package prefixes that actually appear as type descriptors in the dex.
+
+    From ``Landroid/app/Activity;`` derive ``{"android", "android.app"}``. Denoising
+    then keys off the dex's *own* package names instead of a hardcoded library list,
+    so it is complete (every framework/SDK the app references is covered) and
+    self-calibrating — e.g. a host equal to a declared library package is dropped
+    even for libraries no static list would enumerate.
+    """
+    pkgs: set[str] = set()
+    for s in strings:
+        core = s.lstrip("[")  # arrays: [Landroid/...; -> Landroid/...;
+        if not (core.startswith("L") and core.endswith(";") and "/" in core):
+            continue
+        labels = [p.lower() for p in core[1:-1].split("/")[:-1]]  # drop class name
+        if not labels or not all(_PKG_LABEL.fullmatch(p) for p in labels):
+            continue
+        for i in range(1, len(labels) + 1):
+            pkgs.add(".".join(labels[:i]))
+    return frozenset(pkgs)
+
+
+def _is_package_like(host: str, dex_packages: frozenset[str]) -> bool:
+    """Return True if ``host`` is a Java/Android package, not a network domain."""
     low = host.lower()
-    if low.startswith(_FRAMEWORK_PREFIXES):
+    if low in _DROP_HOSTS:
         return True
-    # Reverse-DNS package heuristic: 4+ labels whose TLD-position label is a
-    # common package segment (com/org/net are also TLDs, so only flag when the
-    # leading label is a known framework root handled above). Keep conservative.
-    return low in _DROP_HOSTS
+    if low in dex_packages:  # the dex declares it as a package (authoritative)
+        return True
+    return low.split(".", 1)[0] in _DROP_ROOTS  # reverse-DNS / platform root
 
 
 def _host_of(url: str) -> str:
@@ -122,6 +148,10 @@ def extract_iocs(
     """
     strings = dk.list_strings()
 
+    # Self-calibrating denoise set: the app's own package paths, from its dex type
+    # descriptors. A host candidate that equals one is package usage, not a domain.
+    dex_packages = _dex_package_prefixes(strings) if denoise else frozenset()
+
     urls: set[str] = set()
     ips: set[str] = set()
     domains: set[str] = set()
@@ -139,13 +169,13 @@ def extract_iocs(
             emails.add(m.group(0))
         for m in _HOST.finditer(s):
             host = m.group(0).lower()
-            if not (denoise and _is_package_like(host)):
+            if not (denoise and _is_package_like(host, dex_packages)):
                 domains.add(host)
 
     # A URL's own host is a high-confidence domain — fold it in (post-denoise).
     for u in urls:
         h = _host_of(u).split(":", 1)[0].lower()
-        if "." in h and not (denoise and _is_package_like(h)):
+        if "." in h and not (denoise and _is_package_like(h, dex_packages)):
             domains.add(h)
 
     buckets = {
