@@ -46,12 +46,14 @@ std::string Utf16ToUtf8(const std::vector<uint16_t>& units);
 // Convenience: MUTF-8 → standard UTF-8 (Mutf8ToUtf16 ∘ Utf16ToUtf8).
 std::string Mutf8ToUtf8(std::string_view raw);
 
-// Append one UTF-16 code unit to `out` as Java SOURCE TEXT: a control char
-// (< 0x20) or a surrogate (0xD800–0xDFFF) becomes a `\uXXXX` escape — the only
-// valid, pybind11-decodable text form — and any other BMP unit becomes readable
-// UTF-8 (so 연결 / 中文 / identifiers stay legible). A supplementary char,
-// already split into a surrogate pair by Mutf8ToUtf16, is therefore emitted as
-// `😀` — exactly the pair ART keeps in memory.
+// Append one UTF-16 code unit to `out` as Java SOURCE TEXT: a Unicode CONTROL
+// char (category Cc — C0 0x00–0x1F, DEL 0x7F, C1 0x80–0x9F) or a surrogate
+// (0xD800–0xDFFF) becomes a `\uXXXX` escape — the only valid, pybind11-decodable
+// text form — and any other BMP unit becomes readable UTF-8 (so 연결 / 中文 /
+// identifiers stay legible). Escaping the C1 range matters for binary blobs
+// stored as strings (e.g. an embedded DER certificate), where raw C1 bytes are
+// invisible and make the literal look truncated. A supplementary char, already
+// split into a surrogate pair by Mutf8ToUtf16, is emitted as `😀`.
 void AppendUtf16Escaped(std::string& out, uint16_t unit);
 
 }  // namespace dexkit::dad::mutf8

@@ -128,7 +128,16 @@ std::string Mutf8ToUtf8(std::string_view raw) {
 }
 
 void AppendUtf16Escaped(std::string& out, uint16_t unit) {
-    if (unit < 0x20 || (unit >= 0xD800 && unit <= 0xDFFF)) {
+    // Escape every Unicode CONTROL char (category Cc: C0 0x00-0x1F, DEL 0x7F, and
+    // C1 0x80-0x9F) plus surrogates as `\uXXXX`. C1 controls matter for binary
+    // blobs stored as strings (e.g. an embedded DER certificate): emitting them
+    // raw produces invisible bytes that make the literal look truncated/garbled.
+    // Printable code units (letters, ¨/Õ/÷, CJK, 한글) still pass through as
+    // readable UTF-8; the output stays valid Java and round-trips byte-for-byte.
+    const bool is_control =
+        unit < 0x20 || unit == 0x7F || (unit >= 0x80 && unit <= 0x9F);
+    const bool is_surrogate = unit >= 0xD800 && unit <= 0xDFFF;
+    if (is_control || is_surrogate) {
         char buf[8];
         std::snprintf(buf, sizeof(buf), "\\u%04x", unit);
         out += buf;
