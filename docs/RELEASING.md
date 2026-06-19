@@ -53,8 +53,10 @@ Defined in [pyproject.toml](../pyproject.toml) `[tool.cibuildwheel]`:
 - **macOS**: x86_64 + arm64, `MACOSX_DEPLOYMENT_TARGET=13.3` (dad_cpp/dast.cpp uses
   `std::to_chars` for float/double, whose libc++ symbol needs macOS 13.3+).
 - **CPython** 3.9–3.13. musllinux + PyPy skipped.
-- **Windows** is intentionally absent — the build is only validated on Linux/macOS
-  (CI). Adding it needs MSVC/C++20 portability work on the vendored slicer first.
+- **Windows** is not yet shipped — the build is currently validated on Linux/macOS
+  (CI). The stack is mostly portable already (the slicer has no POSIX deps, a
+  `mmap_windows.h` shim exists); the scoped change set, zlib decision, CI design, and
+  MSVC C++20 risks are in [windows-port-plan.md](windows-port-plan.md).
 
 Each wheel is smoke-tested in CI (`test-command`: import + `identify()`); the full
 parity/sweep gates stay in [ci.yml](../.github/workflows/ci.yml) (they need the
