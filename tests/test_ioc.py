@@ -220,8 +220,28 @@ def test_ipv4_rejects_dotted_version_strings():
     assert not _IPV4.search("v1.0.0.0.5 build")  # 5-component
     assert not _IPV4.search("ver 1.2.3.4.5")
     assert not _IPV4.search("10.0.0.1.2")
+    assert not _IPV4.search("5.8.8.8.8 weird")  # 5-component, no sub-quad slice
     assert _IPV4.search("dns 8.8.8.8 here")  # real IP survives
     assert _IPV4.search("c2 1.2.3.4:8080 port")  # ip:port survives
+    # a valid IP merely FOLLOWED by a dot must still match (regression guard)
+    assert _IPV4.search("Resolved 8.8.8.8.").group(0) == "8.8.8.8"  # sentence end
+    assert _IPV4.search("8.8.8.8.in-addr.arpa").group(0) == "8.8.8.8"  # reverse DNS
+
+
+def test_oversized_string_does_not_emit_truncated_url():
+    # A URL that straddles the scan cap must not surface as a truncated value; its
+    # host is still recovered separately. (No crash, no corrupt indicator.)
+    from dexllm.ioc import _MAX_SCAN
+
+    # host + "/" sits inside the cap; only the long path crosses it.
+    pad = "x" * (_MAX_SCAN - 60)
+    s = pad + " http://straddle-c2.evil.top/" + "a" * 100000
+    iocs = dexllm.extract_iocs(_FakeDK([s]), with_xref=False)
+    for r in iocs["urls"]:
+        assert len(r["value"]) < _MAX_SCAN  # not a giant truncated fragment
+        assert not r["value"].endswith("a" * 50)  # not the cut-off path tail
+    # host still recovered
+    assert "straddle-c2.evil.top" in {r["value"] for r in iocs["domains"]}
 
 
 def test_ip_url_host_not_double_categorized():

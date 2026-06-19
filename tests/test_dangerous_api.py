@@ -158,6 +158,15 @@ def test_override_wrong_shape_clear_error(tmp_path):
         _load_dangerous_map_cached(str(tmp_path))
 
 
+def test_override_api_file_non_dict_clear_error(tmp_path):
+    from dexllm.dangerous_api import _load_dangerous_map_cached
+
+    (tmp_path / "permissions.json").write_text("[]")  # valid (empty) list
+    (tmp_path / "perm_api_by_perm.json").write_text("[1, 2]")  # list, expected object
+    with pytest.raises(ValueError):
+        _load_dangerous_map_cached(str(tmp_path))
+
+
 def test_dataset_path_override(dk):
     """If the full dataset is present locally, the override path parses too."""
     ds = "/home/nyahumi/Project/aosp_data_set"

@@ -96,6 +96,10 @@ def _load_dangerous_map_cached(root: str) -> dict[str, tuple[str, ...]]:
         and "dangerous" in str(p.get("protectionLevel", "")).lower()
     }
     table = json.loads(api_file.read_text())
+    if not isinstance(table, dict):
+        raise ValueError(
+            f"{api_file} must be a JSON object mapping permission -> [apis]"
+        )
     out: dict[str, tuple[str, ...]] = {}
     for perm in sorted(dangerous):
         refs = sorted(

@@ -32,12 +32,15 @@ _MAX_SCAN = 65536
 # A scheme-qualified URL (http/https/ftp/ws/wss). Stop at whitespace/quotes/<>.
 _URL = re.compile(r"\b(?:https?|ftp|wss?)://[^\s\"'<>\\]+", re.IGNORECASE)
 
-# Dotted-quad IPv4 with validated octets, optional :port. Lookarounds (not \b)
-# reject a quad that is part of a longer dotted-decimal token, so a 4+-component
-# version string like `1.0.0.0.5` / `2.30.1.7.0` is not misread as an IP.
+# Dotted-quad IPv4 with validated octets, optional :port. The lookarounds reject a
+# quad that is one slice of a longer dotted-decimal token (a 4+-component version
+# string like `1.0.0.0.5` / `2.30.1.7`) WITHOUT losing a valid IP that is merely
+# followed by a dot — `8.8.8.8.` (sentence end) and `8.8.8.8.in-addr.arpa` (reverse
+# DNS) still match, because only `.<digit>` (another octet) is excluded, not a bare
+# dot. Symmetric on the left so a sub-quad of `5.8.8.8.8` is not half-matched.
 _IPV4 = re.compile(
-    r"(?<![\d.])(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)"
-    r"(?::\d{1,5})?(?![\d.])"
+    r"(?<!\d)(?<!\d\.)(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)"
+    r"(?::\d{1,5})?(?!\.?\d)"
 )
 
 # Tor v2/v3 onion address.
@@ -211,8 +214,13 @@ def extract_iocs(
         # Cap the per-string scan length. The classifier regexes are linear, but
         # a real IOC is short; an oversized blob is itself a signal, not a host.
         # This bounds worst-case cost over an adversarial APK regardless of pattern.
-        s = raw if len(raw) <= _MAX_SCAN else raw[:_MAX_SCAN]
+        truncated = len(raw) > _MAX_SCAN
+        s = raw if not truncated else raw[:_MAX_SCAN]
         for m in _URL.finditer(s):
+            # A URL whose match ends exactly at the scan cap was cut off — drop the
+            # misleading partial (its host is still recovered by the _HOST scan).
+            if truncated and m.end() == len(s):
+                continue
             url = m.group(0).rstrip(".,);")
             # XML namespace URIs (xmlns=...) are identifiers, not endpoints — drop.
             if denoise and _host_of(url) in _NAMESPACE_HOSTS:
