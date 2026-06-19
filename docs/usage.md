@@ -327,7 +327,7 @@ apis = dexllm.dangerous_permission_apis(dk)
 #     ['android.location.LocationManager#getLastKnownLocation', ...], ...}
 
 # same, plus WHO calls each gated API (jump straight to the code)
-callers = dexllm.dangerous_permission_callers(dk)
+callers = dexllm.dangerous_api_callers(dk)
 for perm, rows in callers.items():
     for row in rows:
         print(perm, row["api"], "<-", row["callers"][:1])
@@ -338,7 +338,7 @@ for perm, rows in callers.items():
 The dangerous-permission→API table ships bundled (the dangerous slice of the AOSP
 dataset). Pass `dataset_path="…/aosp_data_set"` (or set `$DEXLLM_AOSP_DATASET`) to
 use a fresher / wider checkout. Both are also MCP tools
-(`dangerous_permission_apis`, `dangerous_permission_callers`).
+(`dangerous_permission_apis`, `dangerous_api_callers`).
 
 ---
 

@@ -330,11 +330,11 @@ def _t_dangerous_permission_apis(dk: DexKit) -> dict:
     }
 
 
-def _t_dangerous_permission_callers(dk: DexKit) -> dict:
+def _t_dangerous_api_callers(dk: DexKit) -> dict:
     """Dangerous-permission APIs the APK uses, each with the methods that call them."""
-    from .dangerous_api import dangerous_permission_callers
+    from .dangerous_api import dangerous_api_callers
 
-    return {"permissions": dangerous_permission_callers(dk)}
+    return {"permissions": dangerous_api_callers(dk)}
 
 
 # ─── Tool catalog (Anthropic API / MCP JSON-Schema) ───────────────────────
@@ -342,7 +342,7 @@ def _t_dangerous_permission_callers(dk: DexKit) -> dict:
 TOOL_IMPLS: dict[str, Callable] = {
     "extract_iocs": _t_extract_iocs,
     "dangerous_permission_apis": _t_dangerous_permission_apis,
-    "dangerous_permission_callers": _t_dangerous_permission_callers,
+    "dangerous_api_callers": _t_dangerous_api_callers,
     "list_classes": _t_list_classes,
     "list_class_methods": _t_list_class_methods,
     "decompile_method": _t_decompile_method,
@@ -641,7 +641,7 @@ TOOL_DEFINITIONS: list[dict] = [
         "input_schema": {"type": "object", "properties": {}},
     },
     {
-        "name": "dangerous_permission_callers",
+        "name": "dangerous_api_callers",
         "description": (
             "Like dangerous_permission_apis, but also returns WHO calls each gated "
             "API — the caller method descriptors — so you can jump straight to the "

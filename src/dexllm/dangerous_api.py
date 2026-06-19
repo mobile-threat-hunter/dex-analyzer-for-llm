@@ -7,7 +7,7 @@ APK actually references (its external method refs) to answer two triage question
 
   - which **dangerous** permissions does the APK exercise *through real API calls*
     (not just `<uses-permission>` claims)? -> :func:`dangerous_permission_apis`
-  - **who** in the code calls those gated APIs? -> :func:`dangerous_permission_callers`
+  - **who** in the code calls those gated APIs? -> :func:`dangerous_api_callers`
 
 The permission -> API table ships bundled (``data/dangerous_perm_api.json``, the
 dangerous slice of the AOSP dataset). Point ``dataset_path`` (or ``$DEXLLM_AOSP_DATASET``)
@@ -26,7 +26,7 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from ._dexkit_core import DexKit
 
-__all__ = ["dangerous_permission_apis", "dangerous_permission_callers"]
+__all__ = ["dangerous_permission_apis", "dangerous_api_callers"]
 
 _BUNDLED = Path(__file__).parent / "data" / "dangerous_perm_api.json"
 
@@ -112,7 +112,7 @@ def dangerous_permission_apis(
     return result
 
 
-def dangerous_permission_callers(
+def dangerous_api_callers(
     dk: DexKit, *, dataset_path: str | None = None
 ) -> dict[str, list[dict[str, Any]]]:
     """Return the dangerous-permission APIs this APK uses, each with its callers.
