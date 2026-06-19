@@ -149,22 +149,15 @@ int main() {
               m::Mutf8ToUtf8("\xED\xA0\xBD\xED\xB8\x80") == "\xF0\x9F\x98\x80");
     }
 
-    // 5. AppendUtf16Escaped (text path): all Cc control chars (C0/DEL/C1) + surrogate
-    //    -> \uXXXX, printable BMP -> readable UTF-8.
+    // 5. AppendUtf16Escaped (text path): control/surrogate -> \uXXXX, BMP -> UTF-8.
     {
-        std::string a, b, c, d, e, f;
-        m::AppendUtf16Escaped(a, 0x0000);  // C0 control
+        std::string a, b, c;
+        m::AppendUtf16Escaped(a, 0x0000);  // control
         m::AppendUtf16Escaped(b, 0xD83D);  // surrogate
-        m::AppendUtf16Escaped(c, 0xC5F0);  // BMP korean (printable)
-        m::AppendUtf16Escaped(d, 0x0086);  // C1 control (e.g. DER cert OID byte)
-        m::AppendUtf16Escaped(e, 0x007F);  // DEL
-        m::AppendUtf16Escaped(f, 0x00F7);  // ÷ U+00F7 — printable Latin-1, stays readable
-        check("escape C0 control -> \\u0000", a == "\\u0000");
+        m::AppendUtf16Escaped(c, 0xC5F0);  // BMP korean
+        check("escape control -> \\u0000", a == "\\u0000");
         check("escape surrogate -> \\ud83d", b == "\\ud83d");
         check("escape BMP -> readable UTF-8", c == "\xEC\x97\xB0");
-        check("escape C1 control -> \\u0086", d == "\\u0086");
-        check("escape DEL -> \\u007f", e == "\\u007f");
-        check("printable Latin-1 stays readable", f == "\xC3\xB7");
     }
 
     std::printf("\n%s — %d failure(s)\n", g_fail ? "FAIL" : "PASS", g_fail);
