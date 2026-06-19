@@ -73,8 +73,13 @@ heap IR built for rewriting, with *no* structural verification, only `SLICER_CHE
 assertions). ART itself parses with **libdexfile** (lazy zero-copy accessors + its own
 `DexFileVerifier`). They are independent AOSP libraries sharing only the dex *format*.
 dexllm therefore pairs slicer's parsing with a **1:1 port of ART's `DexFileVerifier`**
-(`VerifyDex`, below) and of `utf.cc` (MUTF-8) — slicer's convenience, ART's rigor. Full
-side-by-side: [docs/dexkit-vs-art-dex-handling.md §0.5](docs/dexkit-vs-art-dex-handling.md).
+(`VerifyDex`, below) and of `utf.cc` (MUTF-8) — slicer's convenience, ART's rigor.
+
+*Why not just use libdexfile?* Because it's a foundation rewrite, not a parser swap:
+`dex::Reader` is the backbone of all of DexKit Core (L1–L7 search, enumeration), and
+libdexfile isn't standalone-vendorable (it needs libartbase + libbase and builds with
+Soong, not CMake). Its one real edge — rigorous verification — we already ported. Full
+side-by-side + decision: [docs/dexkit-vs-art-dex-handling.md §0.5](docs/dexkit-vs-art-dex-handling.md).
 
 **Runtime flows** — the load/verify path, the DAD decompile pipeline (`Construct →
 BuildDefUse → … → IdentifyStructures → Writer`), the L1–L7 capability ladder, and agent

@@ -48,6 +48,34 @@ convenience + ART's verification rigor** — which is also why the OOB-preventio
 guards (slicer's `SafeWidth`, the MUTF-8 `cont()` bound) exist:
 [aosp-oob-divergences.md](aosp-oob-divergences.md).
 
+### Why not replace slicer with ART libdexfile?
+
+A recurring question: if ART libdexfile is the canonical parser, why not use it
+directly? Because it's not a parser swap — it's a foundation rewrite, for a benefit
+we already have:
+
+1. **slicer is the backbone of DexKit Core, not just our decompiler's parser.**
+   `dex::Reader` is a *member of `DexItem`* (`dex_item.h`) — the entire L1–L7 search
+   engine and class/method enumeration (the headline speed features) run through it.
+   Replacing slicer means re-porting all of DexKit onto a new parser, or dropping
+   DexKit and reimplementing search/enumeration. Tens of thousands of lines.
+2. **libdexfile is not standalone-vendorable.** `dex_file.cc`/`dex_file_verifier.cc`
+   pull in **libartbase** (`base/leb128.h`, `base/globals.h`, `base/mman.h`,
+   `base/hiddenapi_domain.h`, …) and **libbase** (`android-base/*`), and build with
+   **Soong (`Android.bp`), not CMake**. Vendoring it means extracting and
+   CMake-porting libartbase + libbase and maintaining that fork — far more than we
+   vendor today. This is exactly why standalone dex tooling uses dexter/slicer
+   (purpose-built standalone) rather than libdexfile (purpose-built to live *inside*
+   the ART runtime).
+3. **libdexfile's one real advantage — rigorous structural verification — we already
+   have**, via the `DexFileVerifier` and `utf.cc` ports. So we get ART-grade
+   verification + MUTF-8 fidelity *without* libdexfile's build burden.
+
+Net: replacing slicer is huge cost (rewrite DexKit + vendor libartbase/libbase +
+Soong→CMake) for marginal benefit (rigor we already ported). It would only make
+sense if we both dropped DexKit and were willing to vendor libartbase/libbase — a
+standing maintenance burden, not a one-time port. **Decision: keep slicer.**
+
 ## 1. Verification depth — gap now closed by a load-time verifier
 
 **AOSP** — `dex::Verify` (`dex_file_verifier.cc:3541`) runs **4 upfront phases** on
