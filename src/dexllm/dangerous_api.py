@@ -57,28 +57,45 @@ def _is_framework_caller(descriptor: str) -> bool:
     return descriptor.startswith(_FRAMEWORK_CALLER_PREFIXES)
 
 
-@lru_cache(maxsize=8)
 def _load_dangerous_map(dataset_path: str | None) -> dict[str, tuple[str, ...]]:
     """Load the dangerous-permission -> API map.
 
     With no ``dataset_path`` (and no ``$DEXLLM_AOSP_DATASET``), the bundled slim
     table is used. Otherwise the full AOSP dataset at that directory is read and
-    the dangerous slice is computed live from ``permissions.json`` +
-    ``perm_api_by_perm.json``.
+    the dangerous slice is computed live. The ``$DEXLLM_AOSP_DATASET`` env var is
+    resolved here (not inside the cache) so a later change to it is honoured.
     """
-    root = dataset_path or os.environ.get("DEXLLM_AOSP_DATASET")
+    return _load_dangerous_map_cached(
+        dataset_path or os.environ.get("DEXLLM_AOSP_DATASET") or ""
+    )
+
+
+@lru_cache(maxsize=8)
+def _load_dangerous_map_cached(root: str) -> dict[str, tuple[str, ...]]:
+    """Load and cache the map, keyed on the resolved dataset root (``""`` = bundled)."""
     if not root:
         raw = json.loads(_BUNDLED.read_text())
         return {perm: tuple(apis) for perm, apis in raw.items()}
 
     base = Path(root)
-    perms = json.loads((base / "permissions.json").read_text())
+    perm_file = base / "permissions.json"
+    api_file = base / "perm_api_by_perm.json"
+    if not perm_file.is_file() or not api_file.is_file():
+        raise FileNotFoundError(
+            f"AOSP dataset at {root!r} must contain permissions.json + "
+            f"perm_api_by_perm.json"
+        )
+    perms = json.loads(perm_file.read_text())
+    if not isinstance(perms, list):
+        raise ValueError(f"{perm_file} must be a JSON list of permission entries")
     dangerous = {
         p["name"]
         for p in perms
-        if "dangerous" in str(p.get("protectionLevel", "")).lower()
+        if isinstance(p, dict)
+        and "name" in p
+        and "dangerous" in str(p.get("protectionLevel", "")).lower()
     }
-    table = json.loads((base / "perm_api_by_perm.json").read_text())
+    table = json.loads(api_file.read_text())
     out: dict[str, tuple[str, ...]] = {}
     for perm in sorted(dangerous):
         refs = sorted(

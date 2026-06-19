@@ -9,6 +9,7 @@
 
 #include <map>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 #include "api_ref.h"
@@ -118,10 +119,17 @@ public:
     }
     // Every distinct string literal across all loaded dexes, MUTF-8 → UTF-8
     // decoded. Foundation for static IOC / C2 extraction (dexllm.extract_iocs).
+    // ListStrings dedups on raw MUTF-8; we dedup again on the DECODED text so two
+    // distinct byte sequences that decode alike (e.g. both → U+FFFD via the lone-
+    // surrogate fallback) collapse — honouring the "deduplicated" contract.
     py::list list_strings() const {
         py::list out;
+        std::unordered_set<std::string> seen;
         for (const auto& s : ext_.ListStrings()) {
-            out.append(py::str(DecodeMutf8ForPy(s)));
+            std::string decoded = DecodeMutf8ForPy(s);
+            if (seen.insert(decoded).second) {
+                out.append(py::str(decoded));
+            }
         }
         return out;
     }

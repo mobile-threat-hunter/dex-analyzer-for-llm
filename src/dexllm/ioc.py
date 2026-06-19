@@ -20,22 +20,36 @@ from typing import Any
 __all__ = ["extract_iocs", "IOC_CATEGORIES"]
 
 IOC_CATEGORIES = ("urls", "ips", "domains", "emails", "onion")
+# Order to spend the cross-reference budget: highest-signal indicators first.
+_XREF_PRIORITY = ("onion", "ips", "domains", "emails", "urls")
+
+# Per-string scan cap: real network IOCs are short; this bounds worst-case regex
+# cost on an adversarial APK (e.g. a multi-MB embedded blob) defensively.
+_MAX_SCAN = 65536
 
 # --- classification regexes -------------------------------------------------
 
 # A scheme-qualified URL (http/https/ftp/ws/wss). Stop at whitespace/quotes/<>.
 _URL = re.compile(r"\b(?:https?|ftp|wss?)://[^\s\"'<>\\]+", re.IGNORECASE)
 
-# Dotted-quad IPv4 with validated octets, optional :port.
+# Dotted-quad IPv4 with validated octets, optional :port. Lookarounds (not \b)
+# reject a quad that is part of a longer dotted-decimal token, so a 4+-component
+# version string like `1.0.0.0.5` / `2.30.1.7.0` is not misread as an IP.
 _IPV4 = re.compile(
-    r"\b(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)"
-    r"(?::\d{1,5})?\b"
+    r"(?<![\d.])(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)"
+    r"(?::\d{1,5})?(?![\d.])"
 )
 
 # Tor v2/v3 onion address.
 _ONION = re.compile(r"\b[a-z2-7]{16}(?:[a-z2-7]{40})?\.onion\b", re.IGNORECASE)
 
-_EMAIL = re.compile(r"\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}\b")
+# Email. All quantifiers are BOUNDED so a long non-matching run can't drive
+# catastrophic / O(n^2) backtracking (these regexes run over every dex string,
+# some of which are huge binary/regex blobs).
+_EMAIL = re.compile(
+    r"(?<![A-Za-z0-9._%+\-])[A-Za-z0-9._%+\-]{1,64}@"
+    r"[A-Za-z0-9.\-]{1,253}\.[A-Za-z]{2,24}\b"
+)
 
 # A hostname: one or more labels then a public-ish TLD. Deliberately TLD-gated so
 # arbitrary dotted tokens (e.g. version numbers) do not match.
@@ -44,8 +58,11 @@ _TLDS = (
     "vip|pw|su|ws|cm|tv|gg|sh|dev|live|store|shop|fun|click|link|host|space|"
     "pro|mobi|asia|uk|de|fr|jp|kr|in|br|us|nl|eu|ir|kz|ua|by|ng|id|vn|th|ph"
 )
+# ReDoS-safe: each label is a single unambiguous bounded class (no nested
+# optional group), and the label count is bounded — so a long dotted token that
+# does NOT end in a TLD backtracks linearly, not exponentially.
 _HOST = re.compile(
-    r"\b(?:[a-z0-9](?:[a-z0-9\-]{0,61}[a-z0-9])?\.)+(?:" + _TLDS + r")\b",
+    r"\b(?:[a-z0-9][a-z0-9-]{0,62}\.){1,32}(?:" + _TLDS + r")\b",
     re.IGNORECASE,
 )
 
@@ -137,9 +154,17 @@ def _is_package_like(host: str, dex_packages: frozenset[str]) -> bool:
 
 
 def _host_of(url: str) -> str:
-    """Extract the host[:port] authority from a scheme-qualified URL."""
+    """Extract the bare host from a scheme-qualified URL — no userinfo, no port.
+
+    `http://user:pass@evil.com:8080/c2` -> `evil.com`. Stripping the optional
+    `user:pass@` is essential: without it the real C2 host is mis-extracted.
+    """
     rest = url.split("://", 1)[1]
-    return rest.split("/", 1)[0].split("?", 1)[0]
+    authority = rest.split("/", 1)[0].split("?", 1)[0].split("#", 1)[0]
+    authority = authority.rsplit("@", 1)[-1]  # drop user:pass@
+    if authority.startswith("[") and "]" in authority:  # [IPv6]:port
+        return authority[1 : authority.index("]")].lower()
+    return authority.split(":", 1)[0].lower()  # drop :port
 
 
 def extract_iocs(
@@ -182,11 +207,15 @@ def extract_iocs(
     emails: set[str] = set()
     onion: set[str] = set()
 
-    for s in strings:
+    for raw in strings:
+        # Cap the per-string scan length. The classifier regexes are linear, but
+        # a real IOC is short; an oversized blob is itself a signal, not a host.
+        # This bounds worst-case cost over an adversarial APK regardless of pattern.
+        s = raw if len(raw) <= _MAX_SCAN else raw[:_MAX_SCAN]
         for m in _URL.finditer(s):
             url = m.group(0).rstrip(".,);")
             # XML namespace URIs (xmlns=...) are identifiers, not endpoints — drop.
-            if denoise and _host_of(url).split(":", 1)[0].lower() in _NAMESPACE_HOSTS:
+            if denoise and _host_of(url) in _NAMESPACE_HOSTS:
                 continue
             urls.add(url)
         for m in _ONION.finditer(s):
@@ -201,9 +230,14 @@ def extract_iocs(
                 domains.add(host)
 
     # A URL's own host is a high-confidence domain — fold it in (post-denoise).
+    # Skip an IP-literal host: it already belongs to the `ips` bucket, not domains.
     for u in urls:
-        h = _host_of(u).split(":", 1)[0].lower()
-        if "." in h and not (denoise and _is_package_like(h, dex_packages)):
+        h = _host_of(u)
+        if (
+            "." in h
+            and not _IPV4.fullmatch(h)
+            and not (denoise and _is_package_like(h, dex_packages))
+        ):
             domains.add(h)
 
     buckets = {
@@ -216,7 +250,9 @@ def extract_iocs(
 
     xref_budget = xref_limit
     result: dict[str, list[dict[str, Any]]] = {}
-    for cat in IOC_CATEGORIES:
+    # Spend the xref budget highest-signal category first, so a string-heavy app
+    # with thousands of URLs doesn't starve onion/IP indicators of their callers.
+    for cat in _XREF_PRIORITY:
         rows: list[dict[str, Any]] = []
         for value in sorted(buckets[cat]):
             methods: list[str] = []
@@ -236,4 +272,4 @@ def extract_iocs(
                 xref_budget -= 1
             rows.append({"value": value, "methods": methods})
         result[cat] = rows
-    return result
+    return {cat: result[cat] for cat in IOC_CATEGORIES}  # stable output order

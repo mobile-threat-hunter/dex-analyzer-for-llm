@@ -171,6 +171,83 @@ def test_namespace_uris_are_not_iocs():
     pytest.skip("no bundled APK carries an XML namespace URI in dex strings")
 
 
+class _FakeDK:
+    """Minimal dk stand-in for extract_iocs unit tests (no APK needed)."""
+
+    def __init__(self, strings):
+        self._s = strings
+
+    def list_strings(self):
+        return self._s
+
+    def list_classes(self):
+        return []
+
+    def list_external_type_refs(self, framework_only):
+        return []
+
+    def find_methods_using_strings(self, vals, **kw):
+        return []
+
+
+def test_regexes_are_redos_safe():
+    """Adversarial strings must not drive the classifier regexes catastrophic."""
+    import time
+
+    from dexllm.ioc import _EMAIL, _HOST, _IPV4, _ONION, _URL
+
+    attacks = ["a." * 5000 + "x", "a@" + "a." * 40000 + "!", "1." * 50000]
+    for s in attacks:
+        for rx in (_URL, _IPV4, _HOST, _EMAIL, _ONION):
+            t0 = time.time()
+            list(rx.finditer(s))
+            dt = time.time() - t0
+            assert dt < 2.0, f"ReDoS: {rx.pattern[:40]!r} took {dt:.1f}s on len {len(s)}"
+
+
+def test_host_of_strips_userinfo_and_port():
+    from dexllm.ioc import _host_of
+
+    assert _host_of("http://user:pass@evil.com:8080/c2") == "evil.com"
+    assert _host_of("https://evil.com/x") == "evil.com"
+    assert _host_of("ftp://u@1.2.3.4:21/p") == "1.2.3.4"
+    assert _host_of("http://[2001:db8::1]:443/x") == "2001:db8::1"
+
+
+def test_ipv4_rejects_dotted_version_strings():
+    from dexllm.ioc import _IPV4
+
+    assert not _IPV4.search("v1.0.0.0.5 build")  # 5-component
+    assert not _IPV4.search("ver 1.2.3.4.5")
+    assert not _IPV4.search("10.0.0.1.2")
+    assert _IPV4.search("dns 8.8.8.8 here")  # real IP survives
+    assert _IPV4.search("c2 1.2.3.4:8080 port")  # ip:port survives
+
+
+def test_ip_url_host_not_double_categorized():
+    iocs = dexllm.extract_iocs(_FakeDK(["http://1.2.3.4:8080/gate.php"]), with_xref=False)
+    ips = {r["value"] for r in iocs["ips"]}
+    doms = {r["value"] for r in iocs["domains"]}
+    assert any(v.startswith("1.2.3.4") for v in ips)  # ip (with :port) captured
+    assert not any("1.2.3.4" in d for d in doms)  # an IP host is NOT a domain
+
+
+def test_userinfo_url_yields_real_host_in_domains():
+    iocs = dexllm.extract_iocs(_FakeDK(["http://admin:pw@evil.com/c2"]), with_xref=False)
+    doms = {r["value"] for r in iocs["domains"]}
+    assert "evil.com" in doms
+    assert not any("@" in d for d in doms)  # no userinfo garbage
+
+
+def test_extract_iocs_bounded_on_oversized_strings():
+    import time
+
+    dk = _FakeDK(["a@" + "a." * 200000 + "!", "x" * 1000000, "1." * 200000])
+    t0 = time.time()
+    dexllm.extract_iocs(dk, with_xref=False)
+    assert time.time() - t0 < 3.0
+
+
 def test_mcp_tool_extract_iocs_serialisable(dk):
     out = dexllm.tools.execute("extract_iocs", {"xref_limit": 50}, dk)
     assert "indicators" in out and "counts" in out

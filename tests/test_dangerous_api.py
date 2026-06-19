@@ -126,6 +126,38 @@ def test_mcp_tools_registered_and_serialisable(dk):
         json.dumps(out)  # MCP transport requires JSON-serialisable
 
 
+def test_lru_cache_honours_env_change():
+    """A later $DEXLLM_AOSP_DATASET change must NOT return the stale cached table."""
+    from dexllm.dangerous_api import _load_dangerous_map
+
+    os.environ.pop("DEXLLM_AOSP_DATASET", None)
+    bundled = _load_dangerous_map(None)
+    assert bundled  # bundled table cached under resolved root ""
+    os.environ["DEXLLM_AOSP_DATASET"] = "/nonexistent/dexllm/garbage/path"
+    try:
+        # must re-resolve to the new root and fail loudly, not silently reuse bundled
+        with pytest.raises((FileNotFoundError, ValueError)):
+            _load_dangerous_map(None)
+    finally:
+        os.environ.pop("DEXLLM_AOSP_DATASET", None)
+
+
+def test_override_missing_files_clear_error(tmp_path):
+    from dexllm.dangerous_api import _load_dangerous_map_cached
+
+    with pytest.raises(FileNotFoundError):
+        _load_dangerous_map_cached(str(tmp_path))  # empty dir, no JSON files
+
+
+def test_override_wrong_shape_clear_error(tmp_path):
+    from dexllm.dangerous_api import _load_dangerous_map_cached
+
+    (tmp_path / "permissions.json").write_text('{"a": 1}')  # dict, expected list
+    (tmp_path / "perm_api_by_perm.json").write_text("{}")
+    with pytest.raises(ValueError):
+        _load_dangerous_map_cached(str(tmp_path))
+
+
 def test_dataset_path_override(dk):
     """If the full dataset is present locally, the override path parses too."""
     ds = "/home/nyahumi/Project/aosp_data_set"
