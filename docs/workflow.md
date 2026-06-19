@@ -63,8 +63,9 @@ verifier's per-check parity with AOSP ART `DexFileVerifier`.
 
 ## 3. The capability ladder (L1-L7)
 
-One search engine (L7) underpins the higher-level analyses; L5/L6 are the
-render/decompile paths. Each level is independently callable.
+`L` = **capability level** — a numbered grouping, not a strict abstraction
+hierarchy. One search engine (L7) underpins the higher-level analyses (L1–L4);
+L5/L6 are the render/decompile paths. Each level is independently callable.
 
 ```mermaid
 flowchart LR
