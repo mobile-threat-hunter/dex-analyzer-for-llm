@@ -56,6 +56,7 @@ from .filters import (
     find_call_sites_to_ref,
 )
 from .format import format_class, format_class_summary
+from .ioc import IOC_CATEGORIES, extract_iocs
 from .safe import (
     DEFAULT_TIMEOUT_S,
     is_timeout_marker,
@@ -79,6 +80,8 @@ __all__ = [
     "filter_field_refs",
     "filter_method_refs",
     "filter_type_refs",
+    "IOC_CATEGORIES",
+    "extract_iocs",
     "find_call_sites_to_ref",
     "format_class",
     "format_class_summary",

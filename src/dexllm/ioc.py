@@ -1,0 +1,181 @@
+"""Static network-indicator (C2 / IOC) extraction from an APK's dex strings.
+
+VirusTotal shows the URLs, domains, and IPs an app *contacts*; this module
+recovers the same indicators **statically** — from the dex string pool, with no
+execution — and, unlike VirusTotal, ties each indicator back to the class/method
+that references it.
+
+The pipeline is: ``dk.list_strings()`` (every distinct string literal across all
+loaded dexes) -> regex classification into URLs / IPs / domains / emails / onion
+addresses -> denoising (framework package names that *look* like hosts are
+dropped) -> optional cross-reference of each indicator to its referencing methods
+via the L7 search engine.
+"""
+
+from __future__ import annotations
+
+import re
+from typing import Any
+
+__all__ = ["extract_iocs", "IOC_CATEGORIES"]
+
+IOC_CATEGORIES = ("urls", "ips", "domains", "emails", "onion")
+
+# --- classification regexes -------------------------------------------------
+
+# A scheme-qualified URL (http/https/ftp/ws/wss). Stop at whitespace/quotes/<>.
+_URL = re.compile(r"\b(?:https?|ftp|wss?)://[^\s\"'<>\\]+", re.IGNORECASE)
+
+# Dotted-quad IPv4 with validated octets, optional :port.
+_IPV4 = re.compile(
+    r"\b(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)"
+    r"(?::\d{1,5})?\b"
+)
+
+# Tor v2/v3 onion address.
+_ONION = re.compile(r"\b[a-z2-7]{16}(?:[a-z2-7]{40})?\.onion\b", re.IGNORECASE)
+
+_EMAIL = re.compile(r"\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}\b")
+
+# A hostname: one or more labels then a public-ish TLD. Deliberately TLD-gated so
+# arbitrary dotted tokens (e.g. version numbers) do not match.
+_TLDS = (
+    "com|net|org|io|cn|ru|info|top|xyz|app|me|co|tk|cc|biz|site|online|club|"
+    "vip|pw|su|ws|cm|tv|gg|sh|dev|live|store|shop|fun|click|link|host|space|"
+    "pro|mobi|asia|uk|de|fr|jp|kr|in|br|us|nl|eu|ir|kz|ua|by|ng|id|vn|th|ph"
+)
+_HOST = re.compile(
+    r"\b(?:[a-z0-9](?:[a-z0-9\-]{0,61}[a-z0-9])?\.)+(?:" + _TLDS + r")\b",
+    re.IGNORECASE,
+)
+
+# --- denoising --------------------------------------------------------------
+
+# Reverse-DNS roots that are Java/Android package namespaces, not network hosts.
+# A "domain" beginning with one of these is a class/package name false positive.
+_FRAMEWORK_PREFIXES = (
+    "android.",
+    "androidx.",
+    "java.",
+    "javax.",
+    "kotlin.",
+    "kotlinx.",
+    "dalvik.",
+    "sun.",
+    "junit.",
+    "org.w3c.",
+    "org.xml.",
+    "org.json.",
+    "org.intellij.",
+    "org.jetbrains.",
+    "com.android.",
+    "com.google.android.",
+    "com.google.common.",
+    "java.lang.",
+)
+
+# Hosts that are real but near-universally benign infrastructure — kept, but the
+# caller may want to triage these last. We do NOT drop them (a C2 can abuse a CDN);
+# they are merely not noise to suppress.
+_DROP_HOSTS = frozenset({"schemas.android.com", "www.w3.org", "xmlpull.org"})
+
+
+def _is_package_like(host: str) -> bool:
+    """Return True if ``host`` looks like a Java/Android package, not a domain."""
+    low = host.lower()
+    if low.startswith(_FRAMEWORK_PREFIXES):
+        return True
+    # Reverse-DNS package heuristic: 4+ labels whose TLD-position label is a
+    # common package segment (com/org/net are also TLDs, so only flag when the
+    # leading label is a known framework root handled above). Keep conservative.
+    return low in _DROP_HOSTS
+
+
+def _host_of(url: str) -> str:
+    """Extract the host[:port] authority from a scheme-qualified URL."""
+    rest = url.split("://", 1)[1]
+    return rest.split("/", 1)[0].split("?", 1)[0]
+
+
+def extract_iocs(
+    dk: Any,
+    *,
+    with_xref: bool = True,
+    denoise: bool = True,
+    xref_limit: int = 300,
+) -> dict[str, list[dict[str, Any]]]:
+    """Extract network indicators (URLs / IPs / domains / emails / onion) from ``dk``.
+
+    Args:
+        dk: A loaded ``dexllm.DexKit`` instance.
+        with_xref: If True, attach the referencing method descriptors to each
+            indicator (the "where in the code" view VirusTotal lacks). Costs one
+            L7 search per distinct indicator.
+        denoise: If True, drop framework package names that the host regex would
+            otherwise mistake for domains.
+        xref_limit: Cap on the number of indicators cross-referenced, to bound
+            cost on string-heavy apps. Extras still appear, with empty ``methods``.
+
+    Returns:
+        A dict keyed by :data:`IOC_CATEGORIES`; each value is a list of
+        ``{"value": str, "methods": list[str]}`` sorted by value.
+    """
+    strings = dk.list_strings()
+
+    urls: set[str] = set()
+    ips: set[str] = set()
+    domains: set[str] = set()
+    emails: set[str] = set()
+    onion: set[str] = set()
+
+    for s in strings:
+        for m in _URL.finditer(s):
+            urls.add(m.group(0).rstrip(".,);"))
+        for m in _ONION.finditer(s):
+            onion.add(m.group(0).lower())
+        for m in _IPV4.finditer(s):
+            ips.add(m.group(0))
+        for m in _EMAIL.finditer(s):
+            emails.add(m.group(0))
+        for m in _HOST.finditer(s):
+            host = m.group(0).lower()
+            if not (denoise and _is_package_like(host)):
+                domains.add(host)
+
+    # A URL's own host is a high-confidence domain — fold it in (post-denoise).
+    for u in urls:
+        h = _host_of(u).split(":", 1)[0].lower()
+        if "." in h and not (denoise and _is_package_like(h)):
+            domains.add(h)
+
+    buckets = {
+        "urls": urls,
+        "ips": ips,
+        "domains": domains,
+        "emails": emails,
+        "onion": onion,
+    }
+
+    xref_budget = xref_limit
+    result: dict[str, list[dict[str, Any]]] = {}
+    for cat in IOC_CATEGORIES:
+        rows: list[dict[str, Any]] = []
+        for value in sorted(buckets[cat]):
+            methods: list[str] = []
+            if with_xref and xref_budget > 0:
+                try:
+                    hits = dk.find_methods_using_strings(
+                        [value], match_type="contains", ignore_case=False
+                    )
+                    methods = [
+                        m.descriptor if hasattr(m, "descriptor") else str(m)
+                        for m in hits
+                    ]
+                except (
+                    Exception
+                ):  # noqa: BLE001 - one bad query must not abort the report
+                    methods = []
+                xref_budget -= 1
+            rows.append({"value": value, "methods": methods})
+        result[cat] = rows
+    return result

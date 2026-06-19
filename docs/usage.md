@@ -275,6 +275,35 @@ dk.find_methods_by_annotation("Landroidx/annotation/RequiresApi;")
 
 ---
 
+## Static C2 / IOC extraction
+
+VirusTotal shows the URLs, domains, and IPs an app *contacts*; `extract_iocs`
+recovers the same indicators **statically** — from the dex string pool, with no
+execution — and ties each one back to the class/method that references it.
+
+```python
+import dexllm
+
+dk = dexllm.DexKit("app.apk")
+
+iocs = dexllm.extract_iocs(dk)           # with_xref=True, denoise=True by default
+for category in dexllm.IOC_CATEGORIES:   # urls / ips / domains / emails / onion
+    for row in iocs[category]:
+        print(category, row["value"], "<-", row["methods"][:1])
+# urls https://c2.example.top/gate.php <- ['Lcom/x/Net;->beacon()V']
+
+# The raw deduplicated string pool, for custom queries:
+all_strings = dk.list_strings()          # every distinct literal across all dexes
+```
+
+`extract_iocs` classifies `list_strings()` with TLD-gated regexes and **denoises**
+framework package names that look like hosts (`android.app`, `java.lang.*` are
+dropped). Set `with_xref=False` to skip the per-indicator L7 cross-reference (one
+search per indicator), or lower `xref_limit` on string-heavy apps. Also available
+as the `extract_iocs` MCP tool (returns `{indicators, counts}`).
+
+---
+
 ## Descriptor helpers
 
 ```python

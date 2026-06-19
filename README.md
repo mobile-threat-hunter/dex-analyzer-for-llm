@@ -18,6 +18,7 @@ parallel-safe — rather than Xposed module development.
 | Memory | ~520 MB on a 39k-class app — embeddable in-process, no JVM |
 | Parallel | C++ releases the GIL → real multi-threaded decompile from one in-process instance |
 | Search | L1–L7 (name / string / annotation / super / API call-site / xref) — 3–6× faster than androguard |
+| C2 / IOC | `extract_iocs()` — static URL / IP / domain / email / onion extraction from dex strings, each tied to its referencing method (VirusTotal's contacted-addresses view, recovered with no execution) |
 | AST | `decompile_method_ast` returns the full androguard `dast.py` nested AST |
 | LLM | `dexllm.tools` catalog → MCP stdio server + FastAPI/SSE web backend |
 

@@ -298,9 +298,26 @@ def _t_capability_report(dk: DexKit, limit: int = 50) -> dict:
     }
 
 
+def _t_extract_iocs(dk: DexKit, with_xref: bool = True, xref_limit: int = 300) -> dict:
+    """Extract static network indicators (C2 / IOC) from the app's dex strings.
+
+    Recovers the URLs, IPs, domains, emails, and onion addresses embedded in the
+    app's dex strings — the VirusTotal "contacted addresses" view, but static and
+    with each indicator tied to the referencing method (when with_xref).
+    """
+    from .ioc import IOC_CATEGORIES, extract_iocs
+
+    iocs = extract_iocs(dk, with_xref=with_xref, xref_limit=int(xref_limit))
+    return {
+        "indicators": iocs,
+        "counts": {cat: len(iocs[cat]) for cat in IOC_CATEGORIES},
+    }
+
+
 # ─── Tool catalog (Anthropic API / MCP JSON-Schema) ───────────────────────
 
 TOOL_IMPLS: dict[str, Callable] = {
+    "extract_iocs": _t_extract_iocs,
     "list_classes": _t_list_classes,
     "list_class_methods": _t_list_class_methods,
     "decompile_method": _t_decompile_method,
@@ -557,6 +574,33 @@ TOOL_DEFINITIONS: list[dict] = [
                     "default": 50,
                     "description": "max api_hits to return (by call-site count)",
                 }
+            },
+        },
+    },
+    {
+        "name": "extract_iocs",
+        "description": (
+            "Static C2 / network-IOC extraction — the URLs, IPs, domains, "
+            "emails, and .onion addresses embedded in the app's dex strings, "
+            "like VirusTotal's contacted-addresses view but recovered "
+            "statically (no execution). Each indicator is tied to the "
+            "class/method that references it (with_xref). Framework package "
+            "names that look like hosts are denoised out. Use early in triage "
+            "to surface command-and-control / exfiltration endpoints."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "with_xref": {
+                    "type": "boolean",
+                    "default": True,
+                    "description": "attach referencing method descriptors to each indicator",
+                },
+                "xref_limit": {
+                    "type": "integer",
+                    "default": 300,
+                    "description": "cap on indicators cross-referenced (cost bound)",
+                },
             },
         },
     },

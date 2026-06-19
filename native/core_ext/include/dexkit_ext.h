@@ -73,6 +73,13 @@ public:
     // type-id order. External-only refs (no class_def in any dex) excluded.
     [[nodiscard]] std::vector<std::string> ListClasses() const;
 
+    // Every distinct string literal across all loaded dexes (raw MUTF-8,
+    // deduplicated). The foundation for static IOC / C2 extraction: the caller
+    // decodes to UTF-8 and regex-classifies into URLs / IPs / domains. Strings
+    // come from each DexItem's string pool (process-lifetime), copied to owned
+    // std::string here so the result outlives the call.
+    [[nodiscard]] std::vector<std::string> ListStrings() const;
+
     // For each declared method of the given class descriptor, returns the
     // full Dalvik method descriptor `Lcls;->name(proto)ret`. Empty if class
     // is not declared in any loaded dex.

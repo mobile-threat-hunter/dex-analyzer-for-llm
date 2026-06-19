@@ -116,6 +116,15 @@ public:
     std::vector<std::string> list_classes() const {
         return ext_.ListClasses();
     }
+    // Every distinct string literal across all loaded dexes, MUTF-8 → UTF-8
+    // decoded. Foundation for static IOC / C2 extraction (dexllm.extract_iocs).
+    py::list list_strings() const {
+        py::list out;
+        for (const auto& s : ext_.ListStrings()) {
+            out.append(py::str(DecodeMutf8ForPy(s)));
+        }
+        return out;
+    }
     py::list verify_report() const {
         py::list out;
         for (const auto& s : ext_.VerifyReport()) {
@@ -457,6 +466,10 @@ PYBIND11_MODULE(_dexkit_core, m) {
              "L8: Return every class descriptor declared in any loaded dex "
              "(e.g. `Lcom/foo/Bar;`). Replaces androguard's "
              "AnalyzeAPK→get_classes for decompile drivers.")
+        .def("list_strings", &PyDexKit::list_strings,
+             "Return every distinct string literal across all loaded dexes "
+             "(MUTF-8 → UTF-8 decoded, deduplicated). Foundation for static "
+             "IOC / C2 extraction — see dexllm.extract_iocs.")
         .def("verify_report", &PyDexKit::verify_report,
              "Structural-verification report, one dict per dex considered at "
              "load: {dex_id, name, valid, reason}. A dex with valid==False was "
