@@ -68,6 +68,14 @@ flowchart TB
 The boundary is enforced by [`scripts/check_dad_boundary.sh`](scripts/check_dad_boundary.sh):
 `native/dad_cpp/` may never `#include` DexKit, FlatBuffers, the zip reader, or `core_ext`.
 
+**Parser lineage** — dexllm parses with Google's **slicer** (`tools/dexter` — a mutable
+heap IR built for rewriting, with *no* structural verification, only `SLICER_CHECK`
+assertions). ART itself parses with **libdexfile** (lazy zero-copy accessors + its own
+`DexFileVerifier`). They are independent AOSP libraries sharing only the dex *format*.
+dexllm therefore pairs slicer's parsing with a **1:1 port of ART's `DexFileVerifier`**
+(`VerifyDex`, below) and of `utf.cc` (MUTF-8) — slicer's convenience, ART's rigor. Full
+side-by-side: [docs/dexkit-vs-art-dex-handling.md §0.5](docs/dexkit-vs-art-dex-handling.md).
+
 **Runtime flows** — the load/verify path, the DAD decompile pipeline (`Construct →
 BuildDefUse → … → IdentifyStructures → Writer`), the L1–L7 capability ladder, and agent
 (MCP/FastAPI) integration are all diagrammed in **[docs/workflow.md](docs/workflow.md)**.
