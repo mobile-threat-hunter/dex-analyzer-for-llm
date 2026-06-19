@@ -38,31 +38,44 @@ so the same pipeline runs on a real APK (production adapter) or hand-built snaps
 
 ```mermaid
 flowchart TB
-    PY["Python API, MCP stdio, FastAPI/SSE"]
-    BIND["pybind11 binding<br/>native/binding/module.cpp"]
-    FACADE["Decompiler facade + LRU cache<br/>native/dad_cpp/decompiler.cpp"]
-    BYTES["raw .dex / classes*.dex"]
-    VERIFY["VerifyDex structural verifier<br/>1:1 AOSP DexFileVerifier port"]
-    DEXKIT["DexKit Core + slicer"]
-    PROD["DexItemCodeSource<br/>core_ext, production adapter"]
-    MOCK["MockCodeSource<br/>tests, no DexKit"]
-    PORT{{"PORT: IDexCodeSource<br/>pure abstract"}}
-    OUT["Java text | nested AST"]
+    accTitle: Ports and Adapters Architecture
+    accDescr: The Python API drives the decompiler facade and the DAD domain core, which reads dex only through the IDexCodeSource port. Production and test adapters implement that port, and every dex passes the VerifyDex structural verifier before the DexKit Core slicer parses it.
+
+    python_api["Python API, MCP stdio, FastAPI/SSE"]
+    pybind["pybind11 binding<br/>native/binding/module.cpp"]
+    facade["Decompiler facade + LRU cache<br/>native/dad_cpp/decompiler.cpp"]
+    raw_dex["raw .dex / classes*.dex"]
+    verify_dex["VerifyDex structural verifier<br/>1:1 AOSP DexFileVerifier port"]
+    dexkit_core["DexKit Core + slicer"]
+    prod_adapter["DexItemCodeSource<br/>core_ext, production adapter"]
+    mock_adapter["MockCodeSource<br/>tests, no DexKit"]
+    port{{"IDexCodeSource port<br/>pure abstract"}}
+    output["Java text | nested AST"]
 
     subgraph core["Domain core: native/dad_cpp - 1:1 androguard DAD port"]
-        SNAP["MethodSnapshot, immutable DTO"]
-        PIPE["graph, dataflow, control_flow"]
-        EMIT["writer / dast"]
-        SNAP --> PIPE --> EMIT
+        snapshot["MethodSnapshot, immutable DTO"]
+        pipeline["graph, dataflow, control_flow"]
+        emit["writer / dast"]
+        snapshot --> pipeline --> emit
     end
 
-    PY --> BIND --> FACADE
-    FACADE -->|drives| SNAP
-    BYTES --> VERIFY --> DEXKIT --> PROD
-    PROD -->|implements| PORT
-    MOCK -->|implements| PORT
-    PORT -->|reads method code| SNAP
-    EMIT --> OUT
+    python_api --> pybind --> facade
+    facade -->|drives| snapshot
+    raw_dex --> verify_dex --> dexkit_core --> prod_adapter
+    prod_adapter -->|implements| port
+    mock_adapter -->|implements| port
+    port -->|reads method code| snapshot
+    emit --> output
+
+    classDef io fill:#dcfce7,stroke:#16a34a,stroke-width:2px,color:#14532d
+    classDef guard fill:#fee2e2,stroke:#dc2626,stroke-width:2px,color:#7f1d1d
+    classDef boundary fill:#fef9c3,stroke:#ca8a04,stroke-width:2px,color:#713f12
+    classDef domain fill:#dbeafe,stroke:#2563eb,stroke-width:2px,color:#1e3a5f
+
+    class raw_dex,output io
+    class verify_dex guard
+    class port boundary
+    class snapshot,pipeline,emit domain
 ```
 
 The boundary is enforced by [`scripts/check_dad_boundary.sh`](scripts/check_dad_boundary.sh):

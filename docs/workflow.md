@@ -14,19 +14,28 @@ is decompiled until asked; results are cached.
 
 ```mermaid
 flowchart TB
-    SRC["APK / JAR / ZIP / bare .dex<br/>(disguised or extension-less OK)"]
-    ID["identify() — content probe<br/>PK / dex magic, no load"]
-    LOAD["DexKit(apk) — load + structural verify"]
-    SRC --> ID --> LOAD
+    accTitle: dexllm Operation Overview
+    accDescr: A file is content-probed by identify, loaded and structurally verified by DexKit, then served lazily to search/analyze (L1-L4, L7), smali rendering (L5), and decompilation (L6); findings flow to the Python API, an MCP agent, or the FastAPI backend.
 
-    LOAD --> SEARCH["Search and analyze<br/>L1-L4, L7: APIs, call sites, strings, xrefs"]
-    LOAD --> SMALI["L5: smali rendering"]
-    LOAD --> DECOMP["L6: decompile to Java text / AST"]
+    source["APK / JAR / ZIP / bare .dex<br/>(disguised or extension-less OK)"]
+    identify["identify() — content probe<br/>PK / dex magic, no load"]
+    load["DexKit(apk) — load + structural verify"]
+    source --> identify --> load
 
-    SEARCH --> OUT["findings"]
-    SMALI --> OUT
-    DECOMP --> OUT
-    OUT --> CONSUMER["Python API · MCP agent · FastAPI/SSE"]
+    load --> search["Search and analyze<br/>L1-L4, L7: APIs, call sites, strings, xrefs"]
+    load --> smali["L5: smali rendering"]
+    load --> decompile["L6: decompile to Java text / AST"]
+
+    search --> findings["findings"]
+    smali --> findings
+    decompile --> findings
+    findings --> consumer["Python API, MCP agent, FastAPI/SSE"]
+
+    classDef io fill:#dcfce7,stroke:#16a34a,stroke-width:2px,color:#14532d
+    classDef gate fill:#fef9c3,stroke:#ca8a04,stroke-width:2px,color:#713f12
+
+    class source,consumer io
+    class load gate
 ```
 
 ## 2. Load and verify
@@ -38,24 +47,26 @@ load. The load is lazy — no method is decompiled yet.
 
 ```mermaid
 sequenceDiagram
+    accTitle: APK Load and Verify Sequence
+    accDescr: The caller constructs DexKit, which detects the container then loops over each classes dex; a valid dex is added to the core, a malformed one is rejected with a byte-level reason, and the instance returns ready without decompiling anything yet.
     autonumber
-    participant U as Caller (Python / agent)
-    participant K as DexKit (core_ext)
-    participant V as VerifyDex
-    participant C as DexKit Core + slicer
-    U->>K: DexKit(app.apk)
-    K->>K: detect container (PK / dex magic)
+    participant caller as Caller (Python / agent)
+    participant dexkit as DexKit (core_ext)
+    participant verify as VerifyDex
+    participant core as DexKit Core + slicer
+    caller->>dexkit: DexKit(app.apk)
+    dexkit->>dexkit: detect container (PK / dex magic)
     loop each classes*.dex
-        K->>V: VerifyDex(bytes)
+        dexkit->>verify: VerifyDex(bytes)
         alt structurally valid
-            V-->>K: ok
-            K->>C: AddImage(dex)
+            verify-->>dexkit: ok
+            dexkit->>core: AddImage(dex)
         else malformed
-            V-->>K: reject with byte-level reason
-            K-->>U: raise (see verify_report)
+            verify-->>dexkit: reject with byte-level reason
+            dexkit-->>caller: raise (see verify_report)
         end
     end
-    K-->>U: ready (lazy, nothing decompiled yet)
+    dexkit-->>caller: ready (lazy, nothing decompiled yet)
 ```
 
 See [dexkit-vs-art-dex-handling.md](dexkit-vs-art-dex-handling.md) for the
@@ -69,13 +80,22 @@ L5/L6 are the render/decompile paths. Each level is independently callable.
 
 ```mermaid
 flowchart LR
-    L7["L7: find / match engine<br/>Aho-Corasick + matcher"]
-    L7 --> L1["L1: external API surface"]
-    L7 --> L2["L2: API call sites"]
-    L1 --> L3["L3: permissions / categories"]
-    L2 --> L4["L4: intra-method dataflow"]
-    RAW["loaded dex"] --> L5["L5: smali render"]
-    RAW --> L6["L6: Java decompile (DAD)"]
+    accTitle: L1-L7 Capability Ladder
+    accDescr: The L7 find/match engine is the bottom-layer search primitive that L1-L4 build on (API surface, call sites, permissions, dataflow); L5 and L6 are separate smali and Java decompile paths over the loaded dex.
+
+    l7_engine["L7: find / match engine<br/>Aho-Corasick + matcher"]
+    l7_engine --> l1_apis["L1: external API surface"]
+    l7_engine --> l2_call_sites["L2: API call sites"]
+    l1_apis --> l3_permissions["L3: permissions / categories"]
+    l2_call_sites --> l4_dataflow["L4: intra-method dataflow"]
+    loaded_dex["loaded dex"] --> l5_smali["L5: smali render"]
+    loaded_dex --> l6_decompile["L6: Java decompile (DAD)"]
+
+    classDef primitive fill:#dbeafe,stroke:#2563eb,stroke-width:2px,color:#1e3a5f
+    classDef decompile fill:#ede9fe,stroke:#7c3aed,stroke-width:2px,color:#4c1d95
+
+    class l7_engine primitive
+    class l5_smali,l6_decompile decompile
 ```
 
 | Level | Question it answers | Entry point |
@@ -97,22 +117,24 @@ the **GIL released**, so many threads decompile in parallel on one shared instan
 
 ```mermaid
 sequenceDiagram
+    accTitle: Method Decompile Sequence
+    accDescr: A decompile request hits the facade's LRU cache; on a miss it releases the GIL, builds a method snapshot, runs the DAD pipeline, emits Java text or AST through the writer, caches the result, and returns it.
     autonumber
-    participant U as Caller
-    participant D as Decompiler facade (+ LRU cache)
-    participant S as MethodSnapshotBuilder
-    participant P as DAD pipeline (native/dad_cpp)
-    participant W as Writer / JSONWriter
-    U->>D: decompile_method_java(descriptor)
+    participant caller as Caller
+    participant facade as Decompiler facade (+ LRU cache)
+    participant builder as MethodSnapshotBuilder
+    participant pipeline as DAD pipeline (native/dad_cpp)
+    participant writer as Writer / JSONWriter
+    caller->>facade: decompile_method_java(descriptor)
     alt cache hit
-        D-->>U: cached Java text
+        facade-->>caller: cached Java text
     else cache miss
-        Note over D: release GIL (parallel-safe)
-        D->>S: build snapshot (decode + CFG)
-        S->>P: Construct, BuildDefUse, ... , IdentifyStructures
-        P->>W: emit
-        W-->>D: Java text (or nested AST)
-        D-->>U: result (now cached)
+        Note over facade: release GIL (parallel-safe)
+        facade->>builder: build snapshot (decode + CFG)
+        builder->>pipeline: Construct, BuildDefUse, ... , IdentifyStructures
+        pipeline->>writer: emit
+        writer-->>facade: Java text (or nested AST)
+        facade-->>caller: result (now cached)
     end
 ```
 
@@ -120,16 +142,22 @@ The pipeline passes, each mirroring androguard `decompile.py:DvMethod.process`:
 
 ```mermaid
 flowchart LR
-    A["method<br/>descriptor"] --> B["DexItemCodeSource<br/>locate"]
-    B --> C["MethodSnapshotBuilder<br/>decode, CFG, snapshot"]
+    accTitle: DAD Decompile Pipeline
+    accDescr: A method descriptor is located and turned into a snapshot, then run through the DAD IR pipeline (Construct through IdentifyStructures) before the writer emits Java text or AST. Each pass mirrors androguard decompile.py.
+
+    descriptor["method<br/>descriptor"] --> locate["DexItemCodeSource<br/>locate"]
+    locate --> snapshot_builder["MethodSnapshotBuilder<br/>decode, CFG, snapshot"]
     subgraph pipe["DAD IR pipeline: native/dad_cpp"]
-        D["Construct"] --> E["BuildDefUse"] --> F["SplitVariables"] --> G["DeadCodeElimination"]
-        G --> H["RegisterPropagation"] --> I["PlaceDeclarations"] --> J["SplitIfNodes"]
-        J --> K["Simplify"] --> L["IdentifyStructures"]
+        construct["Construct"] --> build_def_use["BuildDefUse"] --> split_variables["SplitVariables"] --> dead_code_elim["DeadCodeElimination"]
+        dead_code_elim --> register_propagation["RegisterPropagation"] --> place_declarations["PlaceDeclarations"] --> split_if_nodes["SplitIfNodes"]
+        split_if_nodes --> simplify["Simplify"] --> identify_structures["IdentifyStructures"]
     end
-    C --> D
-    L --> W["Writer / JSONWriter"]
-    W --> O["Java text | AST"]
+    snapshot_builder --> construct
+    identify_structures --> writer["Writer / JSONWriter"]
+    writer --> output["Java text | AST"]
+
+    classDef io fill:#dcfce7,stroke:#16a34a,stroke-width:2px,color:#14532d
+    class descriptor,output io
 ```
 
 The text path (`Writer`) and AST path (`JSONWriter`/`dast`) share the same
@@ -146,17 +174,19 @@ server.
 
 ```mermaid
 sequenceDiagram
+    accTitle: Agent Integration Sequence
+    accDescr: An LLM agent calls a dexllm MCP tool with an apk path; the server dispatches the schema-validated call to the tools layer, which runs a timeout-guarded analysis or decompile on the DexKit core and returns JSON back to the agent.
     autonumber
-    participant LLM as LLM / agent
-    participant M as dexllm MCP server (stdio)
-    participant T as dexllm.tools (safe wrappers + LRU)
-    participant K as DexKit core
-    LLM->>M: call tool (e.g. dexllm_decompile_class_java, apk_path=...)
-    M->>T: dispatch (JSON-Schema validated)
-    T->>K: analyze / decompile (timeout-guarded)
-    K-->>T: result
-    T-->>M: JSON
-    M-->>LLM: tool result
+    participant llm as LLM / agent
+    participant mcp_server as dexllm MCP server (stdio)
+    participant tools as dexllm.tools (safe wrappers + LRU)
+    participant core as DexKit core
+    llm->>mcp_server: call tool (e.g. dexllm_decompile_class_java, apk_path=...)
+    mcp_server->>tools: dispatch (JSON-Schema validated)
+    tools->>core: analyze / decompile (timeout-guarded)
+    core-->>tools: result
+    tools-->>mcp_server: JSON
+    mcp_server-->>llm: tool result
 ```
 
 ## Where to go next
