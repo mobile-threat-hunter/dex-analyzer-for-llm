@@ -146,6 +146,7 @@ private:
     // ── State (DAD dast.py:30-40) ───────────────────────────────────────────
     const MethodSnapshot* snap_;
     const Graph* graph_;
+    int depth_ = 0;  // visit_node recursion depth (stack-overflow guard)
     std::vector<AstValue> context_;
     std::vector<NodeBase*> loop_follow_{nullptr};
     std::vector<NodeBase*> if_follow_{nullptr};

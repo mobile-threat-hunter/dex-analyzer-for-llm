@@ -13,6 +13,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <stdexcept>
 #include <string>
 
 #include "mutf8.h"
@@ -446,6 +447,17 @@ AstValue JSONWriter::get_cond_operand(Condition::Operand* op) {
 // DAD: dast.py:120 visit_node.
 void JSONWriter::visit_node(NodeBase* node) {
     if (!node) return;
+    // Stack-overflow guard: this AST emit walk recurses like the text Writer's
+    // VisitNode (see the note there). Cap the depth and throw so ProcessAst's
+    // catch turns a pathologically deep CFG into an empty/failed AST, not a SIGSEGV.
+    struct DepthGuard {
+        int& d;
+        explicit DepthGuard(int& x) : d(x) { ++d; }
+        ~DepthGuard() { --d; }
+    } depth_guard(depth_);
+    if (depth_ > 2000) {
+        throw std::runtime_error("decompile: AST emit recursion too deep");
+    }
     if (node == if_follow_.back() || node == switch_follow_.back() ||
         node == loop_follow_.back() || node == latch_node_.back() ||
         node == try_follow_.back())

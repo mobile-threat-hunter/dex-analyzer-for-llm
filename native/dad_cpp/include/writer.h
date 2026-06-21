@@ -78,6 +78,7 @@ private:
     const Graph* graph_;
     std::ostringstream buffer_;
     int indent_ = 0;
+    int depth_ = 0;  // VisitNode recursion depth (stack-overflow guard)
 
     // Structural follow stacks (DAD: writer.loop_follow / if_follow / ...).
     std::vector<NodeBase*> loop_follow_{nullptr};

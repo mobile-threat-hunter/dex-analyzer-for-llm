@@ -12,6 +12,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 
 #include "mutf8.h"
@@ -748,6 +749,21 @@ void Writer::WriteMethod() {
 
 void Writer::VisitNode(NodeBase* node) {
     if (!node) return;
+    // The graph DFS/post_order passes are iterative to avoid stack overflow on
+    // large CFGs, but this structural emit walk recurses (EmitIf/EmitLoop/... ->
+    // VisitNode). A crafted method with thousands of nested if/follow blocks would
+    // overflow the native stack — an uncatchable SIGSEGV that the per-method
+    // try/catch and safe.py's hang-only wrapper cannot contain. Cap the depth and
+    // throw so decompiler.cpp's catch turns it into an empty decompile. Real
+    // methods nest far below this (DAD's effective Python recursion limit is ~1k).
+    struct DepthGuard {
+        int& d;
+        explicit DepthGuard(int& x) : d(x) { ++d; }
+        ~DepthGuard() { --d; }
+    } depth_guard(depth_);
+    if (depth_ > 2000) {
+        throw std::runtime_error("decompile: structured emit recursion too deep");
+    }
     if (node == if_follow_.back() || node == switch_follow_.back() ||
         node == loop_follow_.back() || node == latch_node_.back() ||
         node == try_follow_.back()) return;
