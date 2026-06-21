@@ -450,9 +450,12 @@ std::vector<ParsedTry> ParseExceptions(const dex::Code* code,
 
         int32_t size = ReadSleb128(p, end);
         bool has_catch_all = (size <= 0);
-        int32_t typed_count = std::abs(size);
+        // abs in 64-bit: std::abs(INT32_MIN) is UB (no positive int32). The
+        // verifier bounds handler size to [-65536, 65536] so this can't reach
+        // INT32_MIN on validated input, but the wider cast removes the latent UB.
+        int64_t typed_count = std::abs(static_cast<int64_t>(size));
 
-        for (int32_t j = 0; j < typed_count && p < end; ++j) {
+        for (int64_t j = 0; j < typed_count && p < end; ++j) {
             uint32_t type_idx = ReadUleb128(p, end);
             uint32_t handler_addr_cu = ReadUleb128(p, end);
             ParsedHandler ph;
