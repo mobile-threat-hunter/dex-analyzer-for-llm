@@ -239,8 +239,9 @@ def _t_find_call_sites_to_api(
     for s in sites:
         items.append(
             {
-                "caller_method": getattr(s, "caller_method", None) or _match_to_desc(s),
-                "raw": str(s),
+                "caller": s.caller_descriptor,
+                "callee": s.callee_descriptor,
+                "bytecode_offset": s.bytecode_offset,
             }
         )
     return _paginate(items, offset, limit)
@@ -250,11 +251,11 @@ def _t_get_class_summary(dk: DexKit, class_descriptor: str) -> dict:
     s = dk.get_class_summary(class_descriptor)
     return {
         "descriptor": class_descriptor,
-        "superclass": getattr(s, "super_class", None),
-        "interfaces": list(getattr(s, "interfaces", []) or []),
-        "method_count": len(list(getattr(s, "methods", []) or [])),
-        "field_count": len(list(getattr(s, "fields", []) or [])),
-        "access_flags": getattr(s, "access_flags", None),
+        "superclass": s.superclass_descriptor or None,
+        "interfaces": list(s.interface_descriptors),
+        "method_count": len(list(s.methods)),
+        "field_count": len(list(s.fields)),
+        "access_flags": s.access_flags,
     }
 
 

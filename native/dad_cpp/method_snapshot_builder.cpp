@@ -198,6 +198,12 @@ ConstRef ResolveConstRef(const dex::Instruction& decoded, dex::Opcode op,
 // element count comes straight from (possibly malformed) dex bytes, so each
 // parser clamps it to what actually fits before reading the tail — preventing
 // an out-of-bounds read on a crafted payload near the end of the code item.
+// A payload's declared element count comes straight from dex bytes. On VALID
+// input VerifyInsns + GetWidthFromBytecode bound it (so the clamp below is a
+// no-op), but VerifyInsns only checks a switch/fill-array branch TARGET is
+// in-range — NOT that the bytes there are a correctly-sized payload. A crafted
+// target can point at a fabricated marker with a huge `size`, so each parser
+// MUST clamp the size-driven read to what fits before `end` to avoid an OOB read.
 PayloadVariant ParsePackedSwitchPayload(const dex::u2* p, const dex::u2* end) {
     PayloadPackedSwitch ps;
     // layout: u2 ident=0x0100, u2 size, s4 first_key, s4 targets[size]
@@ -205,21 +211,24 @@ PayloadVariant ParsePackedSwitchPayload(const dex::u2* p, const dex::u2* end) {
     uint16_t size = p[1];
     ps.first_key = *reinterpret_cast<const int32_t*>(p + 2);
     const int32_t* tgts = reinterpret_cast<const int32_t*>(p + 4);
-    // size fits by construction: VerifyInsns width-bounded this payload at load.
-    ps.targets.assign(tgts, tgts + size);
+    const size_t avail = static_cast<size_t>(end - (p + 4)) / 2;  // u2 units → s4
+    const size_t n = std::min(static_cast<size_t>(size), avail);
+    ps.targets.assign(tgts, tgts + n);
     return ps;
 }
 
 PayloadVariant ParseSparseSwitchPayload(const dex::u2* p, const dex::u2* end) {
     PayloadSparseSwitch ss;
     // layout: u2 ident=0x0200, u2 size, s4 keys[size], s4 targets[size]
-    if (p + 2 > end) return std::monostate{};
+    if (p + 4 > end) return std::monostate{};
     uint16_t size = p[1];
-    // size fits by construction: VerifyInsns width-bounded this payload at load.
     const int32_t* keys = reinterpret_cast<const int32_t*>(p + 2);
-    const int32_t* tgts = keys + size;
-    ss.keys.assign(keys, keys + size);
-    ss.targets.assign(tgts, tgts + size);
+    // keys[size] + targets[size] = 2*size s4 words after p+2.
+    const size_t avail = static_cast<size_t>(end - (p + 2)) / 2;  // u2 units → s4
+    const size_t n = std::min(static_cast<size_t>(size), avail / 2);
+    const int32_t* tgts = keys + n;
+    ss.keys.assign(keys, keys + n);
+    ss.targets.assign(tgts, tgts + n);
     return ss;
 }
 
@@ -230,8 +239,9 @@ PayloadVariant ParseFillArrayPayload(const dex::u2* p, const dex::u2* end) {
     pa.element_width = p[1];
     pa.size = *reinterpret_cast<const uint32_t*>(p + 2);
     const uint8_t* data = reinterpret_cast<const uint8_t*>(p + 4);
-    // total fits by construction: VerifyInsns width-bounded this payload at load.
+    const size_t avail_bytes = static_cast<size_t>(end - (p + 4)) * 2;  // u2 → bytes
     size_t total = static_cast<size_t>(pa.element_width) * pa.size;
+    if (total > avail_bytes) total = avail_bytes;
     pa.data.assign(data, data + total);
     return pa;
 }

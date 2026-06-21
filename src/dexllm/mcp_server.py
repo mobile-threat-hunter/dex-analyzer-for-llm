@@ -149,7 +149,9 @@ async def _list_tools() -> list[types.Tool]:
 
 @server.call_tool()
 async def _call_tool(name: str, arguments: dict[str, Any]) -> list[types.TextContent]:
-    result = dispatch_tool(name, arguments or {})
+    # dispatch_tool is blocking (APK load, decompile, GIL-held searches). Run it
+    # off the event loop so a long job can't stall the stdio server / heartbeats.
+    result = await asyncio.to_thread(dispatch_tool, name, arguments or {})
     return [
         types.TextContent(type="text", text=json.dumps(result, indent=2, default=str))
     ]

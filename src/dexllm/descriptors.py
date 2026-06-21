@@ -76,7 +76,9 @@ def _split_proto_params(params: str) -> Iterable[str]:
         while i < n and params[i] == "[":
             i += 1
         if i >= n:
-            return
+            # trailing '[' with no base type — malformed. Raise (consistent with
+            # the truncated-'L' case below) instead of silently dropping the param.
+            raise ValueError(f"malformed proto params: dangling array in {params!r}")
         c = params[i]
         if c == "L":
             end = params.index(";", i)

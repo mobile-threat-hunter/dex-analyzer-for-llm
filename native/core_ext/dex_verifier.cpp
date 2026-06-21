@@ -421,16 +421,29 @@ bool DexVerifier::CheckHeader() {
     // adler32: intentionally not verified (policy).
 
     // Every section offset/size inside the file (ART CheckHeader section block).
+    // CheckValidOffsetAndSize validates each ID table's offset alignment + that
+    // the offset is in-file, but its `size` argument is an element COUNT, so it
+    // only proves `off + count <= file` BYTES. The tables are then indexed by
+    // `i * sizeof(item)` (ClassDef is 32 bytes), so the BYTE SPAN must be bounded
+    // separately with CheckListSize (overflow-safe via division) — otherwise a
+    // crafted dex whose count fits as bytes but `count*sizeof` overruns the file
+    // would OOB-read inside the verifier itself.
     return CheckValidOffsetAndSize(header_->link_off, header_->link_size, 0, "link") &&
            CheckValidOffsetAndSize(header_->map_off, sizeof(dex::MapList), 4, "map") &&
            CheckValidOffsetAndSize(header_->string_ids_off, header_->string_ids_size, 4, "string-ids") &&
+           CheckListSize(OffsetToPtr(header_->string_ids_off), header_->string_ids_size, sizeof(dex::StringId), "string-ids span") &&
            CheckValidOffsetAndSize(header_->type_ids_off, header_->type_ids_size, 4, "type-ids") &&
+           CheckListSize(OffsetToPtr(header_->type_ids_off), header_->type_ids_size, sizeof(dex::TypeId), "type-ids span") &&
            CheckSizeLimit(header_->type_ids_size, dex::kNoIndex - 1, "type-ids") &&
            CheckValidOffsetAndSize(header_->proto_ids_off, header_->proto_ids_size, 4, "proto-ids") &&
+           CheckListSize(OffsetToPtr(header_->proto_ids_off), header_->proto_ids_size, sizeof(dex::ProtoId), "proto-ids span") &&
            CheckSizeLimit(header_->proto_ids_size, dex::kNoIndex - 1, "proto-ids") &&
            CheckValidOffsetAndSize(header_->field_ids_off, header_->field_ids_size, 4, "field-ids") &&
+           CheckListSize(OffsetToPtr(header_->field_ids_off), header_->field_ids_size, sizeof(dex::FieldId), "field-ids span") &&
            CheckValidOffsetAndSize(header_->method_ids_off, header_->method_ids_size, 4, "method-ids") &&
+           CheckListSize(OffsetToPtr(header_->method_ids_off), header_->method_ids_size, sizeof(dex::MethodId), "method-ids span") &&
            CheckValidOffsetAndSize(header_->class_defs_off, header_->class_defs_size, 4, "class-defs") &&
+           CheckListSize(OffsetToPtr(header_->class_defs_off), header_->class_defs_size, sizeof(dex::ClassDef), "class-defs span") &&
            CheckValidOffsetAndSize(header_->data_off, header_->data_size, 0, "data");
 }
 
