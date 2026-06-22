@@ -93,6 +93,29 @@ def test_signature_parsers():
     )
     assert _parse_api("p.C#m(Outer.Inner x)") == ("p.C", "m", ("Inner",))
 
+    # Adversarial real-dataset shapes (found by stressing the parser over the full
+    # AOSP table) — all must parse to clean simple types, never crash:
+    # value annotation with parens/`=`/`,` (its inner comma must NOT split params)
+    assert _parse_api("p.C#m(@FloatRange(from = 0f, to = 1f) float d)") == (
+        "p.C",
+        "m",
+        ("float",),
+    )
+    # dotted/qualified annotation name
+    assert _parse_api("p.C#m(@TelephonyManager.AllowedNetworkTypesReason int r)") == (
+        "p.C",
+        "m",
+        ("int",),
+    )
+    # Kotlin `name: Type` order (type is AFTER the colon)
+    assert _parse_api("p.C#m(context: Context, action: PinRecoveryAction)") == (
+        "p.C",
+        "m",
+        ("Context", "PinRecoveryAction"),
+    )
+    # unbalanced parens / garbage must not raise — treated as a non-call (None)
+    assert _parse_api("p.C#val x: Y? = if (Flags.foo")[2] is None
+
     # Dalvik proto -> the SAME simple-name tuple, so the two compare equal.
     assert _dalvik_param_types("(Ljava/lang/String;)V") == ("String",)
     assert _dalvik_param_types("()V") == ()
@@ -289,3 +312,114 @@ def test_dataset_path_override(dk):
         pytest.skip("full AOSP dataset not present")
     apis = dexllm.dangerous_permission_apis(dk, dataset_path=ds)
     assert isinstance(apis, dict)
+
+
+def test_ref_filter_rejects_garbage_entries():
+    """_REF accepts `Class#method[(sig)]` and rejects malformed scrapes."""
+    from dexllm.dangerous_api import _REF
+
+    assert _REF.match("a.b.C#m")
+    assert _REF.match("a.b.C#m(@NonNull String a)")
+    assert _REF.match("a.b.C#FIELD")
+    # a stray Kotlin source line (member name followed by junk, unbalanced paren)
+    assert not _REF.match("MediaSessions#val mediaRouter2: X? = if (Flags.foo")
+    assert not _REF.match("a.b.C#m() trailing junk")
+    assert not _REF.match("no hash here")
+
+
+def test_full_dataset_parses_without_crash():
+    """Every _REF-accepted entry in the full dataset parses (no exception)."""
+    ds = Path("/home/nyahumi/Project/aosp_data_set/perm_api_by_perm.json")
+    if not ds.is_file():
+        pytest.skip("full AOSP dataset not present")
+    from dexllm.dangerous_api import _REF, _parse_api
+
+    table = json.loads(ds.read_text())
+    entries = {e for apis in table.values() for e in apis}
+    parsed = 0
+    for e in entries:
+        if not _REF.match(e):
+            continue
+        cls, method, types = _parse_api(e)  # must not raise
+        assert cls and method
+        parsed += 1
+    assert parsed > 1000  # sanity: the table really was exercised
+
+
+def test_same_arity_overloads_need_type_match(monkeypatch):
+    """Two overloads of the SAME arity -> the param types disambiguate."""
+    import dexllm.dangerous_api as da
+
+    table = {
+        "android.permission.FOO": (
+            "p.C#m(@NonNull String s)",
+            "p.C#m(int i)",
+        )
+    }
+    monkeypatch.setattr(da, "_load_dangerous_map", lambda _p: table)
+
+    class _DK:
+        def list_external_method_refs(self, framework_only):
+            return [_Ref("p.C", "m", "(I)V", "Lp/C;")]  # the int overload
+
+        def find_call_sites_to_api(self, desc):
+            return []
+
+    apis = da.dangerous_permission_apis(_DK())
+    assert apis["android.permission.FOO"] == ["p.C#m(int i)"]  # not the String one
+
+
+def test_constructor_entries_match_init_refs(monkeypatch):
+    """Dataset writes a ctor as `Class#SimpleName(...)`; the dex ref is `<init>`."""
+    import dexllm.dangerous_api as da
+
+    table = {
+        "android.permission.RECORD_AUDIO": (
+            "android.media.AudioRecord#AudioRecord(int audioSource, int sampleRateInHz)",
+        )
+    }
+    monkeypatch.setattr(da, "_load_dangerous_map", lambda _p: table)
+
+    class _DK:
+        def list_external_method_refs(self, framework_only):
+            return [
+                _Ref(
+                    "android.media.AudioRecord",
+                    "<init>",  # dex names constructors <init>
+                    "(II)V",
+                    "Landroid/media/AudioRecord;",
+                )
+            ]
+
+        def find_call_sites_to_api(self, desc):
+            return []
+
+    apis = da.dangerous_permission_apis(_DK())
+    assert "android.permission.RECORD_AUDIO" in apis
+
+
+def test_inner_class_separator_canonicalised(monkeypatch):
+    """Dataset `Outer.Inner` must match the dex's `Outer$Inner` java_class."""
+    import dexllm.dangerous_api as da
+
+    table = {
+        "android.permission.FOO": ("android.app.Notification.Builder#setX(int i)",)
+    }
+    monkeypatch.setattr(da, "_load_dangerous_map", lambda _p: table)
+
+    class _DK:
+        def list_external_method_refs(self, framework_only):
+            return [
+                _Ref(
+                    "android.app.Notification$Builder",  # dex uses `$`
+                    "setX",
+                    "(I)V",
+                    "Landroid/app/Notification$Builder;",
+                )
+            ]
+
+        def find_call_sites_to_api(self, desc):
+            return []
+
+    apis = da.dangerous_permission_apis(_DK())
+    assert "android.permission.FOO" in apis

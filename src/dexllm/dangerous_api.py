@@ -37,8 +37,11 @@ __all__ = ["dangerous_permission_apis", "dangerous_permission_api_callers"]
 
 _BUNDLED = Path(__file__).parent / "data" / "dangerous_perm_api.json"
 
-# A dataset entry is `pkg.Class#member`, optionally followed by a `(signature)`.
-_REF = re.compile(r"^[A-Za-z_][\w.$]*#[A-Za-z_$][\w$]*")
+# A dataset entry is `pkg.Class#member`, optionally followed by a `(signature)` that
+# runs to the end. Anchored so a malformed scrape (e.g. a stray Kotlin source line
+# `MediaSessions#val mediaRouter2: ... = if (Flags...`) — member name followed by
+# junk rather than `(` or end — is rejected instead of stored and later mis-parsed.
+_REF = re.compile(r"^[\w.$]+#[A-Za-z_$][\w$]*(\(.*\))?$")
 
 # Caller classes that are bundled framework / official-library code. A dangerous
 # API call from here is library plumbing (e.g. androidx permission helpers,
@@ -82,6 +85,23 @@ _DALVIK_PRIM = {
 _JAVA_MODIFIERS = {"final"}
 
 
+# Kotlin primitive/type aliases -> the Java/Dalvik name a Kotlin source signature
+# compiles to, so a Kotlin-style dataset entry's `Int` compares equal to the dex
+# proto's `int` (`I`). Only consulted as a same-arity-overload tiebreak.
+_KOTLIN_ALIASES = {
+    "Int": "int",
+    "Long": "long",
+    "Short": "short",
+    "Byte": "byte",
+    "Char": "char",
+    "Boolean": "boolean",
+    "Float": "float",
+    "Double": "double",
+    "Unit": "void",
+    "Any": "Object",
+}
+
+
 def _simple_name(type_str: str) -> str:
     """`java.util.function.Consumer` / `Outer$Inner` -> last identifier segment."""
     return type_str.replace("/", ".").replace("$", ".").rsplit(".", 1)[-1]
@@ -116,19 +136,23 @@ def _dalvik_param_types(proto: str) -> tuple[str, ...]:
     return tuple(out)
 
 
+# `@Foo`, `@Foo(...)`, `@pkg.Outer.Foo (...)` — a parameter annotation (the name may
+# be dotted/qualified), optionally with a (non-nested) argument list. Stripped whole
+# so its inner `=`/`,` can't leak into the type or be miscounted as a param separator.
+_ANNOTATION = re.compile(r"@[\w.]+\s*(\([^()]*\))?")
+
+
 def _split_top_level(params: str) -> list[str]:
-    """Split a Java parameter list on top-level commas (respecting <> nesting)."""
+    """Split a parameter list on top-level commas (respecting <>, (), [] nesting)."""
     parts: list[str] = []
     depth = 0
     cur = ""
     for ch in params:
-        if ch == "<":
+        if ch in "<([":
             depth += 1
-            cur += ch
-        elif ch == ">":
-            depth -= 1
-            cur += ch
-        elif ch == "," and depth == 0:
+        elif ch in ">)]":
+            depth = max(0, depth - 1)
+        if ch == "," and depth == 0:
             parts.append(cur)
             cur = ""
         else:
@@ -138,16 +162,25 @@ def _split_top_level(params: str) -> list[str]:
     return parts
 
 
-def _java_param_simple(param: str) -> str:
-    """One Java param decl (`@NonNull Consumer<Location> cb`) -> simple type (`Consumer`)."""
-    toks = [
-        t for t in param.split() if not t.startswith("@") and t not in _JAVA_MODIFIERS
-    ]
-    if not toks:
-        return ""
-    # The parameter name is the last token; everything before it is the type.
-    type_str = " ".join(toks[:-1]) if len(toks) >= 2 else toks[0]
+def _param_simple(param: str) -> str:
+    """One param decl -> simple type. Annotations are already stripped upstream.
+
+    Handles both Java order (`Consumer<Location> cb`) and Kotlin order
+    (`cb: Consumer<Location>`), generics, arrays and varargs.
+    """
+    p = param.strip()
+    if ":" in p:
+        # Kotlin `name: Type` — the type is after the (last top-level) colon.
+        p = p.rsplit(":", 1)[-1].strip()
+        type_str = p  # no trailing param name in Kotlin order
+    else:
+        toks = [t for t in p.split() if t not in _JAVA_MODIFIERS]
+        if not toks:
+            return ""
+        # Java `Type name` — the param name is the last token.
+        type_str = " ".join(toks[:-1]) if len(toks) >= 2 else toks[0]
     type_str = re.sub(r"<.*>", "", type_str).strip()  # erase generics (dex erases too)
+    type_str = type_str.rstrip("?").strip()  # Kotlin nullable `String?` -> String
     arr = ""
     while type_str.endswith("[]"):
         arr += "[]"
@@ -155,7 +188,8 @@ def _java_param_simple(param: str) -> str:
     if type_str.endswith("..."):  # varargs are arrays in the descriptor
         arr += "[]"
         type_str = type_str[:-3].strip()
-    return _simple_name(type_str) + arr
+    base = _simple_name(type_str)
+    return _KOTLIN_ALIASES.get(base, base) + arr
 
 
 def _parse_api(entry: str) -> tuple[str, str, tuple[str, ...] | None]:
@@ -165,13 +199,23 @@ def _parse_api(entry: str) -> tuple[str, str, tuple[str, ...] | None]:
     never match a method-call reference.
     """
     cls, _, rest = entry.partition("#")
-    if "(" not in rest:
+    cls = cls.replace("$", ".")  # canonicalise inner-class sep to match the dex side
+    open_p = rest.find("(")
+    close_p = rest.rfind(")")
+    if open_p < 0 or close_p < open_p:
+        # No balanced `(...)` — a field/constant (or malformed entry); not a call.
         return cls, rest, None
-    name = rest[: rest.index("(")]
-    params = rest[rest.index("(") + 1 : rest.rindex(")")]
+    name = rest[:open_p]
+    if name == cls.rsplit(".", 1)[-1]:
+        # The dataset writes a constructor as `Class#SimpleName(...)`; the dex
+        # external ref names it `<init>`. Normalise so the two match.
+        name = "<init>"
+    # Strip annotations (incl their `(...)` args) FIRST so an annotation's inner
+    # `=`/`,` can't leak into a type or be miscounted as a parameter separator.
+    params = _ANNOTATION.sub(" ", rest[open_p + 1 : close_p])
     if not params.strip():
         return cls, name, ()
-    return cls, name, tuple(_java_param_simple(p) for p in _split_top_level(params))
+    return cls, name, tuple(_param_simple(p) for p in _split_top_level(params))
 
 
 def _load_dangerous_map(dataset_path: str | None) -> dict[str, tuple[str, ...]]:
@@ -233,12 +277,19 @@ def _external_method_index(dk: DexKit) -> dict[tuple[str, str], list[Any]]:
     """Index the APK's external method refs by ``(java_class, method_name)``."""
     idx: dict[tuple[str, str], list[Any]] = {}
     for ref in dk.list_external_method_refs(False):
-        idx.setdefault((ref.java_class, ref.name), []).append(ref)
+        # canonicalise inner-class `$` -> `.` to match _parse_api's class key.
+        idx.setdefault((ref.java_class.replace("$", "."), ref.name), []).append(ref)
     return idx
 
 
-def _overload_counts(table: dict[str, tuple[str, ...]]) -> dict[tuple[str, str], int]:
-    """``{(class, method): #distinct dataset signatures}`` — drives the ambiguity check."""
+def _overload_index(
+    table: dict[str, tuple[str, ...]],
+) -> dict[tuple[str, str], dict[int, int]]:
+    """``{(class, method): {arity: #distinct overloads of that arity}}``.
+
+    Drives the ambiguity check: a method with one overload — or one overload of a
+    given arity — needs no signature parsing to disambiguate.
+    """
     seen: dict[tuple[str, str], set[tuple[str, ...]]] = {}
     for sigs in table.values():
         for sig in sigs:
@@ -246,18 +297,32 @@ def _overload_counts(table: dict[str, tuple[str, ...]]) -> dict[tuple[str, str],
             if types is None:
                 continue
             seen.setdefault((cls, method), set()).add(types)
-    return {k: len(v) for k, v in seen.items()}
+    out: dict[tuple[str, str], dict[int, int]] = {}
+    for cm, type_set in seen.items():
+        arity: dict[int, int] = {}
+        for t in type_set:
+            arity[len(t)] = arity.get(len(t), 0) + 1
+        out[cm] = arity
+    return out
 
 
-def _ref_matches(ref: Any, types: tuple[str, ...], single_overload: bool) -> bool:
-    """Whether a dex ref realises the dataset signature.
+def _ref_matches(ref: Any, types: tuple[str, ...], arity_map: dict[int, int]) -> bool:
+    """Whether a dex ref realises the dataset signature `types`.
 
-    With a single dataset overload, match on ``(class, method)`` alone so a
-    signature-parser edge case can't drop a real hit; with multiple overloads,
-    require the simple-param-type lists to agree so the specific gated overload is
-    the one actually referenced.
+    Arity (parameter count) is the primary, parse-robust discriminator; exact
+    simple-type matching is only the tiebreak when the method has more than one
+    overload of the same arity. A lone overload (or a lone overload of this arity)
+    matches on arity alone, so a signature-parser edge case can't drop a real hit.
     """
-    return single_overload or _dalvik_param_types(ref.proto) == types
+    total = sum(arity_map.values())
+    if total <= 1:
+        return True  # single overload: name match is unambiguous
+    ref_types = _dalvik_param_types(ref.proto)
+    if len(ref_types) != len(types):
+        return False  # different arity → different overload
+    if arity_map.get(len(types), 0) <= 1:
+        return True  # unique arity among the overloads — types need not be parsed
+    return ref_types == types
 
 
 def dangerous_permission_apis(
@@ -281,7 +346,7 @@ def dangerous_permission_apis(
     """
     table = _load_dangerous_map(dataset_path)
     index = _external_method_index(dk)
-    overloads = _overload_counts(table)
+    overloads = _overload_index(table)
     result: dict[str, list[str]] = {}
     for perm, sigs in table.items():
         used: list[str] = []
@@ -292,8 +357,8 @@ def dangerous_permission_apis(
             refs = index.get((cls, method))
             if not refs:
                 continue
-            single = overloads.get((cls, method), 0) <= 1
-            if any(_ref_matches(r, types, single) for r in refs):
+            arity_map = overloads.get((cls, method), {})
+            if any(_ref_matches(r, types, arity_map) for r in refs):
                 used.append(sig)
         if used:
             result[perm] = sorted(used)
@@ -328,7 +393,7 @@ def dangerous_permission_api_callers(
     """
     table = _load_dangerous_map(dataset_path)
     index = _external_method_index(dk)
-    overloads = _overload_counts(table)
+    overloads = _overload_index(table)
     result: dict[str, list[dict[str, Any]]] = {}
     for perm, sigs in table.items():
         rows: list[dict[str, Any]] = []
@@ -339,8 +404,8 @@ def dangerous_permission_api_callers(
             refs = index.get((cls, method))
             if not refs:
                 continue
-            single = overloads.get((cls, method), 0) <= 1
-            matched = [r for r in refs if _ref_matches(r, types, single)]
+            arity_map = overloads.get((cls, method), {})
+            matched = [r for r in refs if _ref_matches(r, types, arity_map)]
             if not matched:
                 continue
             descriptors: list[str] = []
