@@ -56,11 +56,126 @@ def test_dangerous_permission_apis_detects_real_usage(dk):
         assert "android.permission.ACCESS_FINE_LOCATION" in apis
         loc = apis["android.permission.ACCESS_FINE_LOCATION"]
         assert any("LocationManager#getLastKnownLocation" in a for a in loc)
+        # the reported entry is the full signature now
+        assert all("(" in a and a.endswith(")") for a in loc)
+        # overload precision: the app calls getLastKnownLocation(String); the
+        # 2-arg LastLocationRequest overload must NOT be reported.
+        gk = [a for a in loc if "getLastKnownLocation" in a]
+        assert any("(@NonNull String provider)" in a for a in gk)
+        assert not any("LastLocationRequest" in a for a in gk)
         assert "android.permission.BLUETOOTH_CONNECT" in apis
-    # shape: {perm: [pkg.Class#method]}
+    # shape: {perm: [pkg.Class#method(sig)]}
     for perm, used in apis.items():
         assert used == sorted(used)
         assert all("#" in a for a in used)
+
+
+def test_signature_parsers():
+    from dexllm.dangerous_api import _dalvik_param_types, _parse_api
+
+    # Java signature -> (class, method, simple param types); generics erased,
+    # annotations + `final` dropped, varargs/arrays normalised, field -> None.
+    assert _parse_api("p.C#m(@NonNull String a)") == ("p.C", "m", ("String",))
+    assert _parse_api("p.C#m()") == ("p.C", "m", ())
+    assert _parse_api("p.C#FIELD") == ("p.C", "FIELD", None)
+    assert _parse_api(
+        "p.C#m(@NonNull @CallbackExecutor Executor e, @NonNull Consumer<Location> c)"
+    ) == ("p.C", "m", ("Executor", "Consumer"))
+    assert _parse_api("p.C#m(int... ids, String[] names)") == (
+        "p.C",
+        "m",
+        ("int[]", "String[]"),
+    )
+    assert _parse_api("p.C#m(final Map<String, Integer> kv)") == (
+        "p.C",
+        "m",
+        ("Map",),
+    )
+    assert _parse_api("p.C#m(Outer.Inner x)") == ("p.C", "m", ("Inner",))
+
+    # Dalvik proto -> the SAME simple-name tuple, so the two compare equal.
+    assert _dalvik_param_types("(Ljava/lang/String;)V") == ("String",)
+    assert _dalvik_param_types("()V") == ()
+    assert _dalvik_param_types("([ILjava/util/function/Consumer;)V") == (
+        "int[]",
+        "Consumer",
+    )
+    assert _dalvik_param_types("(Lp/Outer$Inner;)V") == ("Inner",)
+    assert _dalvik_param_types(
+        "(Ljava/lang/String;)Landroid/location/Location;"
+    ) == ("String",)
+
+
+class _Ref:
+    def __init__(self, java_class, name, proto, class_descriptor):
+        self.java_class = java_class
+        self.name = name
+        self.proto = proto
+        self.class_descriptor = class_descriptor
+
+
+class _OverloadDK:
+    """dk stand-in referencing ONLY the 1-arg getLastKnownLocation overload."""
+
+    def list_external_method_refs(self, framework_only):
+        return [
+            _Ref(
+                "android.location.LocationManager",
+                "getLastKnownLocation",
+                "(Ljava/lang/String;)Landroid/location/Location;",
+                "Landroid/location/LocationManager;",
+            )
+        ]
+
+    def find_call_sites_to_api(self, desc):
+        return []
+
+
+def test_overload_disambiguation(monkeypatch):
+    """A 2-overload method, only one referenced -> only that overload reported."""
+    import dexllm.dangerous_api as da
+
+    table = {
+        "android.permission.ACCESS_FINE_LOCATION": (
+            "android.location.LocationManager#getLastKnownLocation(@NonNull String provider)",
+            "android.location.LocationManager#getLastKnownLocation(@NonNull String provider, @NonNull LastLocationRequest r)",
+        )
+    }
+    monkeypatch.setattr(da, "_load_dangerous_map", lambda _p: table)
+    apis = da.dangerous_permission_apis(_OverloadDK())
+    used = apis["android.permission.ACCESS_FINE_LOCATION"]
+    assert used == [
+        "android.location.LocationManager#getLastKnownLocation(@NonNull String provider)"
+    ]  # the 2-arg overload is NOT reported
+
+
+def test_single_overload_name_fallback(monkeypatch):
+    """A lone overload matches on name even if the dex proto differs slightly."""
+    import dexllm.dangerous_api as da
+
+    # dataset has ONE overload with an odd (unparseable-ish) signature; the dex
+    # ref's proto need not agree because there's no ambiguity to resolve.
+    table = {
+        "android.permission.ACCESS_FINE_LOCATION": (
+            "android.location.LocationManager#getLastKnownLocation(@NonNull String provider)",
+        )
+    }
+    monkeypatch.setattr(da, "_load_dangerous_map", lambda _p: table)
+
+    class _DK(_OverloadDK):
+        def list_external_method_refs(self, framework_only):
+            # proto differs (extra arg) but it's the only overload -> still matched
+            return [
+                _Ref(
+                    "android.location.LocationManager",
+                    "getLastKnownLocation",
+                    "(Ljava/lang/String;J)Landroid/location/Location;",
+                    "Landroid/location/LocationManager;",
+                )
+            ]
+
+    apis = da.dangerous_permission_apis(_DK())
+    assert "android.permission.ACCESS_FINE_LOCATION" in apis
 
 
 def test_dangerous_permission_api_callers_attributes_to_methods(dk):

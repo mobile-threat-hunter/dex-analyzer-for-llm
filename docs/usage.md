@@ -321,17 +321,17 @@ import dexllm
 
 dk = dexllm.DexKit("app.apk")
 
-# {permission: [pkg.Class#method, ...]} for the gated APIs actually used
+# {permission: [pkg.Class#method(signature), ...]} for the gated APIs actually used
 apis = dexllm.dangerous_permission_apis(dk)
 # {'android.permission.ACCESS_FINE_LOCATION':
-#     ['android.location.LocationManager#getLastKnownLocation', ...], ...}
+#     ['android.location.LocationManager#getLastKnownLocation(@NonNull String provider)', ...], ...}
 
 # same, plus WHO calls each gated API (jump straight to the code)
 callers = dexllm.dangerous_permission_api_callers(dk)   # app_only=True by default
 for perm, rows in callers.items():
     for row in rows:
         print(perm, row["api"], "<-", row["callers"][:1])
-# ACCESS_FINE_LOCATION  android.location.LocationManager#getLastKnownLocation
+# ACCESS_FINE_LOCATION  android.location.LocationManager#getLastKnownLocation(@NonNull String provider)
 #   <- ['La2dp/Vol/StoreLoc;->grabGPS()V']
 ```
 
@@ -344,6 +344,12 @@ day/night theming) is library plumbing, not the app's own behaviour. Pass
 ```python
 dexllm.dangerous_permission_api_callers(dk, app_only=False)   # include framework callers
 ```
+
+The table carries the full Java signature for each gated API, so **overloads are
+matched precisely** — `getLastKnownLocation(String)` and its `LastLocationRequest`
+overload are distinguished, and only the one the app actually references is reported
+(a `(class, method)` with a single overload still matches on name alone, so a
+signature-parser edge case can't drop a real hit).
 
 The dangerous-permission→API table ships bundled (the dangerous slice of the AOSP
 dataset). Pass `dataset_path="…/aosp_data_set"` (or set `$DEXLLM_AOSP_DATASET`) to
