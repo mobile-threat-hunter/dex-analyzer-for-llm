@@ -458,6 +458,110 @@ std::vector<std::string> DexKitExt::ListStrings() const {
     return out;
 }
 
+namespace {
+
+// Minimal leb/int readers for the static-values EncodedArray scan. Bounded:
+// never read past `end` (the mmap tail). Mirrors the byte layout the tested
+// DecodeEncodedValueText uses, but collects string indices instead of text.
+uint64_t ScanUleb(const uint8_t*& p, const uint8_t* end) {
+    uint64_t result = 0;
+    int shift = 0;
+    while (p < end && shift < 64) {
+        uint8_t b = *p++;
+        result |= static_cast<uint64_t>(b & 0x7f) << shift;
+        if ((b & 0x80) == 0) break;
+        shift += 7;
+    }
+    return result;
+}
+uint64_t ScanIntLE(const uint8_t*& p, const uint8_t* end, size_t nbytes) {
+    uint64_t v = 0;
+    for (size_t i = 0; i < nbytes && p < end; ++i) v |= static_cast<uint64_t>(*p++) << (i * 8);
+    return v;
+}
+
+// Collect VALUE_STRING (0x17) string indices from one encoded_value, recursing
+// into ARRAY (0x1c) and ANNOTATION (0x1d). All other types only advance the
+// cursor by their fixed payload (idx/number = value_arg+1 bytes; NULL/BOOLEAN 0).
+void ScanEncodedValueStrings(const uint8_t*& p, const uint8_t* end,
+                             std::vector<uint32_t>& out) {
+    if (p >= end) return;
+    uint8_t header = *p++;
+    uint8_t value_arg = (header >> 5) & 0x07;
+    uint8_t value_type = header & 0x1F;
+    size_t nbytes = static_cast<size_t>(value_arg) + 1;
+    switch (value_type) {
+        case 0x17:  // STRING
+            out.push_back(static_cast<uint32_t>(ScanIntLE(p, end, nbytes)));
+            return;
+        case 0x1c: {  // ARRAY
+            uint64_t sz = ScanUleb(p, end);
+            for (uint64_t i = 0; i < sz && p < end; ++i) ScanEncodedValueStrings(p, end, out);
+            return;
+        }
+        case 0x1d: {  // ANNOTATION — type_idx, size, size*(name_idx, value)
+            (void)ScanUleb(p, end);
+            uint64_t sz = ScanUleb(p, end);
+            for (uint64_t i = 0; i < sz && p < end; ++i) {
+                (void)ScanUleb(p, end);  // name_idx
+                ScanEncodedValueStrings(p, end, out);
+            }
+            return;
+        }
+        case 0x1e:  // NULL
+        case 0x1f:  // BOOLEAN — value encoded in value_arg, no payload bytes
+            return;
+        default: {  // BYTE/SHORT/CHAR/INT/LONG/FLOAT/DOUBLE/TYPE/FIELD/METHOD/ENUM
+            size_t avail = static_cast<size_t>(p < end ? end - p : 0);
+            p += std::min(nbytes, avail);
+            return;
+        }
+    }
+}
+
+}  // namespace
+
+std::vector<std::string> DexKitExt::ListValueStrings() const {
+    std::vector<std::string> out;
+    std::unordered_set<std::string_view> seen;
+    auto& mut = const_cast<dexkit::DexKit&>(*core_);
+    const int n = core_->GetDexNum();
+    for (int i = 0; i < n; ++i) {
+        auto* item = mut.GetDexItem(static_cast<uint16_t>(i));
+        if (!item) continue;
+        const auto& strings = item->GetStrings();
+        const auto& reader = item->GetReader();
+        auto add = [&](uint32_t sid) {
+            if (sid < strings.size() && seen.insert(strings[sid]).second)
+                out.emplace_back(strings[sid]);
+        };
+        // (a) const-string / const-string-jumbo — union over every method's code.
+        // GetUsingStrings is the public accessor (lazy-builds the const-string
+        // index per method if needed) and hands back the strings directly.
+        const uint32_t method_count = reader.MethodIds().size();
+        for (uint32_t m = 0; m < method_count; ++m)
+            for (std::string_view s : item->GetUsingStrings(m))
+                if (seen.insert(s).second) out.emplace_back(s);
+        // (b) static-field-initializer EncodedValue VALUE_STRING (0x17).
+        const uint8_t* mmap_end = nullptr;
+        if (auto* img = item->GetImage())
+            mmap_end = reinterpret_cast<const uint8_t*>(img->data()) + img->len();
+        for (const auto& cdef : reader.ClassDefs()) {
+            if (cdef.static_values_off == 0) continue;
+            const uint8_t* p = reader.dataPtr<uint8_t>(cdef.static_values_off);
+            if (!p) continue;
+            const uint8_t* end = mmap_end ? mmap_end : p + (1u << 20);
+            if (p >= end) continue;
+            uint64_t count = ScanUleb(p, end);
+            std::vector<uint32_t> ids;
+            for (uint64_t k = 0; k < count && p < end; ++k)
+                ScanEncodedValueStrings(p, end, ids);
+            for (uint32_t sid : ids) add(sid);
+        }
+    }
+    return out;
+}
+
 std::vector<std::string>
 DexKitExt::ListClassMethods(std::string_view class_descriptor) const {
     std::vector<std::string> out;

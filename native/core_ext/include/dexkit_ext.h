@@ -80,6 +80,16 @@ public:
     // std::string here so the result outlives the call.
     [[nodiscard]] std::vector<std::string> ListStrings() const;
 
+    // The value-bearing subset of ListStrings(): only strings actually loaded as
+    // a VALUE — via a `const-string`/`const-string/jumbo` (0x1a/0x1b) bytecode
+    // operand, or a static-field-initializer EncodedValue VALUE_STRING (0x17,
+    // incl. nested in arrays). Excludes identifier/metadata strings (type
+    // descriptors, method/field names, shorty, source files, debug names) that
+    // make up most of the raw pool — so an IOC caller needs no package denoising.
+    // (Annotation-embedded 0x17 strings are deliberately omitted: framework
+    // metadata, never an app data value.)
+    [[nodiscard]] std::vector<std::string> ListValueStrings() const;
+
     // For each declared method of the given class descriptor, returns the
     // full Dalvik method descriptor `Lcls;->name(proto)ret`. Empty if class
     // is not declared in any loaded dex.

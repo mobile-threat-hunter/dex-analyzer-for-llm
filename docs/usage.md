@@ -294,6 +294,11 @@ for category in dexllm.IOC_CATEGORIES:   # urls / ips / domains / emails / onion
 
 # The raw deduplicated string pool, for custom queries:
 all_strings = dk.list_strings()          # every distinct literal across all dexes
+
+# Higher-precision mode — scan only VALUE-bearing strings (const-string operands +
+# static VALUE_STRING initializers), skipping identifier/metadata pool entries:
+iocs = dexllm.extract_iocs(dk, value_strings_only=True)
+value_strings = dk.list_value_strings()  # the value-only subset of list_strings()
 ```
 
 `extract_iocs` classifies `list_strings()` with TLD-gated regexes and **denoises**
@@ -306,6 +311,16 @@ and other `xmlns` identifiers) are dropped from both buckets — they are identi
 not contacted endpoints. Set `with_xref=False` to skip the per-indicator L7
 cross-reference (one search per indicator), or lower `xref_limit` on string-heavy
 apps. Also available as the `extract_iocs` MCP tool (returns `{indicators, counts}`).
+
+**`value_strings_only=True`** narrows the scan to strings the app loads *as data* —
+`const-string`/`const-string/jumbo` (`0x1a`/`0x1b`) bytecode operands plus static
+`VALUE_STRING` (`0x17`) field initializers — via `dk.list_value_strings()`. These are
+the only two ways a dex references a string pool entry as a value (every other
+reference — type descriptors, method/field names, shorty, source files, debug names —
+is an identifier), so the value-only scan needs no package denoising. The trade-off is
+slightly lower recall: an indicator embedded *only* as an annotation value is skipped.
+Use it for higher precision on identifier-heavy / obfuscated apps; the default
+whole-pool scan + denoise stays the recall-first choice.
 
 ---
 

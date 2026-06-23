@@ -299,7 +299,12 @@ def _t_capability_report(dk: DexKit, limit: int = 50) -> dict:
     }
 
 
-def _t_extract_iocs(dk: DexKit, with_xref: bool = True, xref_limit: int = 300) -> dict:
+def _t_extract_iocs(
+    dk: DexKit,
+    with_xref: bool = True,
+    xref_limit: int = 300,
+    value_strings_only: bool = False,
+) -> dict:
     """Extract static network indicators (C2 / IOC) from the app's dex strings.
 
     Recovers the URLs, IPs, domains, emails, and onion addresses embedded in the
@@ -308,7 +313,12 @@ def _t_extract_iocs(dk: DexKit, with_xref: bool = True, xref_limit: int = 300) -
     """
     from .ioc import IOC_CATEGORIES, extract_iocs
 
-    iocs = extract_iocs(dk, with_xref=with_xref, xref_limit=int(xref_limit))
+    iocs = extract_iocs(
+        dk,
+        with_xref=with_xref,
+        xref_limit=int(xref_limit),
+        value_strings_only=bool(value_strings_only),
+    )
     return {
         "indicators": iocs,
         "counts": {cat: len(iocs[cat]) for cat in IOC_CATEGORIES},
@@ -626,6 +636,15 @@ TOOL_DEFINITIONS: list[dict] = [
                     "type": "integer",
                     "default": 300,
                     "description": "cap on indicators cross-referenced (cost bound)",
+                },
+                "value_strings_only": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": (
+                        "scan only value-bearing strings (const-string operands + "
+                        "static VALUE_STRING initializers) instead of the whole "
+                        "pool — drops identifier noise, higher precision"
+                    ),
                 },
             },
         },

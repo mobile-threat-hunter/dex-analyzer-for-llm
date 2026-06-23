@@ -176,6 +176,7 @@ def extract_iocs(
     with_xref: bool = True,
     denoise: bool = True,
     xref_limit: int = 300,
+    value_strings_only: bool = False,
 ) -> dict[str, list[dict[str, Any]]]:
     """Extract network indicators (URLs / IPs / domains / emails / onion) from ``dk``.
 
@@ -188,12 +189,19 @@ def extract_iocs(
             otherwise mistake for domains.
         xref_limit: Cap on the number of indicators cross-referenced, to bound
             cost on string-heavy apps. Extras still appear, with empty ``methods``.
+        value_strings_only: If True, scan only **value-bearing** strings —
+            ``const-string`` operands + static ``VALUE_STRING`` initializers
+            (``dk.list_value_strings()``) — instead of the whole string pool. This
+            drops identifier/metadata entries (type/method/field names) that look
+            like hosts, so denoising becomes largely unnecessary; the trade-off is
+            it misses an indicator stored only as an annotation value. Higher
+            precision, slightly lower recall.
 
     Returns:
         A dict keyed by :data:`IOC_CATEGORIES`; each value is a list of
         ``{"value": str, "methods": list[str]}`` sorted by value.
     """
-    strings = dk.list_strings()
+    strings = dk.list_value_strings() if value_strings_only else dk.list_strings()
 
     # Self-calibrating denoise set, from the dex's STRUCTURED type tables (not a
     # regex over raw strings): internal class defs + external type refs -> package

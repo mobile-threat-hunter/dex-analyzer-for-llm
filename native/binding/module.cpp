@@ -133,6 +133,20 @@ public:
         }
         return out;
     }
+    // The value-bearing subset: only const-string (0x1a/0x1b) operands + static
+    // VALUE_STRING (0x17) initializers — the strings the app loads AS DATA, with
+    // identifier/metadata pool entries excluded. Same MUTF-8→UTF-8 dedup as above.
+    py::list list_value_strings() const {
+        py::list out;
+        std::unordered_set<std::string> seen;
+        for (const auto& s : ext_.ListValueStrings()) {
+            std::string decoded = DecodeMutf8ForPy(s);
+            if (seen.insert(decoded).second) {
+                out.append(py::str(decoded));
+            }
+        }
+        return out;
+    }
     py::list verify_report() const {
         py::list out;
         for (const auto& s : ext_.VerifyReport()) {
@@ -478,6 +492,12 @@ PYBIND11_MODULE(_dexkit_core, m) {
              "Return every distinct string literal across all loaded dexes "
              "(MUTF-8 → UTF-8 decoded, deduplicated). Foundation for static "
              "IOC / C2 extraction — see dexllm.extract_iocs.")
+        .def("list_value_strings", &PyDexKit::list_value_strings,
+             "The value-bearing subset of list_strings(): only strings loaded as "
+             "DATA — const-string/jumbo (0x1a/0x1b) operands + static-field "
+             "VALUE_STRING (0x17) initializers. Excludes identifier/metadata pool "
+             "entries (type/method/field names, shorty, source files), so IOC "
+             "extraction needs no package denoising. Annotation 0x17 omitted.")
         .def("verify_report", &PyDexKit::verify_report,
              "Structural-verification report, one dict per dex considered at "
              "load: {dex_id, name, valid, reason}. A dex with valid==False was "

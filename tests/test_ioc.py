@@ -57,6 +57,35 @@ def test_list_strings_exposed(dk):
     assert len(strings) == len(set(strings))
 
 
+def test_list_value_strings_is_identifier_free_subset(dk):
+    """list_value_strings = const-string + static VALUE_STRING — a value-only subset.
+
+    It must be a strict subset of the whole pool, carry NO type-descriptor /
+    identifier entries (the noise that needs denoising), yet keep real value
+    strings (the known fixture URLs).
+    """
+    alls = set(dk.list_strings())
+    vals = set(dk.list_value_strings())
+    assert vals <= alls  # value-bearing is a subset of the whole pool
+    assert len(vals) < len(alls)  # identifiers were dropped
+    # type descriptors (the dominant identifier noise) don't survive. (Not array
+    # `[...` — a const-string regex value legitimately starts with `[`.)
+    assert not any(s.startswith("L") and s.endswith(";") for s in vals)
+    # real const-string values are kept (a2dp.Vol carries these URLs)
+    if any("a2dp.Vol" in p for p in _fixture_apk()):
+        assert any("maps.google.com" in s for s in vals)
+        assert any("github.com" in s for s in vals)
+
+
+def test_extract_iocs_value_strings_only_is_subset(dk):
+    full = dexllm.extract_iocs(dk, with_xref=False)
+    vo = dexllm.extract_iocs(dk, with_xref=False, value_strings_only=True)
+    for cat in dexllm.IOC_CATEGORIES:
+        f = {r["value"] for r in full[cat]}
+        v = {r["value"] for r in vo[cat]}
+        assert v <= f, f"value-only {cat} leaked indicators not in full scan"
+
+
 def test_extract_iocs_recovers_urls_and_domains(dk):
     iocs = dexllm.extract_iocs(dk, with_xref=True, xref_limit=100)
     assert set(iocs) == set(dexllm.IOC_CATEGORIES)
@@ -138,7 +167,7 @@ def test_namespace_uris_are_not_iocs():
     `http://schemas.android.com/apk/res/android` and the bare host must be dropped
     from BOTH urls and domains, even though urls are otherwise never denoised.
     """
-    from dexllm.ioc import _host_of, _is_package_like, _NAMESPACE_HOSTS
+    from dexllm.ioc import _NAMESPACE_HOSTS, _host_of, _is_package_like
 
     # unit: namespace hosts are dropped from the domains bucket
     assert _is_package_like("schemas.android.com", frozenset())
@@ -178,6 +207,9 @@ class _FakeDK:
         self._s = strings
 
     def list_strings(self):
+        return self._s
+
+    def list_value_strings(self):
         return self._s
 
     def list_classes(self):
