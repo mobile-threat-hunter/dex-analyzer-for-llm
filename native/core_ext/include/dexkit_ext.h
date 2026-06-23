@@ -73,20 +73,15 @@ public:
     // type-id order. External-only refs (no class_def in any dex) excluded.
     [[nodiscard]] std::vector<std::string> ListClasses() const;
 
-    // Every distinct string literal across all loaded dexes (raw MUTF-8,
-    // deduplicated). The foundation for static IOC / C2 extraction: the caller
-    // decodes to UTF-8 and regex-classifies into URLs / IPs / domains. Strings
-    // come from each DexItem's string pool (process-lifetime), copied to owned
-    // std::string here so the result outlives the call.
-    [[nodiscard]] std::vector<std::string> ListStrings() const;
-
-    // The value-bearing subset of ListStrings(): only strings actually loaded as
-    // a VALUE — via a `const-string`/`const-string/jumbo` (0x1a/0x1b) bytecode
-    // operand, or a static-field-initializer EncodedValue VALUE_STRING (0x17,
-    // incl. nested in arrays). Excludes identifier/metadata strings (type
-    // descriptors, method/field names, shorty, source files, debug names) that
-    // make up most of the raw pool — so an IOC caller needs no package denoising.
-    // (Annotation-embedded 0x17 strings are deliberately omitted: framework
+    // Every distinct string the app loads as a VALUE — a `const-string`/
+    // `const-string/jumbo` (0x1a/0x1b) bytecode operand, or a static-field
+    // EncodedValue VALUE_STRING (0x17, incl. nested in arrays). Raw MUTF-8,
+    // deduplicated; the caller decodes to UTF-8. Excludes identifier/metadata
+    // strings (type descriptors, method/field names, shorty, source files, debug
+    // names) that make up most of the raw pool — the foundation for static IOC /
+    // C2 extraction without package denoising. Strings come from each DexItem's
+    // string pool (process-lifetime), copied to owned std::string here so the
+    // result outlives the call. (Annotation-embedded 0x17 omitted: framework
     // metadata, never an app data value.)
     [[nodiscard]] std::vector<std::string> ListValueStrings() const;
 

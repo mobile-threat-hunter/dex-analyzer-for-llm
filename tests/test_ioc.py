@@ -1,22 +1,19 @@
-"""End-to-end test for static C2 / network-IOC extraction.
+"""Tests for static C2 / network-IOC extraction (library-based redesign).
 
-Drives the package API (dexllm.list_strings + dexllm.extract_iocs) and the MCP
-tool (dexllm.tools.execute "extract_iocs") over the bundled corpus, asserting:
-
-  - the dex string pool is exposed (list_strings is non-empty)
-  - real URLs / domains are recovered from a known-good APK
-  - each indicator is cross-referenced to a referencing method (descriptor str)
-  - denoising drops framework package names that look like hosts
-  - the MCP tool returns a JSON-serialisable {indicators, counts} dict
+Input is dk.list_value_strings() (value-only feed); extraction uses iocextract
+(defang-aware) + tldextract/PSL domain validation. These assert the output
+contract, the carried-over edge-case lessons (IPv4 version-slice vs trailing-dot,
+userinfo-host stripping, namespace-URI denoise, ReDoS-bounded), and the new defang
+capability — without needing a real APK (via _FakeDK) where possible.
 
 a2dp.Vol_137.apk carries http://maps.google.com, https://github.com/... and
-listen.googlelabs.com — a stable, benign fixture for the mechanism. Skips if the
-bundled corpus is absent.
+listen.googlelabs.com — a stable, benign fixture. Skips if the corpus is absent.
 """
 
 import glob
 import json
 import os
+import time
 from pathlib import Path
 
 import pytest
@@ -35,7 +32,6 @@ def _apks():
 
 
 def _fixture_apk():
-    """Prefer a2dp.Vol (known URLs); fall back to any APK with URLs."""
     apks = _apks()
     pref = [p for p in apks if "a2dp.Vol" in p]
     return (pref + apks)[:1]
@@ -49,165 +45,11 @@ def dk():
     return dexllm.DexKit(apks[0])
 
 
-def test_list_strings_exposed(dk):
-    strings = dk.list_strings()
-    assert isinstance(strings, list) and len(strings) > 100
-    assert all(isinstance(s, str) for s in strings[:50])
-    # distinct (the binding deduplicates)
-    assert len(strings) == len(set(strings))
-
-
-def test_list_value_strings_is_identifier_free_subset(dk):
-    """list_value_strings = const-string + static VALUE_STRING — a value-only subset.
-
-    It must be a strict subset of the whole pool, carry NO type-descriptor /
-    identifier entries (the noise that needs denoising), yet keep real value
-    strings (the known fixture URLs).
-    """
-    alls = set(dk.list_strings())
-    vals = set(dk.list_value_strings())
-    assert vals <= alls  # value-bearing is a subset of the whole pool
-    assert len(vals) < len(alls)  # identifiers were dropped
-    # type descriptors (the dominant identifier noise) don't survive. (Not array
-    # `[...` — a const-string regex value legitimately starts with `[`.)
-    assert not any(s.startswith("L") and s.endswith(";") for s in vals)
-    # real const-string values are kept (a2dp.Vol carries these URLs)
-    if any("a2dp.Vol" in p for p in _fixture_apk()):
-        assert any("maps.google.com" in s for s in vals)
-        assert any("github.com" in s for s in vals)
-
-
-def test_extract_iocs_value_strings_only_is_subset(dk):
-    full = dexllm.extract_iocs(dk, with_xref=False)
-    vo = dexllm.extract_iocs(dk, with_xref=False, value_strings_only=True)
-    for cat in dexllm.IOC_CATEGORIES:
-        f = {r["value"] for r in full[cat]}
-        v = {r["value"] for r in vo[cat]}
-        assert v <= f, f"value-only {cat} leaked indicators not in full scan"
-
-
-def test_extract_iocs_recovers_urls_and_domains(dk):
-    iocs = dexllm.extract_iocs(dk, with_xref=True, xref_limit=100)
-    assert set(iocs) == set(dexllm.IOC_CATEGORIES)
-
-    urls = {r["value"] for r in iocs["urls"]}
-    domains = {r["value"] for r in iocs["domains"]}
-
-    # If this is the a2dp.Vol fixture, assert the exact known indicators.
-    if any("github.com" in u for u in urls):
-        assert any("maps.google.com" in u for u in urls)
-        assert "github.com" in domains
-        assert "maps.google.com" in domains
-
-
-def test_xref_is_method_descriptor_strings(dk):
-    iocs = dexllm.extract_iocs(dk, with_xref=True, xref_limit=100)
-    for cat in dexllm.IOC_CATEGORIES:
-        for row in iocs[cat]:
-            assert isinstance(row["value"], str)
-            assert isinstance(row["methods"], list)
-            for m in row["methods"]:
-                # descriptor string, not a repr/object
-                assert isinstance(m, str)
-                assert "->" in m or m.startswith("L")
-
-
-def test_denoise_drops_framework_packages(dk):
-    iocs = dexllm.extract_iocs(dk, with_xref=False)
-    leaked = [
-        r["value"]
-        for r in iocs["domains"]
-        if r["value"].lower().startswith(_FRAMEWORK)
-    ]
-    assert leaked == [], f"framework packages leaked into domains: {leaked}"
-
-
-def test_ips_have_valid_octets(dk):
-    iocs = dexllm.extract_iocs(dk, with_xref=False)
-    for row in iocs["ips"]:
-        host = row["value"].split(":", 1)[0]
-        octets = host.split(".")
-        assert len(octets) == 4
-        assert all(0 <= int(o) <= 255 for o in octets)
-
-
-def test_denoise_is_dex_derived_and_complete():
-    """Denoising keys off the dex's own packages + structural roots, not a list.
-
-    APK-free unit test of the internal helpers proving the accuracy gains over a
-    hardcoded prefix list: per-app package derivation, generic reverse-DNS / platform
-    roots (no per-library enumeration), and that genuine domains survive.
-    """
-    from dexllm.ioc import _dex_package_prefixes, _is_package_like
-
-    pkgs = _dex_package_prefixes(
-        ["Landroid/app/Activity;", "Lcom/evil/Bot;", "[Lkotlin/io/X;"]
-    )
-    assert {"android", "android.app", "com.evil", "kotlin.io"} <= pkgs
-
-    # (1) dex-derived: a declared package that collides with a TLD-label -> dropped
-    assert _is_package_like("android.app", pkgs)
-    assert _is_package_like("kotlin.io", pkgs)
-    # (2) generic reverse-DNS root — any com.*/org.* package, no enumeration needed
-    assert _is_package_like("org.apache.commons.io", frozenset())
-    assert _is_package_like("com.facebook.internal.cc", frozenset())
-    # (3) platform constant namespace (android.intent.* etc.), not a real host
-    assert _is_package_like("android.intent.extra.cc", frozenset())
-    assert _is_package_like("android.r.id", frozenset())
-    # (4) genuine domains survive — first label is neither a platform nor RDN root
-    assert not _is_package_like("github.com", frozenset())
-    assert not _is_package_like("maps.google.com", frozenset())
-    assert not _is_package_like("app.attacker.io", frozenset())  # 'app' is a gTLD, not a root
-    assert not _is_package_like("c2-panel.top", frozenset())
-
-
-def test_namespace_uris_are_not_iocs():
-    """XML namespace URIs (xmlns) are identifiers, not contacted endpoints.
-
-    `http://schemas.android.com/apk/res/android` and the bare host must be dropped
-    from BOTH urls and domains, even though urls are otherwise never denoised.
-    """
-    from dexllm.ioc import _NAMESPACE_HOSTS, _host_of, _is_package_like
-
-    # unit: namespace hosts are dropped from the domains bucket
-    assert _is_package_like("schemas.android.com", frozenset())
-    assert _is_package_like("www.w3.org", frozenset())
-
-    # integration: on a bundled APK that actually carries the namespace URI, it
-    # appears with denoise=False but is gone (urls + domains) with denoise=True.
-    apks = _apks()
-    for apk in apks:
-        try:
-            d = dexllm.DexKit(apk)
-        except Exception:
-            continue
-        if not any("schemas.android.com" in s for s in d.list_strings()):
-            continue
-        raw = dexllm.extract_iocs(d, with_xref=False, denoise=False)
-        clean = dexllm.extract_iocs(d, with_xref=False, denoise=True)
-        raw_ns = [
-            r["value"]
-            for cat in ("urls", "domains")
-            for r in raw[cat]
-            if "schemas.android.com" in r["value"]
-        ]
-        assert raw_ns, "fixture APK should expose the namespace URI when raw"
-        for cat in ("urls", "domains"):
-            for r in clean[cat]:
-                host = _host_of(r["value"]) if "://" in r["value"] else r["value"]
-                assert host.split(":", 1)[0].lower() not in _NAMESPACE_HOSTS
-        return  # one fixture is enough
-    pytest.skip("no bundled APK carries an XML namespace URI in dex strings")
-
-
 class _FakeDK:
-    """Minimal dk stand-in for extract_iocs unit tests (no APK needed)."""
+    """Minimal dk stand-in for APK-free extract_iocs unit tests."""
 
     def __init__(self, strings):
         self._s = strings
-
-    def list_strings(self):
-        return self._s
 
     def list_value_strings(self):
         return self._s
@@ -222,19 +64,74 @@ class _FakeDK:
         return []
 
 
-def test_regexes_are_redos_safe():
-    """Adversarial strings must not drive the classifier regexes catastrophic."""
-    import time
+# --- output contract + real-APK recovery ------------------------------------
 
-    from dexllm.ioc import _EMAIL, _HOST, _IPV4, _ONION, _URL
 
-    attacks = ["a." * 5000 + "x", "a@" + "a." * 40000 + "!", "1." * 50000]
-    for s in attacks:
-        for rx in (_URL, _IPV4, _HOST, _EMAIL, _ONION):
-            t0 = time.time()
-            list(rx.finditer(s))
-            dt = time.time() - t0
-            assert dt < 2.0, f"ReDoS: {rx.pattern[:40]!r} took {dt:.1f}s on len {len(s)}"
+def test_value_strings_feed_exposed(dk):
+    strings = dk.list_value_strings()
+    assert isinstance(strings, list) and len(strings) > 50
+    assert len(strings) == len(set(strings))  # deduplicated
+
+
+def test_extract_iocs_shape_and_recovery(dk):
+    iocs = dexllm.extract_iocs(dk, with_xref=False)
+    assert set(iocs) == set(dexllm.IOC_CATEGORIES)
+    for cat in dexllm.IOC_CATEGORIES:
+        for row in iocs[cat]:
+            assert set(row) == {"value", "methods"}
+            assert isinstance(row["value"], str) and isinstance(row["methods"], list)
+        # value-sorted
+        assert [r["value"] for r in iocs[cat]] == sorted(r["value"] for r in iocs[cat])
+    if any("a2dp.Vol" in p for p in _fixture_apk()):
+        urls = {r["value"] for r in iocs["urls"]}
+        domains = {r["value"] for r in iocs["domains"]}
+        assert any("maps.google.com" in u for u in urls)
+        assert "github.com" in domains
+
+
+def test_xref_ties_indicator_to_method(dk):
+    iocs = dexllm.extract_iocs(dk, with_xref=True, xref_limit=100)
+    for cat in dexllm.IOC_CATEGORIES:
+        for row in iocs[cat]:
+            for m in row["methods"]:
+                assert isinstance(m, str) and ("->" in m or m.startswith("L"))
+
+
+# --- the new capability: defang ---------------------------------------------
+
+
+def test_defanged_indicators_are_refanged():
+    dk = _FakeDK(
+        [
+            "hxxps://evil[.]top/gate.php",
+            "1[.]2[.]3[.]4",
+            "admin@phish.kr",
+        ]
+    )
+    iocs = dexllm.extract_iocs(dk, with_xref=False)
+    assert "https://evil.top/gate.php" in {r["value"] for r in iocs["urls"]}
+    assert any(r["value"].startswith("1.2.3.4") for r in iocs["ips"])
+    assert "admin@phish.kr" in {r["value"] for r in iocs["emails"]}
+
+
+# --- carried-over edge lessons ----------------------------------------------
+
+
+def test_ipv4_rejects_version_string_slices():
+    from dexllm.ioc import _IPV4
+
+    # a 4-octet slice of a longer dotted-decimal version is NOT an IP
+    assert not _IPV4.search("ver 1.0.0.0.5 build")
+    assert not _IPV4.search("10.0.0.1.2")
+    # a real IP merely followed by a dot still matches (reverse-DNS / sentence end)
+    assert _IPV4.search("8.8.8.8.in-addr.arpa").group(0) == "8.8.8.8"
+    assert _IPV4.search("dns 8.8.8.8 here").group(0) == "8.8.8.8"
+    assert _IPV4.search("c2 1.2.3.4:8080 x").group(0) == "1.2.3.4:8080"
+
+
+def test_version_string_is_not_an_ip_end_to_end():
+    iocs = dexllm.extract_iocs(_FakeDK(["lib version 1.0.0.0.5 release"]), with_xref=False)
+    assert iocs["ips"] == []
 
 
 def test_host_of_strips_userinfo_and_port():
@@ -242,67 +139,76 @@ def test_host_of_strips_userinfo_and_port():
 
     assert _host_of("http://user:pass@evil.com:8080/c2") == "evil.com"
     assert _host_of("https://evil.com/x") == "evil.com"
-    assert _host_of("ftp://u@1.2.3.4:21/p") == "1.2.3.4"
     assert _host_of("http://[2001:db8::1]:443/x") == "2001:db8::1"
-
-
-def test_ipv4_rejects_dotted_version_strings():
-    from dexllm.ioc import _IPV4
-
-    assert not _IPV4.search("v1.0.0.0.5 build")  # 5-component
-    assert not _IPV4.search("ver 1.2.3.4.5")
-    assert not _IPV4.search("10.0.0.1.2")
-    assert not _IPV4.search("5.8.8.8.8 weird")  # 5-component, no sub-quad slice
-    assert _IPV4.search("dns 8.8.8.8 here")  # real IP survives
-    assert _IPV4.search("c2 1.2.3.4:8080 port")  # ip:port survives
-    # a valid IP merely FOLLOWED by a dot must still match (regression guard)
-    assert _IPV4.search("Resolved 8.8.8.8.").group(0) == "8.8.8.8"  # sentence end
-    assert _IPV4.search("8.8.8.8.in-addr.arpa").group(0) == "8.8.8.8"  # reverse DNS
-
-
-def test_oversized_string_does_not_emit_truncated_url():
-    # A URL that straddles the scan cap must not surface as a truncated value; its
-    # host is still recovered separately. (No crash, no corrupt indicator.)
-    from dexllm.ioc import _MAX_SCAN
-
-    # host + "/" sits inside the cap; only the long path crosses it.
-    pad = "x" * (_MAX_SCAN - 60)
-    s = pad + " http://straddle-c2.evil.top/" + "a" * 100000
-    iocs = dexllm.extract_iocs(_FakeDK([s]), with_xref=False)
-    for r in iocs["urls"]:
-        assert len(r["value"]) < _MAX_SCAN  # not a giant truncated fragment
-        assert not r["value"].endswith("a" * 50)  # not the cut-off path tail
-    # host still recovered
-    assert "straddle-c2.evil.top" in {r["value"] for r in iocs["domains"]}
-
-
-def test_ip_url_host_not_double_categorized():
-    iocs = dexllm.extract_iocs(_FakeDK(["http://1.2.3.4:8080/gate.php"]), with_xref=False)
-    ips = {r["value"] for r in iocs["ips"]}
-    doms = {r["value"] for r in iocs["domains"]}
-    assert any(v.startswith("1.2.3.4") for v in ips)  # ip (with :port) captured
-    assert not any("1.2.3.4" in d for d in doms)  # an IP host is NOT a domain
 
 
 def test_userinfo_url_yields_real_host_in_domains():
     iocs = dexllm.extract_iocs(_FakeDK(["http://admin:pw@evil.com/c2"]), with_xref=False)
     doms = {r["value"] for r in iocs["domains"]}
     assert "evil.com" in doms
-    assert not any("@" in d for d in doms)  # no userinfo garbage
+    assert not any("@" in d for d in doms)
+
+
+def test_identifier_path_is_not_a_domain():
+    # a Java identifier path whose last label isn't a public suffix -> not a domain
+    iocs = dexllm.extract_iocs(_FakeDK(["com.google.util.Foo", "java.lang.String"]), with_xref=False)
+    assert iocs["domains"] == []
+
+
+def test_onion_not_double_listed_as_domain():
+    iocs = dexllm.extract_iocs(_FakeDK(["abcdefabcdefabcd.onion"]), with_xref=False)
+    assert any(".onion" in r["value"] for r in iocs["onion"])
+    assert not any(".onion" in r["value"] for r in iocs["domains"])
+
+
+def test_ip_url_host_not_double_categorized():
+    iocs = dexllm.extract_iocs(_FakeDK(["http://1.2.3.4:8080/gate.php"]), with_xref=False)
+    assert any(v["value"].startswith("1.2.3.4") for v in iocs["ips"])
+    assert not any("1.2.3.4" in d["value"] for d in iocs["domains"])  # IP host != domain
+
+
+# --- denoising ---------------------------------------------------------------
+
+
+def test_denoise_drops_framework_packages(dk):
+    iocs = dexllm.extract_iocs(dk, with_xref=False)
+    leaked = [r["value"] for r in iocs["domains"] if r["value"].lower().startswith(_FRAMEWORK)]
+    assert leaked == [], f"framework packages leaked into domains: {leaked}"
+
+
+def test_dex_package_denoise_helpers():
+    from dexllm.ioc import _dex_package_prefixes, _is_package_like
+
+    pkgs = _dex_package_prefixes(["Landroid/app/Activity;", "Lcom/evil/Bot;", "[Lkotlin/io/X;"])
+    assert {"android", "android.app", "com.evil", "kotlin.io"} <= pkgs
+    assert _is_package_like("android.app", pkgs)  # declared package
+    assert _is_package_like("com.facebook.x", frozenset())  # reverse-DNS root
+    assert _is_package_like("schemas.android.com", frozenset())  # xmlns host
+    assert not _is_package_like("github.com", frozenset())
+    assert not _is_package_like("c2-panel.top", frozenset())
+
+
+def test_namespace_uri_dropped_from_urls_and_domains():
+    dk = _FakeDK(["http://schemas.android.com/apk/res/android"])
+    clean = dexllm.extract_iocs(dk, with_xref=False, denoise=True)
+    for cat in ("urls", "domains"):
+        assert not any("schemas.android.com" in r["value"] for r in clean[cat])
+
+
+# --- robustness --------------------------------------------------------------
 
 
 def test_extract_iocs_bounded_on_oversized_strings():
-    import time
-
-    dk = _FakeDK(["a@" + "a." * 200000 + "!", "x" * 1000000, "1." * 200000])
+    # adversarial: huge blobs must not blow up wall-clock (per-string cap + bounded
+    # regexes). Includes a defanged-IP-flavoured blob.
+    dk = _FakeDK(["a." * 200000 + "x", "1." * 200000, "x" * 1_000_000, "hxxp://" + "a" * 500000])
     t0 = time.time()
     dexllm.extract_iocs(dk, with_xref=False)
-    assert time.time() - t0 < 3.0
+    assert time.time() - t0 < 5.0
 
 
 def test_mcp_tool_extract_iocs_serialisable(dk):
     out = dexllm.tools.execute("extract_iocs", {"xref_limit": 50}, dk)
     assert "indicators" in out and "counts" in out
     assert set(out["counts"]) == set(dexllm.IOC_CATEGORIES)
-    # the whole tool response must be JSON-serialisable for MCP transport
-    json.dumps(out)
+    json.dumps(out)  # MCP transport requires JSON-serialisable

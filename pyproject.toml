@@ -32,10 +32,21 @@ server = [
     "python-multipart>=0.0.9",
     "anthropic>=0.40",
 ]
-# Everything LLM-facing (MCP + server + agent).
-all = ["dexllm[mcp,server]"]
+# Static C2 / IOC extraction (dexllm.extract_iocs): public-suffix domain
+# validation. (Defang + indicator regexes are in-tree and ReDoS-bounded;
+# iocextract was evaluated and dropped — its regexes ReDoS on dex blobs.)
+ioc = ["tldextract>=5.0"]
+# Everything LLM-facing (MCP + server + agent + IOC).
+all = ["dexllm[mcp,server,ioc]"]
 # Tests + parity/bench tooling. androguard is the decompile parity ground truth.
-dev = ["pytest>=8.0", "androguard>=4.1", "black>=25.0", "ruff>=0.6", "mypy>=1.11"]
+dev = [
+    "pytest>=8.0",
+    "androguard>=4.1",
+    "black>=25.0",
+    "ruff>=0.6",
+    "mypy>=1.11",
+    "tldextract>=5.0",
+]
 
 [project.scripts]
 dexllm-mcp = "dexllm.mcp_server:main"

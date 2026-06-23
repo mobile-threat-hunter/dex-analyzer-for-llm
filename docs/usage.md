@@ -278,8 +278,11 @@ dk.find_methods_by_annotation("Landroidx/annotation/RequiresApi;")
 ## Static C2 / IOC extraction
 
 VirusTotal shows the URLs, domains, and IPs an app *contacts*; `extract_iocs`
-recovers the same indicators **statically** — from the dex string pool, with no
-execution — and ties each one back to the class/method that references it.
+recovers the same indicators **statically** — with no execution — and ties each one
+back to the class/method that references it.
+
+> **Requires** `pip install "dexllm[ioc]"` (pulls `tldextract` for public-suffix
+> domain validation). The defang + indicator regexes are in-tree.
 
 ```python
 import dexllm
@@ -292,35 +295,28 @@ for category in dexllm.IOC_CATEGORIES:   # urls / ips / domains / emails / onion
         print(category, row["value"], "<-", row["methods"][:1])
 # urls https://c2.example.top/gate.php <- ['Lcom/x/Net;->beacon()V']
 
-# The raw deduplicated string pool, for custom queries:
-all_strings = dk.list_strings()          # every distinct literal across all dexes
-
-# Higher-precision mode — scan only VALUE-bearing strings (const-string operands +
-# static VALUE_STRING initializers), skipping identifier/metadata pool entries:
-iocs = dexllm.extract_iocs(dk, value_strings_only=True)
-value_strings = dk.list_value_strings()  # the value-only subset of list_strings()
+# The value-string feed it scans, for custom queries:
+value_strings = dk.list_value_strings()  # strings loaded as DATA (no identifiers)
 ```
 
-`extract_iocs` classifies `list_strings()` with TLD-gated regexes and **denoises**
-framework package names that look like hosts (`android.app`, `android.intent.extra.cc`
-are dropped). Denoising is self-calibrating — it derives the app's package paths from
-its own dex type descriptors and adds generic reverse-DNS / platform roots
-(`com.*`, `org.*`, `android.*`, `java.*`), so it covers every library the app uses
-without a hardcoded list. XML-namespace URIs (`http://schemas.android.com/apk/res/android`
-and other `xmlns` identifiers) are dropped from both buckets — they are identifiers,
-not contacted endpoints. Set `with_xref=False` to skip the per-indicator L7
-cross-reference (one search per indicator), or lower `xref_limit` on string-heavy
-apps. Also available as the `extract_iocs` MCP tool (returns `{indicators, counts}`).
+**Input** is `dk.list_value_strings()` — only strings the app loads *as data*
+(`const-string`/`jumbo` operands + static `VALUE_STRING` initializers), so
+type/method/field-name identifiers never enter the scan. **Defanged** indicators are
+recovered (`hxxps://evil[.]top`, `1[.]2[.]3[.]4`, `admin[at]phish[.]kr`) by a
+literal, linear un-defang pass. **Domains** are validated against the public suffix
+list (`tldextract`), so `com.google.util` (not a real suffix) is rejected while
+`maps.google.co.uk` resolves correctly. **Denoising** then drops the residual
+identifier hosts: the app's own dex package paths (self-calibrating, from its type
+descriptors) plus reverse-DNS / platform roots (`com.*`, `org.*`, `android.*`, …) and
+XML-namespace URIs (`http://schemas.android.com/...`). The classifier regexes are
+hand-bounded (ReDoS-safe) and each string is length-capped — important because dex
+value-strings include multi-MB blobs. Set `with_xref=False` to skip the per-indicator
+L7 cross-reference, or lower `xref_limit` on string-heavy apps. Also the `extract_iocs`
+MCP tool (returns `{indicators, counts}`).
 
-**`value_strings_only=True`** narrows the scan to strings the app loads *as data* —
-`const-string`/`const-string/jumbo` (`0x1a`/`0x1b`) bytecode operands plus static
-`VALUE_STRING` (`0x17`) field initializers — via `dk.list_value_strings()`. These are
-the only two ways a dex references a string pool entry as a value (every other
-reference — type descriptors, method/field names, shorty, source files, debug names —
-is an identifier), so the value-only scan needs no package denoising. The trade-off is
-slightly lower recall: an indicator embedded *only* as an annotation value is skipped.
-Use it for higher precision on identifier-heavy / obfuscated apps; the default
-whole-pool scan + denoise stays the recall-first choice.
+> Note: the indicator extraction is in-tree and ReDoS-bounded by design —
+> `iocextract` was evaluated but its regexes backtrack catastrophically on the dotted
+> blobs dex strings contain, so only the safe `tldextract` PSL lookup is used.
 
 ---
 

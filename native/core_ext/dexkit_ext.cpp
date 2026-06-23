@@ -441,23 +441,6 @@ std::vector<std::string> DexKitExt::ListClasses() const {
     return out;
 }
 
-std::vector<std::string> DexKitExt::ListStrings() const {
-    std::vector<std::string> out;
-    std::unordered_set<std::string_view> seen;
-    auto& mut = const_cast<dexkit::DexKit&>(*core_);
-    const int n = core_->GetDexNum();
-    for (int i = 0; i < n; ++i) {
-        auto* item = mut.GetDexItem(static_cast<uint16_t>(i));
-        if (!item) continue;
-        for (std::string_view s : item->GetStrings()) {
-            // Dedup across dexes; string_view keys stay valid for the loop
-            // (DexItem owns the backing bytes for process lifetime).
-            if (seen.insert(s).second) out.emplace_back(s);
-        }
-    }
-    return out;
-}
-
 namespace {
 
 // Minimal leb/int readers for the static-values EncodedArray scan. Bounded:

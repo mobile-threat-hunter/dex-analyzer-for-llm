@@ -303,13 +303,12 @@ def _t_extract_iocs(
     dk: DexKit,
     with_xref: bool = True,
     xref_limit: int = 300,
-    value_strings_only: bool = False,
 ) -> dict:
-    """Extract static network indicators (C2 / IOC) from the app's dex strings.
+    """Extract static network indicators (C2 / IOC) from the app's dex value-strings.
 
     Recovers the URLs, IPs, domains, emails, and onion addresses embedded in the
-    app's dex strings — the VirusTotal "contacted addresses" view, but static and
-    with each indicator tied to the referencing method (when with_xref).
+    app's dex value-strings — the VirusTotal "contacted addresses" view, but static
+    and with each indicator tied to the referencing method (when with_xref).
     """
     from .ioc import IOC_CATEGORIES, extract_iocs
 
@@ -317,7 +316,6 @@ def _t_extract_iocs(
         dk,
         with_xref=with_xref,
         xref_limit=int(xref_limit),
-        value_strings_only=bool(value_strings_only),
     )
     return {
         "indicators": iocs,
@@ -636,15 +634,6 @@ TOOL_DEFINITIONS: list[dict] = [
                     "type": "integer",
                     "default": 300,
                     "description": "cap on indicators cross-referenced (cost bound)",
-                },
-                "value_strings_only": {
-                    "type": "boolean",
-                    "default": False,
-                    "description": (
-                        "scan only value-bearing strings (const-string operands + "
-                        "static VALUE_STRING initializers) instead of the whole "
-                        "pool — drops identifier noise, higher precision"
-                    ),
                 },
             },
         },

@@ -28,5 +28,5 @@ for category in dexllm.IOC_CATEGORIES:
             print(f"      referenced by: {method}")
     print()
 
-# Raw string pool is also available for custom queries:
-print(f"(total distinct string literals in dex: {len(dk.list_strings())})")
+# The value-bearing string feed is also available for custom queries:
+print(f"(total distinct value-strings in dex: {len(dk.list_value_strings())})")

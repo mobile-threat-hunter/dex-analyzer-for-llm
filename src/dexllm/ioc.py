@@ -1,87 +1,119 @@
-"""Static network-indicator (C2 / IOC) extraction from an APK's dex strings.
+"""Static network-IOC (C2) extraction from an APK's dex value-strings.
 
-VirusTotal shows the URLs, domains, and IPs an app *contacts*; this module
-recovers the same indicators **statically** — from the dex string pool, with no
-execution — and, unlike VirusTotal, ties each indicator back to the class/method
-that references it.
+VirusTotal shows the URLs / domains / IPs an app *contacts*; this module recovers
+the same indicators **statically** from the dex — with no execution — and, unlike
+VirusTotal, ties each indicator back to the class/method that references it.
 
-The pipeline is: ``dk.list_strings()`` (every distinct string literal across all
-loaded dexes) -> regex classification into URLs / IPs / domains / emails / onion
-addresses -> denoising (framework package names that *look* like hosts are
-dropped) -> optional cross-reference of each indicator to its referencing methods
-via the L7 search engine.
+Redesign (2026-06, scaffold). Pipeline:
+
+  dk.list_value_strings()                  # only strings loaded AS DATA — const-string
+                                           # + static VALUE_STRING — so identifier noise
+                                           # (type/method/field names) is gone at source
+    -> _refang (literal, O(n))             # un-defang hxxp:// , [.] , [at] , [dot]
+    -> our bounded regexes                 # URLs / IPs / emails / onion, ReDoS-safe
+    -> _HOST_CANDIDATE + tldextract/PSL    # bare domains, validated against the PSL
+    -> denoise (dex packages + xmlns URIs) # residual identifier false-positives
+    -> per-indicator method xref (L7)      # "where in the code", budgeted
+
+**Why our own regexes, not iocextract:** iocextract's URL/email/refang regexes
+backtrack CATASTROPHICALLY on long dotted blobs (`"a.a.a…"` 32KB → ~10s URL extract;
+emails are exponential even at 1KB) — a ReDoS vector, and dex value-strings DO
+contain such blobs. So we keep our hand-bounded, linear-time regexes (the prior
+version's hard-won ones) and do defang ourselves with literal replaces. tldextract
+is safe (a public-suffix-list lookup, not a text scan) and is the one library we
+use — it replaces the old hand-rolled TLD gate.
+
+Design lessons carried over live in the [[project-ioc-redesign-lessons]] memory:
+ReDoS-bounded regexes + per-string cap, the IPv4 version-slice vs trailing-dot edge,
+denoising roots, namespace URIs, userinfo-host stripping, highest-signal-first xref.
+
+tldextract is an optional dep (``pip install "dexllm[ioc]"``), imported lazily so
+the rest of the package works without it.
 """
 
 from __future__ import annotations
 
 import re
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    import tldextract as _tldextract_mod
 
 __all__ = ["extract_iocs", "IOC_CATEGORIES"]
 
 IOC_CATEGORIES = ("urls", "ips", "domains", "emails", "onion")
-# Order to spend the cross-reference budget: highest-signal indicators first.
+# Spend the cross-reference budget highest-signal indicators first.
 _XREF_PRIORITY = ("onion", "ips", "domains", "emails", "urls")
 
-# Per-string scan cap: real network IOCs are short; this bounds worst-case regex
-# cost on an adversarial APK (e.g. a multi-MB embedded blob) defensively.
+# Per-string scan cap. Real network IOCs are short; an oversized blob is itself a
+# signal, not a host. Bounds worst-case cost on an adversarial APK (all regexes are
+# linear, but this keeps even linear work bounded over millions of bytes).
 _MAX_SCAN = 65536
 
-# --- classification regexes -------------------------------------------------
+# Defang markers -> their refanged form. LITERAL str.replace only (O(n), ReDoS-immune
+# — unlike iocextract's regex refang). Covers the common forms malware uses to store
+# IOCs as inert text. Applied longest-first where it matters (e.g. `[dot]` before `.`).
+_DEFANG = [
+    ("[.]", "."),
+    ("(.)", "."),
+    ("{.}", "."),
+    ("[dot]", "."),
+    ("(dot)", "."),
+    (" dot ", "."),
+    ("[:]", ":"),
+    ("[://]", "://"),
+    ("[at]", "@"),
+    ("(at)", "@"),
+    (" at ", "@"),
+    ("hxxps", "https"),
+    ("hxxp", "http"),
+    ("fxp", "ftp"),
+    ("\\", "/"),
+]
 
-# A scheme-qualified URL (http/https/ftp/ws/wss). Stop at whitespace/quotes/<>.
+
+def _refang(s: str) -> str:
+    """Un-defang a string with literal replaces — linear, no catastrophic regex."""
+    low_markers = s
+    for marker, repl in _DEFANG:
+        if marker in low_markers:
+            low_markers = low_markers.replace(marker, repl)
+    return low_markers
+
+
+# --- extraction regexes (all bounded / linear — ReDoS-safe) -----------------
+
+# Scheme-qualified URL (http/https/ftp/ws/wss). Stops at whitespace/quotes/<>.
 _URL = re.compile(r"\b(?:https?|ftp|wss?)://[^\s\"'<>\\]+", re.IGNORECASE)
 
-# Dotted-quad IPv4 with validated octets, optional :port. The lookarounds reject a
-# quad that is one slice of a longer dotted-decimal token (a 4+-component version
-# string like `1.0.0.0.5` / `2.30.1.7`) WITHOUT losing a valid IP that is merely
-# followed by a dot — `8.8.8.8.` (sentence end) and `8.8.8.8.in-addr.arpa` (reverse
-# DNS) still match, because only `.<digit>` (another octet) is excluded, not a bare
-# dot. Symmetric on the left so a sub-quad of `5.8.8.8.8` is not half-matched.
-_IPV4 = re.compile(
-    r"(?<!\d)(?<!\d\.)(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)"
-    r"(?::\d{1,5})?(?!\.?\d)"
-)
-
-# Tor v2/v3 onion address.
-_ONION = re.compile(r"\b[a-z2-7]{16}(?:[a-z2-7]{40})?\.onion\b", re.IGNORECASE)
-
-# Email. All quantifiers are BOUNDED so a long non-matching run can't drive
-# catastrophic / O(n^2) backtracking (these regexes run over every dex string,
-# some of which are huge binary/regex blobs).
+# Email. Every quantifier BOUNDED so a long non-matching run can't drive
+# catastrophic backtracking (these run over every string, some huge blobs).
 _EMAIL = re.compile(
     r"(?<![A-Za-z0-9._%+\-])[A-Za-z0-9._%+\-]{1,64}@"
     r"[A-Za-z0-9.\-]{1,253}\.[A-Za-z]{2,24}\b"
 )
 
-# A hostname: one or more labels then a public-ish TLD. Deliberately TLD-gated so
-# arbitrary dotted tokens (e.g. version numbers) do not match.
-_TLDS = (
-    "com|net|org|io|cn|ru|info|top|xyz|app|me|co|tk|cc|biz|site|online|club|"
-    "vip|pw|su|ws|cm|tv|gg|sh|dev|live|store|shop|fun|click|link|host|space|"
-    "pro|mobi|asia|uk|de|fr|jp|kr|in|br|us|nl|eu|ir|kz|ua|by|ng|id|vn|th|ph"
-)
-# ReDoS-safe: each label is a single unambiguous bounded class (no nested
-# optional group), and the label count is bounded — so a long dotted token that
-# does NOT end in a TLD backtracks linearly, not exponentially.
-_HOST = re.compile(
-    r"\b(?:[a-z0-9][a-z0-9-]{0,62}\.){1,32}(?:" + _TLDS + r")\b",
-    re.IGNORECASE,
+# Dotted-quad IPv4 with validated octets + optional :port. The lookarounds reject a
+# quad that is one slice of a longer dotted-decimal token (a version string like
+# `1.0.0.0.5` / `2.30.1.7`) WITHOUT losing a valid IP merely followed by a dot
+# (`8.8.8.8.`).
+_IPV4 = re.compile(
+    r"(?<!\d)(?<!\d\.)(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)"
+    r"(?::\d{1,5})?(?!\.?\d)"
 )
 
-# --- denoising --------------------------------------------------------------
+# Tor v2/v3 onion address (no scheme required).
+_ONION = re.compile(r"\b[a-z2-7]{16}(?:[a-z2-7]{40})?\.onion\b", re.IGNORECASE)
 
-# A hostname whose LEFTMOST label is one of these is a Java package / framework
-# constant namespace, not a network host. Two groups:
-#  - classic reverse-DNS roots (com/org/net/...) — no registrable host starts with
-#    a bare `com.`/`org.`, so this generically covers `com.facebook.*`,
-#    `org.apache.*` etc. WITHOUT enumerating every library.
-#  - platform/runtime roots (android/java/kotlin/...) — trademark namespaces the
-#    framework uses for constants (`android.intent.*`, `android.permission.*`) and
-#    packages. Deliberately excludes gTLDs that are also common subdomains (`io`,
-#    `app`, `dev`, `info`) so real hosts like `app.foo.com` survive.
-# Scheme-ful C2 is never lost to this: URLs are extracted (and surfaced) without
-# denoising — only the bare-domain bucket is filtered.
+# A bare-host CANDIDATE: labels then an alphabetic tail. Deliberately loose — the
+# public-suffix validator (tldextract) is the real gate. ReDoS-safe: each label is a
+# single bounded class, the label count is bounded, no nested optional group.
+_HOST_CANDIDATE = re.compile(
+    r"\b(?:[a-z0-9][a-z0-9-]{0,62}\.){1,32}[a-z]{2,24}\b", re.IGNORECASE
+)
+
+# --- denoising (ported — see lessons §4/§5) ---------------------------------
+
 _RDN_ROOTS = frozenset({"com", "org", "net", "edu", "gov", "mil", "int"})
 _PLATFORM_ROOTS = frozenset(
     {
@@ -98,11 +130,7 @@ _PLATFORM_ROOTS = frozenset(
 )
 _DROP_ROOTS = _RDN_ROOTS | _PLATFORM_ROOTS
 
-# XML-namespace / schema authority hosts. A URI like
-# `http://schemas.android.com/apk/res/android` is an XML namespace *identifier*
-# (xmlns:android=...), not a network endpoint the app contacts — so these are
-# dropped from BOTH the urls and domains buckets even though urls are otherwise
-# never denoised (these hosts are never C2). Curated, not pattern-based.
+# XML-namespace / schema authority hosts — xmlns identifiers, never contacted.
 _NAMESPACE_HOSTS = frozenset(
     {
         "schemas.android.com",
@@ -119,26 +147,45 @@ _NAMESPACE_HOSTS = frozenset(
     }
 )
 
-# A package label inside a type descriptor `Lpkg/sub/Class;`.
 _PKG_LABEL = re.compile(r"[a-z0-9_$]+")
+
+# tldextract instance, lazily built with the BUNDLED public-suffix snapshot only
+# (suffix_list_urls=()), so domain validation is deterministic and never touches the
+# network at runtime.
+_TLD: _tldextract_mod.TLDExtract | None = None
+
+
+def _tld():  # type: ignore[no-untyped-def]
+    global _TLD
+    if _TLD is None:
+        import tldextract
+
+        _TLD = tldextract.TLDExtract(suffix_list_urls=(), cache_dir=None)
+    return _TLD
+
+
+def _registered_domain(host: str) -> str:
+    """Return the registered domain under the public suffix, or ``""`` if none.
+
+    `maps.google.co.uk` -> `google.co.uk`; `com.google.util` -> `""` (util is not a
+    public suffix, so the dotted token is not a real domain).
+    """
+    return str(_tld()(host).top_domain_under_public_suffix)
 
 
 def _dex_package_prefixes(descriptors: list[str]) -> frozenset[str]:
     """Dotted package prefixes from a list of type descriptors.
 
-    From ``Landroid/app/Activity;`` derive ``{"android", "android.app"}``. The caller
-    supplies the dex's *structured* type tables (internal class defs +
-    external type refs), so denoising keys off real type-ids — not a regex over raw
-    strings and not a hardcoded library list. Complete (every framework/SDK the app
-    references is covered) and self-calibrating: a host equal to a declared library
-    package is dropped even for libraries no static list would enumerate.
+    `Landroid/app/Activity;` -> `{"android", "android.app"}`. Keyed off the dex's
+    structured type tables, so it is self-calibrating (covers every library the app
+    references) rather than a hardcoded list.
     """
     pkgs: set[str] = set()
     for s in descriptors:
-        core = s.lstrip("[")  # arrays: [Landroid/...; -> Landroid/...;
+        core = s.lstrip("[")
         if not (core.startswith("L") and core.endswith(";") and "/" in core):
             continue
-        labels = [p.lower() for p in core[1:-1].split("/")[:-1]]  # drop class name
+        labels = [p.lower() for p in core[1:-1].split("/")[:-1]]
         if not labels or not all(_PKG_LABEL.fullmatch(p) for p in labels):
             continue
         for i in range(1, len(labels) + 1):
@@ -151,23 +198,26 @@ def _is_package_like(host: str, dex_packages: frozenset[str]) -> bool:
     low = host.lower()
     if low in _NAMESPACE_HOSTS:
         return True
-    if low in dex_packages:  # the dex declares it as a package (authoritative)
+    if low in dex_packages:
         return True
-    return low.split(".", 1)[0] in _DROP_ROOTS  # reverse-DNS / platform root
+    return low.split(".", 1)[0] in _DROP_ROOTS
 
 
 def _host_of(url: str) -> str:
-    """Extract the bare host from a scheme-qualified URL — no userinfo, no port.
+    """Bare host of a scheme-qualified URL — no userinfo, no port.
 
-    `http://user:pass@evil.com:8080/c2` -> `evil.com`. Stripping the optional
-    `user:pass@` is essential: without it the real C2 host is mis-extracted.
+    `http://user:pass@evil.com:8080/c2` -> `evil.com`. Dropping `user:pass@` is
+    essential, else the real C2 host is mis-extracted.
     """
-    rest = url.split("://", 1)[1]
+    try:
+        rest = url.split("://", 1)[1]
+    except IndexError:
+        return ""
     authority = rest.split("/", 1)[0].split("?", 1)[0].split("#", 1)[0]
-    authority = authority.rsplit("@", 1)[-1]  # drop user:pass@
-    if authority.startswith("[") and "]" in authority:  # [IPv6]:port
+    authority = authority.rsplit("@", 1)[-1]
+    if authority.startswith("[") and "]" in authority:
         return authority[1 : authority.index("]")].lower()
-    return authority.split(":", 1)[0].lower()  # drop :port
+    return authority.split(":", 1)[0].lower()
 
 
 def extract_iocs(
@@ -176,36 +226,23 @@ def extract_iocs(
     with_xref: bool = True,
     denoise: bool = True,
     xref_limit: int = 300,
-    value_strings_only: bool = False,
 ) -> dict[str, list[dict[str, Any]]]:
     """Extract network indicators (URLs / IPs / domains / emails / onion) from ``dk``.
 
     Args:
         dk: A loaded ``dexllm.DexKit`` instance.
         with_xref: If True, attach the referencing method descriptors to each
-            indicator (the "where in the code" view VirusTotal lacks). Costs one
-            L7 search per distinct indicator.
-        denoise: If True, drop framework package names that the host regex would
-            otherwise mistake for domains.
-        xref_limit: Cap on the number of indicators cross-referenced, to bound
-            cost on string-heavy apps. Extras still appear, with empty ``methods``.
-        value_strings_only: If True, scan only **value-bearing** strings —
-            ``const-string`` operands + static ``VALUE_STRING`` initializers
-            (``dk.list_value_strings()``) — instead of the whole string pool. This
-            drops identifier/metadata entries (type/method/field names) that look
-            like hosts, so denoising becomes largely unnecessary; the trade-off is
-            it misses an indicator stored only as an annotation value. Higher
-            precision, slightly lower recall.
+            indicator (the "where in the code" view). One L7 search per indicator.
+        denoise: If True, drop residual identifier hosts (dex packages, xmlns URIs)
+            that survive into the candidate set.
+        xref_limit: Cap on indicators cross-referenced, spent highest-signal first.
 
     Returns:
-        A dict keyed by :data:`IOC_CATEGORIES`; each value is a list of
+        A dict keyed by :data:`IOC_CATEGORIES`; each value a list of
         ``{"value": str, "methods": list[str]}`` sorted by value.
     """
-    strings = dk.list_value_strings() if value_strings_only else dk.list_strings()
+    strings = dk.list_value_strings()
 
-    # Self-calibrating denoise set, from the dex's STRUCTURED type tables (not a
-    # regex over raw strings): internal class defs + external type refs -> package
-    # prefixes. A host candidate that equals one is package usage, not a domain.
     dex_packages: frozenset[str] = frozenset()
     if denoise:
         descriptors = list(dk.list_classes())
@@ -219,39 +256,45 @@ def extract_iocs(
     onion: set[str] = set()
 
     for raw in strings:
-        # Cap the per-string scan length. The classifier regexes are linear, but
-        # a real IOC is short; an oversized blob is itself a signal, not a host.
-        # This bounds worst-case cost over an adversarial APK regardless of pattern.
-        truncated = len(raw) > _MAX_SCAN
-        s = raw if not truncated else raw[:_MAX_SCAN]
+        capped = raw if len(raw) <= _MAX_SCAN else raw[:_MAX_SCAN]
+        # Un-defang first (literal, linear), then run only our bounded regexes.
+        s = _refang(capped)
         for m in _URL.finditer(s):
-            # A URL whose match ends exactly at the scan cap was cut off — drop the
-            # misleading partial (its host is still recovered by the _HOST scan).
-            if truncated and m.end() == len(s):
-                continue
-            url = m.group(0).rstrip(".,);")
-            # XML namespace URIs (xmlns=...) are identifiers, not endpoints — drop.
+            url = m.group(0).rstrip(".,);\"'")
             if denoise and _host_of(url) in _NAMESPACE_HOSTS:
                 continue
             urls.add(url)
-        for m in _ONION.finditer(s):
-            onion.add(m.group(0).lower())
-        for m in _IPV4.finditer(s):
-            ips.add(m.group(0))
         for m in _EMAIL.finditer(s):
             emails.add(m.group(0))
-        for m in _HOST.finditer(s):
+        for m in _IPV4.finditer(s):
+            ips.add(m.group(0))
+        for m in _ONION.finditer(s):
+            onion.add(m.group(0).lower())
+        # Bare domains: candidate tokens validated against the public suffix list.
+        for m in _HOST_CANDIDATE.finditer(s):
             host = m.group(0).lower()
-            if not (denoise and _is_package_like(host, dex_packages)):
-                domains.add(host)
+            if host.endswith(".onion"):
+                continue  # its own category; .onion is in the PSL but isn't a domain
+            if not _registered_domain(host):
+                continue  # not a real registered domain (e.g. com.google.util)
+            if denoise and _is_package_like(host, dex_packages):
+                continue
+            # TODO(refine): an identifier path ending in a gTLD label (e.g.
+            # `libcore.icu.icu`, `android.app`) still passes the PSL when it isn't a
+            # declared dex package. value-strings input already removes most; a
+            # tighter heuristic (reject when every label is a lowercase identifier
+            # with no digits/hyphens AND the apex is a single short word) is a
+            # follow-up. Kept permissive for now (recall-first).
+            domains.add(host)
 
-    # A URL's own host is a high-confidence domain — fold it in (post-denoise).
-    # Skip an IP-literal host: it already belongs to the `ips` bucket, not domains.
+    # A URL's own host is a high-confidence domain — fold it in (post-denoise),
+    # skipping IP-literal hosts (those belong to the ips bucket).
     for u in urls:
         h = _host_of(u)
         if (
             "." in h
             and not _IPV4.fullmatch(h)
+            and _registered_domain(h)
             and not (denoise and _is_package_like(h, dex_packages))
         ):
             domains.add(h)
@@ -266,8 +309,6 @@ def extract_iocs(
 
     xref_budget = xref_limit
     result: dict[str, list[dict[str, Any]]] = {}
-    # Spend the xref budget highest-signal category first, so a string-heavy app
-    # with thousands of URLs doesn't starve onion/IP indicators of their callers.
     for cat in _XREF_PRIORITY:
         rows: list[dict[str, Any]] = []
         for value in sorted(buckets[cat]):
@@ -283,9 +324,9 @@ def extract_iocs(
                     ]
                 except (
                     Exception
-                ):  # noqa: BLE001 - one bad query must not abort the report
+                ):  # noqa: BLE001 — one bad query must not abort the report
                     methods = []
                 xref_budget -= 1
             rows.append({"value": value, "methods": methods})
         result[cat] = rows
-    return {cat: result[cat] for cat in IOC_CATEGORIES}  # stable output order
+    return {cat: result[cat] for cat in IOC_CATEGORIES}

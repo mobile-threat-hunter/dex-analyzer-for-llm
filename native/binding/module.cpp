@@ -117,25 +117,13 @@ public:
     std::vector<std::string> list_classes() const {
         return ext_.ListClasses();
     }
-    // Every distinct string literal across all loaded dexes, MUTF-8 → UTF-8
-    // decoded. Foundation for static IOC / C2 extraction (dexllm.extract_iocs).
-    // ListStrings dedups on raw MUTF-8; we dedup again on the DECODED text so two
-    // distinct byte sequences that decode alike (e.g. both → U+FFFD via the lone-
-    // surrogate fallback) collapse — honouring the "deduplicated" contract.
-    py::list list_strings() const {
-        py::list out;
-        std::unordered_set<std::string> seen;
-        for (const auto& s : ext_.ListStrings()) {
-            std::string decoded = DecodeMutf8ForPy(s);
-            if (seen.insert(decoded).second) {
-                out.append(py::str(decoded));
-            }
-        }
-        return out;
-    }
-    // The value-bearing subset: only const-string (0x1a/0x1b) operands + static
-    // VALUE_STRING (0x17) initializers — the strings the app loads AS DATA, with
-    // identifier/metadata pool entries excluded. Same MUTF-8→UTF-8 dedup as above.
+    // Every distinct string the app loads AS DATA — const-string (0x1a/0x1b)
+    // operands + static VALUE_STRING (0x17) initializers — MUTF-8 → UTF-8 decoded.
+    // Identifier/metadata pool entries (type/method/field names, shorty, source
+    // files) are excluded. Foundation for static IOC / C2 extraction. We dedup on
+    // the DECODED text so two byte sequences that decode alike (e.g. both → U+FFFD
+    // via the lone-surrogate fallback) collapse — honouring the "deduplicated"
+    // contract.
     py::list list_value_strings() const {
         py::list out;
         std::unordered_set<std::string> seen;
@@ -488,16 +476,13 @@ PYBIND11_MODULE(_dexkit_core, m) {
              "L8: Return every class descriptor declared in any loaded dex "
              "(e.g. `Lcom/foo/Bar;`). Replaces androguard's "
              "AnalyzeAPK→get_classes for decompile drivers.")
-        .def("list_strings", &PyDexKit::list_strings,
-             "Return every distinct string literal across all loaded dexes "
-             "(MUTF-8 → UTF-8 decoded, deduplicated). Foundation for static "
-             "IOC / C2 extraction — see dexllm.extract_iocs.")
         .def("list_value_strings", &PyDexKit::list_value_strings,
-             "The value-bearing subset of list_strings(): only strings loaded as "
-             "DATA — const-string/jumbo (0x1a/0x1b) operands + static-field "
-             "VALUE_STRING (0x17) initializers. Excludes identifier/metadata pool "
-             "entries (type/method/field names, shorty, source files), so IOC "
-             "extraction needs no package denoising. Annotation 0x17 omitted.")
+             "Return every distinct string the app loads as DATA — const-string/"
+             "jumbo (0x1a/0x1b) operands + static-field VALUE_STRING (0x17) "
+             "initializers (MUTF-8 → UTF-8 decoded, deduplicated). Excludes "
+             "identifier/metadata pool entries (type/method/field names, shorty, "
+             "source files). Foundation for static IOC / C2 extraction — see "
+             "dexllm.extract_iocs. (Annotation-embedded 0x17 omitted.)")
         .def("verify_report", &PyDexKit::verify_report,
              "Structural-verification report, one dict per dex considered at "
              "load: {dex_id, name, valid, reason}. A dex with valid==False was "
