@@ -680,6 +680,10 @@ std::string BuildMethodSignature(const dexkit::DexItem& item, uint32_t method_id
     const auto& reader = item.GetReader();
     const auto& type_names = item.GetTypeNames();
     const auto& strings = item.GetStrings();
+    // Bound the index (mirrors BuildFieldSignature). method_idx can be a raw
+    // invoke operand (ArgOrigin MethodReturn → last_invoke_callee), which lenient
+    // mode leaves unvalidated; an OOB index here would OOB-read MethodIds().
+    if (method_idx >= reader.MethodIds().size()) return {};
     const auto& m = reader.MethodIds()[method_idx];
     std::string out;
     out += std::string(type_names[m.class_idx]);

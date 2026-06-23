@@ -188,8 +188,13 @@ def test_lenient_oob_operand_does_not_crash(kind, _base_classes_dex, tmp_path_fa
     dk = dexllm.DexKit(str(path), lenient=True)
     dk.list_value_strings()
     dk.find_methods_using_strings(["http"], match_type="contains")
+    methods = [m for c in dk.list_classes() for m in dk.list_class_methods(c)]
     for c in dk.list_classes():
         dk.decompile_class_java(c)  # load-time cross-ref + decompile
+    # resolve_call_args walks AnalyzeMethodInvokes → BuildMethodSignature on the
+    # raw invoke operand (ArgOrigin MethodReturn) — the same lenient OOB surface.
+    for m in methods:
+        dk.resolve_call_args(m)
     assert dexllm.extract_iocs(dk, with_xref=True, xref_limit=10) is not None
 
 
