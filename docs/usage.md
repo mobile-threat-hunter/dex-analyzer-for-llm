@@ -321,17 +321,17 @@ import dexllm
 
 dk = dexllm.DexKit("app.apk")
 
-# {permission: [pkg.Class#method, ...]} for the gated APIs actually used
+# {permission: [pkg.Class#method(signature), ...]} for the gated APIs actually used
 apis = dexllm.dangerous_permission_apis(dk)
 # {'android.permission.ACCESS_FINE_LOCATION':
-#     ['android.location.LocationManager#getLastKnownLocation', ...], ...}
+#     ['android.location.LocationManager#getLastKnownLocation(String)', ...], ...}
 
 # same, plus WHO calls each gated API (jump straight to the code)
 callers = dexllm.dangerous_permission_api_callers(dk)   # app_only=True by default
 for perm, rows in callers.items():
     for row in rows:
         print(perm, row["api"], "<-", row["callers"][:1])
-# ACCESS_FINE_LOCATION  android.location.LocationManager#getLastKnownLocation
+# ACCESS_FINE_LOCATION  android.location.LocationManager#getLastKnownLocation(String)
 #   <- ['La2dp/Vol/StoreLoc;->grabGPS()V']
 ```
 
@@ -345,9 +345,18 @@ day/night theming) is library plumbing, not the app's own behaviour. Pass
 dexllm.dangerous_permission_api_callers(dk, app_only=False)   # include framework callers
 ```
 
-The dangerous-permission→API table ships bundled (the dangerous slice of the AOSP
-dataset). Pass `dataset_path="…/aosp_data_set"` (or set `$DEXLLM_AOSP_DATASET`) to
-use a fresher / wider checkout. Both are also MCP tools
+The table carries the full method signature for each gated API, so **overloads are
+matched precisely** — `getLastKnownLocation(String)` and its `LastLocationRequest`
+overload are distinguished, and only the one the app actually references is reported
+(arity is the primary, parse-robust discriminator; a `(class, method)` with a single
+overload of an arity still matches on that alone, so a signature edge case can't drop
+a real hit).
+
+The dangerous-permission→API table ships bundled (the dangerous slice of AOSP's
+metalava-extracted signature inventory — clean, fully-qualified types). Pass
+`dataset_path="…/aosp_data_set"` (or set `$DEXLLM_AOSP_DATASET`) to use a fresher /
+wider checkout (it prefers `perm_api_metalava_by_perm.json`, falling back to the raw
+`perm_api_by_perm.json`). Both are also MCP tools
 (`dangerous_permission_apis`, `dangerous_permission_api_callers`; the latter takes
 `app_only`).
 
