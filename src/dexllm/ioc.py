@@ -336,6 +336,7 @@ def extract_iocs(
         if (
             "." in h
             and not _IPV4.fullmatch(h)
+            and not h.endswith(".onion")  # its own category, not a domain
             and _tld()(h).top_domain_under_public_suffix
             and not (denoise and _is_package_like(h, dex_packages))
         ):

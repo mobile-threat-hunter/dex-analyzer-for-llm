@@ -386,12 +386,20 @@ void DexItem::InitCache(uint32_t init_flags) {
                     auto op_format = ins_formats[op];
 
                     if (need_method_using_string) {
+                        // dexllm: bound the operand index against the string pool.
+                        // It is only guaranteed in-range by VerifyInsns, which the
+                        // lenient load mode skips (partial-decrypt dumps). Dropping an
+                        // OOB index here keeps method_using_string_ids consistent so
+                        // EVERY consumer (GetUsingStrings / IsMethodUsingStringsMatched
+                        // / ...) is safe; on verified input it never triggers.
                         if (op == 0x1a) { // const-string
                             auto index = ReadShort(ptr);
-                            method_using_string_ptr->emplace_back(index);
+                            if (index < strings.size())
+                                method_using_string_ptr->emplace_back(index);
                         } else if (op == 0x1b) { // const-string-jumbo
                             auto index = ReadInt(ptr);
-                            method_using_string_ptr->emplace_back(index);
+                            if (index < strings.size())
+                                method_using_string_ptr->emplace_back(index);
                         }
                     }
 
@@ -404,7 +412,12 @@ void DexItem::InitCache(uint32_t init_flags) {
                             // sput, sput-wide, sput-object, sput-boolean, sput-byte, sput-char, sput-short
                             auto is_setter = ((op >= 0x59 && op <= 0x5f) || (op >= 0x67 && op <= 0x6d));
                             auto index = ReadShort(ptr);
-                            method_using_field_ptr->emplace_back(index, is_getter);
+                            // dexllm: bound the field operand. Unbounded under lenient
+                            // (VerifyInsns-off), it would OOB-index field_get/put_method_ids
+                            // during the load-time cross-ref build (need_field_rw_method)
+                            // and the using-field matchers. On verified input never trips.
+                            if (index < reader.FieldIds().size())
+                                method_using_field_ptr->emplace_back(index, is_getter);
                         }
                     }
 
@@ -412,7 +425,10 @@ void DexItem::InitCache(uint32_t init_flags) {
                         if ((op >= 0x6e && op <= 0x72) // invoke-kind
                             || (op >= 0x74 && op <= 0x78)) { // invoke-kind/range
                             auto index = ReadShort(ptr);
-                            method_invoking_ptr->emplace_back(index);
+                            // dexllm: bound the method operand — same rationale as field;
+                            // unbounded it OOB-indexes method_caller_ids at load time.
+                            if (index < reader.MethodIds().size())
+                                method_invoking_ptr->emplace_back(index);
                         }
                     }
 
@@ -1017,6 +1033,9 @@ std::vector<std::string_view> DexItem::GetUsingStrings(uint32_t method_idx) {
     }
     using_strings.reserve(method_using_strings->size());
     for (auto string_id: *method_using_strings) {
+        // dexllm: string_id is bounded at collection (InitBaseCache /
+        // GetUsingStringsFromCode), so method_using_string_ids never holds an
+        // OOB index even under lenient (VerifyInsns-off) loads. Safe to index.
         using_strings.emplace_back(this->strings[string_id]);
     }
     return using_strings;
@@ -1142,10 +1161,12 @@ std::vector<uint32_t> DexItem::GetUsingStringsFromCode(uint32_t method_idx) {
         auto width = GetBytecodeWidth(ptr++);
         if (op == 0x1a) { // const-string
             auto index = ReadShort(ptr);
-            using_strings.emplace_back(index);
+            if (index < strings.size())  // dexllm: bound — see InitBaseCache scan
+                using_strings.emplace_back(index);
         } else if (op == 0x1b) { // const-string-jumbo
             auto index = ReadInt(ptr);
-            using_strings.emplace_back(index);
+            if (index < strings.size())  // dexllm: bound — lenient skips VerifyInsns
+                using_strings.emplace_back(index);
         }
         p += width;
     }
@@ -1230,7 +1251,10 @@ std::vector<uint32_t> DexItem::GetInvokeMethodsFromCode(uint32_t method_idx) {
         if (op_format == dex::k35c // invoke-kind
             || op_format == dex::k3rc) { // invoke-kind/range
             auto index = ReadShort(ptr);
-            invoke_methods.emplace_back(index);
+            // dexllm: bound — method_codes is sized to MethodIds().size(); lenient
+            // skips VerifyInsns so an OOB invoke operand must not reach consumers.
+            if (index < method_codes.size())
+                invoke_methods.emplace_back(index);
         }
         p += width;
     }

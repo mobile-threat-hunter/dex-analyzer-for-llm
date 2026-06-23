@@ -167,6 +167,16 @@ def test_url_host_bypasses_word_gtld_gate():
     assert "panel.read" in {r["value"] for r in iocs["domains"]}
 
 
+def test_onion_url_not_double_listed_in_domains():
+    # a scheme-qualified onion belongs to urls + onion, NOT domains (it has its
+    # own category; .onion is in the PSL but the URL-fold must skip it).
+    addr = "http://facebookcorewwwi.onion/path"
+    iocs = dexllm.extract_iocs(_FakeDK([addr]), with_xref=False)
+    assert addr in {r["value"] for r in iocs["urls"]}
+    assert any("facebookcorewwwi.onion" in r["value"] for r in iocs["onion"])
+    assert not any(d["value"].endswith(".onion") for d in iocs["domains"])
+
+
 def test_host_of_strips_userinfo_and_port():
     from dexllm.ioc import _host_of
 

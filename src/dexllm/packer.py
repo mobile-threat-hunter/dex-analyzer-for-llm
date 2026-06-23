@@ -11,6 +11,7 @@ runtime; ART consults the decrypted dex first).
 
 from __future__ import annotations
 
+import os
 from typing import TYPE_CHECKING
 
 from ._dexkit_core import DexKit
@@ -23,7 +24,7 @@ __all__ = ["add_dumped_dexes"]
 
 def add_dumped_dexes(
     dk: DexKit,
-    dumps: str | Iterable[str],
+    dumps: str | os.PathLike | Iterable[str | os.PathLike],
     *,
     prefer: bool = True,
     lenient: bool = True,
@@ -49,9 +50,12 @@ def add_dumped_dexes(
     Returns:
         A new ``DexKit`` over the combined, ordered source set.
     """
-    paths = [dumps] if isinstance(dumps, str) else list(dumps)
-    if not paths:
-        raise ValueError("add_dumped_dexes: no dump paths given")
+    if isinstance(dumps, (str, os.PathLike)):
+        paths = [os.fspath(dumps)]
+    else:
+        paths = [os.fspath(p) for p in dumps]
+    if not paths or not all(paths):
+        raise ValueError("add_dumped_dexes: no (non-empty) dump paths given")
     original = list(dk.sources())
     order = paths + original if prefer else original + paths
     return DexKit(order, lenient=lenient)

@@ -87,7 +87,18 @@ def test_accepts_str_or_list(apk_and_dump):
     assert dexllm.add_dumped_dexes(dk, [dump]).dex_count() == dk.dex_count() + 1
 
 
+def test_accepts_pathlike(apk_and_dump):
+    apk, dump = apk_and_dump
+    dk = dexllm.DexKit(apk)
+    # a single Path, and an iterable of Paths, are both accepted (os.fspath)
+    assert dexllm.add_dumped_dexes(dk, Path(dump)).dex_count() == dk.dex_count() + 1
+    assert dexllm.add_dumped_dexes(dk, [Path(dump)]).dex_count() == dk.dex_count() + 1
+
+
 def test_empty_dumps_rejected(apk_and_dump):
     apk, _ = apk_and_dump
+    dk = dexllm.DexKit(apk)
     with pytest.raises(ValueError):
-        dexllm.add_dumped_dexes(dexllm.DexKit(apk), [])
+        dexllm.add_dumped_dexes(dk, [])
+    with pytest.raises(ValueError):
+        dexllm.add_dumped_dexes(dk, "")  # empty string must not reach the loader
