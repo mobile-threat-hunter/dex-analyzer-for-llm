@@ -22,7 +22,13 @@ set(COMPILE_FLAGS "-Wno-empty-body -Wno-unused-private-field \
     -Wno-unused-value -Wno-unused-variable -Wno-unused-function")
 set(CMAKE_C_FLAGS "${CMAKE_CXX_FLAGS} ${COMPILE_FLAGS}")
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${COMPILE_FLAGS}")
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -pthread")
+# GitHub Pages can't set the COOP/COEP headers SharedArrayBuffer needs, so the
+# WASM build is single-threaded. Skip -pthread under Emscripten; native builds
+# (Linux/macOS Python wheel) are unaffected. ThreadPool.h has a matching guard
+# that runs tasks inline when __EMSCRIPTEN__ && !__EMSCRIPTEN_PTHREADS__.
+if(NOT EMSCRIPTEN)
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -pthread")
+endif()
 
 add_library(${PROJECT_NAME}_static
         STATIC

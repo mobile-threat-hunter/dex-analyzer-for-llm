@@ -58,6 +58,15 @@ private:
 // the constructor just launches some amount of workers
 inline ThreadPool::ThreadPool(size_t threads, std::function<bool()> should_skip_task)
         : stop(false), should_skip_task(std::move(should_skip_task)) {
+#if defined(__EMSCRIPTEN__) && !defined(__EMSCRIPTEN_PTHREADS__)
+    // Non-pthread WASM (GitHub Pages can't ship COOP/COEP for SharedArrayBuffer).
+    // std::thread's ctor throws "Not supported" here, which kills every APK load
+    // path that uses multi-image AddImage. Run tasks inline instead — `enqueue`
+    // drains the queue from the calling thread, so the future resolves before
+    // the caller waits on it.
+    (void)threads;
+    _thread_ids.clear();
+#else
     workers.reserve(threads);
     _thread_ids.resize(threads);
     for (size_t i = 0; i < threads; ++i)
@@ -80,6 +89,7 @@ inline ThreadPool::ThreadPool(size_t threads, std::function<bool()> should_skip_
                     }
                 }
         );
+#endif
 }
 
 // add new work item to the pool
@@ -112,6 +122,20 @@ auto ThreadPool::enqueue(F &&f, Args &&... args)
         });
     }
     condition.notify_one();
+#if defined(__EMSCRIPTEN__) && !defined(__EMSCRIPTEN_PTHREADS__)
+    // No workers exist — drain the queue inline so the future resolves before
+    // the caller blocks on it.
+    {
+        std::unique_lock lock(queue_mutex);
+        while (!tasks.empty()) {
+            auto t = std::move(tasks.front());
+            tasks.pop();
+            lock.unlock();
+            t();
+            lock.lock();
+        }
+    }
+#endif
     return res;
 }
 
@@ -122,7 +146,9 @@ inline ThreadPool::~ThreadPool() {
         stop = true;
     }
     condition.notify_all();
+#if !(defined(__EMSCRIPTEN__) && !defined(__EMSCRIPTEN_PTHREADS__))
     for (std::thread &worker: workers)
         worker.join();
+#endif
     dexkit::ReleaseMatcherThreadLocalCaches(_thread_ids);
 }
