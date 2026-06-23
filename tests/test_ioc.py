@@ -134,6 +134,39 @@ def test_version_string_is_not_an_ip_end_to_end():
     assert iocs["ips"] == []
 
 
+def test_word_gtld_identifiers_are_not_domains():
+    # Java identifier paths whose tail is a dictionary-word gTLD (.name/.one/.group/
+    # .read/.support/.secure/.info) must NOT be reported as contacted domains.
+    junk = [
+        "os.name",
+        "user.name",
+        "java.math.BigDecimal.one",
+        "java.util.regex.Matcher.group",
+        "android.util.Log.info",
+        "fitness.activity.read",
+        "channelcount.support",
+        "omx.exynos.avc.dec.secure",
+    ]
+    iocs = dexllm.extract_iocs(_FakeDK(junk), with_xref=False)
+    assert iocs["domains"] == []
+
+
+def test_real_domains_survive_the_word_gtld_gate():
+    iocs = dexllm.extract_iocs(
+        _FakeDK(["maps.google.com", "api.evil.top", "c2.example.co.uk"]),
+        with_xref=False,
+    )
+    doms = {r["value"] for r in iocs["domains"]}
+    assert {"maps.google.com", "api.evil.top", "c2.example.co.uk"} <= doms
+
+
+def test_url_host_bypasses_word_gtld_gate():
+    # a scheme proves intent: a URL host on a word-gTLD is still surfaced as a domain
+    iocs = dexllm.extract_iocs(_FakeDK(["https://panel.read/gate"]), with_xref=False)
+    assert "https://panel.read/gate" in {r["value"] for r in iocs["urls"]}
+    assert "panel.read" in {r["value"] for r in iocs["domains"]}
+
+
 def test_host_of_strips_userinfo_and_port():
     from dexllm.ioc import _host_of
 

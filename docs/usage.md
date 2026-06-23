@@ -307,8 +307,11 @@ literal, linear un-defang pass. **Domains** are validated against the public suf
 list (`tldextract`), so `com.google.util` (not a real suffix) is rejected while
 `maps.google.co.uk` resolves correctly. **Denoising** then drops the residual
 identifier hosts: the app's own dex package paths (self-calibrating, from its type
-descriptors) plus reverse-DNS / platform roots (`com.*`, `org.*`, `android.*`, …) and
-XML-namespace URIs (`http://schemas.android.com/...`). The classifier regexes are
+descriptors), reverse-DNS / platform roots (`com.*`, `org.*`, `android.*`, …),
+XML-namespace URIs (`http://schemas.android.com/...`), and word-gTLD identifier
+collisions where a Java path's tail is a dictionary-word gTLD (`os.name`,
+`Matcher.group`, `*.support` — `.name`/`.group`/`.support` are real TLDs). A
+scheme-qualified URL keeps its host regardless. The classifier regexes are
 hand-bounded (ReDoS-safe) and each string is length-capped — important because dex
 value-strings include multi-MB blobs. Set `with_xref=False` to skip the per-indicator
 L7 cross-reference, or lower `xref_limit` on string-heavy apps. Also the `extract_iocs`

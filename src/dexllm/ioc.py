@@ -130,6 +130,47 @@ _PLATFORM_ROOTS = frozenset(
 )
 _DROP_ROOTS = _RDN_ROOTS | _PLATFORM_ROOTS
 
+# Public suffixes that are real TLDs but, in a dex, OVERWHELMINGLY appear as the
+# tail of a Java identifier path rather than a contacted host: a `Class.method` /
+# `Object.FIELD` / MIME / codec / scope string whose last label is a dictionary
+# word that ICANN also sold as a gTLD. Examples seen in the corpus: `os.name`,
+# `BigDecimal.one`, `Matcher.group`, `Log.info`, `fitness.*.read`,
+# `*.support` (MediaFormat keys), `omx.*.secure` (codec ids), `cn.google`,
+# `vnd.ms` (MIME). A bare-domain candidate ending in one of these is dropped; a
+# scheme-qualified URL keeps its host regardless (a `://` proves intent). This is
+# the interim precision fix — the principled replacement is usage-driven tiering
+# (a host is real if it flows into a network sink), tracked as the next task.
+_NONHOST_SUFFIXES = frozenset(
+    {
+        "name",
+        "one",
+        "group",
+        "read",
+        "support",
+        "secure",
+        "info",
+        "run",
+        "google",
+        "ms",
+        "java",
+        "type",
+        "name",
+        "prod",
+        "build",
+        "now",
+        "new",
+        "win",
+        "men",
+        "review",
+        "country",
+        "kim",
+        "mov",
+        "zip",
+        "foo",
+        "bar",
+    }
+)
+
 # XML-namespace / schema authority hosts — xmlns identifiers, never contacted.
 _NAMESPACE_HOSTS = frozenset(
     {
@@ -164,13 +205,18 @@ def _tld():  # type: ignore[no-untyped-def]
     return _TLD
 
 
-def _registered_domain(host: str) -> str:
-    """Return the registered domain under the public suffix, or ``""`` if none.
+def _valid_domain(host: str) -> bool:
+    """Return True if ``host`` is a plausible CONTACTED domain, not an identifier.
 
-    `maps.google.co.uk` -> `google.co.uk`; `com.google.util` -> `""` (util is not a
-    public suffix, so the dotted token is not a real domain).
+    Two gates: (1) tldextract/PSL must resolve a registered domain — rejects a
+    dotted token whose tail isn't a public suffix (`com.google.util` -> no). (2) the
+    public suffix must not be a word-like gTLD that collides with Java identifiers
+    in a dex (`os.name`, `Matcher.group`, `*.support`) — see `_NONHOST_SUFFIXES`.
     """
-    return str(_tld()(host).top_domain_under_public_suffix)
+    ext = _tld()(host)
+    if not ext.top_domain_under_public_suffix:
+        return False
+    return ext.suffix.rsplit(".", 1)[-1] not in _NONHOST_SUFFIXES
 
 
 def _dex_package_prefixes(descriptors: list[str]) -> frozenset[str]:
@@ -270,31 +316,27 @@ def extract_iocs(
             ips.add(m.group(0))
         for m in _ONION.finditer(s):
             onion.add(m.group(0).lower())
-        # Bare domains: candidate tokens validated against the public suffix list.
+        # Bare domains: candidate tokens validated as a contacted domain (PSL +
+        # word-gTLD-collision gate), then denoised.
         for m in _HOST_CANDIDATE.finditer(s):
             host = m.group(0).lower()
             if host.endswith(".onion"):
                 continue  # its own category; .onion is in the PSL but isn't a domain
-            if not _registered_domain(host):
-                continue  # not a real registered domain (e.g. com.google.util)
+            if not _valid_domain(host):
+                continue  # not a registered domain, or an identifier-collision gTLD
             if denoise and _is_package_like(host, dex_packages):
                 continue
-            # TODO(refine): an identifier path ending in a gTLD label (e.g.
-            # `libcore.icu.icu`, `android.app`) still passes the PSL when it isn't a
-            # declared dex package. value-strings input already removes most; a
-            # tighter heuristic (reject when every label is a lowercase identifier
-            # with no digits/hyphens AND the apex is a single short word) is a
-            # follow-up. Kept permissive for now (recall-first).
             domains.add(host)
 
     # A URL's own host is a high-confidence domain — fold it in (post-denoise),
-    # skipping IP-literal hosts (those belong to the ips bucket).
+    # skipping IP-literal hosts (those belong to the ips bucket). A scheme proves
+    # intent, so the host bypasses the word-gTLD gate (PSL structure check only).
     for u in urls:
         h = _host_of(u)
         if (
             "." in h
             and not _IPV4.fullmatch(h)
-            and _registered_domain(h)
+            and _tld()(h).top_domain_under_public_suffix
             and not (denoise and _is_package_like(h, dex_packages))
         ):
             domains.add(h)
