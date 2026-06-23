@@ -72,7 +72,30 @@ A container whose every dex fails verification raises at construction. See the
 
 In a multidex APK, a class declared in more than one `classes*.dex` resolves **first-wins by lowest dex_id** (classes.dex before classes2.dex), deterministically — matching ART/AOSP, so packer collisions decompile to the body that actually runs (see [DEX-handling comparison](dexkit-vs-art-dex-handling.md)).
 
-The constructor argument is still named `apk_path` for backward compatibility. A zip APK loads in ~150ms for a 50-dex app using zero-copy slicer-based dex parsing. Subsequent operations cache aggressively — the second call is always ≤1µs marshalling overhead plus the algorithm cost.
+### Multiple sources — priority by order (packer / runtime-unpack)
+
+Pass a **list** of sources to load them in order; earlier sources get lower
+dex_ids, and resolution is first-wins, so the **first source wins a class
+collision**:
+
+```python
+# Analysing a packed app: a runtime-decrypted/dumped dex should win over the
+# original (stub) classes. List it FIRST so first-wins prefers it — the same
+# order the packer arranges at runtime (ART consults the decrypted dex first).
+dk = dexllm.DexKit(["/tmp/dumped_real.dex", "app.apk"])   # dumped wins collisions
+dk.decompile_class_java("Lcom/evil/RealC2;")              # the unpacked body
+
+dk = dexllm.DexKit(["dump1.dex", "dump2.dex", "app.apk"]) # several dumps + apk
+```
+
+Each source is a bare `.dex` or a zip/apk, every dex still passes the load-time
+verifier, and classes from **all** sources are cross-indexed (search/decompile see
+the merged set). This is the static side of the unpack workflow — dump the
+decrypted dex with an external dynamic tool, then load it first. (`apk_path()`
+reports the first source.)
+
+The single-source constructor argument is still named `apk_path` for backward
+compatibility. A zip APK loads in ~150ms for a 50-dex app using zero-copy slicer-based dex parsing. Subsequent operations cache aggressively — the second call is always ≤1µs marshalling overhead plus the algorithm cost.
 
 ---
 

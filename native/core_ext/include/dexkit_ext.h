@@ -44,6 +44,16 @@ public:
     static ContainerInfo Identify(const std::string& path);
 
     explicit DexKitExt(const std::string& apk_path);
+
+    // Multi-source load with PRIORITY BY ORDER. Each source (a raw .dex or a
+    // zip/apk) is verified and loaded in turn, so sources earlier in the list get
+    // lower dex_ids. Because class resolution is first-wins (lowest dex_id), the
+    // FIRST source wins a class-descriptor collision — load a runtime-decrypted /
+    // dumped dex BEFORE the original apk to make the unpacked class win (mirrors
+    // ART, where the packer orders the decrypted dex first). apk_path() reports
+    // the first source. Throws if no source yields a structurally-valid dex.
+    explicit DexKitExt(const std::vector<std::string>& sources);
+
     ~DexKitExt();
 
     DexKitExt(const DexKitExt&) = delete;
@@ -220,6 +230,13 @@ public:
     dexkit::DexKit& core() { return *core_; }
 
 private:
+    // Verify + collect the structurally-valid dex(es) of ONE source (raw .dex or
+    // zip/apk) onto the end of `out`, recording per-dex verdicts in verify_status_
+    // with the running combined dex_id. Throws if the source can't be opened or
+    // isn't a dex/zip container; per-dex verify failures are recorded and skipped.
+    void CollectSource(const std::string& path,
+                       std::vector<std::unique_ptr<dexkit::MemMap>>& out);
+
     std::string apk_path_;
     std::unique_ptr<dexkit::DexKit> core_;
     bool analysis_caches_warm_ = false;

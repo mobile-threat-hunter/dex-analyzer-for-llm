@@ -109,6 +109,14 @@ public:
           decompiler_(std::make_unique<dexkit::dad::Decompiler>(
               ext_.GetCodeSource())) {}
 
+    // Multi-source load: sources are loaded in order, earlier ones get lower
+    // dex_ids → first-wins prefers them. Load a decrypted/dumped dex first to
+    // make the unpacked class win a collision (packer / runtime-unpack workflow).
+    explicit PyDexKit(const std::vector<std::string>& sources)
+        : ext_(sources),
+          decompiler_(std::make_unique<dexkit::dad::Decompiler>(
+              ext_.GetCodeSource())) {}
+
     int dex_count() const { return ext_.DexCount(); }
     const std::string& apk_path() const { return ext_.GetApkPath(); }
     int locate_class_dex(const std::string& descriptor) const {
@@ -467,6 +475,14 @@ PYBIND11_MODULE(_dexkit_core, m) {
              "classes*.dex inside are loaded) or a bare .dex file (detected by "
              "its 'dex\\n' magic). The arg keeps the name apk_path for "
              "backward compatibility.")
+        .def(py::init<const std::vector<std::string>&>(), py::arg("sources"),
+             "Load MULTIPLE sources with PRIORITY BY ORDER. Each source (a bare "
+             ".dex or a zip/apk) is loaded in turn, so sources earlier in the list "
+             "get lower dex_ids. Class resolution is first-wins (lowest dex_id), so "
+             "the FIRST source wins a class collision — for a packer/runtime-unpack "
+             "workflow, list a decrypted/dumped dex BEFORE the original apk to make "
+             "the unpacked class win (mirrors ART, where the packer orders the "
+             "decrypted dex first). Each dex still passes the load-time verifier.")
         .def("dex_count", &PyDexKit::dex_count)
         .def("apk_path", &PyDexKit::apk_path)
         .def("locate_class_dex", &PyDexKit::locate_class_dex,

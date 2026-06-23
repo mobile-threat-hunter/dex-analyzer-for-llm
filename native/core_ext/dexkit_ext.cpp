@@ -337,33 +337,32 @@ ContainerInfo DexKitExt::Identify(const std::string& path) {
     return info;
 }
 
-DexKitExt::DexKitExt(const std::string& apk_path) : apk_path_(apk_path) {
-    Probe p = ProbeContainer(apk_path);  // one content-based classification
+void DexKitExt::CollectSource(const std::string& path,
+                             std::vector<std::unique_ptr<dexkit::MemMap>>& out) {
+    Probe p = ProbeContainer(path);  // one content-based classification
 
     if (p.format == "unknown") {
         if (!p.map->ok()) {  // ProbeContainer always sets map; ok() distinguishes
             throw std::runtime_error(
-                "dexllm: cannot open '" + apk_path + "' (file not found or empty)");
+                "dexllm: cannot open '" + path + "' (file not found or empty)");
         }
-        // Opened, but neither a raw .dex nor a parseable zip/apk container.
         throw std::runtime_error(
-            "dexllm: '" + apk_path + "' is neither a .dex (no 'dex\\n' magic) nor a "
+            "dexllm: '" + path + "' is neither a .dex (no 'dex\\n' magic) nor a "
             "zip/apk container (no PK signature / invalid central directory)");
     }
-
-    core_ = std::make_unique<dexkit::DexKit>();
 
     if (p.format == "dex") {
         // Structural gate (DexVerifier) BEFORE the core parses the image — a
         // malformed dex is screened out here so the core/slicer never touch it.
         auto vr = VerifyDex(reinterpret_cast<const uint8_t*>(p.map->data()),
                             p.map->len());
-        verify_status_.push_back({0, apk_path, vr.ok, vr.reason});
+        verify_status_.push_back(
+            {static_cast<int>(out.size()), path, vr.ok, vr.reason});
         if (!vr.ok) {
             throw std::runtime_error(
-                "dexllm: '" + apk_path + "' failed dex verification: " + vr.reason);
+                "dexllm: '" + path + "' failed dex verification: " + vr.reason);
         }
-        core_->AddImage(std::move(p.map));
+        out.push_back(std::move(p.map));
         return;
     }
 
@@ -375,10 +374,10 @@ DexKitExt::DexKitExt(const std::string& apk_path) : apk_path_(apk_path) {
     // dexes in the multidex still load (per-dex rejection).
     if (p.dex_count == 0) {
         throw std::runtime_error(
-            "dexllm: zip container '" + apk_path + "' has no classes*.dex to decompile "
+            "dexllm: zip container '" + path + "' has no classes*.dex to decompile "
             "(AndroidManifest.xml " + (p.has_manifest ? "present" : "absent") + ")");
     }
-    std::vector<std::unique_ptr<dexkit::MemMap>> valid_dexes;
+    const size_t before = out.size();
     for (int idx = 1; idx <= p.dex_count; ++idx) {
         auto name = "classes" + (idx == 1 ? std::string() : std::to_string(idx)) + ".dex";
         const auto* entry = p.za->Find(name);
@@ -393,16 +392,34 @@ DexKitExt::DexKitExt(const std::string& apk_path) : apk_path_(apk_path) {
             verify_status_.push_back({-1, name, false, vr.reason});
             continue;
         }
-        verify_status_.push_back(
-            {static_cast<int>(valid_dexes.size()), name, true, {}});
-        valid_dexes.push_back(std::make_unique<dexkit::MemMap>(std::move(mm)));
+        verify_status_.push_back({static_cast<int>(out.size()), name, true, {}});
+        out.push_back(std::make_unique<dexkit::MemMap>(std::move(mm)));
     }
-    if (valid_dexes.empty()) {
-        const std::string& first = verify_status_.empty() ? std::string{"unknown"}
-                                                          : verify_status_.front().reason;
+    if (out.size() == before) {
         throw std::runtime_error(
-            "dexllm: all " + std::to_string(p.dex_count) + " dex(es) in '" + apk_path +
-            "' failed verification (first: " + first + ")");
+            "dexllm: all " + std::to_string(p.dex_count) + " dex(es) in '" + path +
+            "' failed verification");
+    }
+}
+
+DexKitExt::DexKitExt(const std::string& apk_path) : apk_path_(apk_path) {
+    core_ = std::make_unique<dexkit::DexKit>();
+    std::vector<std::unique_ptr<dexkit::MemMap>> valid_dexes;
+    CollectSource(apk_path, valid_dexes);
+    core_->AddImage(std::move(valid_dexes));
+}
+
+DexKitExt::DexKitExt(const std::vector<std::string>& sources)
+    : apk_path_(sources.empty() ? std::string{} : sources.front()) {
+    if (sources.empty()) {
+        throw std::runtime_error("dexllm: no dex sources given");
+    }
+    core_ = std::make_unique<dexkit::DexKit>();
+    // Load sources in order — earlier sources get lower dex_ids, so first-wins
+    // resolution prefers them (load a decrypted/dumped dex first to win).
+    std::vector<std::unique_ptr<dexkit::MemMap>> valid_dexes;
+    for (const auto& src : sources) {
+        CollectSource(src, valid_dexes);
     }
     core_->AddImage(std::move(valid_dexes));
 }
