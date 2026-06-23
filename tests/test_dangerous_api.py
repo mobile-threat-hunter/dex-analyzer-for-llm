@@ -8,6 +8,7 @@ genuinely uses location, Bluetooth, and phone-state APIs.
 import glob
 import json
 import os
+import re
 from pathlib import Path
 
 import pytest
@@ -330,7 +331,7 @@ def test_override_api_file_non_dict_clear_error(tmp_path):
 def test_dataset_path_override(dk):
     """If the full dataset is present locally, the override path parses too."""
     ds = "/home/nyahumi/Project/aosp_data_set"
-    if not (Path(ds) / "perm_api_by_perm.json").is_file():
+    if not (Path(ds) / "perm_api_metalava_by_perm.json").is_file():
         pytest.skip("full AOSP dataset not present")
     apis = dexllm.dangerous_permission_apis(dk, dataset_path=ds)
     assert isinstance(apis, dict)
@@ -350,12 +351,18 @@ def test_ref_filter_rejects_garbage_entries():
 
 
 def test_full_dataset_parses_without_crash():
-    """Every _REF-accepted entry in the full dataset parses (no exception)."""
-    ds = Path("/home/nyahumi/Project/aosp_data_set/perm_api_by_perm.json")
+    """Every _REF-accepted entry in the full metalava dataset parses cleanly.
+
+    Beyond not raising, every parsed param type must reduce to a clean simple name
+    (no leaked annotations / param names / generics) — the metalava table is the
+    canonical clean source, so a stray anomaly means a parser regression.
+    """
+    ds = Path("/home/nyahumi/Project/aosp_data_set/perm_api_metalava_by_perm.json")
     if not ds.is_file():
         pytest.skip("full AOSP dataset not present")
     from dexllm.dangerous_api import _REF, _parse_api
 
+    clean = re.compile(r"^[A-Za-z_$][\w$]*(\[\])*$")
     table = json.loads(ds.read_text())
     entries = {e for apis in table.values() for e in apis}
     parsed = 0
@@ -364,6 +371,8 @@ def test_full_dataset_parses_without_crash():
             continue
         cls, method, types = _parse_api(e)  # must not raise
         assert cls and method
+        if types is not None:
+            assert all(clean.match(t) for t in types), f"anomalous type in {e!r}: {types}"
         parsed += 1
     assert parsed > 1000  # sanity: the table really was exercised
 

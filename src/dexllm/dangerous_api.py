@@ -174,6 +174,11 @@ def _param_simple(param: str) -> str:
     # would otherwise be mistaken for a `Type name` boundary (metalava types carry
     # no param name, so the last whitespace token must NOT be dropped for them).
     p = re.sub(r"<.*>", "", param).strip()
+    # Count + strip array markers wherever they sit — `int[] x`, `int x[]` (C-style),
+    # and varargs `int...` all denote an array and the brackets can attach to the
+    # type OR the (raw-fallback) param name.
+    dims = p.count("[]") + (1 if "..." in p else 0)
+    p = p.replace("[]", " ").replace("...", " ").strip()
     if ":" in p:
         # Kotlin `name: Type` — the type is after the (last top-level) colon.
         type_str = p.rsplit(":", 1)[-1].strip()
@@ -185,15 +190,8 @@ def _param_simple(param: str) -> str:
         # a single token and is kept as-is.
         type_str = " ".join(toks[:-1]) if len(toks) >= 2 else toks[0]
     type_str = type_str.rstrip("?").strip()  # Kotlin nullable `String?` -> String
-    arr = ""
-    while type_str.endswith("[]"):
-        arr += "[]"
-        type_str = type_str[:-2].strip()
-    if type_str.endswith("..."):  # varargs are arrays in the descriptor
-        arr += "[]"
-        type_str = type_str[:-3].strip()
     base = _simple_name(type_str)
-    return _KOTLIN_ALIASES.get(base, base) + arr
+    return _KOTLIN_ALIASES.get(base, base) + "[]" * dims
 
 
 def _parse_api(entry: str) -> tuple[str, str, tuple[str, ...] | None]:
@@ -210,10 +208,10 @@ def _parse_api(entry: str) -> tuple[str, str, tuple[str, ...] | None]:
         # No balanced `(...)` — a field/constant (or malformed entry); not a call.
         return cls, rest, None
     name = rest[:open_p]
-    if name == cls.rsplit(".", 1)[-1]:
-        # The dataset writes a constructor as `Class#SimpleName(...)`; the dex
-        # external ref names it `<init>`. Normalise so the two match.
-        name = "<init>"
+    # NOTE: a constructor entry `Class#SimpleName(...)` keeps its literal name here;
+    # _external_method_index aliases the dex `<init>` ref under the class simple name
+    # so they match. We deliberately do NOT rewrite name to `<init>` — that would
+    # make a static method coincidentally named like its class miss its real ref.
     # Strip annotations (incl their `(...)` args) FIRST so an annotation's inner
     # `=`/`,` can't leak into a type or be miscounted as a parameter separator.
     params = _ANNOTATION.sub(" ", rest[open_p + 1 : close_p])
@@ -287,7 +285,13 @@ def _external_method_index(dk: DexKit) -> dict[tuple[str, str], list[Any]]:
     idx: dict[tuple[str, str], list[Any]] = {}
     for ref in dk.list_external_method_refs(False):
         # canonicalise inner-class `$` -> `.` to match _parse_api's class key.
-        idx.setdefault((ref.java_class.replace("$", "."), ref.name), []).append(ref)
+        cls = ref.java_class.replace("$", ".")
+        idx.setdefault((cls, ref.name), []).append(ref)
+        # The dataset writes a constructor as `Class#SimpleName(...)` (the dex
+        # ref name is `<init>`). Alias each ctor ref under the class simple name
+        # so that dataset key matches without rewriting the dataset side.
+        if ref.name == "<init>":
+            idx.setdefault((cls, cls.rsplit(".", 1)[-1]), []).append(ref)
     return idx
 
 
@@ -299,18 +303,25 @@ def _overload_index(
     Drives the ambiguity check: a method with one overload — or one overload of a
     given arity — needs no signature parsing to disambiguate.
     """
-    seen: dict[tuple[str, str], set[tuple[str, ...]]] = {}
+    # Dedup by the full signature STRING, not the reduced simple-type tuple: two
+    # distinct overloads can reduce to the same simple tuple (e.g. java.util.Date
+    # vs java.sql.Date -> ('Date',)). Counting tuples would collapse them to one,
+    # wrongly firing the single-overload short-circuit in _ref_matches and matching
+    # any same-arity call. (A signature may repeat across perms via anyOf — the set
+    # of strings dedups those correctly.)
+    seen: dict[tuple[str, str], set[str]] = {}
     for sigs in table.values():
         for sig in sigs:
             cls, method, types = _parse_api(sig)
             if types is None:
                 continue
-            seen.setdefault((cls, method), set()).add(types)
+            seen.setdefault((cls, method), set()).add(sig)
     out: dict[tuple[str, str], dict[int, int]] = {}
-    for cm, type_set in seen.items():
+    for cm, sig_set in seen.items():
         arity: dict[int, int] = {}
-        for t in type_set:
-            arity[len(t)] = arity.get(len(t), 0) + 1
+        for sig in sig_set:
+            n = len(_parse_api(sig)[2] or ())
+            arity[n] = arity.get(n, 0) + 1
         out[cm] = arity
     return out
 
