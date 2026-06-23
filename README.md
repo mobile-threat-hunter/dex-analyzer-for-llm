@@ -15,11 +15,12 @@ parallel-safe — rather than Xposed module development.
 | APK load | ~28 ms (lazy slicer parse + load-time structural verification — ~100× faster than androguard; multiple grows with APK size: Telegram's 39 k classes / 5 dex load in ~120 ms) |
 | Decompile | DAD-quality Java; 4.5× faster per-method than androguard |
 | Multidex | first-wins duplicate-class resolution, deterministic — matches ART/AOSP, so a packer's class collisions decompile to the body that actually runs |
+| Unpack workflow | `DexKit([dump, apk])` loads multiple sources with **priority by order** (decrypted dex first → first-wins makes it win, mirroring ART); `add_dumped_dexes()` is the re-analyze-after-dumping verb; `lenient=True` verifies in **ART-structural-equivalent** mode so a partially-decrypted dump still loads |
 | Memory | ~520 MB on a 39k-class app — embeddable in-process, no JVM |
 | Parallel | C++ releases the GIL → real multi-threaded decompile from one in-process instance |
 | Search | L1–L7 (name / string / annotation / super / API call-site / xref) — 3–6× faster than androguard |
-| C2 / IOC | `extract_iocs()` — static URL / IP / domain / email / onion extraction from dex strings, each tied to its referencing method (VirusTotal's contacted-addresses view, recovered with no execution) |
-| Permissions | `dangerous_permission_apis()` / `dangerous_permission_api_callers()` — which dangerous permissions the APK exercises through real framework API calls (AOSP `@RequiresPermission` map), and the methods that call them |
+| C2 / IOC | `extract_iocs()` — static URL / IP / domain / email / onion extraction over the value-string feed (`list_value_strings()`: const-string + static `VALUE_STRING`, no identifier noise), **defang-aware** (`hxxp://`, `[.]`, `[at]`), public-suffix-validated, each tied to its referencing method (VirusTotal's contacted-addresses view, no execution) |
+| Permissions | `dangerous_permission_apis()` / `dangerous_permission_api_callers()` — which dangerous permissions the APK exercises through real framework API calls, **signature-precise** against AOSP's metalava `@RequiresPermission` map (overloads disambiguated), and the methods that call them |
 | AST | `decompile_method_ast` returns the full androguard `dast.py` nested AST |
 | LLM | `dexllm.tools` catalog → MCP stdio server + FastAPI/SSE web backend |
 
@@ -227,9 +228,9 @@ macOS 13.3+), CPython 3.9–3.13, are attached to this repo's
 `pip` picks the wheel matching your platform/Python — no C++ compiler needed:
 
 ```bash
-pip install dexllm --find-links https://github.com/mobile-threat-hunter/dex-analyzer-for-llm/releases/expanded_assets/v0.1.4
+pip install dexllm --find-links https://github.com/mobile-threat-hunter/dex-analyzer-for-llm/releases/expanded_assets/v0.1.6
 # + LLM backends (MCP + FastAPI); the extra deps resolve from PyPI:
-pip install "dexllm[all]" --find-links https://github.com/mobile-threat-hunter/dex-analyzer-for-llm/releases/expanded_assets/v0.1.4
+pip install "dexllm[all]" --find-links https://github.com/mobile-threat-hunter/dex-analyzer-for-llm/releases/expanded_assets/v0.1.6
 ```
 
 (Or download a specific `.whl` from the [Releases page](https://github.com/mobile-threat-hunter/dex-analyzer-for-llm/releases) and `pip install ./that-file.whl`.)
