@@ -337,7 +337,7 @@ ContainerInfo DexKitExt::Identify(const std::string& path) {
     return info;
 }
 
-void DexKitExt::CollectSource(const std::string& path,
+void DexKitExt::CollectSource(const std::string& path, bool check_insns,
                              std::vector<std::unique_ptr<dexkit::MemMap>>& out) {
     Probe p = ProbeContainer(path);  // one content-based classification
 
@@ -355,7 +355,7 @@ void DexKitExt::CollectSource(const std::string& path,
         // Structural gate (DexVerifier) BEFORE the core parses the image — a
         // malformed dex is screened out here so the core/slicer never touch it.
         auto vr = VerifyDex(reinterpret_cast<const uint8_t*>(p.map->data()),
-                            p.map->len());
+                            p.map->len(), check_insns);
         verify_status_.push_back(
             {static_cast<int>(out.size()), path, vr.ok, vr.reason});
         if (!vr.ok) {
@@ -387,7 +387,8 @@ void DexKitExt::CollectSource(const std::string& path,
             verify_status_.push_back({-1, name, false, "decompression failed"});
             continue;
         }
-        auto vr = VerifyDex(reinterpret_cast<const uint8_t*>(mm.data()), mm.len());
+        auto vr = VerifyDex(reinterpret_cast<const uint8_t*>(mm.data()), mm.len(),
+                            check_insns);
         if (!vr.ok) {
             verify_status_.push_back({-1, name, false, vr.reason});
             continue;
@@ -402,15 +403,17 @@ void DexKitExt::CollectSource(const std::string& path,
     }
 }
 
-DexKitExt::DexKitExt(const std::string& apk_path) : apk_path_(apk_path) {
+DexKitExt::DexKitExt(const std::string& apk_path, bool lenient)
+    : apk_path_(apk_path), sources_{apk_path} {
     core_ = std::make_unique<dexkit::DexKit>();
     std::vector<std::unique_ptr<dexkit::MemMap>> valid_dexes;
-    CollectSource(apk_path, valid_dexes);
+    CollectSource(apk_path, /*check_insns=*/!lenient, valid_dexes);
     core_->AddImage(std::move(valid_dexes));
 }
 
-DexKitExt::DexKitExt(const std::vector<std::string>& sources)
-    : apk_path_(sources.empty() ? std::string{} : sources.front()) {
+DexKitExt::DexKitExt(const std::vector<std::string>& sources, bool lenient)
+    : apk_path_(sources.empty() ? std::string{} : sources.front()),
+      sources_(sources) {
     if (sources.empty()) {
         throw std::runtime_error("dexllm: no dex sources given");
     }
@@ -419,7 +422,7 @@ DexKitExt::DexKitExt(const std::vector<std::string>& sources)
     // resolution prefers them (load a decrypted/dumped dex first to win).
     std::vector<std::unique_ptr<dexkit::MemMap>> valid_dexes;
     for (const auto& src : sources) {
-        CollectSource(src, valid_dexes);
+        CollectSource(src, /*check_insns=*/!lenient, valid_dexes);
     }
     core_->AddImage(std::move(valid_dexes));
 }

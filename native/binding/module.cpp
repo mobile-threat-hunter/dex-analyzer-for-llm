@@ -104,21 +104,22 @@ py::object AstToPy(const dexkit::dad::AstValue& v) {
 
 class PyDexKit {
 public:
-    explicit PyDexKit(const std::string& apk_path)
-        : ext_(apk_path),
+    explicit PyDexKit(const std::string& apk_path, bool lenient = false)
+        : ext_(apk_path, lenient),
           decompiler_(std::make_unique<dexkit::dad::Decompiler>(
               ext_.GetCodeSource())) {}
 
     // Multi-source load: sources are loaded in order, earlier ones get lower
     // dex_ids → first-wins prefers them. Load a decrypted/dumped dex first to
     // make the unpacked class win a collision (packer / runtime-unpack workflow).
-    explicit PyDexKit(const std::vector<std::string>& sources)
-        : ext_(sources),
+    explicit PyDexKit(const std::vector<std::string>& sources, bool lenient = false)
+        : ext_(sources, lenient),
           decompiler_(std::make_unique<dexkit::dad::Decompiler>(
               ext_.GetCodeSource())) {}
 
     int dex_count() const { return ext_.DexCount(); }
     const std::string& apk_path() const { return ext_.GetApkPath(); }
+    std::vector<std::string> sources() const { return ext_.GetSources(); }
     int locate_class_dex(const std::string& descriptor) const {
         return ext_.LocateClassDex(descriptor);
     }
@@ -470,21 +471,30 @@ PYBIND11_MODULE(_dexkit_core, m) {
         });
 
     py::class_<PyDexKit>(m, "DexKit")
-        .def(py::init<const std::string&>(), py::arg("apk_path"),
+        .def(py::init<const std::string&, bool>(), py::arg("apk_path"),
+             py::arg("lenient") = false,
              "Load a DEX source. Accepts a zip container (.apk/.jar/.zip — all "
              "classes*.dex inside are loaded) or a bare .dex file (detected by "
              "its 'dex\\n' magic). The arg keeps the name apk_path for "
-             "backward compatibility.")
-        .def(py::init<const std::vector<std::string>&>(), py::arg("sources"),
+             "backward compatibility. lenient=True verifies in ART-structural-"
+             "equivalent mode (skips instruction-operand checks) so a runtime-"
+             "dumped, partially-decrypted dex still loads.")
+        .def(py::init<const std::vector<std::string>&, bool>(), py::arg("sources"),
+             py::arg("lenient") = false,
              "Load MULTIPLE sources with PRIORITY BY ORDER. Each source (a bare "
              ".dex or a zip/apk) is loaded in turn, so sources earlier in the list "
              "get lower dex_ids. Class resolution is first-wins (lowest dex_id), so "
              "the FIRST source wins a class collision — for a packer/runtime-unpack "
              "workflow, list a decrypted/dumped dex BEFORE the original apk to make "
              "the unpacked class win (mirrors ART, where the packer orders the "
-             "decrypted dex first). Each dex still passes the load-time verifier.")
+             "decrypted dex first). Each dex still passes the load-time verifier; "
+             "lenient=True uses ART-structural-equivalent verification for "
+             "partially-decrypted dumps.")
         .def("dex_count", &PyDexKit::dex_count)
         .def("apk_path", &PyDexKit::apk_path)
+        .def("sources", &PyDexKit::sources,
+             "The source list this instance was loaded from (length 1 for a single "
+             "apk/dex). Used by dexllm.add_dumped_dexes to rebuild with extra dexes.")
         .def("locate_class_dex", &PyDexKit::locate_class_dex,
              py::arg("class_descriptor"),
              "Return dex_id where the class is declared, or -1 if external.")

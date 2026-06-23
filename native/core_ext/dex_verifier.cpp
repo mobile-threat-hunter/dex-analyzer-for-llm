@@ -256,7 +256,8 @@ bool IsValidDescriptor(const char* s) {
 // ─────────────────────────────────────────────────────────────────────────────
 class DexVerifier {
 public:
-    DexVerifier(const u1* data, size_t size) : begin_(data), size_(size) {}
+    DexVerifier(const u1* data, size_t size, bool check_insns = true)
+        : begin_(data), size_(size), check_insns_(check_insns) {}
 
     bool Verify() {
         if (begin_ == nullptr || size_ < dex::Header::kV40Size) {
@@ -399,6 +400,7 @@ private:
 
     const u1* begin_;
     size_t size_;
+    bool check_insns_ = true;  // false = ART-structural-equivalent (skip VerifyInsns)
     const dex::Header* header_ = nullptr;
     std::string reason_;
 };
@@ -558,7 +560,12 @@ bool DexVerifier::VerifyCodeItem(u4 off) {
     const u2 tries_size = code->tries_size;
     const u1* insns = base + sizeof(dex::Code);
     if (!CheckListSize(insns, insns_size, sizeof(u2), "insns")) return false;
-    if (!VerifyInsns(reinterpret_cast<const u2*>(insns), insns_size,
+    // VerifyInsns (operand bounds) is beyond ART's structural verifier; skip it in
+    // ART-structural-equivalent mode so a partially-decrypted dump (garbage method
+    // bodies, valid structure) passes — exactly what ART loads. The insns byte
+    // span is still bounded by CheckListSize above.
+    if (check_insns_ &&
+        !VerifyInsns(reinterpret_cast<const u2*>(insns), insns_size,
                      code->registers_size)) {
         return false;
     }
@@ -1089,9 +1096,9 @@ bool DexVerifier::FindFirstClassDataDefiner(u4 off, u4* out) {
 
 }  // namespace
 
-DexVerifyResult VerifyDex(const u1* data, size_t size) {
+DexVerifyResult VerifyDex(const u1* data, size_t size, bool check_insns) {
     try {
-        DexVerifier v(data, size);
+        DexVerifier v(data, size, check_insns);
         if (v.Verify()) return {true, {}};
         return {false, v.reason()};
     } catch (const std::exception& e) {

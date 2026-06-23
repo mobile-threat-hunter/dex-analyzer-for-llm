@@ -92,7 +92,23 @@ Each source is a bare `.dex` or a zip/apk, every dex still passes the load-time
 verifier, and classes from **all** sources are cross-indexed (search/decompile see
 the merged set). This is the static side of the unpack workflow — dump the
 decrypted dex with an external dynamic tool, then load it first. (`apk_path()`
-reports the first source.)
+reports the first source; `sources()` returns the whole list.)
+
+`dexllm.add_dumped_dexes` is the ergonomic verb for the "re-analyze after dumping"
+step — it rebuilds from the dump(s) **plus** the current sources:
+
+```python
+dk = dexllm.DexKit("app.apk")
+# ... detect packing, dump the decrypted dex to /tmp/dump.dex with a dynamic tool ...
+dk = dexllm.add_dumped_dexes(dk, "/tmp/dump.dex")   # dump prepended → unpacked wins
+dk.decompile_class_java("Lcom/evil/RealC2;")        # the real body
+```
+
+Defaults: `prefer=True` (dumps loaded first → win collisions) and `lenient=True`
+(verify in **ART-structural-equivalent** mode — skip instruction-operand checks — so
+a *partially*-decrypted dump, with valid structure but garbage method bodies, still
+loads, exactly as ART loads it; header/structure/bounds are still verified). It
+returns a fresh `DexKit` (a clean rebuild, consistent caches) — keep the new handle.
 
 The single-source constructor argument is still named `apk_path` for backward
 compatibility. A zip APK loads in ~150ms for a 50-dex app using zero-copy slicer-based dex parsing. Subsequent operations cache aggressively — the second call is always ≤1µs marshalling overhead plus the algorithm cost.

@@ -61,6 +61,7 @@ from .filters import (
 )
 from .format import format_class, format_class_summary
 from .ioc import IOC_CATEGORIES, extract_iocs
+from .packer import add_dumped_dexes
 from .safe import (
     DEFAULT_TIMEOUT_S,
     is_timeout_marker,
@@ -79,6 +80,7 @@ __all__ = [
     "ExternalMethodRef",
     "ExternalTypeRef",
     "ResolvedCallSite",
+    "add_dumped_dexes",
     "descriptor_to_java",
     "descriptors",
     "filter_field_refs",

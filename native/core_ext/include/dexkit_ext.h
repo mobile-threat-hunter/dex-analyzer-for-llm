@@ -43,7 +43,10 @@ public:
     // .dex nor a valid zip/apk container.
     static ContainerInfo Identify(const std::string& path);
 
-    explicit DexKitExt(const std::string& apk_path);
+    // `lenient` runs the load-time verifier in ART-structural-equivalent mode
+    // (VerifyInsns off) so a runtime-dumped, partially-decrypted dex with garbage
+    // method bodies but valid structure still loads — see VerifyDex's `check_insns`.
+    explicit DexKitExt(const std::string& apk_path, bool lenient = false);
 
     // Multi-source load with PRIORITY BY ORDER. Each source (a raw .dex or a
     // zip/apk) is verified and loaded in turn, so sources earlier in the list get
@@ -51,8 +54,8 @@ public:
     // FIRST source wins a class-descriptor collision — load a runtime-decrypted /
     // dumped dex BEFORE the original apk to make the unpacked class win (mirrors
     // ART, where the packer orders the decrypted dex first). apk_path() reports
-    // the first source. Throws if no source yields a structurally-valid dex.
-    explicit DexKitExt(const std::vector<std::string>& sources);
+    // the first source. `lenient` as above. Throws if no source yields a valid dex.
+    explicit DexKitExt(const std::vector<std::string>& sources, bool lenient = false);
 
     ~DexKitExt();
 
@@ -65,6 +68,8 @@ public:
 
     [[nodiscard]] int DexCount() const;
     [[nodiscard]] const std::string& GetApkPath() const { return apk_path_; }
+    // The source list this instance was constructed from (for rebuild-with-dumps).
+    [[nodiscard]] const std::vector<std::string>& GetSources() const { return sources_; }
 
     // Structural-verification report, one entry per dex the loader considered.
     // Rejected dexes (valid==false) were screened out at the load boundary with
@@ -234,10 +239,11 @@ private:
     // zip/apk) onto the end of `out`, recording per-dex verdicts in verify_status_
     // with the running combined dex_id. Throws if the source can't be opened or
     // isn't a dex/zip container; per-dex verify failures are recorded and skipped.
-    void CollectSource(const std::string& path,
+    void CollectSource(const std::string& path, bool check_insns,
                        std::vector<std::unique_ptr<dexkit::MemMap>>& out);
 
     std::string apk_path_;
+    std::vector<std::string> sources_;  // original construction sources
     std::unique_ptr<dexkit::DexKit> core_;
     bool analysis_caches_warm_ = false;
     std::unique_ptr<DexItemCodeSource> code_source_;  // lazy-constructed

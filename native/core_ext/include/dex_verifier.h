@@ -118,6 +118,15 @@ struct DexVerifyResult {
 // Verify one logical dex image [data, data+size). Offsets in the dex are taken
 // relative to `data` (a standard v35–40 dex, or one classes*.dex extracted from
 // an apk). Never reads outside [data, data+size); never crashes.
-DexVerifyResult VerifyDex(const uint8_t* data, size_t size);
+//
+// `check_insns` (default true) gates the ONE deliberate non-port: VerifyInsns
+// (instruction-operand bounds), which ART's *structural* DexFileVerifier does not
+// do. Set false for an "ART-structural-equivalent" pass that accepts a
+// structurally-valid dex whose method bodies are garbage — e.g. a runtime-dumped,
+// partially-decrypted dex from a packer, where only the currently-executing
+// methods are decrypted. ART loads such a dex (it defers instruction validity to
+// the runtime method_verifier, which packers skip); this lets the analyzer do the
+// same WITHOUT relaxing any header/structure/bounds check.
+DexVerifyResult VerifyDex(const uint8_t* data, size_t size, bool check_insns = true);
 
 }  // namespace dexkit::ext
