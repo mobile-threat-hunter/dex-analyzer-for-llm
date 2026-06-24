@@ -813,6 +813,11 @@ void Writer::EmitThrow(ThrowBlock* thr) {
 }
 
 void Writer::EmitIf(CondBlock* cond) {
+    // D-3 — map the `if (…)` header line once. All three emit forms below
+    // (both-branches-same comment, break form, normal) open their header on the
+    // current line and share the same if-test offset; recording once here is
+    // cleaner than three call sites and the same-line dedup is a backstop.
+    RecordLine(CondReprIns(cond));
     if (cond->false_branch == cond->true_branch) {
         // DAD writer.py:285-306 — when both branches point to the same code,
         // emit a comment explaining the situation, the commented condition,
@@ -919,6 +924,7 @@ void Writer::EmitLoop(LoopBlock* loop) {
             loop->neg();
             std::swap(loop->true_branch, loop->false_branch);
         }
+        RecordLine(CondReprIns(loop));  // D-3 — pretest `while (cond)` line
         WriteIndent(); Write("while (");
         // DAD writer.py:246 loop.visit_cond(self) — dispatches to either
         // CondBlock (single ins) or Condition (short-circuit composite).
@@ -958,6 +964,9 @@ void Writer::EmitLoop(LoopBlock* loop) {
         // DAD writer.py:269 emits the posttest latch as `} while(` WITHOUT a
         // space (unlike the pretest `while (` form, like the endless
         // `while(true)`). Match it exactly.
+        // D-3 — posttest `} while(latch)` line ↔ latch's dex offset.
+        if (auto* latch_cb = dynamic_cast<CondBlock*>(loop->latch))
+            RecordLine(CondReprIns(latch_cb));
         WriteIndent(); Write("} while(");
         // DAD writer.py:271 loop.latch.visit_cond(self). visit_cond dispatches
         // virtually: a plain CondBlock latch emits its single ins; a
@@ -977,6 +986,7 @@ void Writer::EmitSwitch(SwitchBlock* sw) {
     auto lins = sw->get_ins();
     WriterImpl wi(this); wi.constructor_ = is_constructor_;
     for (size_t i = 0; i + 1 < lins.size(); ++i) VisitIns(lins[i]);
+    if (!lins.empty()) RecordLine(lins.back().get());  // D-3 — `switch (x)` line
     WriteIndent(); Write("switch (");
     if (!lins.empty()) lins.back()->Accept(wi);
     Write(") {\n");
@@ -1054,9 +1064,32 @@ void Writer::VisitIns(const IRFormPtr& ins) {
     if (!ins) return;
     IRForm* op = ins.get();
     if (dynamic_cast<NopExpression*>(op)) return;
+    // D-3 — map this statement's line, but ONLY if it emits a REAL statement.
+    // An elided implicit super()/this() is an AssignExpression whose suppressed
+    // invoke sets skip_ and omits the trailing `;`: it still writes the line
+    // indent (so the buffer grows) yet contributes no statement, and the next
+    // real statement reuses that indent on the same line. Recording its offset
+    // (0) would then claim that line via first-anchor-wins and stamp the wrong
+    // offset. Record iff the buffer grew AND the statement wasn't elided
+    // (skip_ is set by the elision and not yet consumed by the next
+    // WriteIndent). Mirrors the AST path, where ins_to_stmt returns null for
+    // the elided super and add_off no-ops.
+    const uint32_t line_at_start = current_line_;
+    const auto pos_before = buffer_.tellp();
     WriterImpl wi(this);
     wi.constructor_ = is_constructor_;
     op->Accept(wi);
+    if (buffer_.tellp() != pos_before && !skip_)
+        RecordLineAt(line_at_start, op);
+}
+
+// D-3 — representative offset-bearing IR for a condition/loop/switch header.
+// Delegates to CondBlock::repr_ins (virtual), which dispatches the
+// ShortCircuitBlock / LoopBlock / plain-CondBlock cases in one place (the same
+// recovery JSONWriter::pc_map uses). The returned pointer is graph-owned and
+// outlives the call.
+const IRForm* Writer::CondReprIns(CondBlock* node) {
+    return node ? node->repr_ins() : nullptr;
 }
 
 // Kept for backwards-compat; new path uses WriterImpl via VisitIns.

@@ -39,6 +39,7 @@ void DvMethod::Process() {
     Writer w(snap_.get(), graph_.get());
     w.WriteMethod();
     source_ = w.str();
+    pc_map_ = w.pc_map();  // D-3 — (line ↔ dex offset)
 }
 
 AstValue DvMethod::ProcessAst() {
@@ -49,7 +50,9 @@ AstValue DvMethod::ProcessAst() {
         return jw.get_ast();
     }
     JSONWriter jw(snap_.get(), graph_.get());
-    return jw.get_ast();
+    AstValue ast = jw.get_ast();
+    pc_map_ = jw.pc_map();  // D-3 — (statement_seq ↔ dex offset)
+    return ast;
 }
 
 bool DvMethod::BuildProcessedGraph() {

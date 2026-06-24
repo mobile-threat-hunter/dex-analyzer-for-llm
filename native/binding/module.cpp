@@ -262,6 +262,22 @@ public:
     std::string decompile_method_java(const std::string& descriptor) const {
         return decompiler_->DecompileMethod(descriptor);
     }
+    // D-3 (dexllm#1) — Java text + (line ↔ dex byte offset) map for smali
+    // sync. Returns {"source": str, "pc_map": [[line, byte_off], ...]}.
+    py::dict decompile_method_java_with_pc(const std::string& descriptor) const {
+        dexkit::dad::Decompiler::DecompiledMethodWithMap r;
+        {
+            py::gil_scoped_release release;  // same as decompile_method_java
+            r = decompiler_->DecompileMethodWithPcMap(descriptor);
+        }
+        py::dict out;
+        out["source"] = r.source;
+        py::list pc;
+        for (const auto& [line, off] : r.pc_map)
+            pc.append(py::make_tuple(line, off));
+        out["pc_map"] = std::move(pc);
+        return out;
+    }
     std::string decompile_class_java(const std::string& descriptor) const {
         return decompiler_->DecompileClass(descriptor);
     }
@@ -287,6 +303,12 @@ public:
         // Full nested AST (DAD dast.py get_ast): {triple, flags, ret, params,
         // comments, body}. None if the method was not found / failed.
         out["ast"] = AstToPy(ast.ast);
+        // D-3 — sidechannel (statement_seq ↔ dex byte offset) map; kept out of
+        // `ast` so the tree stays byte-identical to androguard.
+        py::list astpc;
+        for (const auto& [seq, off] : ast.ast_pc_map)
+            astpc.append(py::make_tuple(seq, off));
+        out["pc_map"] = std::move(astpc);
         return out;
     }
     void decompiler_clear_cache() { decompiler_->ClearCache(); }
@@ -615,6 +637,14 @@ PYBIND11_MODULE(_dexkit_core, m) {
              "Decompile a single method to Java via DAD C++ port. "
              "Releases the GIL during execution to allow true parallel "
              "decompilation. Alias of decompile_method.")
+        .def("decompile_method_java_with_pc",
+             &PyDexKit::decompile_method_java_with_pc,
+             py::arg("method_descriptor"),
+             "Decompile a method to Java plus a source-line ↔ dex bytecode "
+             "offset map for smali sync. Returns {'source': str, 'pc_map': "
+             "[(line_1based, byte_off), ...]} (one entry per line, "
+             "first-anchor-wins; lines with no source op omitted). GIL "
+             "released during execution.")
         .def("decompile_class_java",
              [](const PyDexKit& self, const std::string& desc) {
                  py::gil_scoped_release release;

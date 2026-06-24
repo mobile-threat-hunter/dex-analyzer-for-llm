@@ -106,6 +106,22 @@ public:
     // flags, swaps branches), so run on a freshly-built graph.
     AstValue get_ast();
 
+    // D-3 (dexllm#1) — sidechannel (statement_seq, dex_byte_offset) map,
+    // populated as a side-effect of get_ast(). Kept OUT of the AST tree so the
+    // nested-list AST stays byte-identical to androguard (CLAUDE.md invariant).
+    // Key = the statement node's index in **add()-order**, which equals a
+    // post-order DFS of the final AST body (a container is appended to its
+    // parent only after its child blocks are built). Consumer contract: walk
+    // the AST body post-order (ALL child blocks before the node — for a
+    // TryStatement that means the try-block THEN every catch body block; for a
+    // SwitchStatement every per-case body; for a loop its body block), counting
+    // every appended (non-null) statement node from 0; entry i ⇒ that node's
+    // offset. Only condition / loop / switch headers and plain statements carry
+    // an offset; structural nodes (break, try) consume an index with none.
+    const std::vector<std::pair<uint32_t, uint32_t>>& pc_map() const {
+        return ast_pc_map_;
+    }
+
 private:
     // ── node-level visitors (DAD dast.py:120-330) ───────────────────────────
     void visit_node(NodeBase* node);
@@ -138,6 +154,14 @@ private:
     // ── context stack (DAD's `with self as body:` pattern) ──────────────────
     static AstValue statement_block();    // ['BlockStatement', null, []]
     void add(AstValue v);                 // append to current block
+    // D-3 — like add(), but records (ast_seq_, off) for this statement node
+    // before bumping the counter. Use for offset-bearing statements (plain
+    // stmts + condition/loop/switch headers). Plain add() still increments the
+    // shared counter so indices stay aligned for offset-less nodes.
+    void add_off(AstValue v, uint32_t off);
+    // D-3 — representative dex offset for a condition/loop/switch header IR.
+    // Mirrors get_cond_block's short-circuit/loop dispatch.
+    uint32_t CondReprOff(CondBlock* node);
     template <class F> AstValue scope(F&& body);  // with self as scope: ...
 
     // var_map lookup helper: op.var_map[key] → IRForm* (null if missing).
@@ -157,6 +181,10 @@ private:
     NodeBase* next_case_ = nullptr;
     bool need_break_ = true;
     bool constructor_ = false;
+
+    // D-3 — AST pc_map harvest state.
+    uint32_t ast_seq_ = 0;
+    std::vector<std::pair<uint32_t, uint32_t>> ast_pc_map_;
 };
 
 // DAD: dast.py:639 parse_descriptor — Dalvik descriptor → TypeName / Dummy AST.

@@ -22,6 +22,7 @@ parallel-safe — rather than Xposed module development.
 | C2 / IOC | `extract_iocs()` — static URL / IP / domain / email / onion extraction over the value-string feed (`list_value_strings()`: const-string + static `VALUE_STRING`, no identifier noise), **defang-aware** (`hxxp://`, `[.]`, `[at]`), public-suffix-validated, each tied to its referencing method (VirusTotal's contacted-addresses view, no execution) |
 | Permissions | `dangerous_permission_apis()` / `dangerous_permission_api_callers()` — which dangerous permissions the APK exercises through real framework API calls, **signature-precise** against AOSP's metalava `@RequiresPermission` map (overloads disambiguated), and the methods that call them |
 | AST | `decompile_method_ast` returns the full androguard `dast.py` nested AST |
+| Smali sync | `decompile_method_java_with_pc` returns Java text + a source-line ↔ bytecode-offset `pc_map` (condition/loop/switch headers included) for precise smali ↔ Java cursor sync; parity-neutral metadata |
 | LLM | `dexllm.tools` catalog → MCP stdio server + FastAPI/SSE web backend |
 
 See [docs/workflow.md](docs/workflow.md) for how dexllm operates end to end (load →
@@ -277,6 +278,7 @@ for ref in dk.list_external_method_refs(framework_only=True)[:10]:
 print(dk.decompile_method_java("Lcom/example/Foo;->bar()V"))
 print(dk.decompile_class_java("Lcom/example/Foo;"))
 ast = dk.decompile_method_ast("Lcom/example/Foo;->bar()V")   # nested AST + Java text
+pc = dk.decompile_method_java_with_pc("Lcom/example/Foo;->bar()V")  # {"source", "pc_map": [(line, byte_off), …]}
 
 # Search
 for m in dk.find_methods_using_strings(["http"]):

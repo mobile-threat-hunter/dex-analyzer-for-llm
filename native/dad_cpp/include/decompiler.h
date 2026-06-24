@@ -9,6 +9,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <list>
 #include <mutex>
 #include <shared_mutex>
@@ -16,6 +17,7 @@
 #include <string_view>
 #include <unordered_map>
 #include <utility>
+#include <vector>
 
 #include "dast.h"
 #include "dex_code_source.h"
@@ -40,6 +42,18 @@ public:
     // as `// ERROR: <msg>` comments.
     std::string DecompileClass(std::string_view class_descriptor);
 
+    // D-3 (dexllm#1) — Java source plus a (line ↔ dex byte offset) map for
+    // smali ↔ Java cursor sync. pc_map is sorted ascending by line, one entry
+    // per line (first-anchor-wins), lines with no source op omitted. NOT
+    // cached (the text LRU stores strings only); recompute is cheap. Returns
+    // {"", {}} if the descriptor isn't found.
+    struct DecompiledMethodWithMap {
+        std::string source;
+        std::vector<std::pair<uint32_t, uint32_t>> pc_map;
+    };
+    DecompiledMethodWithMap DecompileMethodWithPcMap(
+        std::string_view method_descriptor);
+
     // Minimal AST for a method: signature components + body source.
     // Downstream tools get structured signature data without needing a
     // Java parser; the body remains as decompiled text for now. (Full
@@ -56,6 +70,10 @@ public:
         // Full nested AST — DAD dast.py get_ast() dict
         // {triple, flags, ret, params, comments, body}. Null if not found.
         AstValue ast;
+        // D-3 (dexllm#1) — sidechannel (statement_seq ↔ dex byte offset) map.
+        // Kept out of `ast` so the tree stays byte-identical to androguard;
+        // key = post-order DFS statement index (see JSONWriter::pc_map).
+        std::vector<std::pair<uint32_t, uint32_t>> ast_pc_map;
     };
     // `include_source` controls whether the Java text `source` field is also
     // populated. The text requires a SECOND full pipeline run (the AST and
@@ -76,6 +94,13 @@ public:
 private:
     bool LocateMethod(std::string_view descriptor,
                       uint16_t& dex_id, uint32_t& method_idx);
+
+    // D-3 — shared decompile body: build snapshot → DvMethod::Process →
+    // SanitizeUtf8. Fills *pc_map (line ↔ offset) when non-null. Used by the
+    // cached DecompileMethod (map ignored) and the uncached
+    // DecompileMethodWithPcMap (map returned), so the two can't drift.
+    std::string RunPipeline(uint16_t dex_id, uint32_t method_idx,
+                            std::vector<std::pair<uint32_t, uint32_t>>* pc_map);
 
     // LRU bookkeeping: list nodes hold (key, value); map keys are
     // string_views into the list's key strings so we don't double-store the

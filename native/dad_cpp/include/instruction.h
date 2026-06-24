@@ -182,6 +182,15 @@ public:
     std::unordered_map<std::string, IRFormPtr> var_map;
     // DAD: instruction.py:24 self.type — public; subclasses write directly.
     std::string type;
+
+    // D-3 (dexllm#1) — byte offset of the dex instruction this IR node was
+    // built from. UINT32_MAX = synthesized node (loop headers, short-circuit
+    // wraps, structural braces — no underlying RawIns). Stamped once at the
+    // dispatch funnel (basic_blocks.cpp BuildNodeFromBlock); harvested by the
+    // Writer / JSONWriter into a (line ↔ offset) pc_map. NOT a DAD concept —
+    // metadata only, never read by IR transforms, so DAD output parity is
+    // unaffected. Independent of RawIns::branch_target (different semantics).
+    uint32_t source_byte_off = UINT32_MAX;
 };
 
 // Constant.value in Python is dynamically typed; can be int, float, or

@@ -280,6 +280,11 @@ void CondBlock::visit_cond(Visitor& visitor) {
     visitor.visit_ins(ins.back().get());
 }
 
+// D-3 (dexllm#1) — plain CondBlock: its single if-test ins.
+const IRForm* CondBlock::repr_ins() const {
+    return ins.empty() ? nullptr : ins.back().get();
+}
+
 std::string CondBlock::ToString() const {
     // DAD: basic_blocks.py:165 '%d-If(%s)' % (self.num, self.name)
     return FormatNumName(num, "If", name);
@@ -355,6 +360,12 @@ std::string ShortCircuitBlock::ToString() const {
     return os.str();
 }
 
+// D-3 — last ins of the compound condition (cond->get_ins concatenates arms).
+const IRForm* ShortCircuitBlock::repr_ins() const {
+    auto v = cond->get_ins();
+    return v.empty() ? nullptr : v.back().get();
+}
+
 // =============================================================================
 // LoopBlock — DAD basic_blocks.py:227
 // =============================================================================
@@ -381,6 +392,12 @@ void LoopBlock::visit_cond(Visitor& visitor) {
     // cond form is populated.
     if (cond) cond->visit(visitor);
     else if (cond_block) cond_block->visit_cond(visitor);
+}
+
+// D-3 — last ins of the wrapped loop condition/header.
+const IRForm* LoopBlock::repr_ins() const {
+    auto v = loop_get_ins();
+    return v.empty() ? nullptr : v.back().get();
 }
 
 std::string LoopBlock::ToString() const {
@@ -543,7 +560,15 @@ BuildNodeFromBlock(const RawBlock& block, Vmap& vmap, RetState& gen_ret,
 
         IRFormPtr ir = DispatchInstruction(ri, vmap, gen_ret, payload,
                                            exception_type);
-        if (ir) lins.push_back(std::move(ir));
+        if (ir) {
+            // D-3 (dexllm#1) — stamp the originating dex byte offset onto the
+            // statement-level IR node. This single site covers every node the
+            // Writer/JSONWriter emit (statements + if-test / switch-test), since
+            // DispatchInstruction returns one node per instruction. Harvested
+            // into pc_map at emit time; metadata only, no parity impact.
+            ir->source_byte_off = ri.byte_off;
+            lins.push_back(std::move(ir));
+        }
     }
 
     const std::string& name = block.name;
