@@ -344,6 +344,24 @@ IRForm* JSONWriter::MapGet(const IRForm* owner, const std::string& key) {
 void JSONWriter::add(AstValue v) {
     if (v.is_null()) return;  // DAD: _append only appends non-None.
     context_.back().at(2).push_back(std::move(v));
+    ++ast_seq_;  // D-3 — count this appended statement node (add()-order key).
+}
+
+// D-3 — append + record this statement's dex offset against its add()-order
+// index, then advance the shared counter (kept identical to add()'s bump so
+// offset-less nodes don't desync the index).
+void JSONWriter::add_off(AstValue v, uint32_t off) {
+    if (v.is_null()) return;
+    if (off != UINT32_MAX) ast_pc_map_.emplace_back(ast_seq_, off);
+    context_.back().at(2).push_back(std::move(v));
+    ++ast_seq_;
+}
+
+// D-3 — offset of a condition/loop/switch header's representative ins, via the
+// shared CondBlock::repr_ins dispatch. UINT32_MAX when no offset-bearing ins.
+uint32_t JSONWriter::CondReprOff(CondBlock* node) {
+    const IRForm* ir = node ? node->repr_ins() : nullptr;
+    return ir ? ir->source_byte_off : UINT32_MAX;
 }
 
 // DAD's `with self as scope:` — push a fresh BlockStatement, run body, pop it.
@@ -530,7 +548,16 @@ void JSONWriter::visit_loop_node(LoopBlock* loop) {
         }
     });
 
-    add(LoopStmt(isDo, std::move(cond_expr), std::move(body)));
+    // D-3 — pretest header ↔ loop cond offset; posttest ↔ latch offset;
+    // endless (while(true)) has no source op.
+    uint32_t loop_off = UINT32_MAX;
+    if (loop->looptype.is_pretest()) {
+        loop_off = CondReprOff(loop);
+    } else if (loop->looptype.is_posttest()) {
+        if (auto* lc = dynamic_cast<CondBlock*>(loop->latch))
+            loop_off = CondReprOff(lc);
+    }
+    add_off(LoopStmt(isDo, std::move(cond_expr), std::move(body)), loop_off);
     if (follow) visit_node(follow);
 }
 
@@ -542,7 +569,7 @@ void JSONWriter::visit_cond_node(CondBlock* cond) {
     if (fit != cond->follow.end()) follow = fit->second;
 
     if (cond->false_branch == cond->true_branch) {
-        add(ExpressionStmt(get_cond_block(cond)));
+        add_off(ExpressionStmt(get_cond_block(cond)), CondReprOff(cond));  // D-3
         visit_node(cond->true_branch);
         return;
     }
@@ -557,7 +584,8 @@ void JSONWriter::visit_cond_node(CondBlock* cond) {
         AstValue cond_expr = get_cond_block(cond);
         scopes.push_back(scope([&] { add(JumpStmt("break")); }));
         scopes.push_back(scope([&] { visit_node(cond->false_branch); }));
-        add(IfStmt(std::move(cond_expr), std::move(scopes)));
+        add_off(IfStmt(std::move(cond_expr), std::move(scopes)),
+                CondReprOff(cond));  // D-3
     } else if (follow != nullptr) {
         bool true_is_follow_or_next =
             cond->true_branch == follow || cond->true_branch == next_case_;
@@ -577,13 +605,15 @@ void JSONWriter::visit_cond_node(CondBlock* cond) {
             scopes.push_back(scope([&] { visit_node(cond->false_branch); }));
         }
         if_follow_.pop_back();
-        add(IfStmt(std::move(cond_expr), std::move(scopes)));
+        add_off(IfStmt(std::move(cond_expr), std::move(scopes)),
+                CondReprOff(cond));  // D-3
         visit_node(follow);
     } else {
         AstValue cond_expr = get_cond_block(cond);
         scopes.push_back(scope([&] { visit_node(cond->true_branch); }));
         scopes.push_back(scope([&] { visit_node(cond->false_branch); }));
-        add(IfStmt(std::move(cond_expr), std::move(scopes)));
+        add_off(IfStmt(std::move(cond_expr), std::move(scopes)),
+                CondReprOff(cond));  // D-3
     }
 }
 
@@ -632,7 +662,8 @@ void JSONWriter::visit_switch_node(SwitchBlock* sw) {
                                            std::move(body)}));
     }
 
-    add(SwitchStmt(std::move(cond_expr), std::move(ksv_pairs)));
+    add_off(SwitchStmt(std::move(cond_expr), std::move(ksv_pairs)),
+            lins.empty() ? UINT32_MAX : lins.back()->source_byte_off);  // D-3
     switch_follow_.pop_back();
     visit_node(follow);
 }
@@ -704,7 +735,7 @@ void JSONWriter::visit_throw_node(ThrowBlock* thr) {
 // DAD: dast.py:59 visit_ins.
 void JSONWriter::visit_ins(const IRFormPtr& op) {
     if (!op) return;
-    add(ins_to_stmt(op.get(), constructor_));
+    add_off(ins_to_stmt(op.get(), constructor_), op->source_byte_off);  // D-3
 }
 
 // DAD: dast.py:332 _visit_ins.

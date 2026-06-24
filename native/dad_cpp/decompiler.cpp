@@ -69,6 +69,26 @@ bool Decompiler::LocateMethod(std::string_view descriptor,
     return true;
 }
 
+std::string Decompiler::RunPipeline(
+    uint16_t dex_id, uint32_t method_idx,
+    std::vector<std::pair<uint32_t, uint32_t>>* pc_map) {
+    std::string result;
+    try {
+        auto snap = MethodSnapshotBuilder::BuildShared(
+            source_, dex_id, method_idx);
+        DvMethod dv(snap);
+        dv.Process();
+        result = dv.GetSource();
+        if (pc_map) *pc_map = dv.GetPcMap();
+    } catch (const std::exception& e) {
+        result = std::string("// DECOMPILE ERROR: ") + e.what() + "\n";
+    }
+    // Sanitize: non-ASCII MUTF-8 (incl. 0xED surrogate halves strict UTF-8
+    // rejects) → readable UTF-8 / \uXXXX so Python's strict decoder accepts it.
+    // Preserves '\n', so any captured pc_map line numbers stay valid.
+    return SanitizeUtf8(result);
+}
+
 std::string Decompiler::DecompileMethod(std::string_view descriptor) {
     const std::string key(descriptor);
     {
@@ -85,20 +105,7 @@ std::string Decompiler::DecompileMethod(std::string_view descriptor) {
     uint32_t method_idx;
     if (!LocateMethod(descriptor, dex_id, method_idx)) return {};
 
-    std::string result;
-    try {
-        auto snap = MethodSnapshotBuilder::BuildShared(
-            source_, dex_id, method_idx);
-        DvMethod dv(snap);
-        dv.Process();
-        result = dv.GetSource();
-    } catch (const std::exception& e) {
-        result = std::string("// DECOMPILE ERROR: ") + e.what() + "\n";
-    }
-    // Sanitize: convert any non-ASCII byte sequence into Java \uXXXX escape
-    // so Python's strict UTF-8 decoder accepts the result. Dex MUTF-8 may
-    // contain surrogate halves (0xED prefix) which strict UTF-8 rejects.
-    result = SanitizeUtf8(result);
+    std::string result = RunPipeline(dex_id, method_idx, /*pc_map=*/nullptr);
     {
         std::unique_lock<std::shared_mutex> lock(cache_mutex_);
         // Race: another caller may have inserted while we were decompiling.
@@ -120,6 +127,19 @@ std::string Decompiler::DecompileMethod(std::string_view descriptor) {
         }
     }
     return result;
+}
+
+// D-3 (dexllm#1) — text + (line ↔ offset) map. Uncached (the LRU stores
+// strings only; the map recompute is cheap). Shares RunPipeline with the
+// cached DecompileMethod so the build/process/sanitize path can't drift.
+Decompiler::DecompiledMethodWithMap
+Decompiler::DecompileMethodWithPcMap(std::string_view descriptor) {
+    DecompiledMethodWithMap out;
+    uint16_t dex_id;
+    uint32_t method_idx;
+    if (!LocateMethod(descriptor, dex_id, method_idx)) return out;
+    out.source = RunPipeline(dex_id, method_idx, &out.pc_map);
+    return out;
 }
 
 Decompiler::MethodAst
@@ -144,6 +164,7 @@ Decompiler::DecompileMethodAst(std::string_view descriptor, bool include_source)
         ast.access = snap->meta.access;
         DvMethod dv(snap);
         ast.ast = dv.ProcessAst();
+        ast.ast_pc_map = dv.GetPcMap();  // D-3 — (statement_seq ↔ offset)
     } catch (...) {
         // Pipeline failure → still return partial signature data + text body.
     }

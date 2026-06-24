@@ -42,6 +42,15 @@ public:
     // Final source string.
     std::string str() const { return buffer_.str(); }
 
+    // D-3 (dexllm#1) — (java_line_1based, dex_byte_offset) pairs harvested as a
+    // side-effect of WriteMethod. One entry per line (first-anchor-wins). Lines
+    // with no underlying RawIns (closing braces, `while(true)`, blank lines)
+    // simply don't appear. Observe-only — never mutates buffer_, so DAD-faithful
+    // text output stays byte-identical.
+    const std::vector<std::pair<uint32_t, uint32_t>>& pc_map() const {
+        return pc_map_;
+    }
+
 private:
     // ─── Node-level emission ─────────────────────────────────────────────
     void VisitNode(NodeBase* node);
@@ -61,7 +70,29 @@ private:
 
     // ─── Utilities ───────────────────────────────────────────────────────
     void WriteIndent();
-    void Write(std::string_view s) { buffer_ << s; }
+    void Write(std::string_view s) {
+        buffer_ << s;
+        // D-3 — track the current 1-based output line for pc_map harvesting.
+        for (char c : s)
+            if (c == '\n') ++current_line_;
+    }
+
+    // D-3 — record (line ↔ ir's dex offset). First-anchor-wins: skips when ir
+    // is synthesized (UINT32_MAX) or `line` already has an entry. `line` is
+    // passed explicitly so statement callers can stamp the line where the node
+    // STARTED emitting (current_line_ may have advanced past it after a trailing
+    // newline). Header callers pass current_line_ (they emit on the spot).
+    void RecordLineAt(uint32_t line, const IRForm* ir) {
+        if (!ir || ir->source_byte_off == UINT32_MAX) return;
+        if (!pc_map_.empty() && pc_map_.back().first == line) return;
+        pc_map_.emplace_back(line, ir->source_byte_off);
+    }
+    void RecordLine(const IRForm* ir) { RecordLineAt(current_line_, ir); }
+    // D-3 — representative offset-bearing IR for a condition/loop/switch header.
+    // Mirrors dast.cpp get_cond_block's short-circuit/loop dispatch so compound
+    // `(a && b) || c` headers resolve through Condition::get_ins() (concats arms)
+    // instead of the empty BasicBlock::ins on a ShortCircuitBlock.
+    const IRForm* CondReprIns(CondBlock* node);
     void IncIndent(int n = 1) { indent_ += 4 * n; }
     void DecIndent(int n = 1) { indent_ -= 4 * n; }
     std::string Space() const { return std::string(indent_, ' '); }
@@ -79,6 +110,10 @@ private:
     std::ostringstream buffer_;
     int indent_ = 0;
     int depth_ = 0;  // VisitNode recursion depth (stack-overflow guard)
+
+    // D-3 — pc_map harvest state.
+    uint32_t current_line_ = 1;
+    std::vector<std::pair<uint32_t, uint32_t>> pc_map_;
 
     // Structural follow stacks (DAD: writer.loop_follow / if_follow / ...).
     std::vector<NodeBase*> loop_follow_{nullptr};

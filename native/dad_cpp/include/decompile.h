@@ -43,6 +43,13 @@ public:
     // called or if the method was native/abstract (no body).
     std::string GetSource() const { return source_; }
 
+    // D-3 (dexllm#1) — (line ↔ dex offset) map captured during Process();
+    // (statement_seq ↔ dex offset) map captured during ProcessAst(). Empty
+    // before the corresponding run. See Writer::pc_map / JSONWriter::pc_map.
+    const std::vector<std::pair<uint32_t, uint32_t>>& GetPcMap() const {
+        return pc_map_;
+    }
+
 private:
     // Steps 1-4 of the pipeline (param seeding → Construct → dataflow →
     // structural passes). Returns true iff a usable graph (with entry) was
@@ -55,6 +62,8 @@ private:
     std::unique_ptr<Graph> graph_;
     GenInvokeRetName gen_ret_;
     std::string source_;
+    // D-3 — populated by Process() (line keys) or ProcessAst() (seq keys).
+    std::vector<std::pair<uint32_t, uint32_t>> pc_map_;
 };
 
 }  // namespace dexkit::dad

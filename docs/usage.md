@@ -269,9 +269,13 @@ ast = dk.decompile_method_ast("Lcom/example/Utils;->getDisplaySize(Landroid/cont
 print(ast["ast"]["body"])      # {triple, flags, ret, params, comments, body}
 # Skip the redundant text emit when only the AST is needed (~1.7x faster):
 ast_only = dk.decompile_method_ast(desc, include_source=False)
+
+# Java text + source-line ↔ bytecode-offset map (smali ↔ Java cursor sync):
+pc = dk.decompile_method_java_with_pc("Lcom/example/Utils;->getDisplaySize(Landroid/content/Context;)Landroid/graphics/Point;")
+print(pc["source"], pc["pc_map"])   # pc_map: [(line_1based, byte_off), …], headers included
 ```
 
-API surface: `decompile_method_java` / `decompile_class_java` / `decompile_method_ast` / `render_method_smali`, plus cache control
+API surface: `decompile_method_java` / `decompile_method_java_with_pc` / `decompile_class_java` / `decompile_method_ast` / `render_method_smali`, plus cache control
 (`decompiler_clear_cache`, `decompiler_cache_size`, `decompiler_set_cache_capacity`). External / native / abstract methods return `""` (graceful — androguard crashes on these).
 
 The decompiler is a strict, function-by-function port of androguard's `decompiler/*.py` (graph → dataflow → control_flow → writer/dast) under `dad_cpp/`, validated by 25 DAD parity suites (`ninja parity_tests && ctest`) and an end-to-end diff vs androguard. A few spec-correctness divergences are intentional (valid `null`/`true`/`false` where androguard leaks `None`/`True`/`False`; IEEE754 floats) — see [CLAUDE.md](../CLAUDE.md) "Upstream DAD bug fixes".

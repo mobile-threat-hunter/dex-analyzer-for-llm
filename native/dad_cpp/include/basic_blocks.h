@@ -215,6 +215,15 @@ public:
     // DAD: basic_blocks.py:160 visit_cond → visitor.visit_ins(self.ins[-1]).
     virtual void visit_cond(Visitor& visitor);
 
+    // D-3 (dexllm#1) — representative offset-bearing IR for this header's
+    // condition (the last ins of the possibly-compound condition). Plain
+    // CondBlock returns its own last ins; ShortCircuitBlock / LoopBlock override
+    // to delegate to their wrapped Condition (whose get_ins concatenates the
+    // arms). Centralizes the offset recovery the Writer (RecordLine) and
+    // JSONWriter (pc_map) need — same dispatch get_cond_block uses. Null if no
+    // ins.
+    virtual const IRForm* repr_ins() const;
+
     // DAD: basic_blocks.py:165 __str__
     std::string ToString() const override;
 
@@ -341,6 +350,8 @@ public:
     void neg() override { cond->neg(); }
     // DAD: basic_blocks.py:220 visit_cond — cond.visit(visitor).
     void visit_cond(Visitor& visitor) override { cond->visit(visitor); }
+    // D-3 — last ins of the compound condition.
+    const IRForm* repr_ins() const override;
     // DAD: basic_blocks.py:223 __str__
     std::string ToString() const override;
 
@@ -374,6 +385,8 @@ public:
         if (cond) cond->neg();
         else if (cond_block) cond_block->neg();
     }
+    // D-3 — last ins of the wrapped loop condition/header.
+    const IRForm* repr_ins() const override;
     // DAD: basic_blocks.py:238 get_loc_with_ins — delegate to cond.
     std::vector<std::pair<int, IRFormPtr>> loop_get_loc_with_ins() const {
         if (cond) return cond->get_loc_with_ins();
