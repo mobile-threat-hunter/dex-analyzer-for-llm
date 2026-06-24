@@ -82,7 +82,7 @@ def header_coverage(loadable_apks):
                     continue
                 checked += 1
                 valid = None
-                for i, line in enumerate(src.splitlines(), 1):
+                for i, line in enumerate(src.split("\n"), 1):  # \n contract
                     s = line.strip()
                     kind = _classify(s)
                     if not kind:

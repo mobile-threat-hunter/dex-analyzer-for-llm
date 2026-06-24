@@ -68,7 +68,7 @@ def test_known_method_pc_map(dk):
         assert off in valid, f"offset 0x{off:x} (line {ln}) not a real instruction"
 
     # Every body STATEMENT line (ends with `;`, mentions an anchor op) maps.
-    src_lines = r["source"].splitlines()
+    src_lines = r["source"].split("\n")  # \n contract (NOT splitlines: U+2028/2029)
     n_stmt = 0
     for i, text in enumerate(src_lines, 1):
         s = text.strip()

@@ -643,8 +643,12 @@ PYBIND11_MODULE(_dexkit_core, m) {
              "Decompile a method to Java plus a source-line ↔ dex bytecode "
              "offset map for smali sync. Returns {'source': str, 'pc_map': "
              "[(line_1based, byte_off), ...]} (one entry per line, "
-             "first-anchor-wins; lines with no source op omitted). GIL "
-             "released during execution.")
+             "first-anchor-wins; lines with no source op omitted). 'line' is a "
+             "1-based index into source.split('\\n') — only '\\n' (0x0A) "
+             "delimits a line; do NOT use Python str.splitlines() / a "
+             "Unicode-line-aware split (a string literal may contain a raw "
+             "U+2028/U+2029/U+0085 that those split on but this counter does "
+             "not). GIL released during execution.")
         .def("decompile_class_java",
              [](const PyDexKit& self, const std::string& desc) {
                  py::gil_scoped_release release;
