@@ -326,6 +326,43 @@ void FixInitResultTypes(Graph& graph) {
     auto is_ref = [](const std::string& t) {
         return !t.empty() && (t.front() == 'L' || t.front() == '[');
     };
+    // The move-from-reference recovery below (`vDst = move vSrc`) is restricted
+    // to vSrc being a freshly-ALLOCATED object (new-instance / new-array): the
+    // allocation is unambiguously a reference, so a register that receives the
+    // move IS that object, and recovering its type is sound. We deliberately do
+    // NOT promote a move whose source is merely ref-TYPED (a method result, a
+    // catch var, another move) — an adversarial expanded-sample review showed
+    // that mistypes genuinely-conflated int/ref registers (DAD reuses one Dalvik
+    // register for both), producing uncompilable Java (`String v = -1`,
+    // `SolverVariable v = 6`, an `int` loop counter typed as a reference and
+    // used in `arr[v]` / `v++`). Allocation sources carry no such ambiguity.
+    // Pre-map each version to its single defining instruction (skip multi-def
+    // versions — a conflated source is not a clean allocation).
+    std::unordered_map<std::string, IRForm*> def_ins;
+    std::unordered_set<std::string> multi_def;
+    for (NodeBase* n : graph.nodes) {
+        auto* bb = dynamic_cast<BasicBlock*>(n);
+        if (!bb) continue;
+        for (auto& ins : bb->get_ins()) {
+            if (!ins) continue;
+            auto lid = ins->GetLhsId();
+            if (!lid) continue;
+            if (def_ins.count(*lid)) { multi_def.insert(*lid); continue; }
+            def_ins[*lid] = ins.get();
+        }
+    }
+    auto source_is_allocation = [&](IRForm* src) -> bool {
+        if (!src) return false;
+        const std::string sid = src->Vid();
+        if (multi_def.count(sid)) return false;       // conflated source
+        auto dit = def_ins.find(sid);
+        if (dit == def_ins.end() || !dit->second) return false;
+        auto srhs = dit->second->get_rhs();
+        if (srhs.empty() || !srhs[0]) return false;
+        return dynamic_cast<NewInstance*>(srhs[0].get()) ||
+               dynamic_cast<NewArrayExpression*>(srhs[0].get());
+    };
+
     for (NodeBase* n : graph.nodes) {
         auto* bb = dynamic_cast<BasicBlock*>(n);
         if (!bb) continue;
@@ -333,6 +370,8 @@ void FixInitResultTypes(Graph& graph) {
             if (!ins) continue;
             auto rhs = ins->get_rhs();
             if (rhs.empty() || !rhs[0]) continue;
+            auto lid = ins->GetLhsId();
+            if (!lid) continue;
             // The constructed/allocated object's reference type. For an <init>
             // invoke get_type() returns the FINALIZED base (receiver) type; for
             // a direct new-instance / new-array the rhs's own type is the class
@@ -351,10 +390,18 @@ void FixInitResultTypes(Graph& graph) {
             } else if (dynamic_cast<NewInstance*>(rhs[0].get()) ||
                        dynamic_cast<NewArrayExpression*>(rhs[0].get())) {
                 bt = rhs[0]->get_type();
+            } else if (rhs[0]->is_ident() && source_is_allocation(rhs[0].get())) {
+                // `vDst = move vNew` where vNew is a fresh new-instance/new-array
+                // (e.g. `new-instance v10` → `move-object v0, v10` →
+                // `invoke-direct/range {v0..} <init>`). split_variables' move-
+                // source ref-trust read a STALE primitive for vNew (its
+                // reference version finalized in a LATER split iteration than
+                // vDst), so it didn't trust it and vDst kept orig_type (int).
+                // The source is an allocation → unambiguously a reference, so
+                // recover its type now that all versions are final.
+                if (is_ref(rhs[0]->get_type())) bt = rhs[0]->get_type();
             }
             if (!is_ref(bt)) continue;
-            auto lid = ins->GetLhsId();
-            if (!lid) continue;
             auto it = ins->var_map.find(*lid);
             if (it == ins->var_map.end() || !it->second) continue;
             // Only correct the bug signature: a non-reference result of `new`.
