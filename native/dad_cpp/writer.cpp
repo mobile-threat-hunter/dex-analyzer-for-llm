@@ -654,7 +654,10 @@ private:
         // 0). Mirrors the return-literal null fix in the assignment position;
         // surfaces once a reference lhs is correctly typed (e.g. the
         // FixInitResultTypes new-array/new-instance fix) where DAD emitted `= 0`.
-        if (lhs) {
+        // A ThisParam lhs is NOT a local: `this = 0` is the pre-existing DAD
+        // this-slot-reuse corruption (assignment to `this`, already invalid) —
+        // leave it DAD-faithful rather than silently diverging to `this = null`.
+        if (lhs && !dynamic_cast<ThisParam*>(lhs)) {
             auto is_int_const = [](const std::string& ct) {
                 return ct == "I" || ct == "J" || ct == "B" || ct == "S" ||
                        ct == "C" || ct == "Z";
