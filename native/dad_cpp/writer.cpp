@@ -646,6 +646,31 @@ private:
                 return;
             }
         }
+        // Beyond-DAD: a genuine integer Constant 0 assigned to a REFERENCE lhs
+        // is the null reference (Dalvik 0 in an object register) — render
+        // `lhs = null`, not the uncompilable `lhs = 0`. Same integer-constant
+        // guard as visit_return (a typed reference constant — const-class /
+        // const-string — is NOT null and emits normally; its get_int_value() is
+        // 0). Mirrors the return-literal null fix in the assignment position;
+        // surfaces once a reference lhs is correctly typed (e.g. the
+        // FixInitResultTypes new-array/new-instance fix) where DAD emitted `= 0`.
+        if (lhs) {
+            auto is_int_const = [](const std::string& ct) {
+                return ct == "I" || ct == "J" || ct == "B" || ct == "S" ||
+                       ct == "C" || ct == "Z";
+            };
+            const std::string lt = lhs->get_type();
+            if (auto* c = dynamic_cast<Constant*>(rhs);
+                c && c->is_const() && is_int_const(c->get_type()) &&
+                c->get_int_value() == 0 && !lt.empty() &&
+                (lt.front() == 'L' || lt.front() == '[')) {
+                w_->WriteIndent();
+                visit_ins(lhs);
+                w_->Write(" = null");
+                w_->EndIns();
+                return;
+            }
+        }
         write_ind_visit_end(lhs, " = ", rhs);
     }
 
