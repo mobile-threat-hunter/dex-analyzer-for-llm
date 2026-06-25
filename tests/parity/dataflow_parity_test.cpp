@@ -347,6 +347,53 @@ int main() {
         check_str("init-result: new-array re-typed [B", varr->get_type(), "[B");
     }
 
+    // --- FixInitResultTypes: move-from-ALLOCATION target re-typed ------------
+    //   `vNew = new LFoo;` ; `vDst = move vNew` — vNew's reference version
+    //   finalized AFTER vDst's, so split_variables left vDst `int`.
+    //   FixInitResultTypes (all versions final) recovers vNew's type ONLY because
+    //   the move source is an allocation (unambiguously a reference). A move from
+    //   a merely ref-TYPED source (method result / catch / conflated move) is NOT
+    //   promoted — that would mistype genuinely-conflated int/ref registers.
+    {
+        Graph g;
+        auto ni = std::make_shared<NewInstance>("LFoo;");
+        auto vnew = std::make_shared<Variable>("v1");
+        vnew->set_type("LFoo;");
+        auto def = std::make_shared<AssignExpression>(vnew, ni);   // vNew = new LFoo
+        auto dst = std::make_shared<Variable>("v0");
+        auto mv = std::make_shared<AssignExpression>(dst, vnew);   // vDst = move vNew
+        dst->set_type("I");  // stale primitive from the split-time move
+        StatementBlock blk("A", {def, mv});
+        ReturnBlock r("R", {});
+        g.add_node(&blk); g.add_node(&r);
+        g.add_edge(&blk, &r);
+        g.entry = &blk;
+        g.compute_rpo();
+        FixInitResultTypes(g);
+        check_str("init-result: move-from-alloc re-typed",
+                  dst->get_type(), "LFoo;");
+    }
+    // move from a NON-allocation reference source must NOT be promoted (the
+    // expanded-sample regression guard — a conflated int/ref register's move
+    // source is a method result / catch / move, never a fresh allocation).
+    {
+        Graph g;
+        auto src = std::make_shared<Variable>("v1");
+        src->set_type("Landroid/view/View;");  // ref-typed, but no allocation def
+        auto dst = std::make_shared<Variable>("v0");
+        auto mv = std::make_shared<AssignExpression>(dst, src);
+        dst->set_type("I");
+        StatementBlock blk("A", {mv});
+        ReturnBlock r("R", {});
+        g.add_node(&blk); g.add_node(&r);
+        g.add_edge(&blk, &r);
+        g.entry = &blk;
+        g.compute_rpo();
+        FixInitResultTypes(g);
+        check_str("init-result: move-from-nonalloc untouched",
+                  dst->get_type(), "I");
+    }
+
     std::printf("\n%s — %d failure(s)\n", g_fail ? "FAIL" : "PASS", g_fail);
     return g_fail ? 1 : 0;
 }
