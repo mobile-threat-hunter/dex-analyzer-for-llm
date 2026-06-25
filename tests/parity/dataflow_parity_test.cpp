@@ -297,6 +297,34 @@ int main() {
         check("split-type: int version stays I (move test)", ints, 1);
     }
 
+    // --- FixInitResultTypes: <init> result typed from the finalized base ------
+    //   `vRes = vBase.<init>()` — the constructor result IS the constructed
+    //   object, so vRes's type must be the receiver's class. split_variables can
+    //   read a STALE base for it (version order), mistyping vRes a primitive;
+    //   FixInitResultTypes (run after split, bases finalized) restores it.
+    {
+        Graph g;
+        auto base = std::make_shared<Variable>("v0");
+        base->set_type("LFoo;");
+        InvokeInstruction::Triple triple{"LFoo;", "<init>", "()V"};
+        auto inv = std::make_shared<InvokeDirectInstruction>(
+            "LFoo;", "<init>", base, "V", std::vector<std::string>{},
+            std::vector<IRFormPtr>{}, triple);
+        auto vres = std::make_shared<Variable>("v1");
+        auto a = std::make_shared<AssignExpression>(vres, inv);  // ctor → LFoo
+        vres->set_type("I");  // simulate split-time stale mistyping
+        StatementBlock blk("A", {a});
+        ReturnBlock r("R", {});
+        g.add_node(&blk); g.add_node(&r);
+        g.add_edge(&blk, &r);
+        g.entry = &blk;
+        g.compute_rpo();
+        check_str("init-result: mistyped I before fix", vres->get_type(), "I");
+        FixInitResultTypes(g);
+        check_str("init-result: re-typed from base LFoo;",
+                  vres->get_type(), "LFoo;");
+    }
+
     std::printf("\n%s — %d failure(s)\n", g_fail ? "FAIL" : "PASS", g_fail);
     return g_fail ? 1 : 0;
 }

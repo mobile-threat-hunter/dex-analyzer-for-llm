@@ -99,6 +99,20 @@ bool ClearPath(Graph& graph, const std::string& reg, int loc1, int loc2);
 // DAD: dataflow.py:190 register_propagation.
 void RegisterPropagation(Graph& graph, ChainMap& du, ChainMap& ud);
 
+// Beyond-DAD (dexllm) — type the result of a `vRes = vBase.<init>()` constructor
+// call as the constructed object. split_variables derives a version's type from
+// its def's rhs, but `InvokeInstruction::get_type()` for <init> returns the LIVE
+// base Variable type, and the base's own version is finalized only in a LATER
+// split iteration (vRes has the lower index) — so at derivation time the base is
+// still the shared register carrying a stale (e.g. trailing-int) type, mistyping
+// vRes `int`. Run this AFTER split_variables (bases finalized) and BEFORE
+// register_propagation (the <init> node still intact): re-read each <init>
+// result's finalized base type and apply it when the result is non-reference.
+// No-op on already-correct output; reference results (incl. more-derived) left
+// alone. Scoped to the <init> result only — does not touch the multi-def type
+// derivation that handles conflated (object-or-null) merge variables.
+void FixInitResultTypes(Graph& graph);
+
 // DAD: dataflow.py:323 DummyNode — placeholder Node with empty loc-with-ins.
 class DummyNode : public Node {
 public:

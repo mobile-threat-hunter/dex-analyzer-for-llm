@@ -321,6 +321,33 @@ void RegisterPropagation(Graph& graph, ChainMap& du, ChainMap& ud) {
     }
 }
 
+// Beyond-DAD — see dataflow.h. Re-type `<init>` results from the finalized base.
+void FixInitResultTypes(Graph& graph) {
+    auto is_ref = [](const std::string& t) {
+        return !t.empty() && (t.front() == 'L' || t.front() == '[');
+    };
+    for (NodeBase* n : graph.nodes) {
+        auto* bb = dynamic_cast<BasicBlock*>(n);
+        if (!bb) continue;
+        for (auto& ins : bb->get_ins()) {
+            if (!ins) continue;
+            auto rhs = ins->get_rhs();
+            if (rhs.empty() || !rhs[0]) continue;
+            auto* inv = dynamic_cast<InvokeInstruction*>(rhs[0].get());
+            if (!inv || inv->name() != "<init>") continue;
+            // <init> get_type() now returns the FINALIZED base (receiver) type.
+            const std::string bt = inv->get_type();
+            if (!is_ref(bt)) continue;
+            auto lid = ins->GetLhsId();
+            if (!lid) continue;
+            auto it = ins->var_map.find(*lid);
+            if (it == ins->var_map.end() || !it->second) continue;
+            // Only correct the bug signature: a non-reference result of `new`.
+            if (!is_ref(it->second->get_type())) it->second->set_type(bt);
+        }
+    }
+}
+
 // =============================================================================
 // DummyNode — DAD dataflow.py:323
 // =============================================================================
