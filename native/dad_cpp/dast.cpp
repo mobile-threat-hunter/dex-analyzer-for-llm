@@ -851,7 +851,9 @@ AstValue JSONWriter::write_inplace_if_possible(IRForm* lhs, IRForm* rhs) {
     // Beyond-DAD: an integer Constant 0 assigned to a REFERENCE lhs is the null
     // reference — emit a null literal (mirrors writer.cpp write_inplace and the
     // return-literal null fix; AST and text agree).
-    if (lhs) {
+    // A ThisParam lhs is the pre-existing DAD this-slot-reuse corruption; keep
+    // it DAD-faithful (mirror writer.cpp) rather than diverging to `this = null`.
+    if (lhs && !dynamic_cast<ThisParam*>(lhs)) {
         auto is_int_const = [](const std::string& ct) {
             return ct == "I" || ct == "J" || ct == "B" || ct == "S" ||
                    ct == "C" || ct == "Z";
