@@ -204,6 +204,55 @@ int main() {
         if (!du_v0_0.empty()) check("DU[v0,0][0] = 1", du_v0_0[0], 1);
     }
 
+    // --- split_variables: each version's type from its OWN def (beyond-DAD) -
+    //   Register v0 reused across a reference then a primitive:
+    //     loc0: v0 = new Foo()   (object def)
+    //     loc1: v1 = v0          (object use)
+    //     loc2: v0 = 1           (int def — LAST, so orig_var.type == "I")
+    //     loc3: v2 = v0          (int use)
+    //   DAD copies orig_var.type ("I", the last write) to BOTH split versions,
+    //   so the object version is mistyped `int v = new Foo()` (invalid Java).
+    //   Our fix types each version from its defining instruction's rhs, so the
+    //   object version is "LFoo;" and the int version stays "I".
+    {
+        Graph g;
+        auto v0 = std::make_shared<Variable>("v0");
+        auto ni = std::make_shared<NewInstance>("LFoo;");
+        auto a0 = std::make_shared<AssignExpression>(v0, ni);   // loc0
+        auto v1 = std::make_shared<Variable>("v1");
+        auto mv0 = std::make_shared<MoveExpression>(v1, v0);    // loc1
+        mv0->var_map["v0"] = v0;
+        mv0->var_map["v1"] = v1;
+        auto c1 = std::make_shared<Constant>("1", "I");
+        auto a1 = std::make_shared<AssignExpression>(v0, c1);   // loc2
+        auto v2 = std::make_shared<Variable>("v2");
+        auto mv1 = std::make_shared<MoveExpression>(v2, v0);    // loc3
+        mv1->var_map["v0"] = v0;
+        mv1->var_map["v2"] = v2;
+        StatementBlock a("A", {a0, mv0, a1, mv1});
+        ReturnBlock r("R", {});
+        g.add_node(&a); g.add_node(&r);
+        g.add_edge(&a, &r);
+        g.entry = &a;
+        g.compute_rpo();
+        g.number_ins();
+        auto chains = BuildDefUse(g, /*lparams=*/{});
+        std::unordered_map<int, IRFormPtr> lvars;
+        lvars[0] = v0;
+        // Precondition for the DAD bug: orig var carries the LAST def's type.
+        check_str("split-type: orig v0 type is last-def I", v0->get_type(), "I");
+        SplitVariables(g, lvars, chains.du, chains.ud);
+        int ref_versions = 0, int_versions = 0;
+        for (auto& [k, var] : lvars) {
+            if (!var) continue;
+            if (var->get_type() == "LFoo;") ++ref_versions;
+            else if (var->get_type() == "I") ++int_versions;
+        }
+        check("split-type: object version typed LFoo; (not int)",
+              ref_versions, 1);
+        check("split-type: int version stays I", int_versions >= 1, true);
+    }
+
     std::printf("\n%s — %d failure(s)\n", g_fail ? "FAIL" : "PASS", g_fail);
     return g_fail ? 1 : 0;
 }
