@@ -848,6 +848,22 @@ AstValue JSONWriter::write_inplace_if_possible(IRForm* lhs, IRForm* rhs) {
                               visit_expr_fp_typed(exp_rhs, bin->get_type()), bop);
         }
     }
+    // Beyond-DAD: an integer Constant 0 assigned to a REFERENCE lhs is the null
+    // reference — emit a null literal (mirrors writer.cpp write_inplace and the
+    // return-literal null fix; AST and text agree).
+    if (lhs) {
+        auto is_int_const = [](const std::string& ct) {
+            return ct == "I" || ct == "J" || ct == "B" || ct == "S" ||
+                   ct == "C" || ct == "Z";
+        };
+        const std::string lt = lhs->get_type();
+        if (auto* c = dynamic_cast<Constant*>(rhs);
+            c && c->is_const() && is_int_const(c->get_type()) &&
+            c->get_int_value() == 0 && !lt.empty() &&
+            (lt.front() == 'L' || lt.front() == '[')) {
+            return Assignment(visit_expr(lhs), LiteralNull());
+        }
+    }
     // plain assignment: `double v = <raw-bits int const>` → reinterpret the rhs
     // const against the lhs F/D type (mirrors writer.cpp write_ind_visit_end).
     return Assignment(visit_expr(lhs),

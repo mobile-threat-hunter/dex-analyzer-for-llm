@@ -333,10 +333,25 @@ void FixInitResultTypes(Graph& graph) {
             if (!ins) continue;
             auto rhs = ins->get_rhs();
             if (rhs.empty() || !rhs[0]) continue;
-            auto* inv = dynamic_cast<InvokeInstruction*>(rhs[0].get());
-            if (!inv || inv->name() != "<init>") continue;
-            // <init> get_type() now returns the FINALIZED base (receiver) type.
-            const std::string bt = inv->get_type();
+            // The constructed/allocated object's reference type. For an <init>
+            // invoke get_type() returns the FINALIZED base (receiver) type; for
+            // a direct new-instance / new-array the rhs's own type is the class
+            // / array descriptor (static). All three define a register that can
+            // only legally hold a reference, so a non-reference lhs is the bug.
+            std::string bt;
+            if (auto* inv = dynamic_cast<InvokeInstruction*>(rhs[0].get())) {
+                if (inv->name() == "<init>") {
+                    bt = inv->get_type();
+                    // A `invoke-direct/range` <init> (InvokeRangeInstruction)
+                    // carries no separate base, so get_type() falls back to its
+                    // "V" rtype. The constructed object's type is the class —
+                    // use cls() when get_type() isn't a reference.
+                    if (!is_ref(bt)) bt = inv->cls();
+                }
+            } else if (dynamic_cast<NewInstance*>(rhs[0].get()) ||
+                       dynamic_cast<NewArrayExpression*>(rhs[0].get())) {
+                bt = rhs[0]->get_type();
+            }
             if (!is_ref(bt)) continue;
             auto lid = ins->GetLhsId();
             if (!lid) continue;

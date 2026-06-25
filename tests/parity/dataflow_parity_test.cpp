@@ -325,6 +325,28 @@ int main() {
                   vres->get_type(), "LFoo;");
     }
 
+    // --- FixInitResultTypes: new-array result typed from the array descriptor -
+    //   `v = new byte[n]` — a single-version (unsplit) register reused as an
+    //   array in one branch and `0`/null in another keeps DAD's last-write type
+    //   (int); FixInitResultTypes re-types it from the NewArrayExpression's
+    //   static descriptor `[B`.
+    {
+        Graph g;
+        auto sz = std::make_shared<Constant>("1024", "I");
+        auto na = std::make_shared<NewArrayExpression>(sz, "[B");
+        auto varr = std::make_shared<Variable>("v0");
+        auto a = std::make_shared<AssignExpression>(varr, na);  // ctor → [B
+        varr->set_type("I");  // simulate the conflated-merge int mistyping
+        StatementBlock blk("A", {a});
+        ReturnBlock r("R", {});
+        g.add_node(&blk); g.add_node(&r);
+        g.add_edge(&blk, &r);
+        g.entry = &blk;
+        g.compute_rpo();
+        FixInitResultTypes(g);
+        check_str("init-result: new-array re-typed [B", varr->get_type(), "[B");
+    }
+
     std::printf("\n%s — %d failure(s)\n", g_fail ? "FAIL" : "PASS", g_fail);
     return g_fail ? 1 : 0;
 }
