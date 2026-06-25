@@ -481,6 +481,15 @@ void SplitVariables(Graph& graph,
             // (dmin<0) keep orig_type (the declared parameter type). On
             // multi-def disagreement prefer a reference/array type over a
             // primitive (the bug direction). Empty/absent rhs → keep orig_type.
+            // A `vDst = move vSrc` def is only PARTLY trusted: its rhs is the
+            // live, SHARED source Variable, whose get_type() reflects vSrc's
+            // LAST mutation — if vSrc is reused across types after the move the
+            // read is stale. The dangerous direction is a stale PRIMITIVE
+            // making an object version look primitive (the very bug we fix), so
+            // from a move source (is_ident rhs) we trust only a REFERENCE/array
+            // type (which can only make the version more object-like, never
+            // wrongly primitive). An intrinsically-typed rhs (new-instance /
+            // const / field / invoke / cast — non-ident) is always trusted.
             std::string def_type;
             auto is_ref = [](const std::string& t) {
                 return !t.empty() && (t.front() == 'L' || t.front() == '[');
@@ -493,7 +502,9 @@ void SplitVariables(Graph& graph,
                 auto rhs = ins->get_rhs();
                 if (!rhs.empty() && rhs[0]) {
                     std::string t = rhs[0]->get_type();
-                    if (!t.empty() &&
+                    const bool trust =
+                        !t.empty() && (!rhs[0]->is_ident() || is_ref(t));
+                    if (trust &&
                         (def_type.empty() || (is_ref(t) && !is_ref(def_type)))) {
                         def_type = std::move(t);
                     }

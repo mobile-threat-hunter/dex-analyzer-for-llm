@@ -242,15 +242,59 @@ int main() {
         // Precondition for the DAD bug: orig var carries the LAST def's type.
         check_str("split-type: orig v0 type is last-def I", v0->get_type(), "I");
         SplitVariables(g, lvars, chains.du, chains.ud);
-        int ref_versions = 0, int_versions = 0;
+        int ref_versions = 0, int_versions = 0, total = 0;
         for (auto& [k, var] : lvars) {
             if (!var) continue;
+            ++total;
             if (var->get_type() == "LFoo;") ++ref_versions;
             else if (var->get_type() == "I") ++int_versions;
         }
+        check("split-type: exactly 2 versions", total, 2);
         check("split-type: object version typed LFoo; (not int)",
               ref_versions, 1);
-        check("split-type: int version stays I", int_versions >= 1, true);
+        check("split-type: int version stays I", int_versions, 1);
+    }
+
+    // --- split_variables: move-source typing is direction-safe ---------------
+    //   A move def (`vDst = move vSrc`) reads the SHARED source variable's live
+    //   type, which can be stale. The fix trusts a move source only for a
+    //   REFERENCE type (it can only make the version more object-like, never
+    //   wrongly primitive). Here vSrc is a reference, so the object version
+    //   defined by the move must pick up the reference type (not the trailing
+    //   `int` reuse). Guards the `!is_ident || is_ref` trust rule.
+    {
+        // Aux registers use high numbers (v7/v8/v9) so they never collide with
+        // the split versions' generated Vids ("v1"/"v2" from nb_vars=max+1).
+        Graph g;
+        auto vSrc = std::make_shared<Variable>("v9");
+        vSrc->set_type("LBar;");
+        auto v0 = std::make_shared<Variable>("v0");
+        auto mvdef = std::make_shared<MoveExpression>(v0, vSrc);  // loc0 v0=vSrc
+        auto v7 = std::make_shared<Variable>("v7");
+        auto use0 = std::make_shared<MoveExpression>(v7, v0);     // loc1 use v0
+        auto c9 = std::make_shared<Constant>("9", "I");
+        auto intdef = std::make_shared<AssignExpression>(v0, c9); // loc2 v0=9
+        auto v8 = std::make_shared<Variable>("v8");
+        auto use1 = std::make_shared<MoveExpression>(v8, v0);     // loc3 use v0
+        StatementBlock a("A", {mvdef, use0, intdef, use1});
+        ReturnBlock r("R", {});
+        g.add_node(&a); g.add_node(&r);
+        g.add_edge(&a, &r);
+        g.entry = &a;
+        g.compute_rpo();
+        g.number_ins();
+        auto chains = BuildDefUse(g, /*lparams=*/{});
+        std::unordered_map<int, IRFormPtr> lvars;
+        lvars[0] = v0;
+        SplitVariables(g, lvars, chains.du, chains.ud);
+        int bar = 0, ints = 0;
+        for (auto& [k, var] : lvars) {
+            if (!var) continue;
+            if (var->get_type() == "LBar;") ++bar;
+            else if (var->get_type() == "I") ++ints;
+        }
+        check("split-type: move-source ref version typed LBar;", bar, 1);
+        check("split-type: int version stays I (move test)", ints, 1);
     }
 
     std::printf("\n%s — %d failure(s)\n", g_fail ? "FAIL" : "PASS", g_fail);
