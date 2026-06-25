@@ -470,11 +470,45 @@ void SplitVariables(Graph& graph,
                 v->name = var_str + "_" + std::to_string(i);
             }
             const std::string nv = new_version->Vid();
+            // Beyond-DAD type fix: each split version's type must come from its
+            // OWN definition, not orig_var's last-written type. DAD copies
+            // orig_var.type to every version (dataflow.py:382), so when a
+            // register is reused across types — e.g. `const v0,#1` then
+            // `new-instance v0, LFoo;` then `iget v0,…:I` — the object version
+            // inherits the last `int`, emitting invalid Java
+            // `int v0_x = new Foo()`. We read the defining instruction's rhs
+            // type instead (the value actually assigned). Param versions
+            // (dmin<0) keep orig_type (the declared parameter type). On
+            // multi-def disagreement prefer a reference/array type over a
+            // primitive (the bug direction). Empty/absent rhs → keep orig_type.
+            // A `vDst = move vSrc` def is only PARTLY trusted: its rhs is the
+            // live, SHARED source Variable, whose get_type() reflects vSrc's
+            // LAST mutation — if vSrc is reused across types after the move the
+            // read is stale. The dangerous direction is a stale PRIMITIVE
+            // making an object version look primitive (the very bug we fix), so
+            // from a move source (is_ident rhs) we trust only a REFERENCE/array
+            // type (which can only make the version more object-like, never
+            // wrongly primitive). An intrinsically-typed rhs (new-instance /
+            // const / field / invoke / cast — non-ident) is always trusted.
+            std::string def_type;
+            auto is_ref = [](const std::string& t) {
+                return !t.empty() && (t.front() == 'L' || t.front() == '[');
+            };
             for (int loc : defs_vec) {
                 if (loc < 0) continue;
                 IRFormPtr ins = graph.get_ins_from_loc(loc);
                 if (!ins) continue;
                 ins->replace_lhs(new_version);
+                auto rhs = ins->get_rhs();
+                if (!rhs.empty() && rhs[0]) {
+                    std::string t = rhs[0]->get_type();
+                    const bool trust =
+                        !t.empty() && (!rhs[0]->is_ident() || is_ref(t));
+                    if (trust &&
+                        (def_type.empty() || (is_ref(t) && !is_ref(def_type)))) {
+                        def_type = std::move(t);
+                    }
+                }
                 VarLocKey old_k{var_str, loc};
                 auto it = du.find(old_k);
                 if (it != du.end()) {
@@ -482,6 +516,9 @@ void SplitVariables(Graph& graph,
                     du.erase(it);
                     du[VarLocKey{nv, loc}] = std::move(val);
                 }
+            }
+            if (dmin >= 0 && !def_type.empty()) {
+                new_version->set_type(def_type);
             }
             for (int loc : uses_vec) {
                 IRFormPtr ins = graph.get_ins_from_loc(loc);
