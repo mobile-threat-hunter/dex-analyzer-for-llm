@@ -322,6 +322,13 @@ public:
     }
 
     void visit_return_void() override {
+        // Beyond-DAD: `return` is a compile error inside a static initializer
+        // (JLS §8.7), so drop the return-void a <clinit> ends with — but ONLY at
+        // the body's outermost level (a top-level return has no code after it, so
+        // fall-through is equivalent). A return nested in an if/try/loop is kept:
+        // suppressing it could let the fall-through execute code the return was
+        // skipping (real semantic change). (Pairs with the `static { }` header.)
+        if (w_->is_clinit_ && w_->indent_ == w_->clinit_base_indent_) return;
         w_->WriteIndent();
         w_->Write("return");
         w_->EndIns();
@@ -720,46 +727,65 @@ void Writer::WriteMethod() {
         if (a == "constructor") { is_constructor_ = true; continue; }
         mods.push_back(a);
     }
+    // Beyond-DAD: a <clinit> is a static initializer, not a callable method.
+    // DAD (writer.py:167) sees its ACC_CONSTRUCTOR flag and emits
+    // `static <ClassName>()` — invalid Java. Emit a `static { }` block instead:
+    // the modifiers (just `static`) with NO name, return type, or parameters.
+    // The trailing `return;` is separately suppressed in visit_return_void
+    // (`return` is a compile error inside an initializer, JLS §8.7). No
+    // *DADFaithful sibling — parity suites don't assert method signatures
+    // (return-literal / catch-clamp precedent).
+    is_clinit_ = (m.name == "<clinit>");
+    clinit_base_indent_ = -1;  // reset (belt-and-suspenders; Writer is per-method)
     Write("\n");
     Write(Space());
-    if (!mods.empty()) {
-        for (size_t i = 0; i < mods.size(); ++i) {
-            if (i > 0) Write(" ");
-            Write(mods[i]);
-        }
-        Write(" ");
-    }
-    if (is_constructor_) {
-        std::string cls_desc(StripClassDesc(m.cls_name));
-        auto slash = cls_desc.rfind('/');
-        Write(slash == std::string::npos ? cls_desc : cls_desc.substr(slash + 1));
+    if (is_clinit_) {
+        // A static initializer block is exactly `static { }` — it takes NO
+        // access modifier. A <clinit> may carry ACC_PUBLIC/etc. in dex (obfuscated
+        // dex does), but `public static { }` is invalid Java, so emit only the
+        // `static` keyword and drop any other modifier.
+        Write("static");
     } else {
-        Write(JavaType(m.ret_type));
-        Write(" ");
-        Write(m.name);
-    }
-    Write("(");
-    bool is_static = std::find(m.access.begin(), m.access.end(), "static")
-                     != m.access.end();
-    // Parse the proto independently — meta.params_type is already built from
-    // ParseParamsType so we could reuse it, but doing the parse here keeps
-    // Writer self-contained and unaffected if a future refactor changes
-    // meta.params_type semantics.
-    auto parsed_params = ParseParamsType(m.proto);
-    if (!parsed_params.empty()) {
-        int start = static_cast<int>(snap_->registers_size)
-                  - static_cast<int>(snap_->ins_size);
-        if (!is_static) ++start;  // skip 'this' register
-        int num_param = 0;
-        for (size_t i = 0; i < parsed_params.size(); ++i) {
-            if (i > 0) Write(", ");
-            int reg = start + num_param;
-            Write(JavaType(parsed_params[i]));
-            Write(" p" + std::to_string(reg));
-            num_param += static_cast<int>(GetTypeSize(parsed_params[i]));
+        if (!mods.empty()) {
+            for (size_t i = 0; i < mods.size(); ++i) {
+                if (i > 0) Write(" ");
+                Write(mods[i]);
+            }
+            Write(" ");
         }
+        if (is_constructor_) {
+            std::string cls_desc(StripClassDesc(m.cls_name));
+            auto slash = cls_desc.rfind('/');
+            Write(slash == std::string::npos ? cls_desc
+                                             : cls_desc.substr(slash + 1));
+        } else {
+            Write(JavaType(m.ret_type));
+            Write(" ");
+            Write(m.name);
+        }
+        Write("(");
+        bool is_static = std::find(m.access.begin(), m.access.end(), "static")
+                         != m.access.end();
+        // Parse the proto independently — meta.params_type is already built from
+        // ParseParamsType so we could reuse it, but doing the parse here keeps
+        // Writer self-contained and unaffected if a future refactor changes
+        // meta.params_type semantics.
+        auto parsed_params = ParseParamsType(m.proto);
+        if (!parsed_params.empty()) {
+            int start = static_cast<int>(snap_->registers_size)
+                      - static_cast<int>(snap_->ins_size);
+            if (!is_static) ++start;  // skip 'this' register
+            int num_param = 0;
+            for (size_t i = 0; i < parsed_params.size(); ++i) {
+                if (i > 0) Write(", ");
+                int reg = start + num_param;
+                Write(JavaType(parsed_params[i]));
+                Write(" p" + std::to_string(reg));
+                num_param += static_cast<int>(GetTypeSize(parsed_params[i]));
+            }
+        }
+        Write(")");
     }
-    Write(")");
 
     if (!graph_ || !graph_->entry) {
         Write(";\n");
@@ -769,6 +795,7 @@ void Writer::WriteMethod() {
     Write(Space());
     Write("{\n");
     IncIndent();
+    clinit_base_indent_ = indent_;  // outermost body level (for <clinit> return drop)
     VisitNode(graph_->entry);
     DecIndent();
     Write(Space());

@@ -125,6 +125,20 @@ private:
     NodeBase* next_case_ = nullptr;
     bool need_break_ = true;
     bool is_constructor_ = false;
+    // Beyond-DAD: <clinit> (static initializer) carries ACC_CONSTRUCTOR in dex,
+    // so DAD renders it as `static <ClassName>()` with a trailing `return;` —
+    // both invalid Java (a static init is a `static { }` block; `return` is a
+    // compile error inside an initializer, JLS §8.7). Set in WriteMethod;
+    // consumed by the header emission and visit_return_void.
+    bool is_clinit_ = false;
+    // Indent of the <clinit> body's OUTERMOST statement level (set right after
+    // the body brace opens). A return-void is dropped only at this level: a
+    // top-level return is the method's final statement (a return has no CFG
+    // successor → nothing follows it there), so fall-through is equivalent. A
+    // return nested inside an if/try/loop is NOT dropped — code may execute
+    // after it on the fall-through path, so suppressing it would change
+    // semantics; those stay DAD-faithful `return;` (uncompilable but not wrong).
+    int clinit_base_indent_ = -1;
     // DAD: writer.py: self.skip — set by visit_invoke when ThisParam.<init>()
     // is elided. Consumed by the NEXT write_ind which suppresses its indent.
     // Lives on Writer (persistent) so it carries across VisitIns calls.
