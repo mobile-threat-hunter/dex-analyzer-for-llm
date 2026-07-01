@@ -27,7 +27,8 @@ parallel-safe — rather than Xposed module development.
 
 See [docs/workflow.md](docs/workflow.md) for how dexllm operates end to end (load →
 verify → search → decompile → agent, all diagrammed),
-[docs/usage.md](docs/usage.md) for the full API walkthrough (L1–L7 + decompile),
+[docs/usage.md](docs/usage.md) for the task-oriented API walkthrough (L1–L7 + decompile),
+[docs/api.md](docs/api.md) for the flat API reference (every method, return type, example output),
 [docs/architecture.md](docs/architecture.md) for the ports-&-adapters boundary map,
 [docs/dexkit-vs-art-dex-handling.md](docs/dexkit-vs-art-dex-handling.md) for how dexllm's
 DEX handling compares to AOSP/ART (verification, multidex, cross-dex),
