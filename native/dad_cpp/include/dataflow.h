@@ -112,26 +112,32 @@ void RegisterPropagation(Graph& graph, ChainMap& du, ChainMap& ud);
 // alone. Scoped to the <init> result only — does not touch the multi-def type
 // derivation that handles conflated (object-or-null) merge variables.
 //
-// It ALSO runs a second, general beyond-DAD pass: re-type a move-chain type
-// CASCADE version. DAD types every split version from the register's last write,
-// so a register reused across incompatible types can leave a version typed as a
-// REFERENCE whose transitive ground-truth producers (resolving moves to their
-// ultimate source) are all primitive / null — the reference was copied off a
-// sibling conflated register by a `move`. Such a version is genuinely a primitive
-// (an obfuscator's 0/1 flag reusing an object slot) and emits uncompilable
-// `ArrayList v = 1;`. The pass re-types it to its primitive descriptor. It is
-// def-anchored AND use-corroborated: re-type ONLY when EVERY def is definitively
-// primitive/null (no reference producer AND no UNRESOLVED def — a move-cycle or a
-// producer whose type we cannot determine might be a hidden reference, so any
-// uncertainty blocks the re-type), and the version is never used as an object
-// (receiver of `v.m()`, owner of `v.f`). A version with BOTH a real allocation
-// and a real primitive forcer is a GENUINE conflation (needs a version split, not
-// a re-type) and is left untouched. The re-type target width is the RESOLVED
-// primitive descriptor ('I'/'J'/…) so a `long`/`double` cascade is not narrowed
-// to `int v = <out-of-range>`. Regression-safe by construction: it only ever
-// makes a PROVABLY-object-less version primitive, never the reverse (never
-// reintroduces `prim = new` / `prim.member`) — the "block on any unresolved def"
-// rule (adversarial-review hardening) makes a mislabeled reference impossible.
+// It ALSO runs a second, general beyond-DAD pass that fixes move-chain type
+// CASCADES in BOTH directions. DAD types every split version from the register's
+// last write, so a register reused across incompatible types can leave a version
+// mistyped; resolving each def to its transitive GROUND TRUTH (following moves to
+// their ultimate producer) recovers the real type:
+//   - ref→prim: a REFERENCE-typed version whose ground-truth producers are all
+//     primitive/null (the reference was copied off a sibling conflated register by
+//     a move) is genuinely a primitive — an obfuscator's 0/1 flag reusing an
+//     object slot — emitting uncompilable `ArrayList v = 1;`. Re-typed to its
+//     (resolved-width 'I'/'J'/…) primitive descriptor.
+//   - prim→ref: a PRIMITIVE-typed version whose ground-truth producers are a
+//     reference + null (e.g. `int v = ObjectAnimator.ofFloat(...)` then `v = 0`,
+//     used as `v.addListener()` / `return v`) is genuinely that reference.
+//     Re-typed to the (agreeing) reference class; the `= 0` then renders `= null`.
+// def-anchored AND use-corroborated. Re-type ONLY when the ground truth is
+// UNAMBIGUOUS: no def is UNRESOLVED (a move-cycle 'M' or unknown-type 'U' producer
+// might be a hidden reference), the producers do not mix a real primitive with a
+// real reference (a GENUINE conflation → needs a version split, left untouched —
+// the PR#7 int/ref regression direction), and the reference producers agree on one
+// class. For the ref→prim direction a version used AS AN OBJECT is also skipped
+// (a reference producer we failed to detect). Regression-safe by construction: an
+// all-primitive value cannot be used as an object in valid Dalvik and vice versa,
+// so the "block on any unresolved/mixed def" rule (adversarial-review hardening)
+// makes a mislabeled type impossible in either direction (a/b-verified: 0 new
+// `prim = new` / `prim.member` / `ref = int` / `ref`-used-as-int). Classification
+// reads only pre-mutation types (two-phase) so the directions cannot interfere.
 void FixInitResultTypes(Graph& graph);
 
 // DAD: dataflow.py:323 DummyNode — placeholder Node with empty loc-with-ins.

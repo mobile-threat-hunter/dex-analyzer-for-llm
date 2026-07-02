@@ -8,14 +8,17 @@ a `move`, and the version then emits uncompilable Java such as:
 
     java.util.ArrayList v1_0 = 1;      // reference declared, integer assigned
 
-`FixInitResultTypes`' second pass (dataflow.cpp) re-types such object-less
-cascade versions to their primitive descriptor (def-anchored + use-corroborated:
-only when NO ground-truth reference producer backs the version and it is never
-used as an object). This scans the bundled corpus and asserts ZERO
-`<referenceType> v = <nonzero int>;` lines remain.
+`FixInitResultTypes`' second pass (dataflow.cpp) fixes this in BOTH directions
+by resolving each def to its transitive ground truth: ref→prim (the case above)
+and prim→ref (a PRIMITIVE version whose ground truth is a reference + null —
+`int v = ObjectAnimator.ofFloat(...); v = 0; v.addListener()` — the "Shape B"
+primitive-used-as-object bug). It re-types only when the ground truth is
+unambiguous (no unresolved/mixed def; agreeing references).
 
-The regression direction (making a real object primitive → `prim = new` / a
-primitive receiver `v.m()`) is asserted absent too. Skips if no APK is present.
+These tests scan the bundled corpus per method and assert the regression
+directions are absent — a real object never made primitive (`prim = new`), a
+`RefType v = <nonzero int>` residual bounded, and primitive-used-as-object kept
+low by the mirror. Skips if no APK is present.
 """
 
 import glob
@@ -135,22 +138,19 @@ def test_no_primitive_assigned_allocation(scanned):
     )
 
 
-def test_primitive_used_as_object_not_flooded(scanned):
-    """The cascade re-type must not create NEW `prim v; … v.m()` / `throw v` /
-    `v[i]` (re-typing a real object to a primitive) — the soundness invariant
-    the adversarial review asked to guard.
-
-    A large PRE-EXISTING population of these exists on the bundled corpus from a
-    SEPARATE, opposite-direction bug (a primitive mistyped where an object is
-    used — 'Shape B', deferred; unrelated to this pass). An a/b sweep (fix on
-    vs off) showed this pass adds ZERO to it (285→285 across 13 obfuscated APKs).
-    A unit test cannot a/b, so this is a ceiling over the measured baseline: it
-    tolerates the pre-existing lines but trips if this pass floods them."""
+def test_primitive_used_as_object_bounded(scanned):
+    """`prim v; … v.m()` / `throw v` / `v[i]` (a primitive used AS an object) is
+    Shape B — a primitive mistyped where a reference belongs. The prim→ref MIRROR
+    pass fixes most of these (bundled ~349 → ~85, −76%). This ceiling documents
+    that: the mirror must keep them low (a regression that DISABLED the mirror,
+    or the ref→prim cascade wrongly re-typing an object to a primitive, both push
+    this back up). The residual is genuine int/ref merges + display-name-collision
+    artifacts (a distinct `v4` version legitimately int in the same method)."""
     bad = scanned["prim_object"]
-    assert len(bad) <= 360, (
-        f"{len(bad)} primitive-declared locals used AS AN OBJECT (baseline ~349 "
-        f"pre-existing Shape-B; a jump means the cascade pass re-typed an object "
-        f"to a primitive). e.g. {bad[:8]}"
+    assert len(bad) <= 130, (
+        f"{len(bad)} primitive-declared locals used AS AN OBJECT (mirror keeps "
+        f"this ~85; a jump means the mirror is disabled or the cascade re-typed "
+        f"an object to a primitive). e.g. {bad[:8]}"
     )
 
 

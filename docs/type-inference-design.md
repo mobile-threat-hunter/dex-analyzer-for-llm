@@ -133,8 +133,24 @@ tvleanback 41→4. **0 regression on every axis** — `prim = new`, `prim.member
 `throw prim`, `prim[]` all byte-identical fix-on vs fix-off. The ~20 cases the
 hardening leaves (vs the aggressive variant that reached ≈6) are provably
 uncertain move-chains — correctly untouched rather than guessed. parity 28/28,
-sweep 0-crash / 51k classes. The `genuine` set (true object/primitive merge at a
-shared null-check) still needs the merge-point split and remains the next cut.
+sweep 0-crash / 51k classes.
+
+**The mirror direction (prim→ref).** The same cascade occurs reversed — a
+PRIMITIVE-typed version whose ground truth is a reference + null, mistyped `int`
+by DAD's last-write (`int v = ObjectAnimator.ofFloat(...); v = 0; …
+v.addListener(); return v`). This is the larger population (a primitive used AS an
+object — bundled ~349). `gt()` now also carries the resolved reference descriptor,
+and the pass is a symmetric two-phase classify-then-apply (reads only pre-mutation
+types so the directions can't interfere): re-type a primitive version to the
+agreeing reference class when its producers are a reference + null with no genuine
+primitive forcer, no unresolved def, and no disagreeing references. The `!has_prim`
+guard keeps a genuine int/ref merge untouched (PR#7). Sound by the same
+valid-Dalvik argument in reverse (an all-reference value cannot be used as an int).
+Measured (a/b, 7 APKs): primitive-used-as-object 249→111 (−138), 0 new `ref = int`
+/ `ref`-used-as-int, cascade unchanged.
+
+The `genuine` set (true object/primitive merge at a shared null-check, `has_ref &&
+has_prim`) still needs the merge-point split and remains the next cut.
 
 ## Rollout (safe, incremental)
 
