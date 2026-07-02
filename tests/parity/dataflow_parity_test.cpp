@@ -394,6 +394,55 @@ int main() {
                   dst->get_type(), "I");
     }
 
+    // --- FixInitResultTypes: single-def <init> result typed a WRONG REFERENCE --
+    //   catch-Throwable conflation — a register reused as `catch (Throwable v)`
+    //   makes split_variables type the <init> result `Throwable` (a reference,
+    //   not int), so the earlier `!is_ref` gate left it alone → invalid
+    //   `Throwable v = new FileInputStream()`. An authoritative single-def result
+    //   is definitionally the constructed class, so we override even a reference.
+    {
+        Graph g;
+        auto base = std::make_shared<Variable>("v0");
+        base->set_type("Ljava/io/FileInputStream;");
+        InvokeInstruction::Triple triple{"Ljava/io/FileInputStream;", "<init>",
+                                         "()V"};
+        auto inv = std::make_shared<InvokeDirectInstruction>(
+            "Ljava/io/FileInputStream;", "<init>", base, "V",
+            std::vector<std::string>{}, std::vector<IRFormPtr>{}, triple);
+        auto vres = std::make_shared<Variable>("v1");
+        auto a = std::make_shared<AssignExpression>(vres, inv);
+        vres->set_type("Ljava/lang/Throwable;");  // conflation mistype (a REF)
+        StatementBlock blk("A", {a});
+        ReturnBlock r("R", {});
+        g.add_node(&blk); g.add_node(&r);
+        g.add_edge(&blk, &r);
+        g.entry = &blk;
+        g.compute_rpo();
+        FixInitResultTypes(g);
+        check_str("init-result: wrong-ref Throwable overridden to class",
+                  vres->get_type(), "Ljava/io/FileInputStream;");
+    }
+    // A ThisParam <init> result (super()/this() via range) must NOT be re-typed —
+    // that would corrupt `this` to the superclass.
+    {
+        Graph g;
+        auto self = std::make_shared<ThisParam>("v0", "LSub;");
+        InvokeInstruction::Triple triple{"LSuper;", "<init>", "()V"};
+        auto inv = std::make_shared<InvokeDirectInstruction>(
+            "LSuper;", "<init>", self, "V", std::vector<std::string>{},
+            std::vector<IRFormPtr>{}, triple);
+        auto a = std::make_shared<AssignExpression>(self, inv);  // this = this.<init>()
+        StatementBlock blk("A", {a});
+        ReturnBlock r("R", {});
+        g.add_node(&blk); g.add_node(&r);
+        g.add_edge(&blk, &r);
+        g.entry = &blk;
+        g.compute_rpo();
+        FixInitResultTypes(g);
+        check_str("init-result: ThisParam not re-typed (this preserved)",
+                  self->get_type(), "LSub;");
+    }
+
     std::printf("\n%s — %d failure(s)\n", g_fail ? "FAIL" : "PASS", g_fail);
     return g_fail ? 1 : 0;
 }
