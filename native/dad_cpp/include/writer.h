@@ -131,14 +131,17 @@ private:
     // compile error inside an initializer, JLS §8.7). Set in WriteMethod;
     // consumed by the header emission and visit_return_void.
     bool is_clinit_ = false;
-    // Indent of the <clinit> body's OUTERMOST statement level (set right after
-    // the body brace opens). A return-void is dropped only at this level: a
-    // top-level return is the method's final statement (a return has no CFG
-    // successor → nothing follows it there), so fall-through is equivalent. A
-    // return nested inside an if/try/loop is NOT dropped — code may execute
-    // after it on the fall-through path, so suppressing it would change
-    // semantics; those stay DAD-faithful `return;` (uncompilable but not wrong).
-    int clinit_base_indent_ = -1;
+    // TAIL POSITION — true while emitting a statement whose completion ends the
+    // method with no further code on any path (structural, tracked through the
+    // Emit* recursion, NOT via indent). A <clinit>'s return-void is dropped iff
+    // it is in tail position: fall-through is then equivalent to `return`, and
+    // `return` is illegal in an initializer (JLS §8.7). Propagated true through
+    // the top-level statement chain and into if/else branches whose `if` has NO
+    // follow (the if is itself the tail); set false inside loops / switch / try
+    // and non-tail branches, so a genuinely-early return (code executes after it)
+    // is KEPT DAD-faithful. Only READ when is_clinit_, so non-<clinit> output is
+    // byte-identical regardless of this flag.
+    bool tail_pos_ = false;
     // DAD: writer.py: self.skip — set by visit_invoke when ThisParam.<init>()
     // is elided. Consumed by the NEXT write_ind which suppresses its indent.
     // Lives on Writer (persistent) so it carries across VisitIns calls.

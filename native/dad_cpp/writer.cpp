@@ -323,12 +323,12 @@ public:
 
     void visit_return_void() override {
         // Beyond-DAD: `return` is a compile error inside a static initializer
-        // (JLS §8.7), so drop the return-void a <clinit> ends with — but ONLY at
-        // the body's outermost level (a top-level return has no code after it, so
-        // fall-through is equivalent). A return nested in an if/try/loop is kept:
-        // suppressing it could let the fall-through execute code the return was
-        // skipping (real semantic change). (Pairs with the `static { }` header.)
-        if (w_->is_clinit_ && w_->indent_ == w_->clinit_base_indent_) return;
+        // (JLS §8.7), so drop a <clinit>'s return-void when it is in TAIL
+        // POSITION (nothing executes after it → fall-through is equivalent). A
+        // genuinely-early return (code runs after it on the fall-through path)
+        // has tail_pos_ == false and is kept DAD-faithful. (Pairs with the
+        // `static { }` header fix in WriteMethod.)
+        if (w_->is_clinit_ && w_->tail_pos_) return;
         w_->WriteIndent();
         w_->Write("return");
         w_->EndIns();
@@ -736,7 +736,6 @@ void Writer::WriteMethod() {
     // *DADFaithful sibling — parity suites don't assert method signatures
     // (return-literal / catch-clamp precedent).
     is_clinit_ = (m.name == "<clinit>");
-    clinit_base_indent_ = -1;  // reset (belt-and-suspenders; Writer is per-method)
     Write("\n");
     Write(Space());
     if (is_clinit_) {
@@ -795,7 +794,7 @@ void Writer::WriteMethod() {
     Write(Space());
     Write("{\n");
     IncIndent();
-    clinit_base_indent_ = indent_;  // outermost body level (for <clinit> return drop)
+    tail_pos_ = true;  // the method body's top-level chain is in tail position
     VisitNode(graph_->entry);
     DecIndent();
     Write(Space());
@@ -873,6 +872,11 @@ void Writer::EmitIf(CondBlock* cond) {
     // current line and share the same if-test offset; recording once here is
     // cleaner than three call sites and the same-line dedup is a backstop.
     RecordLine(CondReprIns(cond));
+    // Tail position (for the <clinit> return-void drop): the `if`'s branches are
+    // in tail position only if the `if` itself is (entry_tail) AND has no follow
+    // (nothing runs after the if/else join). Restore to entry_tail for the
+    // follow visit. Conservative on the special forms below (false).
+    const bool entry_tail = tail_pos_;
     if (cond->false_branch == cond->true_branch) {
         // DAD writer.py:285-306 — when both branches point to the same code,
         // emit a comment explaining the situation, the commented condition,
@@ -886,7 +890,9 @@ void Writer::EmitIf(CondBlock* cond) {
         cond->visit_cond(wi);
         Write(") {\n");
         IncIndent();
+        tail_pos_ = false;
         VisitNode(cond->true_branch);
+        tail_pos_ = entry_tail;
         DecIndent();
         WriteIndent();
         Write("// }\n");
@@ -911,12 +917,17 @@ void Writer::EmitIf(CondBlock* cond) {
         WriteIndent(); Write("break;\n");
         DecIndent();
         WriteIndent(); Write("}\n");
-        if (cond->false_branch) VisitNode(cond->false_branch);
+        if (cond->false_branch) {
+            tail_pos_ = entry_tail;  // the in-loop remainder inherits the if's tail
+            VisitNode(cond->false_branch);
+        }
         return;
     }
     NodeBase* follow = nullptr;
     auto it = cond->follow.find("if");
     if (it != cond->follow.end()) follow = it->second;
+    // Branches are in tail position iff the if is AND there's no join code after.
+    const bool branch_tail = entry_tail && (follow == nullptr);
 
     // DAD: writer.py:319-326 — if the true branch goes straight to the follow
     // (or to next_case inside a switch body), negate the condition and swap
@@ -941,6 +952,7 @@ void Writer::EmitIf(CondBlock* cond) {
     IncIndent();
     if (cond->true_branch && cond->true_branch != follow) {
         if_follow_.push_back(follow);
+        tail_pos_ = branch_tail;
         VisitNode(cond->true_branch);
         if_follow_.pop_back();
     }
@@ -958,11 +970,13 @@ void Writer::EmitIf(CondBlock* cond) {
         WriteIndent(); Write("} else {\n");
         IncIndent();
         if_follow_.push_back(follow);
+        tail_pos_ = branch_tail;
         VisitNode(cond->false_branch);
         if_follow_.pop_back();
         DecIndent();
     }
     WriteIndent(); Write("}\n");
+    tail_pos_ = entry_tail;  // the follow (join code) inherits the if's tail
     if (follow) VisitNode(follow);
 }
 
@@ -971,6 +985,10 @@ void Writer::EmitLoop(LoopBlock* loop) {
     auto fit = loop->follow.find("loop");
     if (fit != loop->follow.end()) follow = fit->second;
     WriterImpl wi(this); wi.constructor_ = is_constructor_;
+    // A return inside a loop body is reached mid-iteration, never in the method's
+    // tail position — keep it (conservative). The follow inherits the loop's tail.
+    const bool entry_tail = tail_pos_;
+    tail_pos_ = false;
 
     if (loop->looptype.is_pretest()) {
         // DAD: writer.py:241-243 — if true branch is the loop exit, negate
@@ -1034,12 +1052,17 @@ void Writer::EmitLoop(LoopBlock* loop) {
         }
         Write(");\n");
     }
+    tail_pos_ = entry_tail;
     if (follow) VisitNode(follow);
 }
 
 void Writer::EmitSwitch(SwitchBlock* sw) {
     auto lins = sw->get_ins();
     WriterImpl wi(this); wi.constructor_ = is_constructor_;
+    // Conservative: a return inside a switch case is kept (break/fall-through
+    // structuring makes tail position ambiguous). The follow inherits the tail.
+    const bool entry_tail = tail_pos_;
+    tail_pos_ = false;
     for (size_t i = 0; i + 1 < lins.size(); ++i) VisitIns(lins[i]);
     if (!lins.empty()) RecordLine(lins.back().get());  // D-3 — `switch (x)` line
     WriteIndent(); Write("switch (");
@@ -1074,10 +1097,16 @@ void Writer::EmitSwitch(SwitchBlock* sw) {
     switch_follow_.pop_back();
     DecIndent();
     WriteIndent(); Write("}\n");
+    tail_pos_ = entry_tail;
     if (follow) VisitNode(follow);
 }
 
 void Writer::EmitTry(TryBlock* tb) {
+    // Conservative: returns inside try/catch bodies are kept (a return in a try
+    // followed by a catch, or in a catch, is genuinely early). The try's follow
+    // inherits the tail.
+    const bool entry_tail = tail_pos_;
+    tail_pos_ = false;
     WriteIndent(); Write("try {\n");
     IncIndent();
     try_follow_.push_back(tb->try_follow);
@@ -1112,6 +1141,7 @@ void Writer::EmitTry(TryBlock* tb) {
     }
     Write("\n");
     try_follow_.pop_back();
+    tail_pos_ = entry_tail;
     if (tb->try_follow) VisitNode(tb->try_follow);
 }
 
