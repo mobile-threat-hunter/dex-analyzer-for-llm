@@ -494,32 +494,45 @@ void FixInitResultTypes(Graph& graph) {
                    std::string("IJZBSCFD").find(t[0]) != std::string::npos;
         };
         // Ground-truth of a def's rhs: 'R' ref producer, 'P' prim forcer,
-        // 'N' null/zero-neutral, 'U' unknown/neutral, 'M' unresolved-move.
+        // 'N' null/zero-neutral, 'U' unknown, 'M' unresolved-move (cycle).
         // SAFETY-FIRST: 'P' only when the producer's OWN type is a genuine
         // primitive descriptor (or a structural const-nonzero / arithmetic);
-        // 'R' whenever the type is a reference; everything else neutral. This
-        // guarantees a real object is NEVER mislabeled prim (the regression
+        // 'R' whenever the type is a reference; everything else 'U'/'M'/'N'.
+        // This guarantees a real object is NEVER mislabeled prim (the regression
         // direction — re-typing an object to int would reintroduce `prim=new`).
-        std::function<char(IRForm*, std::set<std::string>&)> gt =
-            [&](IRForm* rhsv, std::set<std::string>& seen) -> char {
+        // `prim_out` receives the resolved primitive DESCRIPTOR ('I'/'J'/… — the
+        // real width, so a long cascade is not narrowed to `int v = <huge>`).
+        std::function<char(IRForm*, std::set<std::string>&, std::string&)> gt =
+            [&](IRForm* rhsv, std::set<std::string>& seen,
+                std::string& prim_out) -> char {
             if (!rhsv) return 'U';
             if (rhsv->is_ident()) {  // move — resolve source transitively
                 const std::string sid = rhsv->Vid();
                 if (seen.count(sid)) return 'M';
                 seen.insert(sid);
                 auto dit = defs_of.find(sid);
-                if (dit == defs_of.end())  // param/no def — declared type
-                    return is_ref(rhsv->get_type()) ? 'R'
-                           : is_prim_desc(rhsv->get_type()) ? 'P'
-                                                            : 'U';
-                char agg = 'N';
+                if (dit == defs_of.end()) {  // param/no def — declared type
+                    const std::string t = rhsv->get_type();
+                    if (is_ref(t)) return 'R';
+                    if (is_prim_desc(t)) { prim_out = t; return 'P'; }
+                    return 'U';
+                }
+                // Aggregate sibling defs with SAFETY precedence R > U/M > P > N:
+                // any reference wins; any uncertainty (unknown / cycle) blocks a
+                // re-type; only an all-primitive/null source is 'P'/'N'.
+                bool sib_u = false, sib_p = false;
                 for (IRForm* d : dit->second) {
                     auto dr = d->get_rhs();
-                    char c = dr.empty() ? 'U' : gt(dr[0].get(), seen);
+                    if (dr.empty() || !dr[0]) { sib_u = true; continue; }
+                    std::string cp;
+                    char c = gt(dr[0].get(), seen, cp);
                     if (c == 'R') return 'R';
-                    if (c == 'P') agg = 'P';
+                    if (c == 'U' || c == 'M') sib_u = true;
+                    else if (c == 'P') { sib_p = true;
+                        if (prim_out.empty()) prim_out = cp; }
                 }
-                return agg;
+                if (sib_u) return 'U';
+                return sib_p ? 'P' : 'N';
             }
             // Unambiguous reference producers.
             if (dynamic_cast<NewInstance*>(rhsv) ||
@@ -530,18 +543,27 @@ void FixInitResultTypes(Graph& graph) {
                 return 'R';
             if (auto* c = dynamic_cast<Constant*>(rhsv)) {
                 if (is_ref(c->get_type())) return 'R';       // const-class/string
-                return c->get_int_value() == 0 ? 'N' : 'P';  // 0 = null-neutral
+                if (c->get_int_value() == 0) return 'N';     // 0 = null-neutral
+                prim_out = is_prim_desc(c->get_type()) ? c->get_type() : "I";
+                return 'P';
             }
             // Structural primitives (arithmetic / length / comparison / prim
             // cast) — but a ref-typed result still wins as 'R' (never mislabel).
             if (dynamic_cast<BinaryExpression*>(rhsv) ||
                 dynamic_cast<UnaryExpression*>(rhsv) ||
-                dynamic_cast<ArrayLengthExpression*>(rhsv))
-                return is_ref(rhsv->get_type()) ? 'R' : 'P';
+                dynamic_cast<ArrayLengthExpression*>(rhsv)) {
+                const std::string t = rhsv->get_type();
+                if (is_ref(t)) return 'R';
+                prim_out = is_prim_desc(t) ? t : "I";
+                return 'P';
+            }
             // Everything else (invoke, field-get, array-load, …): type-driven.
+            // An empty type is UNKNOWN, not primitive — a corrupted-type
+            // reference producer (e.g. aget-object off a mistyped array) must
+            // NOT read as primitive, or the version could be wrongly re-typed.
             const std::string t = rhsv->get_type();
             if (is_ref(t)) return 'R';
-            if (is_prim_desc(t)) return 'P';
+            if (is_prim_desc(t)) { prim_out = t; return 'P'; }
             return 'U';
         };
         for (auto& [vid, dvec] : defs_of) {
@@ -550,31 +572,29 @@ void FixInitResultTypes(Graph& graph) {
             auto vit = dvec[0]->var_map.find(vid);
             if (vit == dvec[0]->var_map.end() || !vit->second) continue;
             if (!is_ref(vit->second->get_type())) continue;  // only ref-typed
-            bool has_ref = false, has_prim = false;
-            std::string prim_type;  // the descriptor to re-type to
+            bool has_ref = false, has_prim = false, has_unknown = false;
+            std::string prim_type;  // the resolved descriptor to re-type to
             for (IRForm* d : dvec) {
                 std::set<std::string> seen{vid};
                 auto dr = d->get_rhs();
-                if (dr.empty() || !dr[0]) continue;
-                char c = gt(dr[0].get(), seen);
+                if (dr.empty() || !dr[0]) { has_unknown = true; continue; }
+                std::string cp;
+                char c = gt(dr[0].get(), seen, cp);
                 if (c == 'R') has_ref = true;
-                if (c == 'P') {
-                    has_prim = true;
-                    // Prefer this def's OWN prim descriptor (const/arith); a
-                    // move-resolved 'P' has no direct descriptor here → fall
-                    // back to int, the obfuscator's flag default.
-                    const std::string dt = dr[0]->get_type();
-                    if (prim_type.empty())
-                        prim_type = is_prim_desc(dt) ? dt : std::string{"I"};
-                }
+                else if (c == 'U' || c == 'M') has_unknown = true;
+                else if (c == 'P') { has_prim = true;
+                    if (prim_type.empty()) prim_type = cp; }
+                // 'N' (null/zero) is neutral — compatible with the primitive.
             }
-            // Only a pure cascade (a primitive forcer, NO reference producer) is
-            // re-typed. has_ref && has_prim is a GENUINE conflation (a real
-            // allocation AND a real primitive) — that needs a version split, not
-            // a re-type, and is left untouched. has_ref-only / no-prim are fine.
-            if (has_ref || !has_prim) continue;
-            // Re-type unless the version is used AS AN OBJECT anywhere (which
-            // would prove a reference producer we failed to detect).
+            // Re-type ONLY a PROVABLY-primitive cascade: a primitive forcer, and
+            // EVERY def definitively primitive/null — no reference producer
+            // (has_ref: a genuine int/ref merge needing a split), and no
+            // unknown/cycle def (has_unknown: a producer we could not resolve
+            // might be a hidden reference — refuse rather than risk re-typing an
+            // object to int, which would reintroduce `prim=new`/`prim.member`).
+            if (has_ref || has_unknown || !has_prim) continue;
+            // Belt-and-suspenders: skip if the version is used AS AN OBJECT
+            // (invoke receiver / field owner) — a reference producer we missed.
             if (object_vids.count(vid)) continue;
             if (prim_type.empty()) prim_type = "I";
             vit->second->set_type(prim_type);

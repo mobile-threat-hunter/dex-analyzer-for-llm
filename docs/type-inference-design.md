@@ -113,11 +113,28 @@ not a merge that needs splitting — fixable by correct def-anchored typing with
 handles most of it. **Implemented** as the cascade re-type in `FixInitResultTypes`
 (see dataflow.h): re-type an object-less ref version to its primitive descriptor
 when no ground-truth reference backs it AND it is never used as an object.
-Measured (reference-declared-nonzero-int invalid lines, before→after): obfuscated
-APKs 61→0 and 16→3; clean tvleanback 41→0. 0 regression (no new `prim = new` /
-`prim.member`), parity 28/28, sweep 0-crash / 51k classes. The `genuine` set
-(true object/primitive merge at a shared null-check) still needs the merge-point
-split and remains the next cut.
+
+**Adversarial-review hardening.** Two independent reviewers flagged the same
+constructible-but-unconfirmed holes: the object-use guard covers only
+receiver/field (not throw/array-store/return/ref-arg), and `gt()` could hide a
+genuine reference behind a move-cycle or a no-def move-source fallback, yielding
+a false all-primitive classification. The resolution is a single conservative
+rule that makes all of them unreachable: **re-type only when EVERY def is
+definitively primitive/null — any unresolved def (`'M'` move-cycle or `'U'`
+unknown-type producer) blocks it**, because such a def might be a hidden
+reference. Since an all-primitive value cannot be used as an object in valid
+Dalvik, this def-side rule also subsumes the use-side gaps. Plus the re-type
+width is the resolved descriptor (`'I'`/`'J'`/…), so a `long`/`double` cascade is
+not narrowed to an uncompilable `int v = <out-of-range>`.
+
+Measured (reference-declared-nonzero-int invalid lines, before→after, hardened):
+aggregate 422→26 (−94%) across a 13-APK a/b; obfuscated e.g. 61→1, 14→4; clean
+tvleanback 41→4. **0 regression on every axis** — `prim = new`, `prim.member`,
+`throw prim`, `prim[]` all byte-identical fix-on vs fix-off. The ~20 cases the
+hardening leaves (vs the aggressive variant that reached ≈6) are provably
+uncertain move-chains — correctly untouched rather than guessed. parity 28/28,
+sweep 0-crash / 51k classes. The `genuine` set (true object/primitive merge at a
+shared null-check) still needs the merge-point split and remains the next cut.
 
 ## Rollout (safe, incremental)
 

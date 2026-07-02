@@ -120,12 +120,18 @@ void RegisterPropagation(Graph& graph, ChainMap& du, ChainMap& ud);
 // sibling conflated register by a `move`. Such a version is genuinely a primitive
 // (an obfuscator's 0/1 flag reusing an object slot) and emits uncompilable
 // `ArrayList v = 1;`. The pass re-types it to its primitive descriptor. It is
-// def-anchored AND use-corroborated: re-type ONLY when there is no ground-truth
-// reference producer AND the version is never used as an object (receiver of
-// `v.m()`, owner of `v.f` / `v.f = …`). A version with BOTH a real allocation and
-// a real primitive forcer is a GENUINE conflation (needs a version split, not a
-// re-type) and is left untouched. Regression-safe: it only ever makes an object-
-// less version primitive, never the reverse (never reintroduces `prim = new`).
+// def-anchored AND use-corroborated: re-type ONLY when EVERY def is definitively
+// primitive/null (no reference producer AND no UNRESOLVED def — a move-cycle or a
+// producer whose type we cannot determine might be a hidden reference, so any
+// uncertainty blocks the re-type), and the version is never used as an object
+// (receiver of `v.m()`, owner of `v.f`). A version with BOTH a real allocation
+// and a real primitive forcer is a GENUINE conflation (needs a version split, not
+// a re-type) and is left untouched. The re-type target width is the RESOLVED
+// primitive descriptor ('I'/'J'/…) so a `long`/`double` cascade is not narrowed
+// to `int v = <out-of-range>`. Regression-safe by construction: it only ever
+// makes a PROVABLY-object-less version primitive, never the reverse (never
+// reintroduces `prim = new` / `prim.member`) — the "block on any unresolved def"
+// rule (adversarial-review hardening) makes a mislabeled reference impossible.
 void FixInitResultTypes(Graph& graph);
 
 // DAD: dataflow.py:323 DummyNode — placeholder Node with empty loc-with-ins.
