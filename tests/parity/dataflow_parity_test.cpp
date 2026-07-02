@@ -442,6 +442,34 @@ int main() {
         check_str("init-result: ThisParam not re-typed (this preserved)",
                   self->get_type(), "LSub;");
     }
+    // --- Use-based refinement: a var typed by conflation (Throwable) but with an
+    //   allocation-X def AND a method whose declaring class == X invoked on it is
+    //   re-typed to X (the use proves the type).
+    {
+        Graph g;
+        auto v = std::make_shared<Variable>("v1");
+        v->set_type("Ljava/lang/Throwable;");  // catch-slot conflation mistype
+        auto ni = std::make_shared<NewInstance>("Ljava/io/FileInputStream;");
+        auto def = std::make_shared<AssignExpression>(v, ni);  // v = new FileInputStream
+        // use: `tmp = v.getChannel()` — declaring class (dotted) == the allocation.
+        InvokeInstruction::Triple tr{"java.io.FileInputStream", "getChannel",
+                                     "()Ljava/nio/channels/FileChannel;"};
+        auto inv = std::make_shared<InvokeDirectInstruction>(
+            "java.io.FileInputStream", "getChannel", v,
+            "Ljava/nio/channels/FileChannel;", std::vector<std::string>{},
+            std::vector<IRFormPtr>{}, tr);
+        auto tmp = std::make_shared<Variable>("v2");
+        auto use = std::make_shared<AssignExpression>(tmp, inv);
+        StatementBlock blk("A", {def, use});
+        ReturnBlock r("R", {});
+        g.add_node(&blk); g.add_node(&r);
+        g.add_edge(&blk, &r);
+        g.entry = &blk;
+        g.compute_rpo();
+        FixInitResultTypes(g);
+        check_str("use-based: Throwable + X-receiver-use → X",
+                  v->get_type(), "Ljava/io/FileInputStream;");
+    }
 
     std::printf("\n%s — %d failure(s)\n", g_fail ? "FAIL" : "PASS", g_fail);
     return g_fail ? 1 : 0;

@@ -438,6 +438,154 @@ void FixInitResultTypes(Graph& graph) {
             if (fix) it->second->set_type(bt);
         }
     }
+
+    // ---- Additive pass: MULTI-def catch-conflation residual --------------------
+    // The loop above corrects SINGLE-def allocation results. A register reused as
+    // a `catch (Throwable v)` slot AND filled (through a move) by an allocation
+    // that is also nulled produces a MULTI-def version whose defs are all
+    // `new X` / `<init> X` / a move from such / null — e.g.
+    // `IOException v = new ByteArrayOutputStream(); v = null`. Its Java type is
+    // unambiguously X (nulls are assignment-compatible), yet the loop skipped it
+    // (multi-def, and the declared var is the move TARGET, not the alloc itself).
+    // Classify every version by ALL its defs (resolving `v = move src` to the
+    // source's allocation, fixpoint) and re-type the "clean-alloc" ones. Genuine
+    // int/ref conflation is excluded — a primitive def, a method-result / field
+    // def, or two disagreeing classes make the version `bad` — leaving it for a
+    // real type-inference pass (deferred). `this` is never re-typed (a
+    // super()-via-range gives it a SUPERCLASS `<init>` def). This pass only ADDS
+    // to the loop above: it re-types versions the loop left with a wrong reference
+    // (never a primitive, so it CANNOT re-introduce a `prim v = new` regression).
+    auto is_int_const_t = [](const std::string& t) {
+        return t == "I" || t == "J" || t == "B" || t == "S" || t == "C" ||
+               t == "Z";
+    };
+    struct DefInfo {
+        std::string alloc; bool bad = false; bool has_prim = false;
+        bool alloc_conflict = false;  // two disagreeing allocation classes
+        std::vector<std::string> mv;
+    };
+    std::unordered_map<std::string, DefInfo> dinfo;
+    for (NodeBase* n : graph.nodes) {
+        auto* bb = dynamic_cast<BasicBlock*>(n);
+        if (!bb) continue;
+        for (auto& ins : bb->get_ins()) {
+            if (!ins) continue;
+            auto lid = ins->GetLhsId();
+            if (!lid) continue;
+            auto& di = dinfo[*lid];
+            auto rhs = ins->get_rhs();
+            if (rhs.empty() || !rhs[0]) { di.bad = true; continue; }
+            IRForm* r = rhs[0].get();
+            std::string alloc;
+            if (auto* inv = dynamic_cast<InvokeInstruction*>(r)) {
+                if (inv->name() == "<init>") {
+                    std::string t = inv->get_type();
+                    if (!is_ref(t)) t = inv->cls();
+                    if (is_ref(t)) alloc = t; else di.bad = true;
+                } else {
+                    di.bad = true;  // method-result — not a clean allocation
+                    if (!is_ref(inv->rtype())) di.has_prim = true;
+                }
+            } else if (dynamic_cast<NewInstance*>(r) ||
+                       dynamic_cast<NewArrayExpression*>(r)) {
+                alloc = r->get_type();
+            } else if (auto* c = dynamic_cast<Constant*>(r)) {
+                if (!(c->is_const() && is_int_const_t(c->get_type()) &&
+                      c->get_int_value() == 0)) {
+                    di.bad = true;      // genuine primitive constant (0 = null, ok)
+                    di.has_prim = true;
+                }
+            } else if (r->is_ident()) {
+                di.mv.push_back(r->Vid());  // move — resolve to source's alloc
+            } else {
+                di.bad = true;              // field / binary / other — conflation
+                if (!is_ref(r->get_type())) di.has_prim = true;  // primitive value
+            }
+            if (!alloc.empty()) {
+                if (!di.alloc.empty() && di.alloc != alloc) {
+                    di.bad = true; di.alloc_conflict = true;
+                } else di.alloc = alloc;
+            }
+        }
+    }
+    for (int iter = 0; iter < 8; ++iter) {
+        bool changed = false;
+        for (auto& [lid, di] : dinfo) {
+            if (di.mv.empty()) continue;
+            std::vector<std::string> pending;
+            for (const std::string& sid : di.mv) {
+                auto s = dinfo.find(sid);
+                if (s == dinfo.end() || s->second.bad) {
+                    di.bad = true;
+                    if (s != dinfo.end() && s->second.has_prim) di.has_prim = true;
+                    changed = true;
+                } else if (!s->second.mv.empty()) {
+                    pending.push_back(sid);
+                } else if (!s->second.alloc.empty()) {
+                    if (!di.alloc.empty() && di.alloc != s->second.alloc) {
+                        di.bad = true; di.alloc_conflict = true;
+                    } else di.alloc = s->second.alloc;
+                    changed = true;
+                } else {
+                    di.bad = true; changed = true;  // source is null-only
+                }
+            }
+            if (pending.size() != di.mv.size()) { di.mv = pending; changed = true; }
+        }
+        if (!changed) break;
+    }
+    // ---- Use-based refinement (sound, DEX-provided, no external hierarchy) -----
+    // The `bad` residual is a version whose defs mix an allocation of X with a
+    // catch-slot exception def (split_variables merged a `catch (IOException v)`
+    // register into the version) — so it's typed `IOException` but constructed
+    // and USED as a `ByteArrayOutputStream`. Two independent facts pin the type:
+    // the DEF proves v holds an X (a `new X` / `<init> X`, possibly via a move),
+    // and a USE `v.toByteArray()` whose method is DECLARED on X (the dex invoke's
+    // `cls()`) corroborates it (an X-method on a receiver only verifies if the
+    // receiver holds an X). So re-type to the ALLOCATION class X — never to a
+    // receiver class. The re-type target being the allocation is what makes this
+    // safe even on a genuinely-conflated register whose receiver set contains
+    // UNRELATED classes (a spurious split-var merge can put two unrelated invokes
+    // under one base id): those extra receivers are ignored, and the two-
+    // allocation case is excluded via `alloc_conflict`. Needs no class hierarchy;
+    // `has_prim` excludes int/ref conflation and `ThisParam` is never re-typed.
+    std::unordered_map<std::string, std::unordered_set<std::string>> recv_cls;
+    for (NodeBase* n : graph.nodes) {
+        auto* bb = dynamic_cast<BasicBlock*>(n);
+        if (!bb) continue;
+        for (auto& ins : bb->get_ins()) {
+            if (!ins) continue;
+            auto rhs = ins->get_rhs();
+            IRForm* r = (!rhs.empty() && rhs[0]) ? rhs[0].get() : ins.get();
+            if (auto* inv = dynamic_cast<InvokeInstruction*>(r))
+                if (!inv->base().empty() && !inv->cls().empty())
+                    recv_cls[inv->base()].insert(inv->cls());
+        }
+    }
+    // `InvokeInstruction::cls()` is the dotted Java form (`java.io.FileInputStream`)
+    // while an allocation type is a descriptor (`Ljava/io/FileInputStream;`).
+    auto to_dotted = [](const std::string& d) -> std::string {
+        if (d.size() >= 2 && d.front() == 'L' && d.back() == ';') {
+            std::string s = d.substr(1, d.size() - 2);
+            for (char& c : s) if (c == '/') c = '.';
+            return s;
+        }
+        return d;
+    };
+    for (auto& [lid, di] : dinfo) {
+        // no allocation anchor / int-conflated / two disagreeing allocations
+        if (di.alloc.empty() || di.has_prim || di.alloc_conflict) continue;
+        auto uc = recv_cls.find(lid);
+        if (uc == recv_cls.end() || !uc->second.count(to_dotted(di.alloc)))
+            continue;
+        IRForm* def = def_ins[lid];
+        if (!def) continue;
+        auto vit = def->var_map.find(lid);
+        if (vit == def->var_map.end() || !vit->second) continue;
+        if (dynamic_cast<ThisParam*>(vit->second.get())) continue;
+        if (vit->second->get_type() != di.alloc)
+            vit->second->set_type(di.alloc);
+    }
 }
 
 // =============================================================================
