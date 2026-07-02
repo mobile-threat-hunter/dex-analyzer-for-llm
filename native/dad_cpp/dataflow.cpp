@@ -378,6 +378,17 @@ void FixInitResultTypes(Graph& graph) {
             // / array descriptor (static). All three define a register that can
             // only legally hold a reference, so a non-reference lhs is the bug.
             std::string bt;
+            // `authoritative` — the result's type is DEFINITIONALLY the
+            // constructed class (a direct new-instance / new-array, or an <init>
+            // whose base resolves to the class). Such a result can be a WRONG
+            // reference too, not just a mistyped primitive: register conflation
+            // (e.g. the slot reused as a `catch (Throwable v)` variable) makes
+            // split_variables type the <init> result `Throwable`, which
+            // get_type()'s `!is_ref` gate below would leave untouched. For a
+            // SINGLE-def authoritative result we override even a reference,
+            // because the object IS exactly that class. A move source (PR#7,
+            // below) is NOT authoritative in this sense — kept non-ref-only.
+            bool authoritative = false;
             if (auto* inv = dynamic_cast<InvokeInstruction*>(rhs[0].get())) {
                 if (inv->name() == "<init>") {
                     bt = inv->get_type();
@@ -386,10 +397,12 @@ void FixInitResultTypes(Graph& graph) {
                     // "V" rtype. The constructed object's type is the class —
                     // use cls() when get_type() isn't a reference.
                     if (!is_ref(bt)) bt = inv->cls();
+                    authoritative = true;
                 }
             } else if (dynamic_cast<NewInstance*>(rhs[0].get()) ||
                        dynamic_cast<NewArrayExpression*>(rhs[0].get())) {
                 bt = rhs[0]->get_type();
+                authoritative = true;
             } else if (rhs[0]->is_ident() && source_is_allocation(rhs[0].get())) {
                 // `vDst = move vNew` where vNew is a fresh new-instance/new-array
                 // (e.g. `new-instance v10` → `move-object v0, v10` →
@@ -404,8 +417,25 @@ void FixInitResultTypes(Graph& graph) {
             if (!is_ref(bt)) continue;
             auto it = ins->var_map.find(*lid);
             if (it == ins->var_map.end() || !it->second) continue;
-            // Only correct the bug signature: a non-reference result of `new`.
-            if (!is_ref(it->second->get_type())) it->second->set_type(bt);
+            const std::string cur = it->second->get_type();
+            // Correct: (a) the classic non-reference result of `new` (int → ref),
+            // OR (b) a SINGLE-def AUTHORITATIVE result whose current type is a
+            // DIFFERENT reference — a conflation artifact (e.g. `Throwable` from a
+            // reused catch slot). Multi-def is excluded: a conflated int/ref
+            // register genuinely typed as a supertype merge must keep its type
+            // (PR#7 regression lesson). The ref-override also EXCLUDES a ThisParam
+            // lhs: a `super()`/`this()` via invoke-direct/range keeps returned=base
+            // (no ThisParam guard in InvokeDirectRange, unlike InvokeDirect), so
+            // the <init> result can be `this` with cls() = the SUPERCLASS —
+            // re-typing it would corrupt `this` and flip the writer's super-vs-this
+            // detection. `this` is never a mistyped allocation result, so a
+            // structural exclusion is free (review-hardening; the multi_def guard
+            // happened to block the in-corpus cases but that is data-dependent).
+            const bool fix =
+                !is_ref(cur) ||
+                (authoritative && cur != bt && !multi_def.count(*lid) &&
+                 !dynamic_cast<ThisParam*>(it->second.get()));
+            if (fix) it->second->set_type(bt);
         }
     }
 }
