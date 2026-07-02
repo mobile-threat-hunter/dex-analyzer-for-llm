@@ -54,6 +54,11 @@ _PRIM_NEW = re.compile(
 # a `<prim> v` declaration whose exact name is later used as an object receiver
 _PRIM_DECL = re.compile(
     r"^\s*(?:" + "|".join(_PRIMS) + r")\s+(v\w+)\s*[=;]", re.M)
+# a variable ORDERED-compared to null (`v <= null`) — the low-false-positive
+# fingerprint of an INT mistyped as a reference (the prim→ref mirror's
+# regression: the const-0 renders `null` because the var is reference-typed, and
+# `<=` requires numeric operands). `==`/`!=` are excluded (valid null checks).
+_REF_ORD_NULL = re.compile(r"(?<![\w.])(v\w+)\s*(?:<=|>=|<|>)\s*null\b")
 
 
 def _apks():
@@ -89,7 +94,11 @@ def scanned():
         pytest.skip("no test APK (set $DEXLLM_TEST_APK or add one under test_apk/APK/)")
     ref_int = []
     prim_new = []
-    prim_object = []  # (class::method, "v.member"/"throw v"/"v[…]")
+    prim_object = set()  # DEDUPED (class::method, var) — one entry per var, so a
+    #                      library method recurring across bundled APKs and a var
+    #                      with several object uses each count once (avoids the
+    #                      inflation + timing-fragility of a per-hit list).
+    ref_ord_null = 0     # `v <op> null` occurrences (mirror ref-used-as-int flood)
     per_apk_cap = 6000
     for apk in apks:
         try:
@@ -120,9 +129,11 @@ def scanned():
                 for m in _PRIM_NEW.finditer(out):
                     prim_new.append((desc, m.group(0).strip()))
                 for pv in {m.group(1) for m in _PRIM_DECL.finditer(out)}:
-                    for h in _object_uses(out, pv):
-                        prim_object.append((desc, h))
-    return {"ref_int": ref_int, "prim_new": prim_new, "prim_object": prim_object}
+                    if _object_uses(out, pv):
+                        prim_object.add((desc, pv))
+                ref_ord_null += len(_REF_ORD_NULL.findall(out))
+    return {"ref_int": ref_int, "prim_new": prim_new,
+            "prim_object": sorted(prim_object), "ref_ord_null": ref_ord_null}
 
 
 # The pass is SOUND-by-construction (it re-types a reference version to a
@@ -141,16 +152,35 @@ def test_no_primitive_assigned_allocation(scanned):
 def test_primitive_used_as_object_bounded(scanned):
     """`prim v; … v.m()` / `throw v` / `v[i]` (a primitive used AS an object) is
     Shape B — a primitive mistyped where a reference belongs. The prim→ref MIRROR
-    pass fixes most of these (bundled ~349 → ~85, −76%). This ceiling documents
+    pass fixes most of these (bundled deduped ~262 → ~60). This ceiling documents
     that: the mirror must keep them low (a regression that DISABLED the mirror,
     or the ref→prim cascade wrongly re-typing an object to a primitive, both push
     this back up). The residual is genuine int/ref merges + display-name-collision
-    artifacts (a distinct `v4` version legitimately int in the same method)."""
+    artifacts (a distinct `v4` version legitimately int in the same method).
+    Deduped per (method, var) so it is stable across corpus size / timeouts."""
     bad = scanned["prim_object"]
-    assert len(bad) <= 130, (
+    assert len(bad) <= 90, (
         f"{len(bad)} primitive-declared locals used AS AN OBJECT (mirror keeps "
-        f"this ~85; a jump means the mirror is disabled or the cascade re-typed "
+        f"this ~60; a jump means the mirror is disabled or the cascade re-typed "
         f"an object to a primitive). e.g. {bad[:8]}"
+    )
+
+
+def test_mirror_does_not_flood_ref_used_as_int(scanned):
+    """The prim→ref MIRROR must not re-type a genuine `int` to a reference that is
+    then used as an int (`v <= null`, `v - 1`, `arr[v]`) — the adversarial-review
+    regression (`int v6` → `String v6; v6 <= null`). The mirror's int-use guard
+    (arithmetic / array-index / ordered-comparison operands) prevents this; an a/b
+    (mirror on vs off) measured 0 new `v <op> null` on the bundled + obfuscated
+    corpus. A residual PRE-EXISTING population (~109 on bundled) comes from a
+    SEPARATE typing bug (split_variables / init-result, present with the mirror
+    off), so this is a ceiling over that baseline: it tolerates the pre-existing
+    lines but trips if the mirror floods them."""
+    n = scanned["ref_ord_null"]
+    assert n <= 130, (
+        f"{n} `v <op> null` (a variable ordered-compared to null — an int mistyped "
+        f"as a reference). Pre-existing baseline ~109; a jump means the mirror "
+        f"re-typed an int-used version to a reference."
     )
 
 

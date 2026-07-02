@@ -149,6 +149,24 @@ valid-Dalvik argument in reverse (an all-reference value cannot be used as an in
 Measured (a/b, 7 APKs): primitive-used-as-object 249→111 (−138), 0 new `ref = int`
 / `ref`-used-as-int, cascade unchanged.
 
+**Adversarial-review hardening (mirror).** Two reviewers found the mirror UNSOUND
+on register-conflated obfuscated dex: a register holding an `int` AND a `String`
+param, whose single split version has defs `[N:const-0, R:String-param]` (the
+primitive nature only in the USES), was re-typed `String` → `String v6; v6 <=
+null; v6 - 1`. The `!has_prim` def-side guard was insufficient — the reference arm
+is a moved-in param, so the version looks all-reference on its defs. Two coupled
+fixes: (1) `gt()`'s move-source aggregation no longer short-circuits on the first
+`'R'` — a source mixing a reference and a primitive returns `'U'` (block); the
+short-circuit had inverted safety polarity for prim→ref (it swallowed the
+primitive sibling). (2) USE-CORROBORATION symmetric to the ref→prim `object_vids`:
+an `int_use_vids` set (arithmetic operand, array index, ordered comparison) blocks
+the mirror on any int-used version. Both make the pass sound for lenient/unverified
+dex. Verified a/b: 0 new `v <op> null` / ref-used-as-int (a ~109 residual on
+bundled is PRE-EXISTING, a separate split_variables/init-result typing bug present
+mirror-off — out of scope). This is why the gate exists: the review caught a
+real regression the author's a/b sample (which lacked the Kotlin-split conflation
+shape) missed.
+
 The `genuine` set (true object/primitive merge at a shared null-check, `has_ref &&
 has_prim`) still needs the merge-point split and remains the next cut.
 

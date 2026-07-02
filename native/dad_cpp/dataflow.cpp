@@ -468,6 +468,11 @@ void FixInitResultTypes(Graph& graph) {
         // object, so it is never re-typed to a primitive (use corroboration —
         // guards against a missed reference producer creating `int v; v.f`).
         std::unordered_set<std::string> object_vids;
+        // Vids used in an INTEGER context — an arithmetic operand, an array
+        // index, or a unary operand (incl. a primitive cast). Such a version
+        // provably holds a primitive, so the prim→ref MIRROR never re-types it
+        // (use-corroboration symmetric to object_vids for the ref→prim cascade).
+        std::unordered_set<std::string> int_use_vids;
         auto note_obj = [&](IRForm* f) {
             if (auto* inv = dynamic_cast<InvokeInstruction*>(f)) {
                 if (!inv->base().empty()) object_vids.insert(inv->base());
@@ -475,6 +480,29 @@ void FixInitResultTypes(Graph& graph) {
                 if (!ie->arg_id().empty()) object_vids.insert(ie->arg_id());
             } else if (auto* ii = dynamic_cast<InstanceInstruction*>(f)) {
                 if (!ii->lhs_id().empty()) object_vids.insert(ii->lhs_id());
+            }
+        };
+        auto note_int = [&](IRForm* f) {
+            auto add = [&](const std::string& v) {
+                if (!v.empty()) int_use_vids.insert(v); };
+            // A UnaryExpression covers CastExpression (a prim cast); a reference
+            // check-cast is a separate CheckCastExpression, so this stays int.
+            if (auto* be = dynamic_cast<BinaryExpression*>(f)) {
+                add(be->arg1_id()); add(be->arg2_id());
+            } else if (auto* ue = dynamic_cast<UnaryExpression*>(f)) {
+                add(ue->arg_id());
+            } else if (auto* al = dynamic_cast<ArrayLoadExpression*>(f)) {
+                add(al->idx_id());
+            } else if (auto* as = dynamic_cast<ArrayStoreInstruction*>(f)) {
+                add(as->index_id());
+            } else if (auto* ce = dynamic_cast<ConditionalExpression*>(f)) {
+                // ORDERED comparisons (`<`/`<=`/`>`/`>=`) require numeric
+                // operands; `==`/`!=` also work on references (object identity /
+                // null check), so only the ordered ops prove an integer use.
+                const std::string& op = ce->op();
+                if (op == "<" || op == "<=" || op == ">" || op == ">=") {
+                    add(ce->arg1_id()); add(ce->arg2_id());
+                }
             }
         };
         for (NodeBase* n : graph.nodes) {
@@ -485,8 +513,10 @@ void FixInitResultTypes(Graph& graph) {
                 auto lid = ins->GetLhsId();
                 if (lid) defs_of[*lid].push_back(ins.get());
                 note_obj(ins.get());
+                note_int(ins.get());
                 auto rhs = ins->get_rhs();
-                if (!rhs.empty() && rhs[0]) note_obj(rhs[0].get());
+                if (!rhs.empty() && rhs[0]) { note_obj(rhs[0].get());
+                    note_int(rhs[0].get()); }
             }
         }
         auto is_prim_desc = [](const std::string& t) {
@@ -520,23 +550,35 @@ void FixInitResultTypes(Graph& graph) {
                     if (is_prim_desc(t)) { type_out = t; return 'P'; }
                     return 'U';
                 }
-                // Aggregate sibling defs with SAFETY precedence R > U/M > P > N:
-                // any reference wins; any uncertainty (unknown / cycle) blocks a
-                // re-type; only an all-primitive/null source is 'P'/'N'.
-                bool sib_u = false, sib_p = false;
-                std::string prim_seen;
+                // Aggregate ALL sibling defs — do NOT short-circuit on the first
+                // 'R'. A conflated move source holding BOTH a reference and a
+                // primitive (an obfuscator reusing one register for an int arg
+                // AND a String) must report as AMBIGUOUS ('U'), not pure-
+                // reference: the earlier short-circuit-on-'R' had INVERTED safety
+                // polarity for the prim→ref mirror — it swallowed the primitive
+                // sibling, so a genuine int/ref merge looked like `has_ref &&
+                // !has_prim` and the mirror re-typed a real `int` to a reference
+                // (adversarial-review finding: `int v6` → `String v6; v6 <= null;
+                // v6 - 1`). Precedence: MIXED (R && P) or any unknown/cycle → 'U'
+                // (blocks either direction); else all-reference → 'R'; else
+                // all-primitive → 'P'; else null-neutral → 'N'.
+                bool sib_r = false, sib_p = false, sib_u = false;
+                std::string ref_seen, prim_seen;
                 for (IRForm* d : dit->second) {
                     auto dr = d->get_rhs();
                     if (dr.empty() || !dr[0]) { sib_u = true; continue; }
                     std::string ct;
                     char c = gt(dr[0].get(), seen, ct);
-                    if (c == 'R') { if (type_out.empty()) type_out = ct;
-                        return 'R'; }
-                    if (c == 'U' || c == 'M') sib_u = true;
+                    if (c == 'R') { sib_r = true;
+                        if (ref_seen.empty()) ref_seen = ct; }
                     else if (c == 'P') { sib_p = true;
                         if (prim_seen.empty()) prim_seen = ct; }
+                    else if (c == 'U' || c == 'M') sib_u = true;
+                    // 'N' (null/zero) is neutral.
                 }
-                if (sib_u) return 'U';
+                if (sib_u || (sib_r && sib_p)) return 'U';  // ambiguous → block
+                if (sib_r) { if (type_out.empty()) type_out = ref_seen;
+                    return 'R'; }
                 if (sib_p) { if (type_out.empty()) type_out = prim_seen;
                     return 'P'; }
                 return 'N';
@@ -547,7 +589,12 @@ void FixInitResultTypes(Graph& graph) {
                 dynamic_cast<FilledArrayExpression*>(rhsv) ||
                 dynamic_cast<MoveExceptionExpression*>(rhsv) ||
                 dynamic_cast<CheckCastExpression*>(rhsv)) {
-                type_out = rhsv->get_type();
+                // An allocation is definitionally a reference; only set the
+                // descriptor when it is actually one (a corrupt/empty type under
+                // lenient load leaves type_out empty → the mirror's is_ref gate
+                // then skips, consistent with the other 'R' branches).
+                const std::string t = rhsv->get_type();
+                if (is_ref(t)) type_out = t;
                 return 'R';
             }
             if (auto* c = dynamic_cast<Constant*>(rhsv)) {
@@ -619,11 +666,21 @@ void FixInitResultTypes(Graph& graph) {
                 retypes.emplace_back(vit->second.get(),
                                      prim_type.empty() ? "I" : prim_type);
             } else if (cur_prim && has_ref && is_ref(ref_type) && !ref_conflict) {
-                // MIRROR (prim→ref): primitive-typed but provably a reference
-                // (e.g. `int v = ObjectAnimator.ofFloat(...)` + `v = 0`, then
-                // `v.addListener()` / `return v`). The !has_prim guard (above,
-                // via the genuine-merge check) keeps a real int/ref conflation
-                // untouched — the PR#7 regression direction.
+                // MIRROR (prim→ref): primitive-typed but its defs are provably a
+                // reference + null (e.g. `int v = ObjectAnimator.ofFloat(...)` +
+                // `v = 0`, then `v.addListener()` / `return v`).
+                // USE-CORROBORATION (symmetric to object_vids, adversarial-review
+                // hardening): skip if the version is ever used in an INTEGER
+                // context (arithmetic operand, array index, unary operand). The
+                // DEF side can look all-reference for a genuinely-conflated
+                // register whose reference arm is a String param moved in while
+                // the same register is reused as an int — split_variables did not
+                // separate them, so `v = strParam` (an 'R' def) and `v = 0` (an
+                // 'N' def) hide the int nature that only the USES expose. Without
+                // this guard the mirror mis-typed `int v6` → `String v6` with
+                // `v6 - 1` / `v6 <= 10` (uncompilable). An int-used version is a
+                // genuine conflation (needs a version split) → leave DAD's type.
+                if (int_use_vids.count(vid)) continue;
                 retypes.emplace_back(vit->second.get(), ref_type);
             }
         }

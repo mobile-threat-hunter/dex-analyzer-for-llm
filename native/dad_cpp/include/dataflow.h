@@ -129,15 +129,23 @@ void RegisterPropagation(Graph& graph, ChainMap& du, ChainMap& ud);
 // def-anchored AND use-corroborated. Re-type ONLY when the ground truth is
 // UNAMBIGUOUS: no def is UNRESOLVED (a move-cycle 'M' or unknown-type 'U' producer
 // might be a hidden reference), the producers do not mix a real primitive with a
-// real reference (a GENUINE conflation → needs a version split, left untouched —
-// the PR#7 int/ref regression direction), and the reference producers agree on one
-// class. For the ref→prim direction a version used AS AN OBJECT is also skipped
-// (a reference producer we failed to detect). Regression-safe by construction: an
-// all-primitive value cannot be used as an object in valid Dalvik and vice versa,
-// so the "block on any unresolved/mixed def" rule (adversarial-review hardening)
-// makes a mislabeled type impossible in either direction (a/b-verified: 0 new
-// `prim = new` / `prim.member` / `ref = int` / `ref`-used-as-int). Classification
-// reads only pre-mutation types (two-phase) so the directions cannot interfere.
+// real reference — where a MOVE SOURCE is itself a conflated register holding both
+// a primitive and a reference, gt() reports 'U' (it aggregates ALL sibling defs
+// and does NOT short-circuit on the first 'R'), so such a genuine conflation is
+// left untouched (needs a version split — the PR#7 int/ref regression direction) —
+// and the reference producers agree on one class. USE-CORROBORATION (symmetric):
+// the ref→prim direction skips a version used AS AN OBJECT (`v.m()` / `v.f`); the
+// prim→ref direction skips a version used AS AN INT (an arithmetic operand, an
+// array index, or an ORDERED comparison `v < n` / `v <= null`). Both guards make
+// the pass sound for lenient/unverified dex too, not only where the verifier
+// guarantees the def/use web. Classification reads only pre-mutation types
+// (two-phase) so the directions cannot interfere. Adversarial-review-hardened:
+// the move-source short-circuit + missing int-use guard once mis-typed a
+// conflated `int` limit to `String` (`v6 <= null`; fixed). Enforced regression
+// tests: `prim = new` and `RefType v = <int>` (bounded) and `v <op> null`
+// (bounded over a separate PRE-EXISTING typing residual) in test_cascade_type.py;
+// the `0 new ref-used-as-int` / `prim.member` claims were a/b-MEASURED (mirror on
+// vs off) rather than each independently CI-enforced.
 void FixInitResultTypes(Graph& graph);
 
 // DAD: dataflow.py:323 DummyNode — placeholder Node with empty loc-with-ins.
