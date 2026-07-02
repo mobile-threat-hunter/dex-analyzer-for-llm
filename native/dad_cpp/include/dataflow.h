@@ -111,6 +111,21 @@ void RegisterPropagation(Graph& graph, ChainMap& du, ChainMap& ud);
 // No-op on already-correct output; reference results (incl. more-derived) left
 // alone. Scoped to the <init> result only — does not touch the multi-def type
 // derivation that handles conflated (object-or-null) merge variables.
+//
+// It ALSO runs a second, general beyond-DAD pass: re-type a move-chain type
+// CASCADE version. DAD types every split version from the register's last write,
+// so a register reused across incompatible types can leave a version typed as a
+// REFERENCE whose transitive ground-truth producers (resolving moves to their
+// ultimate source) are all primitive / null — the reference was copied off a
+// sibling conflated register by a `move`. Such a version is genuinely a primitive
+// (an obfuscator's 0/1 flag reusing an object slot) and emits uncompilable
+// `ArrayList v = 1;`. The pass re-types it to its primitive descriptor. It is
+// def-anchored AND use-corroborated: re-type ONLY when there is no ground-truth
+// reference producer AND the version is never used as an object (receiver of
+// `v.m()`, owner of `v.f` / `v.f = …`). A version with BOTH a real allocation and
+// a real primitive forcer is a GENUINE conflation (needs a version split, not a
+// re-type) and is left untouched. Regression-safe: it only ever makes an object-
+// less version primitive, never the reverse (never reintroduces `prim = new`).
 void FixInitResultTypes(Graph& graph);
 
 // DAD: dataflow.py:323 DummyNode — placeholder Node with empty loc-with-ins.

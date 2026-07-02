@@ -87,6 +87,38 @@ do NOT invent a subtype without a def, staying sound).
 - Uses → the def-derived type already satisfies them (verifier), so we never
   compute `A <: B` ourselves.
 
+## Phase 3 investigation finding (2026-07) — the residual is mostly a CASCADE
+
+Instrumenting `split_variables`/`GroupVariables` on the corpus settled what the
+residual conflation actually is. `GroupVariables` is a standard SSA phi-web: two
+defs share a version ONLY through a common use. So a *sequential* reuse
+(`v = new X; use; v = 7; use2`) is already separate versions — already typed
+correctly. Every remaining multi-def-disagree version therefore has a genuine
+merge use (typically a null / zero check `if-eqz`, which the verifier allows on
+both a reference and an int).
+
+Classifying each ref-typed multi-def version by its **transitive ground-truth
+producers** (resolving moves to their ultimate source) gave, per obfuscated APK:
+
+- **cascade** (ref-typed but NO ground-truth reference producer — a `move`
+  copied a stale reference type off a sibling conflated register; the value is
+  really a primitive flag): the large majority (≈275–308 / APK).
+- **genuine** (a real allocation AND a real primitive forcer both reach the
+  merge): far fewer (≈0–57 / APK).
+
+So the dominant invalid-Java residual (`ArrayList v = 1;`) is a **typing** bug,
+not a merge that needs splitting — fixable by correct def-anchored typing with
+**no control-flow surgery**. Genuine splitting is only needed for the smaller
+`genuine` set. This inverted the expected risk: the cheap, safe typing pass
+handles most of it. **Implemented** as the cascade re-type in `FixInitResultTypes`
+(see dataflow.h): re-type an object-less ref version to its primitive descriptor
+when no ground-truth reference backs it AND it is never used as an object.
+Measured (reference-declared-nonzero-int invalid lines, before→after): obfuscated
+APKs 61→0 and 16→3; clean tvleanback 41→0. 0 regression (no new `prim = new` /
+`prim.member`), parity 28/28, sweep 0-crash / 51k classes. The `genuine` set
+(true object/primitive merge at a shared null-check) still needs the merge-point
+split and remains the next cut.
+
 ## Rollout (safe, incremental)
 
 The 6 post-passes are SAFE (each verified, additive). Replacing them with one
