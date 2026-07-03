@@ -500,6 +500,14 @@ void FixInitResultTypes(Graph& graph) {
                 add(al->idx_id());
             } else if (auto* as = dynamic_cast<ArrayStoreInstruction*>(f)) {
                 add(as->index_id());
+            } else if (auto* cz = dynamic_cast<ConditionalZExpression*>(f)) {
+                // vs-ZERO comparisons (if-ltz/lez/gtz/gez → `<`/`<=`/`>`/`>=`)
+                // require a numeric operand; if-eqz/nez (`==`/`!=`) are the
+                // reference null-check, so only the ordered ops prove an int use.
+                const std::string& op = cz->op();
+                if (op == "<" || op == "<=" || op == ">" || op == ">=") {
+                    add(cz->arg_id());
+                }
             } else if (auto* ce = dynamic_cast<ConditionalExpression*>(f)) {
                 // ORDERED comparisons (`<`/`<=`/`>`/`>=`) require numeric
                 // operands; `==`/`!=` also work on references (object identity /

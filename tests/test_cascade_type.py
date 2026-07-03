@@ -173,16 +173,18 @@ def test_ref_used_as_int_bounded(scanned):
     an int-used version — an a/b measured 0 new); (b) the single-def ref→prim
     CASCADE FIXES it — a lone primitive-returning method typed reference by
     register conflation (`String v = p.indexOf(','); v >= null`) is re-typed to
-    the resolved primitive (`int v = …indexOf(); v >= 0`). That cascade cut the
-    bundled count ~109 → ~53. The residual is genuine int/ref merges (a ref DEF
-    and an int use, needing a version split) — this ceiling catches a regression
-    (mirror flooding it, or the cascade being disabled) without pinning an exact
-    count."""
+    the resolved primitive (`int v = …indexOf(); v >= 0`). The int-use set covers
+    two-operand ordered comparisons AND single-operand vs-zero ones (`if-ltz` →
+    `v < 0`; a ConditionalZExpression), which together cut the bundled count ~109
+    → ~11. The residual is genuine int/ref merges (a ref DEF and an int use,
+    needing a version split) — this ceiling catches a regression (mirror flooding
+    it, or the cascade being disabled) without pinning an exact count."""
     n = scanned["ref_ord_null"]
-    assert n <= 75, (
+    assert n <= 30, (
         f"{n} `v <op> null` (a variable ordered-compared to null — an int mistyped "
-        f"as a reference). Bundled ~53 after the single-def cascade; a jump means "
-        f"the cascade is disabled or the mirror re-typed an int-used version."
+        f"as a reference). Bundled ~11 after the vs-zero int-use corroboration; a "
+        f"jump means the cascade is disabled or the mirror re-typed an int-used "
+        f"version."
     )
 
 
