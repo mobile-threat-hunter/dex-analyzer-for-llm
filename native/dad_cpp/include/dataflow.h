@@ -165,6 +165,45 @@ void RegisterPropagation(Graph& graph, ChainMap& du, ChainMap& ud);
 // (change on vs off) rather than each independently CI-enforced.
 void FixInitResultTypes(Graph& graph);
 
+// Beyond-DAD: materialise a reused `this` register as a fresh local.
+//
+// When a method reuses its receiver register (p0) as a scratch local — reading
+// `this` early, then overwriting it (`move-result` / `const 0`) and reading the
+// new value later, the two merging at a shared use — GroupVariables collapses
+// the param-def and the reuse-defs into ONE version (they share the merge use),
+// so SplitVariables leaves it unsplit and the register keeps its `ThisParam`
+// identity. DAD (and our 1:1 port) then emit `this = <value>` — always invalid
+// Java (you cannot assign to `this`). Confirmed same bug in androguard DAD.
+//
+// Fix (validate-then-mutate — atomic): (1) allocate a fresh local `vX` typed as
+// the method's RETURN type, (2) rewrite every graph reference to the receiver →
+// `vX`, (3) inject `vX = this` at the entry block head. The sole remaining `this`
+// is the entry copy's rhs → `<Ret> vX = this; … vX = …; return vX;` (valid). Runs
+// AFTER SplitVariables (so a surviving `this =` LHS is exactly the unsplit-reuse
+// case — a split reuse was already renamed to `vN`) and BEFORE the chain
+// consumers, which requires the caller to recompute BuildDefUse after a `true`
+// return (the injected copy + renumbered locs).
+//
+// TYPE SAFETY: `vX` is typed as the RETURN type — the one assignability anchor
+// valid Dalvik provides (everything reaching a `return` is assignable to it). The
+// pass therefore ONLY fires when (a) the return type is a reference, (b) the
+// receiver slot is RETURNED, and (c) every reassignment rhs is a reference whose
+// type EXACTLY equals ret_type, or the narrow-integer constant 0 (null). Exact
+// equality (not just any reference) is required because SplitVariables leaves the
+// reuse as one unsplit phi-web that can bind a def reaching only an intermediate
+// use (never the return) with an unrelated type — the merge-point-assignability
+// property does NOT hold per-def (adversarial-review). This provably yields valid
+// Java; a non-reference return, a non-returned reuse, a void-invoke artifact
+// (`this = super.onDraw()`), a genuine primitive (`this = 5`), or a non-exact
+// reference reuse all bail, leaving DAD's (invalid but no-worse) `this = X`. Excludes `<init>` (super()/this() uses the receiver
+// specially). Returns true iff it materialised (the caller then recomputes
+// chains). `this_reg` = receiver register int; `cls_name` = declaring class
+// descriptor; `ret_type` = method return descriptor; `is_ctor` = true for `<init>`.
+bool MaterializeReusedThis(Graph& graph,
+                           std::unordered_map<int, IRFormPtr>& lvars,
+                           int this_reg, const std::string& cls_name,
+                           const std::string& ret_type, bool is_ctor);
+
 // DAD: dataflow.py:323 DummyNode — placeholder Node with empty loc-with-ins.
 class DummyNode : public Node {
 public:

@@ -115,9 +115,22 @@ bool DvMethod::BuildProcessedGraph() {
         }
     }
     SplitVariables(*graph_, lvars, chains.du, chains.ud);
+    // Beyond-DAD: an unsplit reused `this` register (`this = X`, invalid Java) is
+    // materialised as a fresh local seeded `vX = this`. Only fires when a `this =`
+    // would be emitted; on success the graph changed (injected copy + renumbered
+    // locs), so the def-use chains are recomputed below before their consumers.
+    bool mat_this = false;
+    if (!is_static) {
+        mat_this = MaterializeReusedThis(*graph_, lvars, start, m.cls_name,
+                                         m.ret_type, m.name == "<init>");
+    }
     // Beyond-DAD: re-type `<init>` constructor results from the now-finalized
     // base (split_variables can read a stale base for them — version order).
     FixInitResultTypes(*graph_);
+    if (mat_this) {
+        graph_->number_ins();
+        chains = BuildDefUse(*graph_, lparam_keys);
+    }
     DeadCodeElimination(*graph_, chains.du, chains.ud);
     RegisterPropagation(*graph_, chains.du, chains.ud);
 

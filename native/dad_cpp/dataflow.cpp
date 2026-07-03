@@ -933,6 +933,130 @@ void FixInitResultTypes(Graph& graph) {
     }
 }
 
+// Beyond-DAD: see dataflow.h. Materialise a reused receiver register as a local.
+bool MaterializeReusedThis(Graph& graph,
+                           std::unordered_map<int, IRFormPtr>& lvars,
+                           int this_reg, const std::string& cls_name,
+                           const std::string& ret_type, bool is_ctor) {
+    auto is_ref = [](const std::string& t) {
+        return !t.empty() && (t.front() == 'L' || t.front() == '[');
+    };
+    // The materialised local is typed as the method's RETURN type — the one
+    // assignability anchor valid Dalvik gives us: everything that flows to a
+    // `return` is assignable to it. So we only fire when the reused slot is
+    // RETURNED and the return type is a reference (`return this` requires the
+    // receiver — hence the class — to be assignable to it, so `<Ret> vX = this`
+    // is a valid up-cast, and every reuse value returned alongside is likewise
+    // assignable). This provably yields valid Java for the case handled and
+    // leaves everything else as DAD's (invalid-but-no-worse) `this = X`.
+    if (is_ctor) return false;         // super()/this() uses the receiver specially
+    if (!is_ref(ret_type)) return false;  // no reference return anchor
+
+    // The receiver must still be a ThisParam: SplitVariables keeps an UNSPLIT
+    // reuse as ThisParam (the buggy `this = X` case); a reuse it DID split was
+    // already renamed to a fresh vN, so nothing to do there.
+    auto tit = lvars.find(this_reg);
+    if (tit == lvars.end() ||
+        !dynamic_cast<ThisParam*>(tit->second.get())) return false;
+    IRFormPtr this_param = tit->second;
+    const std::string this_vid = "v" + std::to_string(this_reg);
+
+    // ---- PHASE A: validate (NO mutation). Bail cleanly on any disqualifier so
+    // the graph is never left half-rewritten. ------------------------------
+    auto* entry_bb = dynamic_cast<BasicBlock*>(graph.entry);
+    if (!entry_bb) return false;
+
+    bool reused = false, returned = false;
+    for (NodeBase* n : graph.rpo) {
+        auto* bb = dynamic_cast<BasicBlock*>(n);
+        if (!bb) continue;
+        for (const auto& ins : bb->ins) {
+            if (!ins) continue;
+            // Is the receiver returned? (a ReturnInstruction using it.)
+            if (dynamic_cast<ReturnInstruction*>(ins.get())) {
+                for (const auto& u : ins->get_used_vars())
+                    if (u == this_vid) { returned = true; break; }
+            }
+            if (GetLhsKey(ins) != this_vid) continue;
+            reused = true;
+            // Every reassignment rhs must be provably assignable to `vX` (typed
+            // ret_type):
+            //  - a reference whose type EXACTLY equals ret_type. Exact equality
+            //    (not just is_ref) is REQUIRED: SplitVariables leaves the reuse as
+            //    a single unsplit phi-web, which GroupVariables can bind a def into
+            //    that reaches only an INTERMEDIATE use (never the return) whose
+            //    type is unrelated to ret_type — `vX = getBar()` where Bar ⊄ Foo
+            //    (adversarial-review CONFIRMED). Without a type hierarchy or a
+            //    per-def reaches-the-return analysis, exact match is the only
+            //    sound proof; a valid subtype up-cast is conservatively skipped
+            //    too (correctness over coverage).
+            //  - the NARROW-integer constant 0 (`const/4 0`) = the null reference.
+            //    A wide const-0 (`const-wide`, type J/D) is NOT null (lenient-load
+            //    PLAUSIBLE) — require a narrow int descriptor.
+            // A VOID invoke (`this = super.onDraw()`, a DAD artifact) or a genuine
+            // primitive (`this = 5`) also bails — left as DAD's output.
+            auto rhs = ins->get_rhs();
+            const std::string t =
+                (!rhs.empty() && rhs[0]) ? rhs[0]->get_type() : std::string{};
+            if (is_ref(t)) {
+                if (t != ret_type) return false;           // not provably assignable
+                continue;
+            }
+            auto* c = !rhs.empty() ? dynamic_cast<Constant*>(rhs[0].get())
+                                   : nullptr;
+            if (c && c->get_int_value() == 0 && t.size() == 1 &&
+                std::string("IZBSC").find(t) != std::string::npos)
+                continue;                                  // null reference — ok
+            return false;                                  // void / primitive / non-exact ref
+        }
+    }
+    if (!reused || !returned) return false;
+
+    // ---- PHASE B: mutate (all validation passed → atomic). ---------------
+    // Fresh local vid beyond every existing lvars key (no collision; the stoi
+    // passes that allocate vids already ran), typed as the return type.
+    int fresh_reg = this_reg;
+    for (const auto& [reg, var] : lvars) {
+        (void)var;
+        if (reg > fresh_reg) fresh_reg = reg;
+    }
+    ++fresh_reg;
+    const std::string fresh_vid = "v" + std::to_string(fresh_reg);
+    auto vX = std::make_shared<Variable>(fresh_vid);
+    vX->set_type(ret_type);
+    lvars[fresh_reg] = vX;
+
+    // Rewrite EVERY reference to the receiver → vX. Pre-RegisterPropagation the
+    // IR is flat (each use is a direct operand), so per-instruction replace_lhs /
+    // replace_var reaches all of them (every get_used_vars type has a working
+    // replace_var; verified against the overrides).
+    for (NodeBase* n : graph.rpo) {
+        auto* bb = dynamic_cast<BasicBlock*>(n);
+        if (!bb) continue;
+        for (const auto& ins : bb->ins) {
+            if (!ins) continue;
+            if (GetLhsKey(ins) == this_vid) ins->replace_lhs(vX);
+            for (const auto& u : ins->get_used_vars()) {
+                if (u == this_vid) { ins->replace_var(this_vid, vX); break; }
+            }
+        }
+    }
+
+    // Inject `vX = this` at the entry block head — the sole remaining `this`. vX
+    // is undeclared and its def now dominates every use from the entry, so
+    // PlaceDeclarations lets this copy double as the inline declaration
+    // (`<Ret> vX = this;`); DCE drops it when the receiver value is never read.
+    // The receiver ThisParam type was CORRUPTED during Construct (each `this = X`
+    // AssignExpression ctor did `this_param.set_type(X.get_type())`); restore it
+    // to the class before it seeds the copy, and re-assert vX's return type after
+    // the copy ctor (which re-propagates the — now restored — receiver type).
+    this_param->set_type(cls_name);
+    entry_bb->ins.insert(entry_bb->ins.begin(),
+                         std::make_shared<AssignExpression>(vX, this_param));
+    vX->set_type(ret_type);
+    return true;
+}
+
 // =============================================================================
 // DummyNode — DAD dataflow.py:323
 // =============================================================================
