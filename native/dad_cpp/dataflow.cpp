@@ -1066,51 +1066,99 @@ bool MaterializeReusedThis(Graph& graph,
     }
     if (!reused || sink_conflict) return false;
 
-    // DEF-anchor fallback: NO typed use-sink pins the receiver, but every
-    // reassignment is `new C` of one class C AND the entry `this` value is never
-    // read — the receiver slot is a pure scratch for the allocation (e.g.
-    // `this = new X(); this.<init>(msg); throw this`). Then vX = C and NO
-    // `vX = this` seed is injected (it would be dead), so soundness needs no
-    // cls<:C up-cast proof: the entry value provably reaches no use. The read
-    // scan is instruction-ordered — inside a reassign block a this-use BEFORE
-    // the reassignment reads the entry value and disqualifies.
+    // Is the entry `this` value ever read? Two reachability notions must BOTH be
+    // clear (the materialisation rewrites `this` -> vX over graph.rpo, i.e. every
+    // block reachable through NORMAL *and* EXCEPTION edges, so any this-read the
+    // scan misses becomes an invalid `vX.m()` / use-before-def):
+    //   (1) NORMAL def-clear: BFS from entry over normal successors, stopping at
+    //       reassign blocks (they consume the entry value). A this-use in a
+    //       reached block — or BEFORE the reassignment inside a reassign block —
+    //       reads the entry value. rhs reads are checked BEFORE the LHS break: a
+    //       reassignment whose OWN rhs reads the receiver (`this = new C[this]` —
+    //       the array-size operand aliases the receiver register) reads the
+    //       PRE-def (entry) value in the same instruction (verified dex rejects a
+    //       reference array size; lenient load can reach here — declining keeps
+    //       the claim true instead of emitting `C[] vX = new C[vX]`).
+    //   (2) EXCEPTION: a catch handler observes the register at the THROW point,
+    //       which is the entry `this` when the exception fires before the
+    //       reassignment completes (the reassignment itself can throw). So a
+    //       this-read in ANY `in_catch` handler or its (all-edge) downstream also
+    //       reads the entry value, at ANY position (no reassign-stop). Without
+    //       this the def-anchor drops the seed and corrupts a catch that still
+    //       references `this` (adversarial-review finding).
+    auto entry_this_read = [&]() -> bool {
+        std::unordered_set<NodeBase*> normal;
+        std::vector<NodeBase*> work{graph.entry};
+        while (!work.empty()) {
+            NodeBase* b = work.back();
+            work.pop_back();
+            if (!b || !normal.insert(b).second) continue;
+            if (reassign_blocks.count(b)) continue;  // entry value consumed
+            for (NodeBase* s : graph.sucs(b)) work.push_back(s);
+        }
+        // Exception-reachable closure: seed with every catch handler, follow all
+        // edges (handler + downstream see the throw-point merge, incl. entry-this).
+        std::unordered_set<NodeBase*> excpt;
+        for (NodeBase* b : graph.rpo)
+            if (b && b->in_catch) work.push_back(b);
+        while (!work.empty()) {
+            NodeBase* b = work.back();
+            work.pop_back();
+            if (!b || !excpt.insert(b).second) continue;
+            for (NodeBase* s : graph.all_sucs(b)) work.push_back(s);
+        }
+        for (NodeBase* b : normal) {
+            if (excpt.count(b)) continue;  // scanned fully below
+            auto* bb = dynamic_cast<BasicBlock*>(b);
+            if (!bb) continue;
+            const bool is_reassign = reassign_blocks.count(b) != 0;
+            for (const auto& ins : bb->ins) {
+                if (!ins) continue;
+                for (const auto& u : ins->get_used_vars())
+                    if (u == this_vid) return true;
+                if (is_reassign && GetLhsKey(ins) == this_vid) break;
+            }
+        }
+        for (NodeBase* b : excpt) {  // catch-reachable: entry-this at any position
+            auto* bb = dynamic_cast<BasicBlock*>(b);
+            if (!bb) continue;
+            for (const auto& ins : bb->ins) {
+                if (!ins) continue;
+                for (const auto& u : ins->get_used_vars())
+                    if (u == this_vid) return true;
+            }
+        }
+        return false;
+    };
+
+    // DEF-anchor: whenever EVERY reassignment is `new C` of one class C AND the
+    // entry `this` value is never read, type vX = C (the exact allocation class)
+    // and inject NO `vX = this` seed. This takes PRIORITY over any use-sink
+    // anchor: the value genuinely IS a C, so every use — including a return/arg
+    // sink — is exactly what the verified bytecode did with a `new C` register,
+    // hence valid for a C-typed variable with NO framework-transitive subtype
+    // proof (which the dex-only oracle cannot supply). E.g.
+    // `this = new MarginLayoutParams; this(-1,-2); return this` returning
+    // ViewGroup$LayoutParams: `C <: ret` holds only by the verifier, so the
+    // use-sink path's reassign-assignability check `assignable(C, ret)` fails on
+    // the dex-only oracle and bails — the def-anchor sidesteps it (vX = C exact,
+    // and the dead seed's cls<:anchor up-cast is never emitted). The receiver is
+    // pure scratch for the allocation (`this = new X(); this.<init>(); throw this`
+    // OR `... ; return this`).
+    //
+    // Verified-bytecode dependency: soundness rests on the value at each use being
+    // exactly what the (verified) bytecode did with a `new C` register. Under a
+    // lenient load (VerifyInsns skipped) a hand-crafted `sink(this)` whose param
+    // type is unrelated to C would emit `C vX = new C(); sink(vX)` with an
+    // incompatible arg — but that input is already type-incompatible garbage, so
+    // the output is uncompilable-in / uncompilable-out (no worse than DAD's
+    // `this = new C`, cannot crash). A verified dex makes it unreachable.
     bool def_anchor = false;
-    if (anchor.empty()) {
-        auto entry_this_read = [&]() -> bool {
-            std::unordered_set<NodeBase*> reached;
-            std::vector<NodeBase*> work{graph.entry};
-            while (!work.empty()) {
-                NodeBase* b = work.back();
-                work.pop_back();
-                if (!b || !reached.insert(b).second) continue;
-                if (reassign_blocks.count(b)) continue;  // entry value consumed
-                for (NodeBase* s : graph.sucs(b)) work.push_back(s);
-            }
-            for (NodeBase* b : reached) {
-                auto* bb = dynamic_cast<BasicBlock*>(b);
-                if (!bb) continue;
-                const bool is_reassign = reassign_blocks.count(b) != 0;
-                for (const auto& ins : bb->ins) {
-                    if (!ins) continue;
-                    // rhs reads are checked BEFORE the LHS break: a reassignment
-                    // whose OWN rhs reads the receiver (`this = new C[this]` — the
-                    // array-size operand aliases the receiver register) reads the
-                    // PRE-def (entry) value in the same instruction that redefines
-                    // it, so it counts as an entry read and disqualifies the
-                    // def-anchor. (On verified dex a reference-typed array size is
-                    // rejected by VerifyInsns; under lenient load it can reach here
-                    // — declining keeps the "entry value reaches no use" claim true
-                    // instead of emitting the self-referential `C[] vX = new C[vX]`.)
-                    for (const auto& u : ins->get_used_vars())
-                        if (u == this_vid) return true;
-                    if (is_reassign && GetLhsKey(ins) == this_vid) break;
-                }
-            }
-            return false;
-        };
-        if (!all_alloc || alloc_type.empty() || entry_this_read()) return false;
+    if (all_alloc && !alloc_type.empty() && !entry_this_read()) {
         anchor = alloc_type;
         def_anchor = true;
+    } else if (anchor.empty()) {
+        return false;  // no typed use-sink and not a clean allocation scratch
     }
 
     // Every reassignment must be assignable to the anchor (a subtype ok via the

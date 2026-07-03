@@ -245,6 +245,41 @@ def test_def_anchor_throw_new():
     pytest.skip("no APK bundling ActionBar.setHideOffset")
 
 
+def test_def_anchor_priority_over_return_sink():
+    """A receiver reused ONLY to hold a `new C()` that is then RETURNED (a typed
+    use-sink IS present) still materialises via the DEF-anchor, which now takes
+    PRIORITY over the return-sink anchor whenever every reassignment is `new C`
+    of one class C and the entry `this` is never read. `ViewPager.generateDefault
+    LayoutParams` returns `ViewGroup$LayoutParams` but allocates the subtype
+    `ViewPager$LayoutParams`; it must render `return new ViewPager$LayoutParams()`
+    — no `this =`. (The framework-transitive variant, e.g. an obfuscated
+    `generateDefaultLayoutParams` allocating the pure-framework
+    `ViewGroup$MarginLayoutParams`, is the case that FAILS without the priority:
+    the use-sink path's `assignable(C, ret)` check cannot prove the subtype through
+    a framework class and bails to invalid `this = new C; return this`.) Skips if
+    the repro class is absent."""
+    cls = "Landroid/support/v4/view/ViewPager;"
+    for apk in _apks():
+        if cls not in _classes(apk):
+            continue
+        dk = dexllm.DexKit(apk)
+        desc = None
+        for m in dk.list_class_methods(cls):
+            if m.split("->")[-1].startswith("generateDefaultLayoutParams"):
+                desc = m
+                break
+        if desc is None:
+            continue
+        out = dk.decompile_method_java(desc)
+        assert not _THIS_ASSIGN.search(out), out[:400]
+        # the def-anchor injects no `<X> vX = this;` seed (entry value is dead)
+        assert not _GOOD_MAT.search(out), out[:400]
+        assert re.search(
+            r"return\s+new\s+[\w.$]*ViewPager\$LayoutParams\(", out), out[:400]
+        return
+    pytest.skip("no APK bundling ViewPager.generateDefaultLayoutParams")
+
+
 def _classes(apk):
     try:
         if dexllm.identify(apk).get("dex_count", 0) == 0:
