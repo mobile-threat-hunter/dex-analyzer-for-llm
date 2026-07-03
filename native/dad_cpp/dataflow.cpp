@@ -815,11 +815,24 @@ void FixInitResultTypes(Graph& graph) {
                 if (prim_type == "Z" && int_use_vids.count(vid)) continue;
                 retypes.emplace_back(vit->second.get(),
                                      prim_type.empty() ? "I" : prim_type);
-            } else if (dvec.size() >= 2 && cur_prim && has_ref &&
-                       is_ref(ref_type) && !ref_conflict) {
-                // MIRROR (prim→ref): primitive-typed but its defs are provably a
-                // reference + null (e.g. `int v = ObjectAnimator.ofFloat(...)` +
-                // `v = 0`, then `v.addListener()` / `return v`).
+            } else if (cur_prim && has_ref && is_ref(ref_type) && !ref_conflict &&
+                       (dvec.size() >= 2 || object_vids.count(vid)) &&
+                       !dynamic_cast<ThisParam*>(vit->second.get())) {
+                // Belt-and-suspenders (adversarial-review): a `this` / super
+                // <init>-base register is always reference-typed, so the cur_prim
+                // gate already excludes it; the explicit ThisParam check makes the
+                // exclusion STRUCTURAL (matching the first FixInitResultTypes
+                // pass) rather than incidental — re-typing `this` would corrupt
+                // the writer's super-vs-this detection.
+                // MIRROR (prim→ref): primitive-typed but really a reference. Two
+                // shapes: a MULTI-def version whose defs are a reference + null
+                // (`int v = ObjectAnimator.ofFloat(...)` + `v = 0`, then
+                // `v.addListener()` / `return v`); or a SINGLE-def version that is
+                // USE-corroborated as an OBJECT — a lone reference-returning method
+                // typed `int` by register conflation (`int v2 =
+                // getChildViewHolderInt(...); v2.isRemoved(); v2.itemView`), where
+                // the receiver / field-owner use proves the reference (symmetric
+                // to the single-def cascade's int-use proof).
                 // USE-CORROBORATION (symmetric to object_vids, adversarial-review
                 // hardening): skip if the version is ever used in an INTEGER
                 // context (arithmetic operand, array index, unary operand). The

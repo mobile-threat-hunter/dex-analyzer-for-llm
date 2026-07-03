@@ -164,17 +164,19 @@ def test_no_primitive_assigned_allocation(scanned):
 def test_primitive_used_as_object_bounded(scanned):
     """`prim v; … v.m()` / `throw v` / `v[i]` (a primitive used AS an object) is
     Shape B — a primitive mistyped where a reference belongs. The prim→ref MIRROR
-    pass fixes most of these (bundled deduped ~262 → ~60). This ceiling documents
-    that: the mirror must keep them low (a regression that DISABLED the mirror,
-    or the ref→prim cascade wrongly re-typing an object to a primitive, both push
-    this back up). The residual is genuine int/ref merges + display-name-collision
-    artifacts (a distinct `v4` version legitimately int in the same method).
-    Deduped per (method, var) so it is stable across corpus size / timeouts."""
+    pass fixes most of these — both the multi-def (reference + null) and the
+    single-def object-USE-corroborated shape (`int v2 = getViewHolderInt(...);
+    v2.isRemoved()` → the reference the method returns; deduped ~181 → ~35). This
+    ceiling documents that: the mirror must keep them low (a regression that
+    DISABLED the mirror — single-def or multi — or the ref→prim cascade wrongly
+    re-typing an object to a primitive, all push this back up). The residual is
+    genuine int/ref merges (both an object AND an int def, needing a version
+    split). Deduped per (method, var) so it is stable across corpus size."""
     bad = scanned["prim_object"]
-    assert len(bad) <= 90, (
+    assert len(bad) <= 55, (
         f"{len(bad)} primitive-declared locals used AS AN OBJECT (mirror keeps "
-        f"this ~60; a jump means the mirror is disabled or the cascade re-typed "
-        f"an object to a primitive). e.g. {bad[:8]}"
+        f"this ~35; a jump means the mirror — single-def or multi — is disabled "
+        f"or the cascade re-typed an object to a primitive). e.g. {bad[:8]}"
     )
 
 
