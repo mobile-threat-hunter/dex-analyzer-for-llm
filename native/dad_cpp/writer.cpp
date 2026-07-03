@@ -210,30 +210,6 @@ public:
 
     // ─── visit_assign: DAD writer.py:494 ─────────────────────────────────
     void visit_assign(IRForm* lhs, IRForm* rhs) override {
-        // Beyond-DAD: a VOID invoke assigned to the receiver (`this = super.m()` /
-        // `this = this.priv()`) is invalid Java. DAD's invoke-super/direct RANGE
-        // handlers set `returned = base` for a void call (unlike the non-range
-        // `invokesuper`, which nulls it, and `invokedirect`, which nulls it for a
-        // ThisParam base — opcode_ins.cpp), so a void range invoke on the receiver
-        // yields `<ThisParam> = <void call>`. Drop the LHS → render the call alone
-        // (`super.m();`); the receiver is NOT actually reassigned (the void
-        // "result" IS base), so subsequent `this.x` reads stay correct. Gated on
-        // VOID (`get_type() == "V"`, which for an invoke is only a void return) —
-        // a non-void `this = X` would lose its value, so it is left as-is (the
-        // reused-`this` materialisation pass handles the fixable non-void cases).
-        // EXCLUDE an `<init>` invoke: a range constructor delegation whose base
-        // ThisParam type was POISONED to "V" during Construct (each `this = X`
-        // AssignExpression ctor does `this_param.set_type(X.get_type())`, and the
-        // materialisation pass's restore is skipped for `<init>`) would ALSO report
-        // `get_type() == "V"` (via the base, NOT an absent base_ — the range ctor
-        // sets base_ = args.front()). Collapsing it would render a clean but
-        // possibly mis-keyworded `super(...)`/`this(...)` (the super/this pick reads
-        // the poisoned "V" type), hiding the corruption — so leave `<init>` as DAD's.
-        if (lhs != nullptr && dynamic_cast<ThisParam*>(lhs) &&
-            rhs != nullptr && rhs->get_type() == "V") {
-            auto* inv = dynamic_cast<InvokeInstruction*>(rhs);
-            if (!inv || inv->name() != "<init>") lhs = nullptr;
-        }
         if (lhs != nullptr) {
             return write_inplace_if_possible(lhs, rhs);
         }

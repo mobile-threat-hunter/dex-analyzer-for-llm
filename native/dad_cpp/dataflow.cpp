@@ -993,8 +993,13 @@ bool MaterializeReusedThis(Graph& graph,
             //  - the NARROW-integer constant 0 (`const/4 0`) = the null reference.
             //    A wide const-0 (`const-wide`, type J/D) is NOT null (lenient-load
             //    PLAUSIBLE) — require a narrow int descriptor.
-            // A VOID invoke (`this = super.onDraw()`, a DAD artifact) or a genuine
-            // primitive (`this = 5`) also bails — left as DAD's output.
+            // A VOID invoke or a genuine primitive (`this = 5`) also bails — left
+            // as DAD's output. NOTE: the void `this = <call>` case no longer
+            // occurs (the opcode_ins InvokeSuperRange/InvokeDirectRange root-cause
+            // fix nulls `returned` for void, so no such AssignExpression is built);
+            // this VOID guard is now DEFENSIVE — retained so a future DAD-artifact
+            // (or a revert of that fix) that reintroduces a void `this =` still
+            // bails here rather than emitting `<Ret> vX = <void call>`.
             auto rhs = ins->get_rhs();
             const std::string t =
                 (!rhs.empty() && rhs[0]) ? rhs[0]->get_type() : std::string{};

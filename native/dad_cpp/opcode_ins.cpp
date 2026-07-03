@@ -678,14 +678,17 @@ IRFormPtr InvokeSuperRange(const MethodRef& m,
     }
     std::vector<std::string> tail(regs.begin() + 1, regs.end());
     auto args = GetArgs(vmap, m.param_type, tail);
-    auto base = GetVariable(vmap, regs[0]);
-    IRFormPtr returned;
-    if (m.ret_type != "V") {
-        returned = ret.New();
-    } else {
-        returned = base;
-        ret.SetTo(base);
-    }
+    // Beyond-DAD (root-cause of the `this = super.m()` invalid Java): DAD's
+    // invokesuperrange sets `returned = base` (the receiver) for a VOID call,
+    // producing an assignment to the receiver register. The NON-range
+    // `invokesuper` nulls `returned` for void — and invoke-super is NEVER an
+    // `<init>` (super constructor calls use invoke-direct), so the receiver never
+    // needs to become the result. Match the non-range handler: null for void, so
+    // a void super call renders as a bare `super.m(...);` in BOTH the text and the
+    // AST (fixed at the IR builder, not masked in the Writer). `base`/`ret.SetTo`
+    // are dropped — the void "result" was never read (no move-result follows a
+    // void call), so the gen_ret chain is unaffected.
+    IRFormPtr returned = (m.ret_type == "V") ? IRFormPtr{} : ret.New();
     auto superclass = std::make_shared<BaseClass>("super");
     std::vector<IRFormPtr> all_args;
     all_args.reserve(args.size() + 1);
@@ -710,12 +713,24 @@ IRFormPtr InvokeDirectRange(const MethodRef& m,
     auto args = GetArgs(vmap, m.param_type, tail);
     // DAD redundantly: base = get_variables(vmap, ins.CCCC) — same as this_arg.
     auto base = GetVariable(vmap, regs[0]);
+    // Beyond-DAD (root-cause of the `this = this.priv()` / `this = super(...)`
+    // invalid Java): DAD's invokedirectrange sets `returned = base` for a VOID
+    // call UNCONDITIONALLY, unlike the NON-range `invokedirect`, which nulls it
+    // when `base` is a ThisParam (a void `this.<init>()`/`super()` delegation or a
+    // void `this.privateMethod()` must not assign to the receiver). Match the
+    // non-range handler: for void, null when base is a ThisParam, else keep
+    // `returned = base` + `ret.set_to` (the `newObj = new X()` constructor
+    // pattern). Fixes text AND AST at the IR builder.
     IRFormPtr returned;
-    if (m.ret_type != "V") {
-        returned = ret.New();
+    if (m.ret_type == "V") {
+        if (std::dynamic_pointer_cast<ThisParam>(base)) {
+            returned = nullptr;
+        } else {
+            returned = base;
+            ret.SetTo(base);
+        }
     } else {
-        returned = base;
-        ret.SetTo(base);
+        returned = ret.New();
     }
     std::vector<IRFormPtr> all_args;
     all_args.reserve(args.size() + 1);
