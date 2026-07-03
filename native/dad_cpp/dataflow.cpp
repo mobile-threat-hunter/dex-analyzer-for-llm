@@ -635,6 +635,16 @@ static void InferCascadeTypes(Graph& graph) {
     // cascade is not narrowed to `int v = <huge>`), or the reference
     // descriptor ('L…;'/'[…') when 'R' (so a mirror re-type below knows the
     // exact class). Set for BOTH 'P' and 'R'.
+    // An UNAMBIGUOUS reference producer — a value that is definitionally an
+    // object regardless of a possibly-corrupt declared type. Shared by `gt`
+    // (→ 'R') and `resolve_prim_width` (→ "", no primitive width).
+    auto is_alloc_producer = [](IRForm* r) {
+        return dynamic_cast<NewInstance*>(r) ||
+               dynamic_cast<NewArrayExpression*>(r) ||
+               dynamic_cast<FilledArrayExpression*>(r) ||
+               dynamic_cast<MoveExceptionExpression*>(r) ||
+               dynamic_cast<CheckCastExpression*>(r);
+    };
     std::function<char(IRForm*, std::set<std::string>&, std::string&)> gt =
         [&](IRForm* rhsv, std::set<std::string>& seen,
             std::string& type_out) -> char {
@@ -684,11 +694,7 @@ static void InferCascadeTypes(Graph& graph) {
             return 'N';
         }
         // Unambiguous reference producers.
-        if (dynamic_cast<NewInstance*>(rhsv) ||
-            dynamic_cast<NewArrayExpression*>(rhsv) ||
-            dynamic_cast<FilledArrayExpression*>(rhsv) ||
-            dynamic_cast<MoveExceptionExpression*>(rhsv) ||
-            dynamic_cast<CheckCastExpression*>(rhsv)) {
+        if (is_alloc_producer(rhsv)) {
             // An allocation is definitionally a reference; only set the
             // descriptor when it is actually one (a corrupt/empty type under
             // lenient load leaves type_out empty → the mirror's is_ref gate
@@ -767,14 +773,28 @@ static void InferCascadeTypes(Graph& graph) {
         // A genuine allocation is definitively a reference — no primitive
         // width, so an int-used allocation (impossible in valid Dalvik) is
         // never re-typed.
-        if (dynamic_cast<NewInstance*>(r) ||
-            dynamic_cast<NewArrayExpression*>(r) ||
-            dynamic_cast<FilledArrayExpression*>(r) ||
-            dynamic_cast<MoveExceptionExpression*>(r) ||
-            dynamic_cast<CheckCastExpression*>(r))
-            return {};
+        if (is_alloc_producer(r)) return {};
         const std::string t = r->get_type();
         return is_prim_desc(t) ? t : std::string{};
+    };
+    // The single primitive width ALL of a version's defs agree on, or "" — a def
+    // that is a genuine reference producer / unresolved (`resolve_prim_width`
+    // returns "") or a width disagreement fails the aggregate. Shared by the two
+    // branches that re-type only on an unambiguous agreed width: the USE-DRIVEN
+    // ref→prim branch (A) and the prim→WIDER branch (D). (Extracted from two
+    // byte-identical copies — the sole true duplication in this pass.)
+    auto agreed_prim_width = [&](const std::string& vid,
+                                 const std::vector<IRForm*>& dvec) -> std::string {
+        std::string w;
+        for (IRForm* d : dvec) {
+            auto dr = d->get_rhs();
+            if (dr.empty() || !dr[0]) return {};
+            std::set<std::string> seen{vid};
+            std::string dw = resolve_prim_width(dr[0].get(), seen);
+            if (dw.empty() || (!w.empty() && w != dw)) return {};
+            if (w.empty()) w = dw;
+        }
+        return w;
     };
     // Two-phase: classify every version reading ONLY pre-mutation types
     // (so the two directions can't interfere), then apply. Direction is
@@ -833,18 +853,8 @@ static void InferCascadeTypes(Graph& graph) {
         // conflation). The `object_vids` check is kept as belt-and-suspenders.
         if (cur_ref && int_use_vids.count(vid) &&
             !object_vids.count(vid)) {
-            std::string w;
-            bool ok = true;
-            for (IRForm* d : dvec) {
-                auto dr = d->get_rhs();
-                if (dr.empty() || !dr[0]) { ok = false; break; }
-                std::set<std::string> seen{vid};
-                std::string dw = resolve_prim_width(dr[0].get(), seen);
-                if (dw.empty()) { ok = false; break; }   // genuine ref / unknown
-                if (w.empty()) w = dw;
-                else if (w != dw) { ok = false; break; }  // width disagreement
-            }
-            if (ok && !w.empty() && w != "Z") {
+            std::string w = agreed_prim_width(vid, dvec);
+            if (!w.empty() && w != "Z") {
                 retypes.emplace_back(vit->second.get(), w);
                 continue;
             }
@@ -924,24 +934,14 @@ static void InferCascadeTypes(Graph& graph) {
             // wide type — but NOT by ordinary arithmetic / comparison, which
             // is valid on a wide value, so unlike the mirror this does not
             // skip all int uses.
-            std::string w;
-            bool ok = true;
-            for (IRForm* d : dvec) {
-                auto dr = d->get_rhs();
-                if (dr.empty() || !dr[0]) { ok = false; break; }
-                std::set<std::string> seen{vid};
-                std::string dw = resolve_prim_width(dr[0].get(), seen);
-                if (dw.empty()) { ok = false; break; }
-                if (w.empty()) w = dw;
-                else if (w != dw) { ok = false; break; }
-            }
+            std::string w = agreed_prim_width(vid, dvec);
             // Java widening order for assignment: {Z,B,C,S,I}=1 < J=2 < F=3 <
             // D=4. `cur v = w` is an invalid narrowing iff rank(w) > rank(cur).
             auto rank = [](const std::string& t) {
                 if (t == "D") return 4; if (t == "F") return 3;
                 if (t == "J") return 2; return 1;
             };
-            if (ok && !w.empty() && rank(w) > rank(cur))
+            if (!w.empty() && rank(w) > rank(cur))
                 retypes.emplace_back(vit->second.get(), w);
         }
     }
