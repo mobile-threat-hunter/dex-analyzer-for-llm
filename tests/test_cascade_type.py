@@ -59,6 +59,15 @@ _PRIM_DECL = re.compile(
 # regression: the const-0 renders `null` because the var is reference-typed, and
 # `<=` requires numeric operands). `==`/`!=` are excluded (valid null checks).
 _REF_ORD_NULL = re.compile(r"(?<![\w.])(v\w+)\s*(?:<=|>=|<|>)\s*null\b")
+# `int/short/byte/char v = <wide-returning method>();` — a long/float/double
+# value narrowed into a too-narrow declaration (uncompilable). The prim→WIDER
+# pass fixes it by re-typing to the def width (`long v = System.currentTimeMillis()`).
+_NARROW_WIDE = re.compile(
+    r"^\s*(?:int|short|byte|char)\s+v\w+\s*=\s*[\w.]*\."
+    r"(?:parseLong|currentTimeMillis|nanoTime|longValue|getTimeInMillis"
+    r"|parseFloat|parseDouble|doubleValue|floatValue)\b",
+    re.M,
+)
 
 
 def _apks():
@@ -99,6 +108,7 @@ def scanned():
     #                      with several object uses each count once (avoids the
     #                      inflation + timing-fragility of a per-hit list).
     ref_ord_null = 0     # `v <op> null` occurrences (mirror ref-used-as-int flood)
+    narrow_wide = 0      # `int v = <wide-returning method>` (narrowing, prim→wider)
     per_apk_cap = 6000
     for apk in apks:
         try:
@@ -132,8 +142,10 @@ def scanned():
                     if _object_uses(out, pv):
                         prim_object.add((desc, pv))
                 ref_ord_null += len(_REF_ORD_NULL.findall(out))
+                narrow_wide += len(_NARROW_WIDE.findall(out))
     return {"ref_int": ref_int, "prim_new": prim_new,
-            "prim_object": sorted(prim_object), "ref_ord_null": ref_ord_null}
+            "prim_object": sorted(prim_object), "ref_ord_null": ref_ord_null,
+            "narrow_wide": narrow_wide}
 
 
 # The pass is SOUND-by-construction (it re-types a reference version to a
@@ -200,4 +212,15 @@ def test_reference_int_cascades_bounded(scanned):
     assert len(residual) <= 40, (
         f"{len(residual)} `RefType v = <nonzero int>;` lines — the cascade "
         f"re-type appears disabled or regressed. e.g. {residual[:8]}"
+    )
+
+
+def test_no_wide_value_narrowed_to_int(scanned):
+    """A `long`/`float`/`double`-returning method whose result was mistyped into a
+    too-narrow declaration (`int v = System.currentTimeMillis()`) is uncompilable.
+    The prim→WIDER pass re-types the version to the def width. Assert 0 remain."""
+    n = scanned["narrow_wide"]
+    assert n == 0, (
+        f"{n} `int/short/byte/char v = <wide-returning method>()` narrowing(s) "
+        f"— the prim→wider re-type appears disabled or regressed."
     )

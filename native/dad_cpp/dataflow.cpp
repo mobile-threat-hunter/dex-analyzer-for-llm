@@ -473,6 +473,14 @@ void FixInitResultTypes(Graph& graph) {
         // provably holds a primitive, so the prim→ref MIRROR never re-types it
         // (use-corroboration symmetric to object_vids for the ref→prim cascade).
         std::unordered_set<std::string> int_use_vids;
+        // Vids used where an INT is specifically REQUIRED and a wider primitive
+        // is invalid: an array INDEX (`arr[v]`), a `switch` selector
+        // (`switch(v)` — long/float/double are not switchable), or an array
+        // CREATION size (`new int[v]`). These break a WIDENING re-type
+        // (int→long/float/double) whereas ordinary arithmetic / comparison on a
+        // wide value is fine, so the prim→wider branch guards on this narrower set
+        // (not all `int_use_vids`).
+        std::unordered_set<std::string> int_required_vids;
         auto note_obj = [&](IRForm* f) {
             if (auto* inv = dynamic_cast<InvokeInstruction*>(f)) {
                 if (!inv->base().empty()) object_vids.insert(inv->base());
@@ -498,8 +506,24 @@ void FixInitResultTypes(Graph& graph) {
                 add(ue->arg_id());
             } else if (auto* al = dynamic_cast<ArrayLoadExpression*>(f)) {
                 add(al->idx_id());
+                if (!al->idx_id().empty())
+                    int_required_vids.insert(al->idx_id());
             } else if (auto* as = dynamic_cast<ArrayStoreInstruction*>(f)) {
                 add(as->index_id());
+                if (!as->index_id().empty())
+                    int_required_vids.insert(as->index_id());
+            } else if (auto* na = dynamic_cast<NewArrayExpression*>(f)) {
+                // `new int[v]` — the CREATION size must be an int (a widened
+                // long/float/double there is invalid). (The def-side new-array
+                // itself is a reference producer, handled elsewhere; here we only
+                // record its SIZE operand as an int-required use.)
+                if (!na->size_id().empty())
+                    int_required_vids.insert(na->size_id());
+            } else if (auto* sw = dynamic_cast<SwitchExpression*>(f)) {
+                // `switch(v)` — the selector must be char/byte/short/int (never
+                // long/float/double), so a widened selector is invalid Java.
+                if (!sw->src_id().empty())
+                    int_required_vids.insert(sw->src_id());
             } else if (auto* cz = dynamic_cast<ConditionalZExpression*>(f)) {
                 // vs-ZERO comparisons (if-ltz/lez/gtz/gez → `<`/`<=`/`>`/`>=`)
                 // require a numeric operand; if-eqz/nez (`==`/`!=`) are the
@@ -659,13 +683,23 @@ void FixInitResultTypes(Graph& graph) {
                 if (it == defs_of.end())  // param/no def — declared type
                     return is_prim_desc(r->get_type()) ? r->get_type()
                                                        : std::string{};
+                // AGGREGATE all sibling defs — do NOT return the first non-empty
+                // width (adversarial-review hardening, symmetric to gt()): a
+                // conflated move source holding two DIFFERENT primitive widths
+                // (a `long` call on one path, a `const int` on another) must
+                // report AMBIGUOUS ("") so the widen branch leaves it untouched,
+                // not commit whichever def happens to iterate first. Empty
+                // (reference / no primitive) siblings are neutral — skipped.
+                std::string agreed;
                 for (IRForm* d : it->second) {
                     auto dr = d->get_rhs();
                     if (dr.empty() || !dr[0]) continue;
                     std::string w = resolve_prim_width(dr[0].get(), seen);
-                    if (!w.empty()) return w;
+                    if (w.empty()) continue;
+                    if (agreed.empty()) agreed = w;
+                    else if (agreed != w) return {};  // width disagreement
                 }
-                return {};
+                return agreed;
             }
             // A genuine allocation is definitively a reference — no primitive
             // width, so an int-used allocation (impossible in valid Dalvik) is
@@ -799,6 +833,40 @@ void FixInitResultTypes(Graph& graph) {
                 // genuine conflation (needs a version split) → leave DAD's type.
                 if (int_use_vids.count(vid)) continue;
                 retypes.emplace_back(vit->second.get(), ref_type);
+            } else if (cur_prim && !int_required_vids.count(vid)) {
+                // prim→WIDER-prim: an `int`-typed version whose value is really a
+                // WIDER primitive — `int v = System.currentTimeMillis()` /
+                // `int v = Long.parseLong(s)` (long returned into a wide register
+                // whose split version DAD mistyped `int`). `int v = <long>` is an
+                // uncompilable narrowing. Re-type to the def width when EVERY def
+                // resolves to the SAME primitive and it is WIDER than the current
+                // type (an assignment `cur v = w` that would be an invalid
+                // narrowing). Disjoint from the ref→prim / mirror branches
+                // (cur_prim, not cur_ref). Guarded by INT-REQUIRED use — an array
+                // index (`arr[longV]`), a `switch` selector (`switch(longV)`), or
+                // an array-creation size (`new int[longV]`) are all invalid for a
+                // wide type — but NOT by ordinary arithmetic / comparison, which
+                // is valid on a wide value, so unlike the mirror this does not
+                // skip all int uses.
+                std::string w;
+                bool ok = true;
+                for (IRForm* d : dvec) {
+                    auto dr = d->get_rhs();
+                    if (dr.empty() || !dr[0]) { ok = false; break; }
+                    std::set<std::string> seen{vid};
+                    std::string dw = resolve_prim_width(dr[0].get(), seen);
+                    if (dw.empty()) { ok = false; break; }
+                    if (w.empty()) w = dw;
+                    else if (w != dw) { ok = false; break; }
+                }
+                // Java widening order for assignment: {Z,B,C,S,I}=1 < J=2 < F=3 <
+                // D=4. `cur v = w` is an invalid narrowing iff rank(w) > rank(cur).
+                auto rank = [](const std::string& t) {
+                    if (t == "D") return 4; if (t == "F") return 3;
+                    if (t == "J") return 2; return 1;
+                };
+                if (ok && !w.empty() && rank(w) > rank(cur))
+                    retypes.emplace_back(vit->second.get(), w);
             }
         }
         for (auto& [var, t] : retypes) var->set_type(t);

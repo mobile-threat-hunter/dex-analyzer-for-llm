@@ -203,6 +203,18 @@ used-as-int 35→20, `v <op> null` 11→3, 0 new truncation, 0 regression. The t
 genuine merges that remain DO need control-flow version splitting — deferred; this
 handles the spurious-reference majority with no control-flow surgery.
 
+**prim→WIDER-prim (int→long/float/double, 2026-07).** A separate pre-existing bug:
+`int v = System.currentTimeMillis()` (a long value in a wide register mistyped
+`int` by split_variables — an uncompilable narrowing). A `cur_prim` version is
+re-typed to the def width when EVERY def resolves to the SAME primitive WIDER than
+the current type (`rank(w) > rank(cur)`), guarded by an `int_required_vids` set
+(array index / `switch` selector / `new int[v]` size — where a wide type is
+invalid; ordinary arithmetic/comparison is fine). Adversarial review added
+switch/array-size to the guard and made `resolve_prim_width` aggregate move-source
+siblings (return "" on width disagreement, symmetric to `gt`). Measured: `int v =
+<wide method>` 2→0, 0 regression. The remaining split_variables ordered-compare→ref
+mistype and the true genuine object+int / mixed-width merges stay deferred.
+
 The `genuine` set (true object/primitive merge at a shared null-check, `has_ref &&
 has_prim`) still needs the merge-point split and remains the next cut.
 
