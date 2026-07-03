@@ -228,6 +228,21 @@ pass risks the whole-corpus output. So:
   verify byte-identical output to the current accreted `FixInitResultTypes` on
   the full corpus (bundled + obfuscated). This is the de-hack: 6 patches → 1
   pass, 0 behaviour change. Retire the old code once 0-diff is proven.
+
+  **Phase 1a — structural split done (2026-07).** As the safe, incremental first
+  cut, the 607-line `FixInitResultTypes` was split by pure code-motion into a
+  thin driver calling two named, documented static passes: `FixAllocationResult
+  Types` (design §1 — allocation ground truth: `new`/`<init>`/move-from-alloc)
+  and `InferCascadeTypes` (design §2/§3 — move-chain cascade/mirror, def-anchored
+  + use-corroborated). Each carries a design-doc-mapped header comment; the two
+  are independent except the shared `is_ref` (a local in each). Verified
+  **byte-identical** (0 changed / 43,399 class hashes, bundled + obfuscated) and
+  parity 28/28. This is legibility only — the classifiers (`gt()`,
+  `resolve_prim_width`, `source_is_allocation`) are NOT yet merged into one §1
+  table (deferred; the two serve different purposes — allocation-result fixup vs
+  cascade classification — so a merge is a larger, riskier change with bounded
+  cleanliness gain since each branch encodes a reviewer-caught soundness rule
+  that must survive).
 - **Phase 2 — completeness of use positions.** Extend corroboration to arg /
   field / throw / return (PR #12 only did receiver-invoke). Verify: more
   catch-conflation residual fixed, 0 regression (sound-oracle: every re-type is

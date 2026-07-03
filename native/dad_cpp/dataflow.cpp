@@ -324,7 +324,11 @@ void RegisterPropagation(Graph& graph, ChainMap& du, ChainMap& ud) {
 }
 
 // Beyond-DAD — see dataflow.h. Re-type `<init>` results from the finalized base.
-void FixInitResultTypes(Graph& graph) {
+// Beyond-DAD (design §1 — allocation ground truth). Re-type a version whose
+// value is a `new`/`<init>`/move-from-allocation result but which DAD typed
+// non-reference (or a wrong reference for a single-def authoritative result).
+// See docs/type-inference-design.md and the per-branch comments below.
+static void FixAllocationResultTypes(Graph& graph) {
     auto is_ref = [](const std::string& t) {
         return !t.empty() && (t.front() == 'L' || t.front() == '[');
     };
@@ -441,6 +445,19 @@ void FixInitResultTypes(Graph& graph) {
         }
     }
 
+}
+
+// Beyond-DAD (design §2/§3 — move-chain cascade/mirror, def-anchored +
+// use-corroborated). Re-type a version whose declared type disagrees with its
+// transitive ground-truth producers: a reference cascade artifact → its
+// primitive (ref→prim), a primitive mistyped over a reference+null → the
+// reference class (prim→ref mirror), or a too-narrow primitive → the def width.
+// Two-phase classify-then-apply; every re-type is def-anchored and, where it
+// could be ambiguous, use-corroborated. See docs/type-inference-design.md.
+static void InferCascadeTypes(Graph& graph) {
+    auto is_ref = [](const std::string& t) {
+        return !t.empty() && (t.front() == 'L' || t.front() == '[');
+    };
     // Beyond-DAD — re-type move-chain type CASCADE versions (dataflow.h).
     // A register reused across incompatible types leaves split versions typed by
     // the register's last write (DAD types every version from orig_var.type).
@@ -460,477 +477,484 @@ void FixInitResultTypes(Graph& graph) {
     // splitting pass handles those. Regression-safe direction: we only make an
     // object-less version primitive, never the reverse (never re-introduces
     // `prim = new`), and the receiver guard prevents creating `prim.member`.
-    {
-        // Vid → all defining instructions (multi included).
-        std::unordered_map<std::string, std::vector<IRForm*>> defs_of;
-        // Vids used AS AN OBJECT anywhere — a receiver of `v.m()`, the owner of a
-        // field access `v.f` / `v.f = …`, etc. Such a version provably holds an
-        // object, so it is never re-typed to a primitive (use corroboration —
-        // guards against a missed reference producer creating `int v; v.f`).
-        std::unordered_set<std::string> object_vids;
-        // Vids used in an INTEGER context — an arithmetic operand, an array
-        // index, or a unary operand (incl. a primitive cast). Such a version
-        // provably holds a primitive, so the prim→ref MIRROR never re-types it
-        // (use-corroboration symmetric to object_vids for the ref→prim cascade).
-        std::unordered_set<std::string> int_use_vids;
-        // Vids used where an INT is specifically REQUIRED and a wider primitive
-        // is invalid: an array INDEX (`arr[v]`), a `switch` selector
-        // (`switch(v)` — long/float/double are not switchable), or an array
-        // CREATION size (`new int[v]`). These break a WIDENING re-type
-        // (int→long/float/double) whereas ordinary arithmetic / comparison on a
-        // wide value is fine, so the prim→wider branch guards on this narrower set
-        // (not all `int_use_vids`).
-        std::unordered_set<std::string> int_required_vids;
-        // `==`/`!=` ConditionalExpression operand pairs — resolved in a post-pass
-        // (once defs_of is complete): if one operand is a nonzero int constant,
-        // the other is proven a primitive and joins int_use_vids.
-        std::vector<std::pair<std::string, std::string>> eqne_pairs;
-        auto note_obj = [&](IRForm* f) {
-            if (auto* inv = dynamic_cast<InvokeInstruction*>(f)) {
-                if (!inv->base().empty()) object_vids.insert(inv->base());
-            } else if (auto* ie = dynamic_cast<InstanceExpression*>(f)) {
-                if (!ie->arg_id().empty()) object_vids.insert(ie->arg_id());
-            } else if (auto* ii = dynamic_cast<InstanceInstruction*>(f)) {
-                if (!ii->lhs_id().empty()) object_vids.insert(ii->lhs_id());
+    // Vid → all defining instructions (multi included).
+    std::unordered_map<std::string, std::vector<IRForm*>> defs_of;
+    // Vids used AS AN OBJECT anywhere — a receiver of `v.m()`, the owner of a
+    // field access `v.f` / `v.f = …`, etc. Such a version provably holds an
+    // object, so it is never re-typed to a primitive (use corroboration —
+    // guards against a missed reference producer creating `int v; v.f`).
+    std::unordered_set<std::string> object_vids;
+    // Vids used in an INTEGER context — an arithmetic operand, an array
+    // index, or a unary operand (incl. a primitive cast). Such a version
+    // provably holds a primitive, so the prim→ref MIRROR never re-types it
+    // (use-corroboration symmetric to object_vids for the ref→prim cascade).
+    std::unordered_set<std::string> int_use_vids;
+    // Vids used where an INT is specifically REQUIRED and a wider primitive
+    // is invalid: an array INDEX (`arr[v]`), a `switch` selector
+    // (`switch(v)` — long/float/double are not switchable), or an array
+    // CREATION size (`new int[v]`). These break a WIDENING re-type
+    // (int→long/float/double) whereas ordinary arithmetic / comparison on a
+    // wide value is fine, so the prim→wider branch guards on this narrower set
+    // (not all `int_use_vids`).
+    std::unordered_set<std::string> int_required_vids;
+    // `==`/`!=` ConditionalExpression operand pairs — resolved in a post-pass
+    // (once defs_of is complete): if one operand is a nonzero int constant,
+    // the other is proven a primitive and joins int_use_vids.
+    std::vector<std::pair<std::string, std::string>> eqne_pairs;
+    auto note_obj = [&](IRForm* f) {
+        if (auto* inv = dynamic_cast<InvokeInstruction*>(f)) {
+            if (!inv->base().empty()) object_vids.insert(inv->base());
+        } else if (auto* ie = dynamic_cast<InstanceExpression*>(f)) {
+            if (!ie->arg_id().empty()) object_vids.insert(ie->arg_id());
+        } else if (auto* ii = dynamic_cast<InstanceInstruction*>(f)) {
+            if (!ii->lhs_id().empty()) object_vids.insert(ii->lhs_id());
+        }
+    };
+    auto note_int = [&](IRForm* f) {
+        auto add = [&](const std::string& v) {
+            if (!v.empty()) int_use_vids.insert(v); };
+        // A UnaryExpression covers CastExpression (a prim cast); a reference
+        // check-cast is a separate CheckCastExpression, so this stays int.
+        if (auto* be = dynamic_cast<BinaryExpression*>(f)) {
+            // `instanceof` is lowered to a BinaryExpression whose arg1 is the
+            // tested OBJECT (a reference), not an integer — exclude it so a
+            // `v instanceof T` use does not falsely corroborate an int type.
+            if (be->op() != "instanceof") {
+                add(be->arg1_id()); add(be->arg2_id());
             }
-        };
-        auto note_int = [&](IRForm* f) {
-            auto add = [&](const std::string& v) {
-                if (!v.empty()) int_use_vids.insert(v); };
-            // A UnaryExpression covers CastExpression (a prim cast); a reference
-            // check-cast is a separate CheckCastExpression, so this stays int.
-            if (auto* be = dynamic_cast<BinaryExpression*>(f)) {
-                // `instanceof` is lowered to a BinaryExpression whose arg1 is the
-                // tested OBJECT (a reference), not an integer — exclude it so a
-                // `v instanceof T` use does not falsely corroborate an int type.
-                if (be->op() != "instanceof") {
-                    add(be->arg1_id()); add(be->arg2_id());
-                }
-            } else if (auto* ue = dynamic_cast<UnaryExpression*>(f)) {
-                add(ue->arg_id());
-            } else if (auto* al = dynamic_cast<ArrayLoadExpression*>(f)) {
-                add(al->idx_id());
-                if (!al->idx_id().empty())
-                    int_required_vids.insert(al->idx_id());
-            } else if (auto* as = dynamic_cast<ArrayStoreInstruction*>(f)) {
-                add(as->index_id());
-                if (!as->index_id().empty())
-                    int_required_vids.insert(as->index_id());
-            } else if (auto* na = dynamic_cast<NewArrayExpression*>(f)) {
-                // `new int[v]` — the CREATION size must be an int (a widened
-                // long/float/double there is invalid). (The def-side new-array
-                // itself is a reference producer, handled elsewhere; here we only
-                // record its SIZE operand as an int-required use.)
-                if (!na->size_id().empty())
-                    int_required_vids.insert(na->size_id());
-            } else if (auto* sw = dynamic_cast<SwitchExpression*>(f)) {
-                // `switch(v)` — the selector must be char/byte/short/int (never
-                // long/float/double), so a widened selector is invalid Java.
-                if (!sw->src_id().empty())
-                    int_required_vids.insert(sw->src_id());
-            } else if (auto* cz = dynamic_cast<ConditionalZExpression*>(f)) {
-                // vs-ZERO comparisons (if-ltz/lez/gtz/gez → `<`/`<=`/`>`/`>=`)
-                // require a numeric operand; if-eqz/nez (`==`/`!=`) are the
-                // reference null-check, so only the ordered ops prove an int use.
-                const std::string& op = cz->op();
-                if (op == "<" || op == "<=" || op == ">" || op == ">=") {
-                    add(cz->arg_id());
-                }
-            } else if (auto* ce = dynamic_cast<ConditionalExpression*>(f)) {
-                // ORDERED comparisons (`<`/`<=`/`>`/`>=`) require numeric
-                // operands; `==`/`!=` also work on references (object identity /
-                // null check), so only the ordered ops prove an integer use here.
-                const std::string& op = ce->op();
-                if (op == "<" || op == "<=" || op == ">" || op == ">=") {
-                    add(ce->arg1_id()); add(ce->arg2_id());
-                } else if (op == "==" || op == "!=") {
-                    // `v == <nonzero int const>` DOES prove v is a primitive (a
-                    // reference is `==` only to null or another reference, never a
-                    // nonzero literal). We cannot check the sibling's def here
-                    // (defs_of is still being built) — defer to a post-pass.
-                    eqne_pairs.emplace_back(ce->arg1_id(), ce->arg2_id());
-                }
+        } else if (auto* ue = dynamic_cast<UnaryExpression*>(f)) {
+            add(ue->arg_id());
+        } else if (auto* al = dynamic_cast<ArrayLoadExpression*>(f)) {
+            add(al->idx_id());
+            if (!al->idx_id().empty())
+                int_required_vids.insert(al->idx_id());
+        } else if (auto* as = dynamic_cast<ArrayStoreInstruction*>(f)) {
+            add(as->index_id());
+            if (!as->index_id().empty())
+                int_required_vids.insert(as->index_id());
+        } else if (auto* na = dynamic_cast<NewArrayExpression*>(f)) {
+            // `new int[v]` — the CREATION size must be an int (a widened
+            // long/float/double there is invalid). (The def-side new-array
+            // itself is a reference producer, handled elsewhere; here we only
+            // record its SIZE operand as an int-required use.)
+            if (!na->size_id().empty())
+                int_required_vids.insert(na->size_id());
+        } else if (auto* sw = dynamic_cast<SwitchExpression*>(f)) {
+            // `switch(v)` — the selector must be char/byte/short/int (never
+            // long/float/double), so a widened selector is invalid Java.
+            if (!sw->src_id().empty())
+                int_required_vids.insert(sw->src_id());
+        } else if (auto* cz = dynamic_cast<ConditionalZExpression*>(f)) {
+            // vs-ZERO comparisons (if-ltz/lez/gtz/gez → `<`/`<=`/`>`/`>=`)
+            // require a numeric operand; if-eqz/nez (`==`/`!=`) are the
+            // reference null-check, so only the ordered ops prove an int use.
+            const std::string& op = cz->op();
+            if (op == "<" || op == "<=" || op == ">" || op == ">=") {
+                add(cz->arg_id());
             }
-        };
-        for (NodeBase* n : graph.nodes) {
-            auto* bb = dynamic_cast<BasicBlock*>(n);
-            if (!bb) continue;
-            for (auto& ins : bb->get_ins()) {
-                if (!ins) continue;
-                auto lid = ins->GetLhsId();
-                if (lid) defs_of[*lid].push_back(ins.get());
-                note_obj(ins.get());
-                note_int(ins.get());
-                auto rhs = ins->get_rhs();
-                if (!rhs.empty() && rhs[0]) { note_obj(rhs[0].get());
-                    note_int(rhs[0].get()); }
+        } else if (auto* ce = dynamic_cast<ConditionalExpression*>(f)) {
+            // ORDERED comparisons (`<`/`<=`/`>`/`>=`) require numeric
+            // operands; `==`/`!=` also work on references (object identity /
+            // null check), so only the ordered ops prove an integer use here.
+            const std::string& op = ce->op();
+            if (op == "<" || op == "<=" || op == ">" || op == ">=") {
+                add(ce->arg1_id()); add(ce->arg2_id());
+            } else if (op == "==" || op == "!=") {
+                // `v == <nonzero int const>` DOES prove v is a primitive (a
+                // reference is `==` only to null or another reference, never a
+                // nonzero literal). We cannot check the sibling's def here
+                // (defs_of is still being built) — defer to a post-pass.
+                eqne_pairs.emplace_back(ce->arg1_id(), ce->arg2_id());
             }
         }
-        auto is_prim_desc = [](const std::string& t) {
-            return t.size() == 1 &&
-                   std::string("IJZBSCFD").find(t[0]) != std::string::npos;
-        };
-        // POST-PASS: `v == <nonzero int const>` / `v != <nonzero>` proves v is a
-        // primitive (a reference compares `==` only to null or another reference,
-        // never to a nonzero literal). eq/ne were excluded from int_use above
-        // because `== null` (const 0) is a valid null check; here we add the
-        // operand whose SIBLING resolves to a NONZERO integer constant.
-        // NOTE: this runs pre-RegisterPropagation (this pass precedes
-        // register_propagation in decompile.cpp), so the compared constant is
-        // still a distinct `const` def in defs_of and the operand is still its
-        // register vid. If that order ever changed, this would silently no-op
-        // (the inlined-const vid absent from defs_of) — a safe failure.
-        auto is_nonzero_int_const = [&](const std::string& v) -> bool {
-            if (v.empty()) return false;
-            auto it = defs_of.find(v);
-            if (it == defs_of.end()) return false;
-            // PATH-ROBUSTNESS (adversarial-review): trust `v == <const>` as an
-            // integer proof for the SIBLING only when `v` is UNAMBIGUOUSLY a
-            // primitive — no reference def anywhere in its def set. A genuinely
-            // int/ref-conflated `v` (a nonzero-int def on one arm, a reference def
-            // on another) would path-insensitively mark its reference-arm
-            // comparison partner as int-used and wrongly veto that partner's
-            // prim→ref mirror (`int v = someObject()`). Requiring no reference def
-            // makes the proof path-independent.
-            bool has_nonzero = false;
+    };
+    for (NodeBase* n : graph.nodes) {
+        auto* bb = dynamic_cast<BasicBlock*>(n);
+        if (!bb) continue;
+        for (auto& ins : bb->get_ins()) {
+            if (!ins) continue;
+            auto lid = ins->GetLhsId();
+            if (lid) defs_of[*lid].push_back(ins.get());
+            note_obj(ins.get());
+            note_int(ins.get());
+            auto rhs = ins->get_rhs();
+            if (!rhs.empty() && rhs[0]) { note_obj(rhs[0].get());
+                note_int(rhs[0].get()); }
+        }
+    }
+    auto is_prim_desc = [](const std::string& t) {
+        return t.size() == 1 &&
+               std::string("IJZBSCFD").find(t[0]) != std::string::npos;
+    };
+    // POST-PASS: `v == <nonzero int const>` / `v != <nonzero>` proves v is a
+    // primitive (a reference compares `==` only to null or another reference,
+    // never to a nonzero literal). eq/ne were excluded from int_use above
+    // because `== null` (const 0) is a valid null check; here we add the
+    // operand whose SIBLING resolves to a NONZERO integer constant.
+    // NOTE: this runs pre-RegisterPropagation (this pass precedes
+    // register_propagation in decompile.cpp), so the compared constant is
+    // still a distinct `const` def in defs_of and the operand is still its
+    // register vid. If that order ever changed, this would silently no-op
+    // (the inlined-const vid absent from defs_of) — a safe failure.
+    auto is_nonzero_int_const = [&](const std::string& v) -> bool {
+        if (v.empty()) return false;
+        auto it = defs_of.find(v);
+        if (it == defs_of.end()) return false;
+        // PATH-ROBUSTNESS (adversarial-review): trust `v == <const>` as an
+        // integer proof for the SIBLING only when `v` is UNAMBIGUOUSLY a
+        // primitive — no reference def anywhere in its def set. A genuinely
+        // int/ref-conflated `v` (a nonzero-int def on one arm, a reference def
+        // on another) would path-insensitively mark its reference-arm
+        // comparison partner as int-used and wrongly veto that partner's
+        // prim→ref mirror (`int v = someObject()`). Requiring no reference def
+        // makes the proof path-independent.
+        bool has_nonzero = false;
+        for (IRForm* d : it->second) {
+            auto dr = d->get_rhs();
+            if (dr.empty() || !dr[0]) continue;
+            if (is_ref(dr[0]->get_type())) return false;  // conflated → refuse
+            auto* c = dynamic_cast<Constant*>(dr[0].get());
+            if (c && is_prim_desc(c->get_type()) && c->get_int_value() != 0)
+                has_nonzero = true;
+        }
+        return has_nonzero;
+    };
+    for (auto& [a, b] : eqne_pairs) {
+        if (!a.empty() && is_nonzero_int_const(b)) int_use_vids.insert(a);
+        if (!b.empty() && is_nonzero_int_const(a)) int_use_vids.insert(b);
+    }
+    // Ground-truth of a def's rhs: 'R' ref producer, 'P' prim forcer,
+    // 'N' null/zero-neutral, 'U' unknown, 'M' unresolved-move (cycle).
+    // SAFETY-FIRST: 'P' only when the producer's OWN type is a genuine
+    // primitive descriptor (or a structural const-nonzero / arithmetic);
+    // 'R' whenever the type is a reference; everything else 'U'/'M'/'N'.
+    // This guarantees a real object is NEVER mislabeled prim (the regression
+    // direction — re-typing an object to int would reintroduce `prim=new`).
+    // `type_out` receives the resolved concrete DESCRIPTOR of whatever the
+    // producer is — the primitive width ('I'/'J'/…) when 'P' (so a long
+    // cascade is not narrowed to `int v = <huge>`), or the reference
+    // descriptor ('L…;'/'[…') when 'R' (so a mirror re-type below knows the
+    // exact class). Set for BOTH 'P' and 'R'.
+    std::function<char(IRForm*, std::set<std::string>&, std::string&)> gt =
+        [&](IRForm* rhsv, std::set<std::string>& seen,
+            std::string& type_out) -> char {
+        if (!rhsv) return 'U';
+        if (rhsv->is_ident()) {  // move — resolve source transitively
+            const std::string sid = rhsv->Vid();
+            if (seen.count(sid)) return 'M';
+            seen.insert(sid);
+            auto dit = defs_of.find(sid);
+            if (dit == defs_of.end()) {  // param/no def — declared type
+                const std::string t = rhsv->get_type();
+                if (is_ref(t)) { type_out = t; return 'R'; }
+                if (is_prim_desc(t)) { type_out = t; return 'P'; }
+                return 'U';
+            }
+            // Aggregate ALL sibling defs — do NOT short-circuit on the first
+            // 'R'. A conflated move source holding BOTH a reference and a
+            // primitive (an obfuscator reusing one register for an int arg
+            // AND a String) must report as AMBIGUOUS ('U'), not pure-
+            // reference: the earlier short-circuit-on-'R' had INVERTED safety
+            // polarity for the prim→ref mirror — it swallowed the primitive
+            // sibling, so a genuine int/ref merge looked like `has_ref &&
+            // !has_prim` and the mirror re-typed a real `int` to a reference
+            // (adversarial-review finding: `int v6` → `String v6; v6 <= null;
+            // v6 - 1`). Precedence: MIXED (R && P) or any unknown/cycle → 'U'
+            // (blocks either direction); else all-reference → 'R'; else
+            // all-primitive → 'P'; else null-neutral → 'N'.
+            bool sib_r = false, sib_p = false, sib_u = false;
+            std::string ref_seen, prim_seen;
+            for (IRForm* d : dit->second) {
+                auto dr = d->get_rhs();
+                if (dr.empty() || !dr[0]) { sib_u = true; continue; }
+                std::string ct;
+                char c = gt(dr[0].get(), seen, ct);
+                if (c == 'R') { sib_r = true;
+                    if (ref_seen.empty()) ref_seen = ct; }
+                else if (c == 'P') { sib_p = true;
+                    if (prim_seen.empty()) prim_seen = ct; }
+                else if (c == 'U' || c == 'M') sib_u = true;
+                // 'N' (null/zero) is neutral.
+            }
+            if (sib_u || (sib_r && sib_p)) return 'U';  // ambiguous → block
+            if (sib_r) { if (type_out.empty()) type_out = ref_seen;
+                return 'R'; }
+            if (sib_p) { if (type_out.empty()) type_out = prim_seen;
+                return 'P'; }
+            return 'N';
+        }
+        // Unambiguous reference producers.
+        if (dynamic_cast<NewInstance*>(rhsv) ||
+            dynamic_cast<NewArrayExpression*>(rhsv) ||
+            dynamic_cast<FilledArrayExpression*>(rhsv) ||
+            dynamic_cast<MoveExceptionExpression*>(rhsv) ||
+            dynamic_cast<CheckCastExpression*>(rhsv)) {
+            // An allocation is definitionally a reference; only set the
+            // descriptor when it is actually one (a corrupt/empty type under
+            // lenient load leaves type_out empty → the mirror's is_ref gate
+            // then skips, consistent with the other 'R' branches).
+            const std::string t = rhsv->get_type();
+            if (is_ref(t)) type_out = t;
+            return 'R';
+        }
+        if (auto* c = dynamic_cast<Constant*>(rhsv)) {
+            if (is_ref(c->get_type())) {                 // const-class/string
+                type_out = c->get_type(); return 'R'; }
+            if (c->get_int_value() == 0) return 'N';     // 0 = null-neutral
+            type_out = is_prim_desc(c->get_type()) ? c->get_type() : "I";
+            return 'P';
+        }
+        // Structural primitives (arithmetic / length / comparison / prim
+        // cast) — but a ref-typed result still wins as 'R' (never mislabel).
+        if (dynamic_cast<BinaryExpression*>(rhsv) ||
+            dynamic_cast<UnaryExpression*>(rhsv) ||
+            dynamic_cast<ArrayLengthExpression*>(rhsv)) {
+            const std::string t = rhsv->get_type();
+            if (is_ref(t)) { type_out = t; return 'R'; }
+            type_out = is_prim_desc(t) ? t : "I";
+            return 'P';
+        }
+        // Everything else (invoke, field-get, array-load, …): type-driven.
+        // An empty type is UNKNOWN, not primitive — a corrupted-type
+        // reference producer (e.g. aget-object off a mistyped array) must
+        // NOT read as primitive, or the version could be wrongly re-typed.
+        const std::string t = rhsv->get_type();
+        if (is_ref(t)) { type_out = t; return 'R'; }
+        if (is_prim_desc(t)) { type_out = t; return 'P'; }
+        return 'U';
+    };
+    // Resolve the PRIMITIVE WIDTH a version's value really has, by walking its
+    // defs (through moves to the ultimate producer) to the first genuine
+    // primitive descriptor. Unlike gt(), it does NOT stop at a reference — a
+    // reference in the def closure of an INT-USED version is a spurious
+    // conflation type (in valid Dalvik an ordered-compare / arithmetic operand
+    // cannot be a reference), so it is skipped and the walk continues to the
+    // real primitive. Returns "" (UNKNOWN) when no primitive producer is found
+    // — e.g. a genuine allocation / reference-returning method — so such a
+    // version is left untouched rather than guessed. This is what preserves
+    // width: a `long`/`float`/`double`-returning method mistyped a reference is
+    // re-typed to 'J'/'F'/'D', never narrowed to int.
+    std::function<std::string(IRForm*, std::set<std::string>&)>
+        resolve_prim_width =
+        [&](IRForm* r, std::set<std::string>& seen) -> std::string {
+        if (!r) return {};
+        if (r->is_ident()) {
+            const std::string sid = r->Vid();
+            if (seen.count(sid)) return {};
+            seen.insert(sid);
+            auto it = defs_of.find(sid);
+            if (it == defs_of.end())  // param/no def — declared type
+                return is_prim_desc(r->get_type()) ? r->get_type()
+                                                   : std::string{};
+            // AGGREGATE all sibling defs — do NOT return the first non-empty
+            // width (adversarial-review hardening, symmetric to gt()): a
+            // conflated move source holding two DIFFERENT primitive widths
+            // (a `long` call on one path, a `const int` on another) must
+            // report AMBIGUOUS ("") so the widen branch leaves it untouched,
+            // not commit whichever def happens to iterate first. Empty
+            // (reference / no primitive) siblings are neutral — skipped.
+            std::string agreed;
             for (IRForm* d : it->second) {
                 auto dr = d->get_rhs();
                 if (dr.empty() || !dr[0]) continue;
-                if (is_ref(dr[0]->get_type())) return false;  // conflated → refuse
-                auto* c = dynamic_cast<Constant*>(dr[0].get());
-                if (c && is_prim_desc(c->get_type()) && c->get_int_value() != 0)
-                    has_nonzero = true;
+                std::string w = resolve_prim_width(dr[0].get(), seen);
+                if (w.empty()) continue;
+                if (agreed.empty()) agreed = w;
+                else if (agreed != w) return {};  // width disagreement
             }
-            return has_nonzero;
-        };
-        for (auto& [a, b] : eqne_pairs) {
-            if (!a.empty() && is_nonzero_int_const(b)) int_use_vids.insert(a);
-            if (!b.empty() && is_nonzero_int_const(a)) int_use_vids.insert(b);
+            return agreed;
         }
-        // Ground-truth of a def's rhs: 'R' ref producer, 'P' prim forcer,
-        // 'N' null/zero-neutral, 'U' unknown, 'M' unresolved-move (cycle).
-        // SAFETY-FIRST: 'P' only when the producer's OWN type is a genuine
-        // primitive descriptor (or a structural const-nonzero / arithmetic);
-        // 'R' whenever the type is a reference; everything else 'U'/'M'/'N'.
-        // This guarantees a real object is NEVER mislabeled prim (the regression
-        // direction — re-typing an object to int would reintroduce `prim=new`).
-        // `type_out` receives the resolved concrete DESCRIPTOR of whatever the
-        // producer is — the primitive width ('I'/'J'/…) when 'P' (so a long
-        // cascade is not narrowed to `int v = <huge>`), or the reference
-        // descriptor ('L…;'/'[…') when 'R' (so a mirror re-type below knows the
-        // exact class). Set for BOTH 'P' and 'R'.
-        std::function<char(IRForm*, std::set<std::string>&, std::string&)> gt =
-            [&](IRForm* rhsv, std::set<std::string>& seen,
-                std::string& type_out) -> char {
-            if (!rhsv) return 'U';
-            if (rhsv->is_ident()) {  // move — resolve source transitively
-                const std::string sid = rhsv->Vid();
-                if (seen.count(sid)) return 'M';
-                seen.insert(sid);
-                auto dit = defs_of.find(sid);
-                if (dit == defs_of.end()) {  // param/no def — declared type
-                    const std::string t = rhsv->get_type();
-                    if (is_ref(t)) { type_out = t; return 'R'; }
-                    if (is_prim_desc(t)) { type_out = t; return 'P'; }
-                    return 'U';
-                }
-                // Aggregate ALL sibling defs — do NOT short-circuit on the first
-                // 'R'. A conflated move source holding BOTH a reference and a
-                // primitive (an obfuscator reusing one register for an int arg
-                // AND a String) must report as AMBIGUOUS ('U'), not pure-
-                // reference: the earlier short-circuit-on-'R' had INVERTED safety
-                // polarity for the prim→ref mirror — it swallowed the primitive
-                // sibling, so a genuine int/ref merge looked like `has_ref &&
-                // !has_prim` and the mirror re-typed a real `int` to a reference
-                // (adversarial-review finding: `int v6` → `String v6; v6 <= null;
-                // v6 - 1`). Precedence: MIXED (R && P) or any unknown/cycle → 'U'
-                // (blocks either direction); else all-reference → 'R'; else
-                // all-primitive → 'P'; else null-neutral → 'N'.
-                bool sib_r = false, sib_p = false, sib_u = false;
-                std::string ref_seen, prim_seen;
-                for (IRForm* d : dit->second) {
-                    auto dr = d->get_rhs();
-                    if (dr.empty() || !dr[0]) { sib_u = true; continue; }
-                    std::string ct;
-                    char c = gt(dr[0].get(), seen, ct);
-                    if (c == 'R') { sib_r = true;
-                        if (ref_seen.empty()) ref_seen = ct; }
-                    else if (c == 'P') { sib_p = true;
-                        if (prim_seen.empty()) prim_seen = ct; }
-                    else if (c == 'U' || c == 'M') sib_u = true;
-                    // 'N' (null/zero) is neutral.
-                }
-                if (sib_u || (sib_r && sib_p)) return 'U';  // ambiguous → block
-                if (sib_r) { if (type_out.empty()) type_out = ref_seen;
-                    return 'R'; }
-                if (sib_p) { if (type_out.empty()) type_out = prim_seen;
-                    return 'P'; }
-                return 'N';
-            }
-            // Unambiguous reference producers.
-            if (dynamic_cast<NewInstance*>(rhsv) ||
-                dynamic_cast<NewArrayExpression*>(rhsv) ||
-                dynamic_cast<FilledArrayExpression*>(rhsv) ||
-                dynamic_cast<MoveExceptionExpression*>(rhsv) ||
-                dynamic_cast<CheckCastExpression*>(rhsv)) {
-                // An allocation is definitionally a reference; only set the
-                // descriptor when it is actually one (a corrupt/empty type under
-                // lenient load leaves type_out empty → the mirror's is_ref gate
-                // then skips, consistent with the other 'R' branches).
-                const std::string t = rhsv->get_type();
-                if (is_ref(t)) type_out = t;
-                return 'R';
-            }
-            if (auto* c = dynamic_cast<Constant*>(rhsv)) {
-                if (is_ref(c->get_type())) {                 // const-class/string
-                    type_out = c->get_type(); return 'R'; }
-                if (c->get_int_value() == 0) return 'N';     // 0 = null-neutral
-                type_out = is_prim_desc(c->get_type()) ? c->get_type() : "I";
-                return 'P';
-            }
-            // Structural primitives (arithmetic / length / comparison / prim
-            // cast) — but a ref-typed result still wins as 'R' (never mislabel).
-            if (dynamic_cast<BinaryExpression*>(rhsv) ||
-                dynamic_cast<UnaryExpression*>(rhsv) ||
-                dynamic_cast<ArrayLengthExpression*>(rhsv)) {
-                const std::string t = rhsv->get_type();
-                if (is_ref(t)) { type_out = t; return 'R'; }
-                type_out = is_prim_desc(t) ? t : "I";
-                return 'P';
-            }
-            // Everything else (invoke, field-get, array-load, …): type-driven.
-            // An empty type is UNKNOWN, not primitive — a corrupted-type
-            // reference producer (e.g. aget-object off a mistyped array) must
-            // NOT read as primitive, or the version could be wrongly re-typed.
-            const std::string t = rhsv->get_type();
-            if (is_ref(t)) { type_out = t; return 'R'; }
-            if (is_prim_desc(t)) { type_out = t; return 'P'; }
-            return 'U';
-        };
-        // Resolve the PRIMITIVE WIDTH a version's value really has, by walking its
-        // defs (through moves to the ultimate producer) to the first genuine
-        // primitive descriptor. Unlike gt(), it does NOT stop at a reference — a
-        // reference in the def closure of an INT-USED version is a spurious
-        // conflation type (in valid Dalvik an ordered-compare / arithmetic operand
-        // cannot be a reference), so it is skipped and the walk continues to the
-        // real primitive. Returns "" (UNKNOWN) when no primitive producer is found
-        // — e.g. a genuine allocation / reference-returning method — so such a
-        // version is left untouched rather than guessed. This is what preserves
-        // width: a `long`/`float`/`double`-returning method mistyped a reference is
-        // re-typed to 'J'/'F'/'D', never narrowed to int.
-        std::function<std::string(IRForm*, std::set<std::string>&)>
-            resolve_prim_width =
-            [&](IRForm* r, std::set<std::string>& seen) -> std::string {
-            if (!r) return {};
-            if (r->is_ident()) {
-                const std::string sid = r->Vid();
-                if (seen.count(sid)) return {};
-                seen.insert(sid);
-                auto it = defs_of.find(sid);
-                if (it == defs_of.end())  // param/no def — declared type
-                    return is_prim_desc(r->get_type()) ? r->get_type()
-                                                       : std::string{};
-                // AGGREGATE all sibling defs — do NOT return the first non-empty
-                // width (adversarial-review hardening, symmetric to gt()): a
-                // conflated move source holding two DIFFERENT primitive widths
-                // (a `long` call on one path, a `const int` on another) must
-                // report AMBIGUOUS ("") so the widen branch leaves it untouched,
-                // not commit whichever def happens to iterate first. Empty
-                // (reference / no primitive) siblings are neutral — skipped.
-                std::string agreed;
-                for (IRForm* d : it->second) {
-                    auto dr = d->get_rhs();
-                    if (dr.empty() || !dr[0]) continue;
-                    std::string w = resolve_prim_width(dr[0].get(), seen);
-                    if (w.empty()) continue;
-                    if (agreed.empty()) agreed = w;
-                    else if (agreed != w) return {};  // width disagreement
-                }
-                return agreed;
-            }
-            // A genuine allocation is definitively a reference — no primitive
-            // width, so an int-used allocation (impossible in valid Dalvik) is
-            // never re-typed.
-            if (dynamic_cast<NewInstance*>(r) ||
-                dynamic_cast<NewArrayExpression*>(r) ||
-                dynamic_cast<FilledArrayExpression*>(r) ||
-                dynamic_cast<MoveExceptionExpression*>(r) ||
-                dynamic_cast<CheckCastExpression*>(r))
-                return {};
-            const std::string t = r->get_type();
-            return is_prim_desc(t) ? t : std::string{};
-        };
-        // Two-phase: classify every version reading ONLY pre-mutation types
-        // (so the two directions can't interfere), then apply. Direction is
-        // symmetric: a version whose current type disagrees with its provable
-        // ground truth (ALL defs primitive/null → primitive; ALL defs
-        // reference/null with agreeing class → that class) is re-typed. A
-        // version with BOTH a real primitive forcer and a real reference is a
-        // GENUINE conflation (needs a version split) and is left untouched, as
-        // is any version with an unresolved ('U'/'M') def.
-        std::vector<std::pair<IRForm*, std::string>> retypes;
-        for (auto& [vid, dvec] : defs_of) {
-            if (dvec.empty()) continue;
-            auto vit = dvec[0]->var_map.find(vid);
-            if (vit == dvec[0]->var_map.end() || !vit->second) continue;
-            const std::string cur = vit->second->get_type();
-            const bool cur_ref = is_ref(cur), cur_prim = is_prim_desc(cur);
-            if (!cur_ref && !cur_prim) continue;
-            bool has_ref = false, has_prim = false, has_unknown = false;
-            bool ref_conflict = false;
-            std::string prim_type, ref_type;
+        // A genuine allocation is definitively a reference — no primitive
+        // width, so an int-used allocation (impossible in valid Dalvik) is
+        // never re-typed.
+        if (dynamic_cast<NewInstance*>(r) ||
+            dynamic_cast<NewArrayExpression*>(r) ||
+            dynamic_cast<FilledArrayExpression*>(r) ||
+            dynamic_cast<MoveExceptionExpression*>(r) ||
+            dynamic_cast<CheckCastExpression*>(r))
+            return {};
+        const std::string t = r->get_type();
+        return is_prim_desc(t) ? t : std::string{};
+    };
+    // Two-phase: classify every version reading ONLY pre-mutation types
+    // (so the two directions can't interfere), then apply. Direction is
+    // symmetric: a version whose current type disagrees with its provable
+    // ground truth (ALL defs primitive/null → primitive; ALL defs
+    // reference/null with agreeing class → that class) is re-typed. A
+    // version with BOTH a real primitive forcer and a real reference is a
+    // GENUINE conflation (needs a version split) and is left untouched, as
+    // is any version with an unresolved ('U'/'M') def.
+    std::vector<std::pair<IRForm*, std::string>> retypes;
+    for (auto& [vid, dvec] : defs_of) {
+        if (dvec.empty()) continue;
+        auto vit = dvec[0]->var_map.find(vid);
+        if (vit == dvec[0]->var_map.end() || !vit->second) continue;
+        const std::string cur = vit->second->get_type();
+        const bool cur_ref = is_ref(cur), cur_prim = is_prim_desc(cur);
+        if (!cur_ref && !cur_prim) continue;
+        bool has_ref = false, has_prim = false, has_unknown = false;
+        bool ref_conflict = false;
+        std::string prim_type, ref_type;
+        for (IRForm* d : dvec) {
+            std::set<std::string> seen{vid};
+            auto dr = d->get_rhs();
+            if (dr.empty() || !dr[0]) { has_unknown = true; continue; }
+            std::string ct;
+            char c = gt(dr[0].get(), seen, ct);
+            if (c == 'R') { has_ref = true;
+                if (ref_type.empty()) ref_type = ct;
+                else if (is_ref(ct) && ct != ref_type) ref_conflict = true; }
+            else if (c == 'U' || c == 'M') has_unknown = true;
+            else if (c == 'P') { has_prim = true;
+                if (prim_type.empty()) prim_type = ct; }
+            // 'N' (null/zero) is neutral — compatible with either type.
+        }
+        // USE-DRIVEN ref→prim (width-resolved) — runs BEFORE the def-only
+        // guards below. A reference-typed version USED AS AN INTEGER (an
+        // ordered comparison / arithmetic operand / array index) is, in valid
+        // Dalvik, provably a primitive on that path: the verifier rejects
+        // those operations on a reference, so a 'R' reached only through moves
+        // is a SPURIOUS conflation type (a stale reference copied off a
+        // mistyped sibling register). This is the residual that looked like it
+        // needed a "version split" but has NO real reference use.
+        //
+        // ADVERSARIAL-REVIEW HARDENING: re-type ONLY when EVERY def resolves
+        // to a primitive width AND they all AGREE. If ANY def is a GENUINE
+        // reference producer (an allocation / reference-returning method /
+        // reference field — `resolve_prim_width` returns ""), the register is
+        // a GENUINE object+int conflation (a real object on one path, an int
+        // on another) that needs a version split — left untouched, so it is
+        // never re-typed to `int` while `return v` / `throw v` / a reference
+        // argument uses the object arm (the `object_vids` receiver/field guard
+        // does not cover those positions). If the widths DISAGREE (I vs J) the
+        // register is a genuine mixed-width conflation — left untouched to
+        // avoid truncating a long/float/double to int. A boolean (Z) width is
+        // left too (a boolean used as an int is a genuine boolean/int
+        // conflation). The `object_vids` check is kept as belt-and-suspenders.
+        if (cur_ref && int_use_vids.count(vid) &&
+            !object_vids.count(vid)) {
+            std::string w;
+            bool ok = true;
             for (IRForm* d : dvec) {
-                std::set<std::string> seen{vid};
                 auto dr = d->get_rhs();
-                if (dr.empty() || !dr[0]) { has_unknown = true; continue; }
-                std::string ct;
-                char c = gt(dr[0].get(), seen, ct);
-                if (c == 'R') { has_ref = true;
-                    if (ref_type.empty()) ref_type = ct;
-                    else if (is_ref(ct) && ct != ref_type) ref_conflict = true; }
-                else if (c == 'U' || c == 'M') has_unknown = true;
-                else if (c == 'P') { has_prim = true;
-                    if (prim_type.empty()) prim_type = ct; }
-                // 'N' (null/zero) is neutral — compatible with either type.
+                if (dr.empty() || !dr[0]) { ok = false; break; }
+                std::set<std::string> seen{vid};
+                std::string dw = resolve_prim_width(dr[0].get(), seen);
+                if (dw.empty()) { ok = false; break; }   // genuine ref / unknown
+                if (w.empty()) w = dw;
+                else if (w != dw) { ok = false; break; }  // width disagreement
             }
-            // USE-DRIVEN ref→prim (width-resolved) — runs BEFORE the def-only
-            // guards below. A reference-typed version USED AS AN INTEGER (an
-            // ordered comparison / arithmetic operand / array index) is, in valid
-            // Dalvik, provably a primitive on that path: the verifier rejects
-            // those operations on a reference, so a 'R' reached only through moves
-            // is a SPURIOUS conflation type (a stale reference copied off a
-            // mistyped sibling register). This is the residual that looked like it
-            // needed a "version split" but has NO real reference use.
-            //
-            // ADVERSARIAL-REVIEW HARDENING: re-type ONLY when EVERY def resolves
-            // to a primitive width AND they all AGREE. If ANY def is a GENUINE
-            // reference producer (an allocation / reference-returning method /
-            // reference field — `resolve_prim_width` returns ""), the register is
-            // a GENUINE object+int conflation (a real object on one path, an int
-            // on another) that needs a version split — left untouched, so it is
-            // never re-typed to `int` while `return v` / `throw v` / a reference
-            // argument uses the object arm (the `object_vids` receiver/field guard
-            // does not cover those positions). If the widths DISAGREE (I vs J) the
-            // register is a genuine mixed-width conflation — left untouched to
-            // avoid truncating a long/float/double to int. A boolean (Z) width is
-            // left too (a boolean used as an int is a genuine boolean/int
-            // conflation). The `object_vids` check is kept as belt-and-suspenders.
-            if (cur_ref && int_use_vids.count(vid) &&
-                !object_vids.count(vid)) {
-                std::string w;
-                bool ok = true;
-                for (IRForm* d : dvec) {
-                    auto dr = d->get_rhs();
-                    if (dr.empty() || !dr[0]) { ok = false; break; }
-                    std::set<std::string> seen{vid};
-                    std::string dw = resolve_prim_width(dr[0].get(), seen);
-                    if (dw.empty()) { ok = false; break; }   // genuine ref / unknown
-                    if (w.empty()) w = dw;
-                    else if (w != dw) { ok = false; break; }  // width disagreement
-                }
-                if (ok && !w.empty() && w != "Z") {
-                    retypes.emplace_back(vit->second.get(), w);
-                    continue;
-                }
-            }
-            // Any unresolved def, a genuine ref+prim merge, or disagreeing
-            // reference producers → refuse (would risk a wrong guess).
-            if (has_unknown || (has_ref && has_prim)) continue;
-            if (cur_ref && has_prim) {
-                // CASCADE (ref→prim): ref-typed but provably primitive. Skip if
-                // used AS AN OBJECT (a reference producer we failed to detect).
-                if (object_vids.count(vid)) continue;
-                // A MULTI-def all-primitive version is def-confirmed. A SINGLE-def
-                // version (a lone primitive-returning method typed reference by
-                // register conflation — `String v = p.indexOf(',')` then `v >= 0`
-                // / `v + 1`) additionally requires USE-corroboration: a clear
-                // integer use proves the primitive, and an ambiguous single-def
-                // version (never used as an int — e.g. `String v = indexOf();
-                // return v` where the method returns String) is a genuine
-                // conflation no single type satisfies, so it is left untouched
-                // rather than guessed. (Multi-def prim merges keep the original,
-                // def-driven behaviour — no use requirement.)
-                if (dvec.size() < 2 && !int_use_vids.count(vid)) continue;
-                // A `boolean` (Z) value cannot be an arithmetic / ordered-compare
-                // operand in Java, and `int v = booleanMethod()` is equally
-                // invalid — a Z-returning def that reaches an integer use is a
-                // genuine boolean/int register conflation no single type
-                // satisfies. Leave it (DAD's reference type) rather than emit a
-                // new `boolean v; v + 1` flavour of invalid Java (adversarial-
-                // review nit; needs a version split to resolve). B/S/C stay
-                // re-typed — `byte v; v + 1` is valid (numeric promotion).
-                if (prim_type == "Z" && int_use_vids.count(vid)) continue;
-                retypes.emplace_back(vit->second.get(),
-                                     prim_type.empty() ? "I" : prim_type);
-            } else if (cur_prim && has_ref && is_ref(ref_type) && !ref_conflict &&
-                       (dvec.size() >= 2 || object_vids.count(vid)) &&
-                       !dynamic_cast<ThisParam*>(vit->second.get())) {
-                // Belt-and-suspenders (adversarial-review): a `this` / super
-                // <init>-base register is always reference-typed, so the cur_prim
-                // gate already excludes it; the explicit ThisParam check makes the
-                // exclusion STRUCTURAL (matching the first FixInitResultTypes
-                // pass) rather than incidental — re-typing `this` would corrupt
-                // the writer's super-vs-this detection.
-                // MIRROR (prim→ref): primitive-typed but really a reference. Two
-                // shapes: a MULTI-def version whose defs are a reference + null
-                // (`int v = ObjectAnimator.ofFloat(...)` + `v = 0`, then
-                // `v.addListener()` / `return v`); or a SINGLE-def version that is
-                // USE-corroborated as an OBJECT — a lone reference-returning method
-                // typed `int` by register conflation (`int v2 =
-                // getChildViewHolderInt(...); v2.isRemoved(); v2.itemView`), where
-                // the receiver / field-owner use proves the reference (symmetric
-                // to the single-def cascade's int-use proof).
-                // USE-CORROBORATION (symmetric to object_vids, adversarial-review
-                // hardening): skip if the version is ever used in an INTEGER
-                // context (arithmetic operand, array index, unary operand). The
-                // DEF side can look all-reference for a genuinely-conflated
-                // register whose reference arm is a String param moved in while
-                // the same register is reused as an int — split_variables did not
-                // separate them, so `v = strParam` (an 'R' def) and `v = 0` (an
-                // 'N' def) hide the int nature that only the USES expose. Without
-                // this guard the mirror mis-typed `int v6` → `String v6` with
-                // `v6 - 1` / `v6 <= 10` (uncompilable). An int-used version is a
-                // genuine conflation (needs a version split) → leave DAD's type.
-                if (int_use_vids.count(vid)) continue;
-                retypes.emplace_back(vit->second.get(), ref_type);
-            } else if (cur_prim && !int_required_vids.count(vid)) {
-                // prim→WIDER-prim: an `int`-typed version whose value is really a
-                // WIDER primitive — `int v = System.currentTimeMillis()` /
-                // `int v = Long.parseLong(s)` (long returned into a wide register
-                // whose split version DAD mistyped `int`). `int v = <long>` is an
-                // uncompilable narrowing. Re-type to the def width when EVERY def
-                // resolves to the SAME primitive and it is WIDER than the current
-                // type (an assignment `cur v = w` that would be an invalid
-                // narrowing). Disjoint from the ref→prim / mirror branches
-                // (cur_prim, not cur_ref). Guarded by INT-REQUIRED use — an array
-                // index (`arr[longV]`), a `switch` selector (`switch(longV)`), or
-                // an array-creation size (`new int[longV]`) are all invalid for a
-                // wide type — but NOT by ordinary arithmetic / comparison, which
-                // is valid on a wide value, so unlike the mirror this does not
-                // skip all int uses.
-                std::string w;
-                bool ok = true;
-                for (IRForm* d : dvec) {
-                    auto dr = d->get_rhs();
-                    if (dr.empty() || !dr[0]) { ok = false; break; }
-                    std::set<std::string> seen{vid};
-                    std::string dw = resolve_prim_width(dr[0].get(), seen);
-                    if (dw.empty()) { ok = false; break; }
-                    if (w.empty()) w = dw;
-                    else if (w != dw) { ok = false; break; }
-                }
-                // Java widening order for assignment: {Z,B,C,S,I}=1 < J=2 < F=3 <
-                // D=4. `cur v = w` is an invalid narrowing iff rank(w) > rank(cur).
-                auto rank = [](const std::string& t) {
-                    if (t == "D") return 4; if (t == "F") return 3;
-                    if (t == "J") return 2; return 1;
-                };
-                if (ok && !w.empty() && rank(w) > rank(cur))
-                    retypes.emplace_back(vit->second.get(), w);
+            if (ok && !w.empty() && w != "Z") {
+                retypes.emplace_back(vit->second.get(), w);
+                continue;
             }
         }
-        for (auto& [var, t] : retypes) var->set_type(t);
+        // Any unresolved def, a genuine ref+prim merge, or disagreeing
+        // reference producers → refuse (would risk a wrong guess).
+        if (has_unknown || (has_ref && has_prim)) continue;
+        if (cur_ref && has_prim) {
+            // CASCADE (ref→prim): ref-typed but provably primitive. Skip if
+            // used AS AN OBJECT (a reference producer we failed to detect).
+            if (object_vids.count(vid)) continue;
+            // A MULTI-def all-primitive version is def-confirmed. A SINGLE-def
+            // version (a lone primitive-returning method typed reference by
+            // register conflation — `String v = p.indexOf(',')` then `v >= 0`
+            // / `v + 1`) additionally requires USE-corroboration: a clear
+            // integer use proves the primitive, and an ambiguous single-def
+            // version (never used as an int — e.g. `String v = indexOf();
+            // return v` where the method returns String) is a genuine
+            // conflation no single type satisfies, so it is left untouched
+            // rather than guessed. (Multi-def prim merges keep the original,
+            // def-driven behaviour — no use requirement.)
+            if (dvec.size() < 2 && !int_use_vids.count(vid)) continue;
+            // A `boolean` (Z) value cannot be an arithmetic / ordered-compare
+            // operand in Java, and `int v = booleanMethod()` is equally
+            // invalid — a Z-returning def that reaches an integer use is a
+            // genuine boolean/int register conflation no single type
+            // satisfies. Leave it (DAD's reference type) rather than emit a
+            // new `boolean v; v + 1` flavour of invalid Java (adversarial-
+            // review nit; needs a version split to resolve). B/S/C stay
+            // re-typed — `byte v; v + 1` is valid (numeric promotion).
+            if (prim_type == "Z" && int_use_vids.count(vid)) continue;
+            retypes.emplace_back(vit->second.get(),
+                                 prim_type.empty() ? "I" : prim_type);
+        } else if (cur_prim && has_ref && is_ref(ref_type) && !ref_conflict &&
+                   (dvec.size() >= 2 || object_vids.count(vid)) &&
+                   !dynamic_cast<ThisParam*>(vit->second.get())) {
+            // Belt-and-suspenders (adversarial-review): a `this` / super
+            // <init>-base register is always reference-typed, so the cur_prim
+            // gate already excludes it; the explicit ThisParam check makes the
+            // exclusion STRUCTURAL (matching the first FixInitResultTypes
+            // pass) rather than incidental — re-typing `this` would corrupt
+            // the writer's super-vs-this detection.
+            // MIRROR (prim→ref): primitive-typed but really a reference. Two
+            // shapes: a MULTI-def version whose defs are a reference + null
+            // (`int v = ObjectAnimator.ofFloat(...)` + `v = 0`, then
+            // `v.addListener()` / `return v`); or a SINGLE-def version that is
+            // USE-corroborated as an OBJECT — a lone reference-returning method
+            // typed `int` by register conflation (`int v2 =
+            // getChildViewHolderInt(...); v2.isRemoved(); v2.itemView`), where
+            // the receiver / field-owner use proves the reference (symmetric
+            // to the single-def cascade's int-use proof).
+            // USE-CORROBORATION (symmetric to object_vids, adversarial-review
+            // hardening): skip if the version is ever used in an INTEGER
+            // context (arithmetic operand, array index, unary operand). The
+            // DEF side can look all-reference for a genuinely-conflated
+            // register whose reference arm is a String param moved in while
+            // the same register is reused as an int — split_variables did not
+            // separate them, so `v = strParam` (an 'R' def) and `v = 0` (an
+            // 'N' def) hide the int nature that only the USES expose. Without
+            // this guard the mirror mis-typed `int v6` → `String v6` with
+            // `v6 - 1` / `v6 <= 10` (uncompilable). An int-used version is a
+            // genuine conflation (needs a version split) → leave DAD's type.
+            if (int_use_vids.count(vid)) continue;
+            retypes.emplace_back(vit->second.get(), ref_type);
+        } else if (cur_prim && !int_required_vids.count(vid)) {
+            // prim→WIDER-prim: an `int`-typed version whose value is really a
+            // WIDER primitive — `int v = System.currentTimeMillis()` /
+            // `int v = Long.parseLong(s)` (long returned into a wide register
+            // whose split version DAD mistyped `int`). `int v = <long>` is an
+            // uncompilable narrowing. Re-type to the def width when EVERY def
+            // resolves to the SAME primitive and it is WIDER than the current
+            // type (an assignment `cur v = w` that would be an invalid
+            // narrowing). Disjoint from the ref→prim / mirror branches
+            // (cur_prim, not cur_ref). Guarded by INT-REQUIRED use — an array
+            // index (`arr[longV]`), a `switch` selector (`switch(longV)`), or
+            // an array-creation size (`new int[longV]`) are all invalid for a
+            // wide type — but NOT by ordinary arithmetic / comparison, which
+            // is valid on a wide value, so unlike the mirror this does not
+            // skip all int uses.
+            std::string w;
+            bool ok = true;
+            for (IRForm* d : dvec) {
+                auto dr = d->get_rhs();
+                if (dr.empty() || !dr[0]) { ok = false; break; }
+                std::set<std::string> seen{vid};
+                std::string dw = resolve_prim_width(dr[0].get(), seen);
+                if (dw.empty()) { ok = false; break; }
+                if (w.empty()) w = dw;
+                else if (w != dw) { ok = false; break; }
+            }
+            // Java widening order for assignment: {Z,B,C,S,I}=1 < J=2 < F=3 <
+            // D=4. `cur v = w` is an invalid narrowing iff rank(w) > rank(cur).
+            auto rank = [](const std::string& t) {
+                if (t == "D") return 4; if (t == "F") return 3;
+                if (t == "J") return 2; return 1;
+            };
+            if (ok && !w.empty() && rank(w) > rank(cur))
+                retypes.emplace_back(vit->second.get(), w);
+        }
     }
+    for (auto& [var, t] : retypes) var->set_type(t);
+}
+
+// Driver — DAD types every register version from the register's LAST write
+// (orig_var.type), so a Dalvik register reused across incompatible types
+// leaves its split versions mistyped. This corrects them at the VALUE/version
+// level in two def-anchored passes (docs/type-inference-design.md).
+void FixInitResultTypes(Graph& graph) {
+    FixAllocationResultTypes(graph);  // design §1: allocation ground truth
+    InferCascadeTypes(graph);         // design §2/§3: move-chain cascade/mirror
 }
 
 // Beyond-DAD: see dataflow.h. Materialise a reused receiver register as a local.
