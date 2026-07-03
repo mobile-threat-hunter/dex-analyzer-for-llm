@@ -1009,6 +1009,9 @@ bool MaterializeReusedThis(Graph& graph,
     // Reassignment rhs descriptors: a reference type, "" for the null constant,
     // or "!" for void / primitive / non-const (disqualifying).
     std::vector<std::string> reassign;
+    // DEF-anchor tracking: is EVERY reassignment a `new C` of the SAME class C?
+    bool all_alloc = true;
+    std::string alloc_type;
     for (NodeBase* n : graph.rpo) {
         auto* bb = dynamic_cast<BasicBlock*>(n);
         if (!bb) continue;
@@ -1040,6 +1043,17 @@ bool MaterializeReusedThis(Graph& graph,
             reassign_blocks.insert(n);
             const std::string t =
                 (!rr.empty() && rr[0]) ? rr[0]->get_type() : std::string{};
+            // DEF-anchor: track whether this reassignment is a `new C` allocation
+            // (new-instance / new-array) and whether all of them share one C.
+            bool alloc = !rr.empty() && rr[0] &&
+                         (dynamic_cast<NewInstance*>(rr[0].get()) ||
+                          dynamic_cast<NewArrayExpression*>(rr[0].get()));
+            if (alloc && is_ref(t)) {
+                if (alloc_type.empty()) alloc_type = t;
+                else if (alloc_type != t) all_alloc = false;
+            } else {
+                all_alloc = false;
+            }
             if (is_ref(t)) { reassign.push_back(t); continue; }
             auto* c = !rr.empty() ? dynamic_cast<Constant*>(rr[0].get())
                                   : nullptr;
@@ -1050,10 +1064,60 @@ bool MaterializeReusedThis(Graph& graph,
                     : std::string{"!"});  // void / primitive / non-const const
         }
     }
-    if (!reused || anchor.empty() || sink_conflict) return false;
+    if (!reused || sink_conflict) return false;
+
+    // DEF-anchor fallback: NO typed use-sink pins the receiver, but every
+    // reassignment is `new C` of one class C AND the entry `this` value is never
+    // read — the receiver slot is a pure scratch for the allocation (e.g.
+    // `this = new X(); this.<init>(msg); throw this`). Then vX = C and NO
+    // `vX = this` seed is injected (it would be dead), so soundness needs no
+    // cls<:C up-cast proof: the entry value provably reaches no use. The read
+    // scan is instruction-ordered — inside a reassign block a this-use BEFORE
+    // the reassignment reads the entry value and disqualifies.
+    bool def_anchor = false;
+    if (anchor.empty()) {
+        auto entry_this_read = [&]() -> bool {
+            std::unordered_set<NodeBase*> reached;
+            std::vector<NodeBase*> work{graph.entry};
+            while (!work.empty()) {
+                NodeBase* b = work.back();
+                work.pop_back();
+                if (!b || !reached.insert(b).second) continue;
+                if (reassign_blocks.count(b)) continue;  // entry value consumed
+                for (NodeBase* s : graph.sucs(b)) work.push_back(s);
+            }
+            for (NodeBase* b : reached) {
+                auto* bb = dynamic_cast<BasicBlock*>(b);
+                if (!bb) continue;
+                const bool is_reassign = reassign_blocks.count(b) != 0;
+                for (const auto& ins : bb->ins) {
+                    if (!ins) continue;
+                    // rhs reads are checked BEFORE the LHS break: a reassignment
+                    // whose OWN rhs reads the receiver (`this = new C[this]` — the
+                    // array-size operand aliases the receiver register) reads the
+                    // PRE-def (entry) value in the same instruction that redefines
+                    // it, so it counts as an entry read and disqualifies the
+                    // def-anchor. (On verified dex a reference-typed array size is
+                    // rejected by VerifyInsns; under lenient load it can reach here
+                    // — declining keeps the "entry value reaches no use" claim true
+                    // instead of emitting the self-referential `C[] vX = new C[vX]`.)
+                    for (const auto& u : ins->get_used_vars())
+                        if (u == this_vid) return true;
+                    if (is_reassign && GetLhsKey(ins) == this_vid) break;
+                }
+            }
+            return false;
+        };
+        if (!all_alloc || alloc_type.empty() || entry_this_read()) return false;
+        anchor = alloc_type;
+        def_anchor = true;
+    }
+
     // Every reassignment must be assignable to the anchor (a subtype ok via the
     // hierarchy oracle) or the null constant — else `vX` (typed anchor) would
-    // hold an incompatible value (the phi-web intermediate-use hazard).
+    // hold an incompatible value (the phi-web intermediate-use hazard). For the
+    // def-anchor every reassignment is exactly `alloc_type == anchor`, so this
+    // trivially passes.
     for (const auto& rt : reassign) {
         if (rt == "!") return false;                       // void / primitive
         if (!rt.empty() && !assignable(rt, anchor)) return false;
@@ -1077,25 +1141,29 @@ bool MaterializeReusedThis(Graph& graph,
     // trusting `returned` would bless an unproven `<Unrelated> vX = this`
     // (adversarial-review CONFIRMED). So gate it on `is_ref(ret_type) && anchor ==
     // ret_type`; every other (arg-sink) case must use the sound proof below.
-    bool cls_ok = (returned && is_ref(ret_type) && anchor == ret_type) ||
-                  assignable(cls_name, anchor);
-    if (!cls_ok) {
-        std::unordered_set<NodeBase*> reached;
-        std::vector<NodeBase*> work{graph.entry};
-        while (!work.empty()) {
-            NodeBase* b = work.back();
-            work.pop_back();
-            if (!b || !reached.insert(b).second) continue;
-            if (reassign_blocks.count(b)) continue;   // entry value consumed here
-            for (NodeBase* s : graph.sucs(b)) work.push_back(s);
-        }
-        for (NodeBase* sb : sink_blocks)
-            if (reached.count(sb) && !reassign_blocks.count(sb)) {
-                cls_ok = true;
-                break;
+    // The def-anchor injects no `vX = this` seed, so there is no up-cast to
+    // prove — skip the cls<:anchor gate entirely (entry value reaches no use).
+    if (!def_anchor) {
+        bool cls_ok = (returned && is_ref(ret_type) && anchor == ret_type) ||
+                      assignable(cls_name, anchor);
+        if (!cls_ok) {
+            std::unordered_set<NodeBase*> reached;
+            std::vector<NodeBase*> work{graph.entry};
+            while (!work.empty()) {
+                NodeBase* b = work.back();
+                work.pop_back();
+                if (!b || !reached.insert(b).second) continue;
+                if (reassign_blocks.count(b)) continue;  // entry value consumed
+                for (NodeBase* s : graph.sucs(b)) work.push_back(s);
             }
+            for (NodeBase* sb : sink_blocks)
+                if (reached.count(sb) && !reassign_blocks.count(sb)) {
+                    cls_ok = true;
+                    break;
+                }
+        }
+        if (!cls_ok) return false;
     }
-    if (!cls_ok) return false;
 
     // ---- PHASE B: mutate (all validation passed → atomic). ---------------
     // Fresh local vid beyond every existing lvars key (no collision; the stoi
@@ -1135,10 +1203,17 @@ bool MaterializeReusedThis(Graph& graph,
     // AssignExpression ctor did `this_param.set_type(X.get_type())`); restore it
     // to the class before it seeds the copy, and re-assert vX's return type after
     // the copy ctor (which re-propagates the — now restored — receiver type).
-    this_param->set_type(cls_name);
-    entry_bb->ins.insert(entry_bb->ins.begin(),
-                         std::make_shared<AssignExpression>(vX, this_param));
-    vX->set_type(anchor);
+    //
+    // The DEF-anchor path skips this: the entry value is never read, so vX is
+    // fully defined by its `new C` reassignments — a `vX = this` seed would be
+    // dead (and, being `C vX = this` with cls⊄C, invalid). vX's declaration is
+    // then placed at its allocation def(s) by PlaceDeclarations.
+    if (!def_anchor) {
+        this_param->set_type(cls_name);
+        entry_bb->ins.insert(entry_bb->ins.begin(),
+                             std::make_shared<AssignExpression>(vX, this_param));
+        vX->set_type(anchor);
+    }
     return true;
 }
 

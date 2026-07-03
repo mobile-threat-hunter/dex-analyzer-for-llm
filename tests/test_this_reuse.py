@@ -214,6 +214,37 @@ def test_arg_sink_materialization_valid():
     pytest.skip("no APK bundling the ActionProviderWrapperJB arg-sink repro")
 
 
+def test_def_anchor_throw_new():
+    """A receiver reused ONLY to hold a `new X()` that is then thrown/discarded
+    (no return-this, no arg-this sink) is materialised via the DEF-anchor:
+    vX = X, and NO `vX = this` seed (the entry value is never read). The
+    canonical repro `ActionBar.setHideOffset` must render
+    `throw new UnsupportedOperationException(...)` — no `this =`, no leftover
+    `<X> vX = this;`. Skips if absent."""
+    cls = "Landroidx/appcompat/app/ActionBar;"
+    for apk in _apks():
+        if cls not in _classes(apk):
+            continue
+        dk = dexllm.DexKit(apk)
+        desc = None
+        for m in dk.list_class_methods(cls):
+            if "setHideOffset" in m:
+                desc = m
+                break
+        if desc is None:
+            continue
+        out = dk.decompile_method_java(desc)
+        assert not _THIS_ASSIGN.search(out), out[:400]
+        assert not _GOOD_MAT.search(out), (
+            "def-anchor must NOT inject a `<X> vX = this;` seed (entry value "
+            f"is dead):\n{out}"
+        )
+        assert re.search(
+            r"throw new [\w.$]*UnsupportedOperationException\(", out), out[:400]
+        return
+    pytest.skip("no APK bundling ActionBar.setHideOffset")
+
+
 def _classes(apk):
     try:
         if dexllm.identify(apk).get("dex_count", 0) == 0:
