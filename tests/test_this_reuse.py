@@ -30,8 +30,11 @@ REPO = Path(__file__).resolve().parents[1]
 _PRIMS = ("int", "boolean", "byte", "short", "char", "long", "float", "double", "void")
 
 # `this = …;` — assignment to the receiver (always invalid Java). After the fix
-# only the void-invoke DAD artifact subset remains (a separate, deeper bug).
+# only the non-void materialise-skipped subset remains (a separate, deeper bug).
 _THIS_ASSIGN = re.compile(r"^\s*this\s*=", re.M)
+# `this = super.<call>` — a void super call modelled as defining the receiver
+# (the invoke-super/range DAD artifact). Dropped by the Writer to `super.m(...)`.
+_THIS_SUPER = re.compile(r"^\s*this\s*=\s*super\.", re.M)
 # `<primitive|void> vN = this;` — a mistyped materialization (the receiver's
 # ThisParam type is corrupted to the last reuse's rhs during Construct; the fix
 # must restore the class type). Must be 0.
@@ -61,6 +64,8 @@ def scanned():
         pytest.skip("no test APK (set $DEXLLM_TEST_APK or add one under test_apk/APK/)")
     mistyped = []
     good_mat = 0
+    this_super = 0
+    this_super_ex = []
     per_apk_cap = 6000
     for apk in apks:
         try:
@@ -85,7 +90,12 @@ def scanned():
                 for m in _MISTYPED_MAT.finditer(out):
                     mistyped.append((desc, m.group(0).strip()))
                 good_mat += len(_GOOD_MAT.findall(out))
-    return {"mistyped": mistyped, "good_mat": good_mat}
+                for m in _THIS_SUPER.finditer(out):
+                    this_super += 1
+                    if len(this_super_ex) < 5:
+                        this_super_ex.append(m.group(0).strip())
+    return {"mistyped": mistyped, "good_mat": good_mat,
+            "this_super": this_super, "this_super_ex": this_super_ex}
 
 
 def test_no_mistyped_this_materialization(scanned):
@@ -136,6 +146,43 @@ def test_fragment_reuse_is_valid():
         assert re.search(r"return\s+v\w+\s*;", out), f"no `return v`:\n{out}"
         return
     pytest.skip("findFragmentByWho not found in any bundled Fragment variant")
+
+
+def test_no_this_equals_super_void_call(scanned):
+    """A VOID `invoke-super/range` (or `invoke-direct/range`) on the receiver is
+    modelled by DAD as `returned = base` (unlike the non-range handlers that null
+    it), so a void super call renders the invalid `this = super.m(...)`. The
+    Writer drops the LHS of a void invoke on a ThisParam → `super.m(...);`. A
+    NON-void super call never assigns to the receiver (it goes to a fresh temp),
+    so `this = super.` is exclusively the void-range artifact — assert 0 remain."""
+    n = scanned["this_super"]
+    assert n == 0, (
+        f"{n} `this = super.<call>` lines — the void-invoke-on-receiver LHS drop "
+        f"(writer.cpp visit_assign) regressed. e.g. {scanned['this_super_ex'][:5]}"
+    )
+
+
+def test_void_super_renders_call_only():
+    """`ProviderList.onListItemClick` (void) begins with a void `super.onListItem
+    Click(...)`; it must render as a bare call, not `this = super...`. Skips if
+    absent."""
+    cls = "La2dp/Vol/ProviderList;"
+    for apk in _apks():
+        if cls not in _classes(apk):
+            continue
+        dk = dexllm.DexKit(apk)
+        desc = None
+        for m in dk.list_class_methods(cls):
+            if "onListItemClick" in m:
+                desc = m
+                break
+        if desc is None:
+            continue
+        out = dk.decompile_method_java(desc)
+        assert "this = super.onListItemClick" not in out, out[:400]
+        assert re.search(r"^\s*super\.onListItemClick\(", out, re.M), out[:400]
+        return
+    pytest.skip("no APK bundling a2dp.Vol.ProviderList.onListItemClick")
 
 
 def _classes(apk):
