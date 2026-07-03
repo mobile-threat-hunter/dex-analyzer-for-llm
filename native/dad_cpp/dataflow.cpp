@@ -636,6 +636,49 @@ void FixInitResultTypes(Graph& graph) {
             if (is_prim_desc(t)) { type_out = t; return 'P'; }
             return 'U';
         };
+        // Resolve the PRIMITIVE WIDTH a version's value really has, by walking its
+        // defs (through moves to the ultimate producer) to the first genuine
+        // primitive descriptor. Unlike gt(), it does NOT stop at a reference — a
+        // reference in the def closure of an INT-USED version is a spurious
+        // conflation type (in valid Dalvik an ordered-compare / arithmetic operand
+        // cannot be a reference), so it is skipped and the walk continues to the
+        // real primitive. Returns "" (UNKNOWN) when no primitive producer is found
+        // — e.g. a genuine allocation / reference-returning method — so such a
+        // version is left untouched rather than guessed. This is what preserves
+        // width: a `long`/`float`/`double`-returning method mistyped a reference is
+        // re-typed to 'J'/'F'/'D', never narrowed to int.
+        std::function<std::string(IRForm*, std::set<std::string>&)>
+            resolve_prim_width =
+            [&](IRForm* r, std::set<std::string>& seen) -> std::string {
+            if (!r) return {};
+            if (r->is_ident()) {
+                const std::string sid = r->Vid();
+                if (seen.count(sid)) return {};
+                seen.insert(sid);
+                auto it = defs_of.find(sid);
+                if (it == defs_of.end())  // param/no def — declared type
+                    return is_prim_desc(r->get_type()) ? r->get_type()
+                                                       : std::string{};
+                for (IRForm* d : it->second) {
+                    auto dr = d->get_rhs();
+                    if (dr.empty() || !dr[0]) continue;
+                    std::string w = resolve_prim_width(dr[0].get(), seen);
+                    if (!w.empty()) return w;
+                }
+                return {};
+            }
+            // A genuine allocation is definitively a reference — no primitive
+            // width, so an int-used allocation (impossible in valid Dalvik) is
+            // never re-typed.
+            if (dynamic_cast<NewInstance*>(r) ||
+                dynamic_cast<NewArrayExpression*>(r) ||
+                dynamic_cast<FilledArrayExpression*>(r) ||
+                dynamic_cast<MoveExceptionExpression*>(r) ||
+                dynamic_cast<CheckCastExpression*>(r))
+                return {};
+            const std::string t = r->get_type();
+            return is_prim_desc(t) ? t : std::string{};
+        };
         // Two-phase: classify every version reading ONLY pre-mutation types
         // (so the two directions can't interfere), then apply. Direction is
         // symmetric: a version whose current type disagrees with its provable
@@ -668,6 +711,46 @@ void FixInitResultTypes(Graph& graph) {
                 else if (c == 'P') { has_prim = true;
                     if (prim_type.empty()) prim_type = ct; }
                 // 'N' (null/zero) is neutral — compatible with either type.
+            }
+            // USE-DRIVEN ref→prim (width-resolved) — runs BEFORE the def-only
+            // guards below. A reference-typed version USED AS AN INTEGER (an
+            // ordered comparison / arithmetic operand / array index) is, in valid
+            // Dalvik, provably a primitive on that path: the verifier rejects
+            // those operations on a reference, so a 'R' reached only through moves
+            // is a SPURIOUS conflation type (a stale reference copied off a
+            // mistyped sibling register). This is the residual that looked like it
+            // needed a "version split" but has NO real reference use.
+            //
+            // ADVERSARIAL-REVIEW HARDENING: re-type ONLY when EVERY def resolves
+            // to a primitive width AND they all AGREE. If ANY def is a GENUINE
+            // reference producer (an allocation / reference-returning method /
+            // reference field — `resolve_prim_width` returns ""), the register is
+            // a GENUINE object+int conflation (a real object on one path, an int
+            // on another) that needs a version split — left untouched, so it is
+            // never re-typed to `int` while `return v` / `throw v` / a reference
+            // argument uses the object arm (the `object_vids` receiver/field guard
+            // does not cover those positions). If the widths DISAGREE (I vs J) the
+            // register is a genuine mixed-width conflation — left untouched to
+            // avoid truncating a long/float/double to int. A boolean (Z) width is
+            // left too (a boolean used as an int is a genuine boolean/int
+            // conflation). The `object_vids` check is kept as belt-and-suspenders.
+            if (cur_ref && int_use_vids.count(vid) &&
+                !object_vids.count(vid)) {
+                std::string w;
+                bool ok = true;
+                for (IRForm* d : dvec) {
+                    auto dr = d->get_rhs();
+                    if (dr.empty() || !dr[0]) { ok = false; break; }
+                    std::set<std::string> seen{vid};
+                    std::string dw = resolve_prim_width(dr[0].get(), seen);
+                    if (dw.empty()) { ok = false; break; }   // genuine ref / unknown
+                    if (w.empty()) w = dw;
+                    else if (w != dw) { ok = false; break; }  // width disagreement
+                }
+                if (ok && !w.empty() && w != "Z") {
+                    retypes.emplace_back(vit->second.get(), w);
+                    continue;
+                }
             }
             // Any unresolved def, a genuine ref+prim merge, or disagreeing
             // reference producers → refuse (would risk a wrong guess).

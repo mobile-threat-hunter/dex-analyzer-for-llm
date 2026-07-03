@@ -183,6 +183,26 @@ boolean-arith. The residual `v <op> null` is a genuine ref-DEF + int-use merge
 (needs a version split) — plus a separate PRE-EXISTING split_variables/init-result
 bug that types an ordered-compared variable as a reference (deferred).
 
+**Width-resolved use-driven ref→prim (attempted "version splitting", 2026-07).**
+Asked to attempt genuine version splitting for this residual, analysis showed it
+is the wrong tool: `GroupVariables` merges defs only through a shared use, so a
+genuine merge always has a phi point (no clean split) — BUT the residual was
+proven to have 0 real reference uses. The values are primitives mistyped a
+reference by register conflation (`Object v0_2 = zza(); if (v0_2 < 0);
+list.get(v0_2)`), and in valid Dalvik an ordered-compare/arithmetic operand
+cannot be a reference. So a USE-DRIVEN ref→prim branch re-types a `cur_ref`,
+int-used, non-object-used version to the width resolved from its def closure
+(`resolve_prim_width`, walking moves to a genuine primitive, preserving
+long/float/double — a naive force-int would truncate 1332/8119 candidates).
+Adversarial review (finding #1) required requiring EVERY def to resolve to an
+AGREEING primitive width: any genuine reference producer (allocation / reference
+method → "") or width disagreement leaves the version untouched (a real object+int
+or mixed-width merge that genuinely needs a version split, since `object_vids`
+does not cover return/throw/aput-object/ref-cast/ref-arg). Measured: ref-declared
+used-as-int 35→20, `v <op> null` 11→3, 0 new truncation, 0 regression. The true
+genuine merges that remain DO need control-flow version splitting — deferred; this
+handles the spurious-reference majority with no control-flow surgery.
+
 The `genuine` set (true object/primitive merge at a shared null-check, `has_ref &&
 has_prim`) still needs the merge-point split and remains the next cut.
 

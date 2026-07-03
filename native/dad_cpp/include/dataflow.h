@@ -148,7 +148,13 @@ void RegisterPropagation(Graph& graph, ChainMap& du, ChainMap& ud);
 // 0`), width-correct (`Long.parseLong` → `long`). Multi-def prim merges keep the
 // def-driven behaviour (no use requirement); a single-def version never used as an
 // int is ambiguous (`String v = indexOf(); return v` where the method returns
-// String) and is left untouched rather than guessed. Classification reads only
+// String) and is left untouched rather than guessed. A further USE-DRIVEN ref→prim
+// branch handles a reference-typed version that is int-USED but whose reference is
+// a spurious conflation artifact (no real object use): it re-types to the width
+// resolved from the def closure — but ONLY when EVERY def resolves to an AGREEING
+// primitive width, so a genuine object+int merge (a real allocation / reference
+// method among the defs) or a mixed-width conflation is left for a real version
+// split (adversarial-review hardening). Classification reads only
 // pre-mutation types (two-phase) so the directions cannot interfere. Adversarial-
 // review-hardened (three review rounds): the move-source short-circuit + missing
 // int-use guard once mis-typed a conflated `int` limit to `String` (`v6 <= null`);
