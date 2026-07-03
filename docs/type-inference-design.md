@@ -218,6 +218,21 @@ mistype and the true genuine object+int / mixed-width merges stay deferred.
 The `genuine` set (true object/primitive merge at a shared null-check, `has_ref &&
 has_prim`) still needs the merge-point split and remains the next cut.
 
+**Move-cycle resolution (2026-07).** A classification-first census of the residual
+found it was NOT dominated by the `genuine` set but by a `gt()` RESOLUTION gap: a
+version whose all-primitive/null defs reconverge through a move-DIAMOND or move-
+cycle (e.g. a boolean `equals()` result `1`/`null` moved v1→v2→`return`) hit a move
+back-edge that `gt()` reported `'M'` and the aggregator treated as blocking `'U'`,
+so the version kept DAD's reference type. Making a genuine cycle back-edge NEUTRAL
+(it targets an ancestor frame that already resolves the cycle member's real defs —
+no ground truth is lost, a reference entering the cycle still surfaces as `'R'` on
+its first visit) resolves them. Soundness needs per-path cycle detection, done by
+BACKTRACKING `seen` as a DFS stack (a diamond is not a cycle); the O(2^N) re-
+exploration on a crafted nested-diamond chain is bounded by a `gt_budget` work cap
+(bail to `'U'`). Measured: ref-declared-int bundled 26→6, prim-used-as-object 33→17,
+`prim = new` flat. The remaining `has_ref && has_prim` genuine merges still need the
+split — but they are a far smaller set than the pre-resolution residual suggested.
+
 ## Rollout (safe, incremental)
 
 The 6 post-passes are SAFE (each verified, additive). Replacing them with one

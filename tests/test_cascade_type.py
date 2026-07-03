@@ -197,9 +197,12 @@ def test_primitive_used_as_object_bounded(scanned):
     genuine int/ref merges (both an object AND an int def, needing a version
     split). Deduped per (method, var) so it is stable across corpus size."""
     bad = scanned["prim_object"]
-    assert len(bad) <= 55, (
+    # ~17 after the move-cycle gt() resolution (a cycle back-edge is NEUTRAL, so
+    # a mirror/cascade chain that reconverges through a move-diamond now resolves
+    # instead of blocking on a spurious 'U') — down from ~35 before it.
+    assert len(bad) <= 30, (
         f"{len(bad)} primitive-declared locals used AS AN OBJECT (mirror keeps "
-        f"this ~35; a jump means the mirror — single-def or multi — is disabled "
+        f"this ~17; a jump means the mirror — single-def or multi — is disabled "
         f"or the cascade re-typed an object to a primitive). e.g. {bad[:8]}"
     )
 
@@ -235,7 +238,11 @@ def test_reference_int_cascades_bounded(scanned):
     """Reference-declared-nonzero-int cascades stay well below the un-fixed
     baseline (bundled corpus was ~150+ before the pass)."""
     residual = scanned["ref_int"]
-    assert len(residual) <= 40, (
+    # ~6 after the move-cycle gt() resolution (down from ~26): a version whose
+    # all-primitive/null defs reconverge through a move-diamond used to block on a
+    # spurious cycle-'U' and keep DAD's reference type; the neutral back-edge now
+    # lets the cascade re-type it. A jump means that resolution regressed.
+    assert len(residual) <= 15, (
         f"{len(residual)} `RefType v = <nonzero int>;` lines — the cascade "
         f"re-type appears disabled or regressed. e.g. {residual[:8]}"
     )

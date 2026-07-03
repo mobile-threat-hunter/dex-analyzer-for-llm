@@ -646,14 +646,40 @@ static void InferCascadeTypes(Graph& graph) {
                dynamic_cast<MoveExceptionExpression*>(r) ||
                dynamic_cast<CheckCastExpression*>(r);
     };
+    // Work budget for gt(). The per-path DFS-stack backtracking below (needed so
+    // a move-DIAMOND is not mistaken for a cycle) means a diamond's two arms are
+    // RE-EXPLORED rather than short-circuited (the old shared-`seen`, never
+    // popped, returned 'M' on the second arm), so a crafted chain of N nested
+    // move-diamonds could drive O(2^N) gt() calls — an uncatchable CPU-spin hang on
+    // machine-generated / lenient-load bytecode (adversarial-review finding, same
+    // family as the emit-walk and ShortCircuitStruct hangs the project caps). Cap
+    // the total gt() calls per pass; on exhaustion gt() returns 'U' — the
+    // CONSERVATIVE verdict (blocks re-typing, never a wrong type), so the only
+    // effect is that a pathological method's versions are left at DAD's type. The
+    // budget is far above any natural method (verified 0 output change vs uncapped
+    // on the bundled + obfuscated corpus), so it bites ONLY crafted input.
+    size_t gt_budget = 2'000'000;
     std::function<char(IRForm*, std::set<std::string>&, std::string&)> gt =
         [&](IRForm* rhsv, std::set<std::string>& seen,
             std::string& type_out) -> char {
+        if (gt_budget == 0) return 'U';  // work cap → conservative bail
+        --gt_budget;
         if (!rhsv) return 'U';
         if (rhsv->is_ident()) {  // move — resolve source transitively
             const std::string sid = rhsv->Vid();
             if (seen.count(sid)) return 'M';
             seen.insert(sid);
+            // BACKTRACK sid on every exit of this frame, so `seen` is a proper
+            // DFS ancestor STACK: a sibling move path starts from the same set
+            // this frame did (per-path cycle detection) — WITHOUT the O(depth)
+            // copy a naive per-sibling `seen` clone needs (which turned a deep
+            // linear move chain into O(N^2)). A move-DIAMOND's two arms are then
+            // re-explored (a node is only 'M' when it is a LIVE ancestor on the
+            // current path, not merely visited-and-popped by an earlier arm); the
+            // resulting O(2^N) re-exploration on a crafted diamond chain is bounded
+            // by the gt_budget cap above (adversarial-review finding).
+            struct Pop { std::set<std::string>& s; const std::string& k;
+                         ~Pop() { s.erase(k); } } pop_{seen, sid};
             auto dit = defs_of.find(sid);
             if (dit == defs_of.end()) {  // param/no def — declared type
                 const std::string t = rhsv->get_type();
@@ -673,25 +699,42 @@ static void InferCascadeTypes(Graph& graph) {
             // v6 - 1`). Precedence: MIXED (R && P) or any unknown/cycle → 'U'
             // (blocks either direction); else all-reference → 'R'; else
             // all-primitive → 'P'; else null-neutral → 'N'.
-            bool sib_r = false, sib_p = false, sib_u = false;
+            bool sib_r = false, sib_p = false, sib_u = false, sib_any = false;
             std::string ref_seen, prim_seen;
             for (IRForm* d : dit->second) {
                 auto dr = d->get_rhs();
-                if (dr.empty() || !dr[0]) { sib_u = true; continue; }
+                if (dr.empty() || !dr[0]) { sib_u = true; sib_any = true;
+                    continue; }
                 std::string ct;
+                // Shared `seen` as a backtracked DFS stack (each recursive frame
+                // pops its own id, above): a DIAMOND's second arm sees the first
+                // arm's nodes already POPPED, so it is not mistaken for a cycle —
+                // only a genuine back-edge to a LIVE ancestor returns 'M'. (A
+                // spurious 'M' here would, with 'M' now neutral, HIDE a reference
+                // reached only on that arm.)
                 char c = gt(dr[0].get(), seen, ct);
-                if (c == 'R') { sib_r = true;
+                if (c == 'R') { sib_r = true; sib_any = true;
                     if (ref_seen.empty()) ref_seen = ct; }
-                else if (c == 'P') { sib_p = true;
+                else if (c == 'P') { sib_p = true; sib_any = true;
                     if (prim_seen.empty()) prim_seen = ct; }
-                else if (c == 'U' || c == 'M') sib_u = true;
-                // 'N' (null/zero) is neutral.
+                else if (c == 'U') { sib_u = true; sib_any = true; }
+                else if (c == 'N') sib_any = true;
+                // 'M' (a genuine cycle back-edge on this path) carries NO new
+                // ground truth: it targets an ANCESTOR frame (the `sid` already
+                // in `seen`) that OWNS the cycle member's real defs and resolves
+                // its type there — this back-edge frame merely defers to it. A
+                // reference entering the cycle does so via some member's non-move
+                // def, which that ancestor frame aggregates and reports 'R' on its
+                // FIRST visit (a back-edge never re-reads it), so a reference can
+                // never be hidden. Hence NEUTRAL, not blocking. A pure move-cycle
+                // with no ground producer falls to the !sib_any guard below.
             }
             if (sib_u || (sib_r && sib_p)) return 'U';  // ambiguous → block
             if (sib_r) { if (type_out.empty()) type_out = ref_seen;
                 return 'R'; }
             if (sib_p) { if (type_out.empty()) type_out = prim_seen;
                 return 'P'; }
+            if (!sib_any) return 'U';  // pure move-cycle, no ground → undetermined
             return 'N';
         }
         // Unambiguous reference producers.
