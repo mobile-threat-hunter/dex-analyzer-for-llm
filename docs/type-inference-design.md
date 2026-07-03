@@ -167,6 +167,22 @@ mirror-off — out of scope). This is why the gate exists: the review caught a
 real regression the author's a/b sample (which lacked the Kotlin-split conflation
 shape) missed.
 
+**Single-def method-result mistypes (ref→prim, use-corroborated).** The cascade
+originally skipped single-def versions. But a lone primitive-returning method
+typed a reference by register conflation (`String v = p.indexOf(','); v >= null;
+v + 1`) is a common, uncompilable mistype. The pass now re-types a single-def ref
+version to its resolved primitive when it is int-USE-corroborated (arithmetic /
+array-index / ordered-comparison operand), width-correct (`Long.parseLong` →
+`long`). A single-def version never used as an int is ambiguous and left
+untouched. Two adversarial-review nits: `instanceof` operands are excluded from
+the int-use set (a reference), and a `boolean`-returning def reaching an int use
+is a genuine boolean/int conflation left untouched (neither `boolean v; v+1` nor
+`int v = booleanMethod()` is valid). Verified: 1155 re-types / 6 apks, 0
+valid→invalid; ref-declared-used-as-int 239→66, `v <op> null` 109→53, 0 new
+boolean-arith. The residual `v <op> null` is a genuine ref-DEF + int-use merge
+(needs a version split) — plus a separate PRE-EXISTING split_variables/init-result
+bug that types an ordered-compared variable as a reference (deferred).
+
 The `genuine` set (true object/primitive merge at a shared null-check, `has_ref &&
 has_prim`) still needs the merge-point split and remains the next cut.
 

@@ -488,7 +488,12 @@ void FixInitResultTypes(Graph& graph) {
             // A UnaryExpression covers CastExpression (a prim cast); a reference
             // check-cast is a separate CheckCastExpression, so this stays int.
             if (auto* be = dynamic_cast<BinaryExpression*>(f)) {
-                add(be->arg1_id()); add(be->arg2_id());
+                // `instanceof` is lowered to a BinaryExpression whose arg1 is the
+                // tested OBJECT (a reference), not an integer — exclude it so a
+                // `v instanceof T` use does not falsely corroborate an int type.
+                if (be->op() != "instanceof") {
+                    add(be->arg1_id()); add(be->arg2_id());
+                }
             } else if (auto* ue = dynamic_cast<UnaryExpression*>(f)) {
                 add(ue->arg_id());
             } else if (auto* al = dynamic_cast<ArrayLoadExpression*>(f)) {
@@ -633,7 +638,7 @@ void FixInitResultTypes(Graph& graph) {
         // is any version with an unresolved ('U'/'M') def.
         std::vector<std::pair<IRForm*, std::string>> retypes;
         for (auto& [vid, dvec] : defs_of) {
-            if (dvec.size() < 2) continue;  // single-def handled by shape passes
+            if (dvec.empty()) continue;
             auto vit = dvec[0]->var_map.find(vid);
             if (vit == dvec[0]->var_map.end() || !vit->second) continue;
             const std::string cur = vit->second->get_type();
@@ -663,9 +668,30 @@ void FixInitResultTypes(Graph& graph) {
                 // CASCADE (ref→prim): ref-typed but provably primitive. Skip if
                 // used AS AN OBJECT (a reference producer we failed to detect).
                 if (object_vids.count(vid)) continue;
+                // A MULTI-def all-primitive version is def-confirmed. A SINGLE-def
+                // version (a lone primitive-returning method typed reference by
+                // register conflation — `String v = p.indexOf(',')` then `v >= 0`
+                // / `v + 1`) additionally requires USE-corroboration: a clear
+                // integer use proves the primitive, and an ambiguous single-def
+                // version (never used as an int — e.g. `String v = indexOf();
+                // return v` where the method returns String) is a genuine
+                // conflation no single type satisfies, so it is left untouched
+                // rather than guessed. (Multi-def prim merges keep the original,
+                // def-driven behaviour — no use requirement.)
+                if (dvec.size() < 2 && !int_use_vids.count(vid)) continue;
+                // A `boolean` (Z) value cannot be an arithmetic / ordered-compare
+                // operand in Java, and `int v = booleanMethod()` is equally
+                // invalid — a Z-returning def that reaches an integer use is a
+                // genuine boolean/int register conflation no single type
+                // satisfies. Leave it (DAD's reference type) rather than emit a
+                // new `boolean v; v + 1` flavour of invalid Java (adversarial-
+                // review nit; needs a version split to resolve). B/S/C stay
+                // re-typed — `byte v; v + 1` is valid (numeric promotion).
+                if (prim_type == "Z" && int_use_vids.count(vid)) continue;
                 retypes.emplace_back(vit->second.get(),
                                      prim_type.empty() ? "I" : prim_type);
-            } else if (cur_prim && has_ref && is_ref(ref_type) && !ref_conflict) {
+            } else if (dvec.size() >= 2 && cur_prim && has_ref &&
+                       is_ref(ref_type) && !ref_conflict) {
                 // MIRROR (prim→ref): primitive-typed but its defs are provably a
                 // reference + null (e.g. `int v = ObjectAnimator.ofFloat(...)` +
                 // `v = 0`, then `v.addListener()` / `return v`).

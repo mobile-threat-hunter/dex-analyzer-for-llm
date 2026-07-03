@@ -166,21 +166,23 @@ def test_primitive_used_as_object_bounded(scanned):
     )
 
 
-def test_mirror_does_not_flood_ref_used_as_int(scanned):
-    """The prim→ref MIRROR must not re-type a genuine `int` to a reference that is
-    then used as an int (`v <= null`, `v - 1`, `arr[v]`) — the adversarial-review
-    regression (`int v6` → `String v6; v6 <= null`). The mirror's int-use guard
-    (arithmetic / array-index / ordered-comparison operands) prevents this; an a/b
-    (mirror on vs off) measured 0 new `v <op> null` on the bundled + obfuscated
-    corpus. A residual PRE-EXISTING population (~109 on bundled) comes from a
-    SEPARATE typing bug (split_variables / init-result, present with the mirror
-    off), so this is a ceiling over that baseline: it tolerates the pre-existing
-    lines but trips if the mirror floods them."""
+def test_ref_used_as_int_bounded(scanned):
+    """`v <op> null` (a variable ordered-compared to null) is the low-false-
+    positive fingerprint of an INT mistyped as a REFERENCE. Two forces move it:
+    (a) the prim→ref MIRROR must not CREATE it (its int-use guard blocks re-typing
+    an int-used version — an a/b measured 0 new); (b) the single-def ref→prim
+    CASCADE FIXES it — a lone primitive-returning method typed reference by
+    register conflation (`String v = p.indexOf(','); v >= null`) is re-typed to
+    the resolved primitive (`int v = …indexOf(); v >= 0`). That cascade cut the
+    bundled count ~109 → ~53. The residual is genuine int/ref merges (a ref DEF
+    and an int use, needing a version split) — this ceiling catches a regression
+    (mirror flooding it, or the cascade being disabled) without pinning an exact
+    count."""
     n = scanned["ref_ord_null"]
-    assert n <= 130, (
+    assert n <= 75, (
         f"{n} `v <op> null` (a variable ordered-compared to null — an int mistyped "
-        f"as a reference). Pre-existing baseline ~109; a jump means the mirror "
-        f"re-typed an int-used version to a reference."
+        f"as a reference). Bundled ~53 after the single-def cascade; a jump means "
+        f"the cascade is disabled or the mirror re-typed an int-used version."
     )
 
 

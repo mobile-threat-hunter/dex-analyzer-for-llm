@@ -136,16 +136,27 @@ void RegisterPropagation(Graph& graph, ChainMap& du, ChainMap& ud);
 // and the reference producers agree on one class. USE-CORROBORATION (symmetric):
 // the ref→prim direction skips a version used AS AN OBJECT (`v.m()` / `v.f`); the
 // prim→ref direction skips a version used AS AN INT (an arithmetic operand, an
-// array index, or an ORDERED comparison `v < n` / `v <= null`). Both guards make
-// the pass sound for lenient/unverified dex too, not only where the verifier
-// guarantees the def/use web. Classification reads only pre-mutation types
-// (two-phase) so the directions cannot interfere. Adversarial-review-hardened:
-// the move-source short-circuit + missing int-use guard once mis-typed a
-// conflated `int` limit to `String` (`v6 <= null`; fixed). Enforced regression
-// tests: `prim = new` and `RefType v = <int>` (bounded) and `v <op> null`
-// (bounded over a separate PRE-EXISTING typing residual) in test_cascade_type.py;
-// the `0 new ref-used-as-int` / `prim.member` claims were a/b-MEASURED (mirror on
-// vs off) rather than each independently CI-enforced.
+// array index, or an ORDERED comparison `v < n` / `v <= null` — but NOT an
+// `instanceof` operand, which is a reference; and NOT a `boolean` (Z) value,
+// which can't be a valid int operand and whose int use marks a genuine
+// boolean/int conflation that neither type resolves — left untouched). Both
+// guards make the pass sound for lenient/unverified dex too, not only where the
+// verifier guarantees the def/use web. The ref→prim CASCADE also handles a
+// SINGLE-def version when it is int-USE-corroborated: a lone primitive-returning
+// method typed reference by register conflation (`String v = p.indexOf(','); v >=
+// null; v + 1`) is re-typed to the resolved primitive (`int v = …indexOf(); v >=
+// 0`), width-correct (`Long.parseLong` → `long`). Multi-def prim merges keep the
+// def-driven behaviour (no use requirement); a single-def version never used as an
+// int is ambiguous (`String v = indexOf(); return v` where the method returns
+// String) and is left untouched rather than guessed. Classification reads only
+// pre-mutation types (two-phase) so the directions cannot interfere. Adversarial-
+// review-hardened (three review rounds): the move-source short-circuit + missing
+// int-use guard once mis-typed a conflated `int` limit to `String` (`v6 <= null`);
+// the single-def cascade was verified over 1155 re-types / 6 obfuscated apks with
+// 0 valid→invalid regressions. Enforced regression tests (test_cascade_type.py):
+// `prim = new` and `RefType v = <int>` and `v <op> null` (bounded); the `0 new
+// ref-used-as-int` / `prim.member` / boolean-arith claims were a/b-MEASURED
+// (change on vs off) rather than each independently CI-enforced.
 void FixInitResultTypes(Graph& graph);
 
 // DAD: dataflow.py:323 DummyNode — placeholder Node with empty loc-with-ins.
