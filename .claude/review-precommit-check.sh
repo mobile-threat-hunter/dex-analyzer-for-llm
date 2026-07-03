@@ -9,6 +9,20 @@
 # committing. This gate makes that a mandatory, conscious step at publish time.
 #
 # What "adversarial review" means here (do ALL of it, then commit):
+#   0. HACK SELF-CHECK (root-cause, not output masking). Before reviewing, ask:
+#      does this fix address the ROOT of the defect, or does it mask a symptom at
+#      the output/late layer? A change that suppresses/rewrites Writer or dast
+#      OUTPUT to hide a defect whose true origin is the IR builder / dataflow /
+#      control-flow (opcode_ins, instruction, dataflow, graph, control_flow) is a
+#      HACK — even when the emitted text looks correct (the AST/other consumers
+#      still carry the defect). Precedent: the v0.1.12 void-invoke "fix" masked in
+#      Writer::visit_assign, left `this = voidcall` in the AST, and was REWRITTEN
+#      at the IR builder (the range invoke handlers). If this is a hack, DO NOT
+#      commit — RECONSIDER and redo it at the layer where the defect originates
+#      (CLAUDE.md: "structural defects must be fixed at the IR level, not in Writer
+#      output"). Only genuine beyond-DAD emit divergences (return-literal, catch-
+#      clamp, <clinit> static{}) legitimately live in the Writer; a defect with an
+#      earlier structural origin does not.
 #   1. Spawn ≥2 INDEPENDENT reviewer agents on the diff — e.g. the Agent tool with
 #      compound-engineering:ce-adversarial-reviewer + ce-correctness-reviewer, or
 #      invoke the `code-review` skill. Each must try to CONSTRUCT a breaking input,
@@ -58,6 +72,13 @@ grep -qE '^(native/|vendor/dexkit_core/Core/|src/dexllm/).*\.(cpp|cc|h|hpp|py)$'
     echo "🔬 Adversarial-review gate — this commit/push changes production source"
     echo "   (a fix). Before it lands, run an ADVERSARIAL CODE REVIEW and address"
     echo "   the findings:"
+    echo "     0. HACK SELF-CHECK (root-cause, not output masking): does this fix"
+    echo "        the ROOT of the defect, or mask a symptom in Writer/dast OUTPUT"
+    echo "        while the true origin is the IR builder / dataflow / control-flow?"
+    echo "        Output-layer suppression that hides an earlier structural defect"
+    echo "        (AST still carries it) is a HACK — RECONSIDER and redo it at the"
+    echo "        originating layer (cf. v0.1.12 void-invoke: Writer-hack → IR fix)."
+    echo "        Only genuine beyond-DAD emit divergences belong in the Writer."
     echo "     1. Spawn ≥2 INDEPENDENT reviewers on the diff (Agent tool:"
     echo "        compound-engineering:ce-adversarial-reviewer +"
     echo "        ce-correctness-reviewer, or the code-review skill). Each must try"
