@@ -481,6 +481,10 @@ void FixInitResultTypes(Graph& graph) {
         // wide value is fine, so the prim→wider branch guards on this narrower set
         // (not all `int_use_vids`).
         std::unordered_set<std::string> int_required_vids;
+        // `==`/`!=` ConditionalExpression operand pairs — resolved in a post-pass
+        // (once defs_of is complete): if one operand is a nonzero int constant,
+        // the other is proven a primitive and joins int_use_vids.
+        std::vector<std::pair<std::string, std::string>> eqne_pairs;
         auto note_obj = [&](IRForm* f) {
             if (auto* inv = dynamic_cast<InvokeInstruction*>(f)) {
                 if (!inv->base().empty()) object_vids.insert(inv->base());
@@ -535,10 +539,16 @@ void FixInitResultTypes(Graph& graph) {
             } else if (auto* ce = dynamic_cast<ConditionalExpression*>(f)) {
                 // ORDERED comparisons (`<`/`<=`/`>`/`>=`) require numeric
                 // operands; `==`/`!=` also work on references (object identity /
-                // null check), so only the ordered ops prove an integer use.
+                // null check), so only the ordered ops prove an integer use here.
                 const std::string& op = ce->op();
                 if (op == "<" || op == "<=" || op == ">" || op == ">=") {
                     add(ce->arg1_id()); add(ce->arg2_id());
+                } else if (op == "==" || op == "!=") {
+                    // `v == <nonzero int const>` DOES prove v is a primitive (a
+                    // reference is `==` only to null or another reference, never a
+                    // nonzero literal). We cannot check the sibling's def here
+                    // (defs_of is still being built) — defer to a post-pass.
+                    eqne_pairs.emplace_back(ce->arg1_id(), ce->arg2_id());
                 }
             }
         };
@@ -560,6 +570,43 @@ void FixInitResultTypes(Graph& graph) {
             return t.size() == 1 &&
                    std::string("IJZBSCFD").find(t[0]) != std::string::npos;
         };
+        // POST-PASS: `v == <nonzero int const>` / `v != <nonzero>` proves v is a
+        // primitive (a reference compares `==` only to null or another reference,
+        // never to a nonzero literal). eq/ne were excluded from int_use above
+        // because `== null` (const 0) is a valid null check; here we add the
+        // operand whose SIBLING resolves to a NONZERO integer constant.
+        // NOTE: this runs pre-RegisterPropagation (this pass precedes
+        // register_propagation in decompile.cpp), so the compared constant is
+        // still a distinct `const` def in defs_of and the operand is still its
+        // register vid. If that order ever changed, this would silently no-op
+        // (the inlined-const vid absent from defs_of) — a safe failure.
+        auto is_nonzero_int_const = [&](const std::string& v) -> bool {
+            if (v.empty()) return false;
+            auto it = defs_of.find(v);
+            if (it == defs_of.end()) return false;
+            // PATH-ROBUSTNESS (adversarial-review): trust `v == <const>` as an
+            // integer proof for the SIBLING only when `v` is UNAMBIGUOUSLY a
+            // primitive — no reference def anywhere in its def set. A genuinely
+            // int/ref-conflated `v` (a nonzero-int def on one arm, a reference def
+            // on another) would path-insensitively mark its reference-arm
+            // comparison partner as int-used and wrongly veto that partner's
+            // prim→ref mirror (`int v = someObject()`). Requiring no reference def
+            // makes the proof path-independent.
+            bool has_nonzero = false;
+            for (IRForm* d : it->second) {
+                auto dr = d->get_rhs();
+                if (dr.empty() || !dr[0]) continue;
+                if (is_ref(dr[0]->get_type())) return false;  // conflated → refuse
+                auto* c = dynamic_cast<Constant*>(dr[0].get());
+                if (c && is_prim_desc(c->get_type()) && c->get_int_value() != 0)
+                    has_nonzero = true;
+            }
+            return has_nonzero;
+        };
+        for (auto& [a, b] : eqne_pairs) {
+            if (!a.empty() && is_nonzero_int_const(b)) int_use_vids.insert(a);
+            if (!b.empty() && is_nonzero_int_const(a)) int_use_vids.insert(b);
+        }
         // Ground-truth of a def's rhs: 'R' ref producer, 'P' prim forcer,
         // 'N' null/zero-neutral, 'U' unknown, 'M' unresolved-move (cycle).
         // SAFETY-FIRST: 'P' only when the producer's OWN type is a genuine

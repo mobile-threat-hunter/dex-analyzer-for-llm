@@ -68,6 +68,21 @@ _NARROW_WIDE = re.compile(
     r"|parseFloat|parseDouble|doubleValue|floatValue)\b",
     re.M,
 )
+# a variable declared a REFERENCE (not primitive/void/keyword) — captures its name.
+_REF_DECL = re.compile(
+    r"^\s*(?!(?:" + "|".join(_PRIMS) + r"|void|return|new|throw|case|else"
+    r"|if|while|for|do|switch)\b)"
+    r"(?:\[+)?[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*(?:\[\])*\s+(v\w+)\s*[=;]",
+    re.M,
+)
+# `v == <nonzero>` / `v != <nonzero>` (either operand order). A reference compares
+# `==` only to null (const 0) or another reference — never to a nonzero literal —
+# so a reference-declared var here is an INT mistyped as a reference. The eq/ne
+# post-pass in FixInitResultTypes re-types such a var to a primitive (unless it is
+# itself genuinely int/ref-conflated, which the path-robust proof deliberately skips).
+_EQ_NONZERO = re.compile(
+    r"(?<![\w.])(v\w+)\s*[!=]=\s*(-?\d+)\b|(?<![\w.])(-?\d+)\s*[!=]=\s*(v\w+)"
+)
 
 
 def _apks():
@@ -109,6 +124,7 @@ def scanned():
     #                      inflation + timing-fragility of a per-hit list).
     ref_ord_null = 0     # `v <op> null` occurrences (mirror ref-used-as-int flood)
     narrow_wide = 0      # `int v = <wide-returning method>` (narrowing, prim→wider)
+    ref_eq_nonzero = 0   # `RefType v; v == <nonzero>` (int mistyped ref; eq/ne pass)
     per_apk_cap = 6000
     for apk in apks:
         try:
@@ -143,9 +159,17 @@ def scanned():
                         prim_object.add((desc, pv))
                 ref_ord_null += len(_REF_ORD_NULL.findall(out))
                 narrow_wide += len(_NARROW_WIDE.findall(out))
+                refs = {m.group(1) for m in _REF_DECL.finditer(out)}
+                eqv = set()
+                for m in _EQ_NONZERO.finditer(out):
+                    v, lit = ((m.group(1), m.group(2)) if m.group(1)
+                              else (m.group(4), m.group(3)))
+                    if lit != "0":
+                        eqv.add(v)
+                ref_eq_nonzero += len(refs & eqv)
     return {"ref_int": ref_int, "prim_new": prim_new,
             "prim_object": sorted(prim_object), "ref_ord_null": ref_ord_null,
-            "narrow_wide": narrow_wide}
+            "narrow_wide": narrow_wide, "ref_eq_nonzero": ref_eq_nonzero}
 
 
 # The pass is SOUND-by-construction (it re-types a reference version to a
@@ -225,4 +249,23 @@ def test_no_wide_value_narrowed_to_int(scanned):
     assert n == 0, (
         f"{n} `int/short/byte/char v = <wide-returning method>()` narrowing(s) "
         f"— the prim→wider re-type appears disabled or regressed."
+    )
+
+
+def test_ref_equals_nonzero_int_bounded(scanned):
+    """`RefType v; … if (v == 5)` is an INT mistyped as a REFERENCE — a reference
+    compares `==`/`!=` only to null or another reference, never to a nonzero
+    literal. The eq/ne post-pass adds the comparison partner to the int-use set so
+    the prim→ref MIRROR won't type it a reference (and the ref→prim CASCADE can
+    re-type an existing conflated one to its resolved primitive). An a/b on the
+    bundled corpus measured 100 (pass OFF) → 8 (pass ON); the residual is genuine
+    int/ref-conflated versions (a nonzero-int def AND a reference def on different
+    arms), which the path-robust `is_nonzero_int_const` proof deliberately skips —
+    re-typing those needs a real version split. This ceiling catches a regression
+    that DISABLES the pass (count jumps back toward the ~100 baseline)."""
+    n = scanned["ref_eq_nonzero"]
+    assert n <= 25, (
+        f"{n} `RefType v = …; v == <nonzero int>` lines (an int mistyped as a "
+        f"reference). Bundled ~8 after the eq/ne pass (baseline ~100 without it); "
+        f"a jump means the eq/ne re-type is disabled or regressed."
     )
