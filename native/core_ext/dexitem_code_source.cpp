@@ -7,7 +7,9 @@
 #include <cstring>
 #include <stdexcept>
 #include <string>
+#include <unordered_set>
 #include <utility>
+#include <vector>
 
 #include "dex_item.h"
 #include "mmap.h"  // dexkit::MemMap (GetDexImageRange bounds)
@@ -641,6 +643,38 @@ DexItemCodeSource::GetClassInfo(std::string_view class_descriptor) {
         if (it != init_map.end()) info.field_init_texts[i] = it->second;
     }
     return info;
+}
+
+// Sound (partial) dex-hierarchy assignability — see IDexCodeSource::IsAssignable.
+// A bounded BFS up `sub`'s superclass + transitively-implemented interfaces;
+// returns true on the first match, false when `sub`'s chain is exhausted or exits
+// the loaded dex (a framework ancestor we cannot see). Never a false positive.
+bool DexItemCodeSource::IsAssignable(std::string_view sub,
+                                     std::string_view super) {
+    if (sub == super) return true;
+    if (sub.empty() || super.empty()) return false;
+    const bool sub_ref = sub.front() == 'L' || sub.front() == '[';
+    if (!sub_ref) return false;                         // primitives: exact only
+    if (super == "Ljava/lang/Object;") return true;     // any reference <: Object
+    if (sub.front() == '[') return false;               // arrays: no covariance
+    std::unordered_set<std::string> seen;
+    std::vector<std::string> stack{std::string(sub)};
+    while (!stack.empty()) {
+        std::string cur = std::move(stack.back());
+        stack.pop_back();
+        if (!seen.insert(cur).second) continue;
+        auto info = GetClassInfo(cur);
+        if (!info) continue;      // not in the loaded dex — cannot traverse
+        if (!info->superclass.empty()) {
+            if (info->superclass == super) return true;
+            stack.emplace_back(info->superclass);
+        }
+        for (auto iface : info->interfaces) {
+            if (iface == super) return true;
+            stack.emplace_back(iface);
+        }
+    }
+    return false;
 }
 
 // DAD: decompile.py:367 DvClass.get_source — per-field name + type + access.

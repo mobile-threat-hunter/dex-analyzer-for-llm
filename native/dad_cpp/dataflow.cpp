@@ -11,6 +11,7 @@
 #include <memory>
 #include <set>
 #include <string>
+#include <string_view>
 #include <utility>
 
 namespace dexkit::dad {
@@ -961,20 +962,20 @@ void FixInitResultTypes(Graph& graph) {
 bool MaterializeReusedThis(Graph& graph,
                            std::unordered_map<int, IRFormPtr>& lvars,
                            int this_reg, const std::string& cls_name,
-                           const std::string& ret_type, bool is_ctor) {
+                           const std::string& ret_type, bool is_ctor,
+                           const std::function<bool(std::string_view,
+                                                    std::string_view)>&
+                               is_assignable) {
     auto is_ref = [](const std::string& t) {
         return !t.empty() && (t.front() == 'L' || t.front() == '[');
     };
-    // The materialised local is typed as the method's RETURN type — the one
-    // assignability anchor valid Dalvik gives us: everything that flows to a
-    // `return` is assignable to it. So we only fire when the reused slot is
-    // RETURNED and the return type is a reference (`return this` requires the
-    // receiver — hence the class — to be assignable to it, so `<Ret> vX = this`
-    // is a valid up-cast, and every reuse value returned alongside is likewise
-    // assignable). This provably yields valid Java for the case handled and
-    // leaves everything else as DAD's (invalid-but-no-worse) `this = X`.
-    if (is_ctor) return false;         // super()/this() uses the receiver specially
-    if (!is_ref(ret_type)) return false;  // no reference return anchor
+    // `sub <: super` via the injected class-hierarchy oracle, or exact-equality
+    // when it is unset (conservative — a source without a hierarchy proves only
+    // the trivial case, keeping every widening decision below sound).
+    auto assignable = [&](const std::string& sub, const std::string& super) {
+        return is_assignable ? is_assignable(sub, super) : sub == super;
+    };
+    if (is_ctor) return false;  // super()/this() uses the receiver specially
 
     // The receiver must still be a ThisParam: SplitVariables keeps an UNSPLIT
     // reuse as ThisParam (the buggy `this = X` case); a reuse it DID split was
@@ -990,56 +991,111 @@ bool MaterializeReusedThis(Graph& graph,
     auto* entry_bb = dynamic_cast<BasicBlock*>(graph.entry);
     if (!entry_bb) return false;
 
+    // The anchor is the single reference type a TYPED SINK pins the receiver's
+    // value to: a `return this` (return type) or a reference arg `m(…, this, …)`
+    // (the parameter type). Two differing sinks → bail (no common bound without a
+    // full lattice). Sink/reassign blocks are recorded for the reaches-a-sink
+    // proof below.
+    std::string anchor;
+    bool sink_conflict = false;
+    std::unordered_set<NodeBase*> sink_blocks, reassign_blocks;
+    auto note_sink = [&](const std::string& ty, NodeBase* blk) {
+        if (!is_ref(ty)) return;
+        sink_blocks.insert(blk);
+        if (anchor.empty()) anchor = ty;
+        else if (anchor != ty) sink_conflict = true;
+    };
     bool reused = false, returned = false;
+    // Reassignment rhs descriptors: a reference type, "" for the null constant,
+    // or "!" for void / primitive / non-const (disqualifying).
+    std::vector<std::string> reassign;
     for (NodeBase* n : graph.rpo) {
         auto* bb = dynamic_cast<BasicBlock*>(n);
         if (!bb) continue;
         for (const auto& ins : bb->ins) {
             if (!ins) continue;
-            // Is the receiver returned? (a ReturnInstruction using it.)
+            // SINK: `return this` → the method return type.
             if (dynamic_cast<ReturnInstruction*>(ins.get())) {
                 for (const auto& u : ins->get_used_vars())
-                    if (u == this_vid) { returned = true; break; }
+                    if (u == this_vid) { note_sink(ret_type, n);
+                                         returned = true; break; }
+            }
+            // SINK: reference argument `m(…, this, …)` → the parameter type. The
+            // receiver (base) of the invoke is a real-this read, NOT a sink. A
+            // statement-level invoke is the RHS of an AssignExpression (every
+            // opcode_ins handler wraps it), so inspect the rhs, not `ins`. (args↔
+            // ptype are 1:1 via ParseParamsType; a size mismatch is skipped.)
+            auto rr = ins->get_rhs();
+            if (!rr.empty() && rr[0]) {
+                if (auto* inv = dynamic_cast<InvokeInstruction*>(rr[0].get())) {
+                    const auto& a = inv->args();
+                    const auto& pt = inv->ptype();
+                    if (a.size() == pt.size())
+                        for (size_t i = 0; i < a.size(); ++i)
+                            if (a[i] == this_vid) note_sink(pt[i], n);
+                }
             }
             if (GetLhsKey(ins) != this_vid) continue;
             reused = true;
-            // Every reassignment rhs must be provably assignable to `vX` (typed
-            // ret_type):
-            //  - a reference whose type EXACTLY equals ret_type. Exact equality
-            //    (not just is_ref) is REQUIRED: SplitVariables leaves the reuse as
-            //    a single unsplit phi-web, which GroupVariables can bind a def into
-            //    that reaches only an INTERMEDIATE use (never the return) whose
-            //    type is unrelated to ret_type — `vX = getBar()` where Bar ⊄ Foo
-            //    (adversarial-review CONFIRMED). Without a type hierarchy or a
-            //    per-def reaches-the-return analysis, exact match is the only
-            //    sound proof; a valid subtype up-cast is conservatively skipped
-            //    too (correctness over coverage).
-            //  - the NARROW-integer constant 0 (`const/4 0`) = the null reference.
-            //    A wide const-0 (`const-wide`, type J/D) is NOT null (lenient-load
-            //    PLAUSIBLE) — require a narrow int descriptor.
-            // A VOID invoke or a genuine primitive (`this = 5`) also bails — left
-            // as DAD's output. NOTE: the void `this = <call>` case no longer
-            // occurs (the opcode_ins InvokeSuperRange/InvokeDirectRange root-cause
-            // fix nulls `returned` for void, so no such AssignExpression is built);
-            // this VOID guard is now DEFENSIVE — retained so a future DAD-artifact
-            // (or a revert of that fix) that reintroduces a void `this =` still
-            // bails here rather than emitting `<Ret> vX = <void call>`.
-            auto rhs = ins->get_rhs();
+            reassign_blocks.insert(n);
             const std::string t =
-                (!rhs.empty() && rhs[0]) ? rhs[0]->get_type() : std::string{};
-            if (is_ref(t)) {
-                if (t != ret_type) return false;           // not provably assignable
-                continue;
-            }
-            auto* c = !rhs.empty() ? dynamic_cast<Constant*>(rhs[0].get())
-                                   : nullptr;
-            if (c && c->get_int_value() == 0 && t.size() == 1 &&
-                std::string("IZBSC").find(t) != std::string::npos)
-                continue;                                  // null reference — ok
-            return false;                                  // void / primitive / non-exact ref
+                (!rr.empty() && rr[0]) ? rr[0]->get_type() : std::string{};
+            if (is_ref(t)) { reassign.push_back(t); continue; }
+            auto* c = !rr.empty() ? dynamic_cast<Constant*>(rr[0].get())
+                                  : nullptr;
+            reassign.push_back(
+                (c && c->get_int_value() == 0 && t.size() == 1 &&
+                 std::string("IZBSC").find(t) != std::string::npos)
+                    ? std::string{}     // null reference
+                    : std::string{"!"});  // void / primitive / non-const const
         }
     }
-    if (!reused || !returned) return false;
+    if (!reused || anchor.empty() || sink_conflict) return false;
+    // Every reassignment must be assignable to the anchor (a subtype ok via the
+    // hierarchy oracle) or the null constant — else `vX` (typed anchor) would
+    // hold an incompatible value (the phi-web intermediate-use hazard).
+    for (const auto& rt : reassign) {
+        if (rt == "!") return false;                       // void / primitive
+        if (!rt.empty() && !assignable(rt, anchor)) return false;
+    }
+    // cls_name <: anchor (the injected `<anchor> vX = this` up-cast) is proven by
+    // EITHER the hierarchy oracle (cls's super/interface chain), OR the entry
+    // `this` reaching an anchor sink through a reassignment-free CFG path (the
+    // verifier then proves it — covering framework-transitive chains the dex-only
+    // oracle cannot see). A reassign block CONSUMES the entry value, so it stops
+    // the walk and a sink inside it is disqualified (conservative but sound).
+    //
+    // The pre-existing (v0.1.11) return-anchor trust ALSO passes — a `return this`
+    // was already trusted to imply cls <: ret_type (0-manifest theoretical gap,
+    // 4-reviewer-accepted), kept so the sound hierarchy/reachability additions
+    // never REGRESS an already-emitted valid materialisation (a framework-
+    // transitive `<Super> vX = this` the dex-only oracle can't prove and where
+    // `this` never reaches the return). But that trust applies ONLY when the
+    // anchor genuinely IS the reference return type: `returned` alone is set even
+    // for a NON-reference `return <this_reg>` (a register-reuse artifact on
+    // lenient dex), and if an ARG sink then supplies an unrelated anchor,
+    // trusting `returned` would bless an unproven `<Unrelated> vX = this`
+    // (adversarial-review CONFIRMED). So gate it on `is_ref(ret_type) && anchor ==
+    // ret_type`; every other (arg-sink) case must use the sound proof below.
+    bool cls_ok = (returned && is_ref(ret_type) && anchor == ret_type) ||
+                  assignable(cls_name, anchor);
+    if (!cls_ok) {
+        std::unordered_set<NodeBase*> reached;
+        std::vector<NodeBase*> work{graph.entry};
+        while (!work.empty()) {
+            NodeBase* b = work.back();
+            work.pop_back();
+            if (!b || !reached.insert(b).second) continue;
+            if (reassign_blocks.count(b)) continue;   // entry value consumed here
+            for (NodeBase* s : graph.sucs(b)) work.push_back(s);
+        }
+        for (NodeBase* sb : sink_blocks)
+            if (reached.count(sb) && !reassign_blocks.count(sb)) {
+                cls_ok = true;
+                break;
+            }
+    }
+    if (!cls_ok) return false;
 
     // ---- PHASE B: mutate (all validation passed → atomic). ---------------
     // Fresh local vid beyond every existing lvars key (no collision; the stoi
@@ -1052,7 +1108,7 @@ bool MaterializeReusedThis(Graph& graph,
     ++fresh_reg;
     const std::string fresh_vid = "v" + std::to_string(fresh_reg);
     auto vX = std::make_shared<Variable>(fresh_vid);
-    vX->set_type(ret_type);
+    vX->set_type(anchor);
     lvars[fresh_reg] = vX;
 
     // Rewrite EVERY reference to the receiver → vX. Pre-RegisterPropagation the
@@ -1082,7 +1138,7 @@ bool MaterializeReusedThis(Graph& graph,
     this_param->set_type(cls_name);
     entry_bb->ins.insert(entry_bb->ins.begin(),
                          std::make_shared<AssignExpression>(vX, this_param));
-    vX->set_type(ret_type);
+    vX->set_type(anchor);
     return true;
 }
 

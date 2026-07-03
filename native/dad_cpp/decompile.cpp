@@ -122,7 +122,8 @@ bool DvMethod::BuildProcessedGraph() {
     bool mat_this = false;
     if (!is_static) {
         mat_this = MaterializeReusedThis(*graph_, lvars, start, m.cls_name,
-                                         m.ret_type, m.name == "<init>");
+                                         m.ret_type, m.name == "<init>",
+                                         is_assignable_);
     }
     // Beyond-DAD: re-type `<init>` constructor results from the now-finalized
     // base (split_variables can read a stale base for them — version order).

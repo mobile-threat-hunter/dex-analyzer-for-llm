@@ -185,6 +185,35 @@ def test_void_super_renders_call_only():
     pytest.skip("no APK bundling a2dp.Vol.ProviderList.onListItemClick")
 
 
+def test_arg_sink_materialization_valid():
+    """A receiver reused as `cond ? this : null` and passed as an ARGUMENT (not
+    returned) is materialised via the ARG sink — vX typed as the callee's
+    parameter type, proven assignable to the declaring class by the injected
+    is_assignable class-hierarchy oracle (or by `this` reaching the call). The
+    canonical repro `MenuItemWrapperJB$ActionProviderWrapperJB.setVisibilityList
+    ener` must render a valid `<ParamType> vX = this; if(...) vX = null;
+    …setVisibilityListener(vX)` — no `this =`. Skips if absent."""
+    cls = "Landroid/support/v7/view/menu/MenuItemWrapperJB$ActionProviderWrapperJB;"
+    for apk in _apks():
+        if cls not in _classes(apk):
+            continue
+        dk = dexllm.DexKit(apk)
+        desc = None
+        for m in dk.list_class_methods(cls):
+            if "setVisibilityListener" in m:
+                desc = m
+                break
+        if desc is None:
+            continue
+        out = dk.decompile_method_java(desc)
+        assert not _THIS_ASSIGN.search(out), out[:400]
+        # the materialised local is typed as the arg's param type (a reference)
+        assert _GOOD_MAT.search(out), out[:400]
+        assert re.search(r"setVisibilityListener\(v\w+\)", out), out[:400]
+        return
+    pytest.skip("no APK bundling the ActionProviderWrapperJB arg-sink repro")
+
+
 def _classes(apk):
     try:
         if dexllm.identify(apk).get("dex_count", 0) == 0:

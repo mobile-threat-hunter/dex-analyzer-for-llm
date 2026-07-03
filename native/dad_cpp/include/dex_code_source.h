@@ -53,6 +53,24 @@ public:
     virtual std::pair<const uint8_t*, const uint8_t*>
     GetDexImageRange(uint16_t /*dex_id*/) { return {nullptr, nullptr}; }
 
+    // ─── Class-hierarchy assignability (for sound type inference) ────────
+    // True iff a value of type `sub` (Smali descriptor) is assignable to a
+    // variable of type `super` — `sub <: super` in the Java subtype lattice
+    // (equality, superclass chain, and transitively-implemented interfaces;
+    // any reference is assignable to `Ljava/lang/Object;`; array covariance is
+    // NOT modelled — array descriptors compare by equality). The default is the
+    // CONSERVATIVE exact-equality fallback (`sub == super`): a source without a
+    // class hierarchy (the test Mock) reports only the trivially-true case, so a
+    // caller using this to *widen* what it accepts (vs. exact match) stays sound.
+    // The production DexItemCodeSource overrides it with a real dex-hierarchy
+    // walk. It is a PARTIAL oracle: a subtype relationship that transits a class
+    // NOT present in the loaded dex (a framework chain, e.g. ArrayList <: List)
+    // cannot be proven and returns false — callers must treat false as "unknown,
+    // be conservative", never as a proof of non-assignability.
+    virtual bool IsAssignable(std::string_view sub, std::string_view super) {
+        return sub == super;
+    }
+
     // ─── Const-pool resolution (string_views point into source's tables) ─
     virtual std::string_view   GetString(uint16_t dex_id, uint32_t idx) = 0;
     virtual std::string_view   GetTypeName(uint16_t dex_id, uint32_t idx) = 0;

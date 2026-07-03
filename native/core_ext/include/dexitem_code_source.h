@@ -44,6 +44,8 @@ public:
     std::optional<ClassInfo>
                        GetClassInfo(std::string_view class_descriptor) override;
     FieldInfo          GetFieldInfo(uint16_t, uint32_t) override;
+    bool               IsAssignable(std::string_view sub,
+                                    std::string_view super) override;
 
 private:
     // Per-(dex_id, proto_idx) proto descriptor cache. Strings are owned by

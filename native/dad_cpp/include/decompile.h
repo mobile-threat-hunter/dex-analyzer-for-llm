@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include <functional>
 #include <memory>
 #include <string>
 
@@ -29,6 +30,14 @@ namespace dexkit::dad {
 class DvMethod {
 public:
     explicit DvMethod(std::shared_ptr<const MethodSnapshot> snap);
+
+    // Class-hierarchy assignability oracle (`sub <: super`), injected by the
+    // Decompiler from the IDexCodeSource so the hierarchy-free dad_cpp core can
+    // do sound type inference (the reused-`this` materialisation). Defaults to
+    // exact-equality (conservative) when unset. Set before Process()/ProcessAst().
+    using IsAssignableFn =
+        std::function<bool(std::string_view sub, std::string_view super)>;
+    void SetIsAssignable(IsAssignableFn f) { is_assignable_ = std::move(f); }
 
     // Runs the full pipeline. Idempotent if called twice; second call is
     // currently not supported (mutable state). Throws on malformed IR.
@@ -57,6 +66,7 @@ private:
     bool BuildProcessedGraph();
 
     std::shared_ptr<const MethodSnapshot> snap_;
+    IsAssignableFn is_assignable_;
     Vmap vmap_;
     std::vector<int> lparams_;
     std::unique_ptr<Graph> graph_;

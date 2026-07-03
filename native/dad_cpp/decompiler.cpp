@@ -77,6 +77,9 @@ std::string Decompiler::RunPipeline(
         auto snap = MethodSnapshotBuilder::BuildShared(
             source_, dex_id, method_idx);
         DvMethod dv(snap);
+        dv.SetIsAssignable([this](std::string_view sub, std::string_view super) {
+            return source_.IsAssignable(sub, super);
+        });
         dv.Process();
         result = dv.GetSource();
         if (pc_map) *pc_map = dv.GetPcMap();
@@ -163,6 +166,9 @@ Decompiler::DecompileMethodAst(std::string_view descriptor, bool include_source)
         ast.params_type = snap->meta.params_type;
         ast.access = snap->meta.access;
         DvMethod dv(snap);
+        dv.SetIsAssignable([this](std::string_view sub, std::string_view super) {
+            return source_.IsAssignable(sub, super);
+        });
         ast.ast = dv.ProcessAst();
         ast.ast_pc_map = dv.GetPcMap();  // D-3 — (statement_seq ↔ offset)
     } catch (...) {

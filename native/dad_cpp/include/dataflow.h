@@ -184,25 +184,30 @@ void FixInitResultTypes(Graph& graph);
 // consumers, which requires the caller to recompute BuildDefUse after a `true`
 // return (the injected copy + renumbered locs).
 //
-// TYPE SAFETY: `vX` is typed as the RETURN type — the one assignability anchor
-// valid Dalvik provides (everything reaching a `return` is assignable to it). The
-// pass therefore ONLY fires when (a) the return type is a reference, (b) the
-// receiver slot is RETURNED, and (c) every reassignment rhs is a reference whose
-// type EXACTLY equals ret_type, or the narrow-integer constant 0 (null). Exact
-// equality (not just any reference) is required because SplitVariables leaves the
-// reuse as one unsplit phi-web that can bind a def reaching only an intermediate
-// use (never the return) with an unrelated type — the merge-point-assignability
-// property does NOT hold per-def (adversarial-review). This provably yields valid
-// Java; a non-reference return, a non-returned reuse, a void-invoke artifact
-// (`this = super.onDraw()`), a genuine primitive (`this = 5`), or a non-exact
-// reference reuse all bail, leaving DAD's (invalid but no-worse) `this = X`. Excludes `<init>` (super()/this() uses the receiver
-// specially). Returns true iff it materialised (the caller then recomputes
-// chains). `this_reg` = receiver register int; `cls_name` = declaring class
-// descriptor; `ret_type` = method return descriptor; `is_ctor` = true for `<init>`.
+// TYPE SAFETY: `vX` is typed as an ANCHOR — a reference type the receiver's value
+// is pinned to by a TYPED SINK it flows to: a `return this` (the method return
+// type) or a reference argument `m(…, this, …)` (the parameter type). A single
+// consistent reference anchor is required (two differing sinks → bail). The pass
+// fires only when it can PROVE the injected `<anchor> vX = this` up-cast is valid,
+// i.e. cls_name <: anchor, via EITHER (a) the injected `is_assignable` class-
+// hierarchy oracle (cls's superclass/interface chain — handles a subtype up-cast
+// like `List vX = this` where cls implements List), OR (b) the entry `this`
+// REACHES an anchor sink through a reassignment-free CFG path (the verifier then
+// proves cls_name <: anchor, covering framework-transitive chains the dex-only
+// oracle cannot see). Every reassignment must likewise be `is_assignable` to the
+// anchor (subtype ok) or the narrow-integer constant 0 (null). A non-reference
+// sink, a sink conflict, an unprovable up-cast, a genuine primitive (`this = 5`),
+// or a void-invoke artifact all bail, leaving DAD's (invalid but no-worse)
+// `this = X`. Excludes `<init>` (super()/this() uses the receiver specially).
+// `is_assignable` may be null → falls back to exact-equality (conservative).
+// Returns true iff it materialised (the caller then recomputes chains).
 bool MaterializeReusedThis(Graph& graph,
                            std::unordered_map<int, IRFormPtr>& lvars,
                            int this_reg, const std::string& cls_name,
-                           const std::string& ret_type, bool is_ctor);
+                           const std::string& ret_type, bool is_ctor,
+                           const std::function<bool(std::string_view,
+                                                    std::string_view)>&
+                               is_assignable);
 
 // DAD: dataflow.py:323 DummyNode — placeholder Node with empty loc-with-ins.
 class DummyNode : public Node {
