@@ -301,7 +301,28 @@ public:
                 }
             }
         }
-        visit_ins(base);
+        // Beyond-DAD (LLM-comprehension): a conflated register typed `Object`
+        // used as a method RECEIVER gets an explicit `((DeclClass) v).m()` cast
+        // (the method's declaring class), so `Object v; v.m()` — which would not
+        // compile and hides the receiver's real type — becomes an explicit,
+        // type-clear call for the consuming LLM. Skip `this`/super and <init>.
+        bool base_casted = false;
+        if (invokeInstr && base && name != "<init>"
+            && !dynamic_cast<ThisParam*>(base)
+            && base->get_type() == "Ljava/lang/Object;"
+            && !invokeInstr->cls().empty()
+            && invokeInstr->cls() != "java.lang.Object"
+            && invokeInstr->cls() != "Object") {  // no-op Object→Object cast
+                                                  // (an Object method: getClass /
+                                                  // equals / hashCode / …)
+            w_->Write("((");
+            w_->Write(invokeInstr->cls());
+            w_->Write(") ");
+            visit_ins(base);
+            w_->Write(")");
+            base_casted = true;
+        }
+        if (!base_casted) visit_ins(base);
         if (name != "<init>") {
             w_->Write(".");
             w_->Write(name);
@@ -316,6 +337,23 @@ public:
             const std::string_view pt = i < ptype.size()
                                             ? std::string_view(ptype[i])
                                             : std::string_view();
+            // Beyond-DAD (LLM-comprehension): a genuinely-conflated register is
+            // typed `Object` (see InferCascadeTypes). Where it is passed at a
+            // MORE SPECIFIC reference-parameter position, emit an explicit
+            // `(Type) v` cast so the consuming LLM sees its real type at THIS
+            // use (the original dex reused one register for two types; the cast
+            // makes each use's type explicit instead of a misleading single
+            // declaration).
+            if (args[i] && !pt.empty() && (pt.front() == 'L' || pt.front() == '[')
+                && pt != "Ljava/lang/Object;"
+                && args[i]->get_type() == "Ljava/lang/Object;") {
+                w_->Write("((");
+                w_->Write(GetType(std::string(pt)));
+                w_->Write(") ");
+                visit_ins(args[i]);
+                w_->Write(")");
+                continue;
+            }
             if (!emit_fp_const_typed(args[i], pt)) visit_ins(args[i]);
         }
         w_->Write(")");

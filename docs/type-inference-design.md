@@ -218,6 +218,42 @@ mistype and the true genuine object+int / mixed-width merges stay deferred.
 The `genuine` set (true object/primitive merge at a shared null-check, `has_ref &&
 has_prim`) still needs the merge-point split and remains the next cut.
 
+**Phase 3 resolution — genuine conflation → `Object` + explicit casts (2026-07-05,
+jadx-informed, for LLM comprehension).** DAD-1:1 fidelity was relaxed (user
+decision) so the genuine `has_ref && has_prim` merges could finally be addressed.
+Measurement settled the shape: the genuinely-INVALID conflations are ~2–4 per
+corpus (bundled + obfuscated), each a Dalvik register reused across a REFERENCE
+and a NONZERO-INT LITERAL that MERGE at a phi-use — so the value is genuinely
+int-OR-reference with no single Java type (Java cannot express what Dalvik's
+register reuse does). A clean rename-split fires on ZERO (all have the phi-use by
+GroupVariables construction). The output is consumed by an LLM (not javac), so the
+fix follows jadx's Object+cast model rather than SSA phi surgery: `SplitConflated
+Version` ([dataflow.cpp](../native/dad_cpp/dataflow.cpp)) detects the conflation
+PRECISELY from DIRECT def types (`region_of`: a ref / ref-move → 'R', a NONZERO int
+const → 'P', const-0 → 'N', a non-const prim / method-result → 'U' bail — so an
+arithmetic/false-'R' register is NOT flagged, the over-fire that degrades a clean
+primitive) and, where the uses are disjoint, SPLITS by rename; where they merge at
+a phi, types the register `Object` (the honest common type — `Object v = <int>`
+autoboxes). The Writer ([writer.cpp](../native/dad_cpp/writer.cpp) `visit_invoke`)
+then emits an explicit `(Type)` cast wherever an Object-typed variable is passed at
+a more-specific reference ARG or used as a RECEIVER (`((DeclClass) v).m()`), so the
+LLM sees the real type at each use instead of a single misleading declaration.
+Params are excluded (their type is the signature). **Measured (a/b, 25,309 bundled
++ 15-APK obfuscated, HEAD vs change):** the misleading `FontCallback v = -3` →
+honest `Object v = -3`; **108 bundled / 249 obf explicit casts added**; pre-existing
+`Object v; v.m()` invalids FIXED (bundled 39→12, obf 24→6, the receiver cast makes
+them valid+explicit); **net invalid-Java UNCHANGED (ref/Object=nonzero-int 4→4,
+prim=new 2→2)**, 0 new no-op `((Object) x)` casts; parity 28/28, determinism (3
+processes byte-identical), 0-crash/0-timeout. Reviewers: correctness sound (0 bugs);
+adversarial 4/6 REFUTED + 2 LOW (a move-source stale-ref 'R' could in principle
+Object-type a clean primitive — same accepted move-source trust the split-time code
+uses, did NOT fire on the corpus; a lenient-dex receiver cast is cosmetic-only, no
+worse than the `Object v; v.m()` it replaces). Guards: `test_conflated_register_
+typed_object_with_casts` + `test_object_typed_use_gets_explicit_cast` in
+[tests/test_cascade_type.py](../tests/test_cascade_type.py). The residual ~12
+bundled Object-receiver invalids are field-owner / array positions not covered by
+the invoke-receiver cast (a later cut).
+
 **Move-cycle resolution (2026-07).** A classification-first census of the residual
 found it was NOT dominated by the `genuine` set but by a `gt()` RESOLUTION gap: a
 version whose all-primitive/null defs reconverge through a move-DIAMOND or move-

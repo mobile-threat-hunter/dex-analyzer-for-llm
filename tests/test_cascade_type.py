@@ -383,3 +383,92 @@ def test_use_bound_prim_to_ref_typing():
     assert re.search(r"\bv4\s*=\s*null\b", out), (
         f"v4's reference default should render `= null`.\n{out}"
     )
+
+
+def test_conflated_register_typed_object_with_casts():
+    """A Dalvik register genuinely reused across a REFERENCE and a NONZERO
+    INTEGER LITERAL (a conflation Java cannot express as one type) is typed
+    `Object` — the honest common type — instead of DAD's misleading
+    `RefType v = -3`; the Writer then emits an explicit `(Type)` cast wherever an
+    Object-typed variable is used at a more-specific reference position, so the
+    consuming LLM sees the real type at each use (jadx Object+cast).
+
+    `ResourcesCompat.loadFont(...Resources...)` reuses register 8 as both the
+    `FontCallback` param and the int `-3` error sentinel merging at a phi-use;
+    without the fix it is the misleading `FontCallback v8 = -3`."""
+    dk, desc = _find_method("core/content/res/ResourcesCompat", "loadFont")
+    if desc is None:
+        pytest.skip("ResourcesCompat.loadFont not in the bundled corpus")
+    # pick the multi-arg overload (the one with the conflation)
+    src = None
+    for apk in _apks():
+        try:
+            d2 = dexllm.DexKit(apk)
+        except Exception:
+            continue
+        for c in d2.list_classes():
+            if "core/content/res/ResourcesCompat" not in c:
+                continue
+            for m in d2.list_class_methods(c):
+                if "->loadFont(" in m and "Resources;" in m:
+                    o = safe_decompile_method_java(d2, m, timeout=10.0)
+                    if o and not is_timeout_marker(o) and "Object v8" in o:
+                        src = o
+                        break
+            if src:
+                break
+        if src:
+            break
+    if not src:
+        pytest.skip("loadFont conflation overload not found")
+    # The conflated register is Object, not the misleading `FontCallback v = -3`.
+    assert re.search(r"\bObject v8\b", src), (
+        f"the conflated register should be typed `Object`, not a misleading "
+        f"specific reference assigned an int.\n{src}"
+    )
+    assert not re.search(r"FontCallback v8\s*=\s*-?\d", src), (
+        f"the misleading `FontCallback v8 = <int>` must be gone.\n{src}"
+    )
+    # No no-op `((Object) ...)` cast was introduced.
+    assert "((Object) v8" not in src, f"no-op Object cast on v8.\n{src}"
+
+
+def test_object_typed_use_gets_explicit_cast():
+    """An Object-typed variable used at a more-specific reference invoke
+    arg/receiver position gets an explicit `(Type)` cast (LLM type-clarity), and
+    never a no-op `((Object) x)` cast. Scans the corpus for the cast form."""
+    apks = _apks()
+    if not apks:
+        pytest.skip("no test APK")
+    casts = noop = 0
+    for apk in apks:
+        try:
+            if dexllm.identify(apk).get("dex_count", 0) == 0:
+                continue
+            dk = dexllm.DexKit(apk)
+        except Exception:
+            continue
+        n = 0
+        for c in dk.list_classes():
+            if n >= 4000:
+                break
+            n += 1
+            try:
+                methods = dk.list_class_methods(c)
+            except Exception:
+                continue
+            for desc in methods:
+                out = safe_decompile_method_java(dk, desc, timeout=10.0)
+                if is_timeout_marker(out) or not out:
+                    continue
+                # a specific-type cast on a variable/param (the A behaviour)
+                casts += len(re.findall(r"\(\([A-Za-z][\w.$]*(?:\.[\w$]+)+\)\s+[vp]\w+\)", out))
+                noop += len(re.findall(r"\(\(Object\)\s+[vp]\w+\)\.\w", out))
+    # The cast machinery fires broadly (Object-var uses made type-explicit).
+    assert casts > 0, "no `(Type) v` casts emitted — the Object-cast pass is off"
+    # And the no-op-Object exclusion holds corpus-wide (allow the small
+    # pre-existing DAD `((Object) this).wait()` set; assert we did not flood it).
+    assert noop <= 15, (
+        f"{noop} `((Object) v).m()` no-op casts — the Object→Object exclusion "
+        f"regressed."
+    )

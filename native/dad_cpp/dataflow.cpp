@@ -1056,7 +1056,10 @@ static void InferCascadeTypes(Graph& graph, const std::string& ret_type) {
             }
         }
         // Any unresolved def, a genuine ref+prim merge, or disagreeing
-        // reference producers → refuse (would risk a wrong guess).
+        // reference producers → refuse (the genuine ref+prim conflation is typed
+        // Object by SplitVariables, which has the reaching-def info to identify
+        // it PRECISELY — the gt-based has_ref/has_prim here over-includes
+        // arithmetic/false-'R' cases that render fine, so it must NOT act).
         if (has_unknown || (has_ref && has_prim)) continue;
         if (cur_ref && has_prim) {
             // CASCADE (ref→prim): ref-typed but provably primitive. Skip if
@@ -1583,12 +1586,169 @@ VariableGroups GroupVariables(
 // =============================================================================
 // split_variables — DAD dataflow.py:368
 // =============================================================================
+// Beyond-DAD (jadx-informed, dupConst/splitByPhi concept — FixTypesVisitor):
+// DAD's GroupVariables merges a register's ref-typed def(s) and prim-typed
+// def(s) into ONE version when they reach a common use, so a register reused
+// across a reference and a primitive (e.g. `FontCallback v = param` on one path,
+// `v = -3` on another) is typed once and emits invalid Java. Where the two
+// type-regions' USES are DISJOINT (no single use reached by BOTH a ref def and a
+// prim def — i.e. no genuine merge/phi point), the version can be split back
+// into a ref-version and a prim-version by pure renaming (the jadx SSA model
+// keeps them separate to begin with; we re-separate after the fact). A version
+// with a genuine phi-use (a use reached by both regions) is left unsplit (a
+// later cut may insert a move, as jadx's tryInsertAdditionalMove does).
+//
+// Returns the sub-partitions of a conflated version if it splits cleanly, else
+// an empty vector (caller keeps the original single version). Each partition is
+// (defs, uses) like a GroupVariables version; the existing SplitVariables loop
+// then types each from its own defs.
+// `conflated` is set true when the version is a GENUINE ref+prim conflation (a
+// real reference def AND a real primitive def, confirmed from the DIRECT def
+// types — NOT the gt-based over-approximation) regardless of whether it splits
+// cleanly. The caller: clean partitions → split; else if conflated → type the
+// version `Object` (jadx Object+cast, for the phi-use case); else normal.
+static std::vector<std::pair<std::vector<int>, std::vector<int>>>
+SplitConflatedVersion(const std::string& var_str,
+                      const std::vector<int>& defs,
+                      const std::vector<int>& uses,
+                      const ChainMap& ud, Graph& graph, bool& conflated) {
+    auto is_ref = [](const std::string& t) {
+        return !t.empty() && (t.front() == 'L' || t.front() == '[');
+    };
+    auto is_prim = [](const std::string& t) {
+        return t.size() == 1 &&
+               std::string("IJZBSCFD").find(t[0]) != std::string::npos;
+    };
+    // Region of a def, NARROW to the clearest genuine-invalid conflation signal:
+    //   'R' a REFERENCE producer (a ref-typed def, incl. a move off a ref var —
+    //       an object trivially widens to Object, never a false conflation),
+    //   'P' a NONZERO INTEGER LITERAL constant (`= -3`) — a literal int in the
+    //       SAME register as a reference is the irreconcilable conflation that
+    //       renders `RefType v = -3`; a move / arithmetic / method-result prim
+    //       is NOT counted (it may resolve, and typing such a register Object
+    //       would degrade a clean primitive — the over-fire we must avoid),
+    //   'N' the null constant (0 in a ref slot) — neutral,
+    //   'U' anything else → bail (do not risk a wrong Object-typing).
+    auto region_of = [&](int loc) -> char {
+        if (loc < 0) return 'U';
+        IRFormPtr in = graph.get_ins_from_loc(loc);
+        if (!in) return 'U';
+        auto rhs = in->get_rhs();
+        if (rhs.empty() || !rhs[0]) return 'U';
+        if (auto* c = dynamic_cast<Constant*>(rhs[0].get())) {
+            if (is_ref(c->get_type())) return 'R';       // const-string / class
+            if (c->get_int_value() == 0) return 'N';     // null / zero
+            if (is_prim(c->get_type())) return 'P';      // nonzero int literal
+            return 'U';
+        }
+        // A move (`v = vSrc`) is classified by vSrc's LIVE type — the SAME
+        // move-source policy the split-time typing 30 lines below uses (it too
+        // trusts a move source only when it is a reference). A stale/false ref
+        // move-source could in principle mislabel a clean primitive 'R'
+        // (adversarial-review, conf 45) — but this is the established, accepted
+        // trust direction (an object only widens; the over-fire we actively
+        // avoid is the reverse — a non-const PRIM move → 'U' bail below), and it
+        // did NOT manifest as any invalid-Java increase on the corpus a/b
+        // (25,309 classes, ref/Object=nonzero-int count unchanged). A non-ref
+        // move / method-result / field is 'U' (bail) — never a false 'P'.
+        const std::string t = rhs[0]->get_type();
+        if (is_ref(t)) return 'R';                       // ref producer / move
+        return 'U';                                      // non-const prim → bail
+    };
+    std::unordered_map<int, char> dreg;
+    bool has_r = false, has_p = false;
+    for (int d : defs) {
+        char r = region_of(d);
+        if (r == 'U') return {};                 // unclassifiable def → bail
+        dreg[d] = r;
+        if (r == 'R') has_r = true;
+        if (r == 'P') has_p = true;
+    }
+    if (!has_r || !has_p) return {};             // not a ref+prim conflation
+    conflated = true;                            // genuine ref+prim conflation
+    // Partition each use by the regions of the defs that REACH it (ud). A use
+    // reached by both an R def and a P def is a genuine phi — bail (no clean
+    // rename). 'N' (null) defs are neutral and do not force a region.
+    std::vector<int> uses_r, uses_p;
+    for (int u : uses) {
+        auto it = ud.find(VarLocKey{var_str, u});
+        if (it == ud.end()) return {};           // no reaching info → bail
+        bool ur = false, up = false;
+        for (int d : it->second) {
+            auto dit = dreg.find(d);
+            if (dit == dreg.end()) continue;      // a def from another version
+            if (dit->second == 'R') ur = true;
+            else if (dit->second == 'P') up = true;
+        }
+        if (ur && up) return {};                  // genuine phi-use → bail
+        if (ur) uses_r.push_back(u);
+        else if (up) uses_p.push_back(u);
+        else return {};                           // reached only by 'N' → ambiguous
+    }
+    // Split the defs by region ('N' null defs go with... the prim side, since a
+    // `= 0` on a reference renders `= null` anyway and on a prim is a real 0;
+    // but a genuine conflation here has no bare N — keep it simple: N with R).
+    std::vector<int> defs_r, defs_p;
+    for (int d : defs) {
+        char r = dreg[d];
+        if (r == 'R' || r == 'N') defs_r.push_back(d);
+        else defs_p.push_back(d);
+    }
+    if (defs_r.empty() || defs_p.empty()) return {};
+    return {{defs_r, uses_r}, {defs_p, uses_p}};
+}
+
 void SplitVariables(Graph& graph,
                     std::unordered_map<int, IRFormPtr>& lvars,
                     ChainMap& du, ChainMap& ud) {
     auto variables = GroupVariables(lvars, du, ud);
     int nb_vars = 0;
     for (const auto& [k, _] : lvars) nb_vars = std::max(nb_vars, k + 1);
+
+    // Beyond-DAD (jadx-informed): a genuine ref+prim conflation — a register
+    // reused across a reference and a primitive, merged by GroupVariables into
+    // one version. Where the two regions' USES are disjoint, split cleanly
+    // (rename). Where they merge at a phi-use (no clean split), type the version
+    // `Object` — the honest common type; the Writer then emits an explicit cast
+    // at each type-specific use so the consuming LLM sees the real type there
+    // (see writer.cpp visit_invoke). An unsplit conflation is a single version
+    // the rename loop skips, so it is Object-typed inline here.
+    for (auto& [var_str, versions] : variables) {
+        std::vector<std::pair<std::vector<int>, std::vector<int>>> expanded;
+        bool changed = false, any_conflated_unsplit = false;
+        for (auto& [defs, uses] : versions) {
+            bool conflated = false;
+            auto parts =
+                SplitConflatedVersion(var_str, defs, uses, ud, graph, conflated);
+            if (parts.empty()) {
+                expanded.emplace_back(defs, uses);
+                if (conflated) any_conflated_unsplit = true;
+            } else {
+                for (auto& p : parts) expanded.push_back(std::move(p));
+                changed = true;
+            }
+        }
+        if (changed) versions.swap(expanded);
+        // Only a still-single (unsplit) conflated register is Object-typed here;
+        // a register that also split otherwise is handled per-version below.
+        if (any_conflated_unsplit && versions.size() == 1) {
+            std::string_view sv{var_str};
+            if (!sv.empty() && sv.front() == 'v') sv.remove_prefix(1);
+            try {
+                int vi = std::stoi(std::string{sv});
+                auto it = lvars.find(vi);
+                // Exclude a PARAM: its declared type comes from the method proto
+                // (the signature is emitted from that, not the Variable), so
+                // Object-typing it would only make the body uses render `(Type)
+                // p` casts that disagree with the unchanged signature — redundant
+                // noise, not a genuine conflation fix.
+                if (it != lvars.end() && it->second &&
+                    !dynamic_cast<Param*>(it->second.get()) &&
+                    !dynamic_cast<ThisParam*>(it->second.get()))
+                    it->second->set_type("Ljava/lang/Object;");
+            } catch (...) {}
+        }
+    }
 
     for (auto& [var_str, versions] : variables) {
         if (versions.size() == 1) continue;
