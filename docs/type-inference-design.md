@@ -298,8 +298,31 @@ pass risks the whole-corpus output. So:
   precedent for the other use-corroborated re-types; NOT closable cheaply (a
   move-to-param reads the conflated register type I, indistinguishable from a
   real int param). Guard: `test_use_bound_prim_to_ref_typing` in
-  `tests/test_cascade_type.py`. Still TODO for Phase 2: the other use positions
-  (field-store value, return, throw, aput-object) as TYPE sources.
+  `tests/test_cascade_type.py`.
+
+  **Phase 2b — field-store + throw sources, two-tier resolver (2026-07).**
+  Extended the use-bound type source beyond the reference argument to a FIELD
+  STORE (`obj.f = v` iput → the field type `atype`; `Cls.f = v` sput → `ftype`)
+  and a THROW (`throw v` → `Ljava/lang/Throwable;`, cast to `ThrowExpression`
+  specifically so the sibling `MoveExceptionExpression` catch-DEF is not misread
+  as a use). To keep these ADDITIVE, the single `ref_arg_type` map became a
+  TWO-TIER resolver: PRIMARY = the reference argument (a param type is exact and
+  reliable), FALLBACK = field-store/throw (used only when no ref-arg pins the
+  vid). A field store to an unrelated type can therefore never revert a ref-arg
+  re-type — the first single-map attempt HAD exactly that regression (`p3 = null`
+  → `p3 = 0` when a store conflicted with the arg). A PRESENT-but-CONFLICTED
+  primary returns EMPTY (skip) — it does NOT descend to the fallback: a vid
+  passed at two different ref-param types is a genuine LUB case no exact-match
+  tier can satisfy, and descending could re-type to a type incompatible with the
+  arg uses (`Runnable v` passed at `m(List v)` — both reviewers converged on
+  this; the fix is output-neutral on the corpus, the shape is constructible-only).
+  **Measured (a/b, strictly additive vs the committed ref-arg version, 0
+  regression):** bundled +19 null-render lines, obfuscated (15-APK) +28. parity
+  28/28, determinism (2 fresh processes byte-identical), 0-crash. Reviewers:
+  correctness sound; adversarial 5/6 REFUTED + 1 (the conflicted-primary
+  fall-through, FIXED). Return / array-store still TODO (the method return type
+  is not on the graph; the array element type needs the array's type). Genuine
+  `has_ref && has_prim` merges still need a version split (Phase 3).
 - **Phase 3 — split on conflict.** Implement version splitting for genuinely
   conflated registers (the residual PR #12 leaves). This touches variable
   numbering + def/use rewiring — the highest-risk piece; gate behind the sound

@@ -502,17 +502,62 @@ static void InferCascadeTypes(Graph& graph) {
     // (once defs_of is complete): if one operand is a nonzero int constant,
     // the other is proven a primitive and joins int_use_vids.
     std::vector<std::pair<std::string, std::string>> eqne_pairs;
-    // USE-BOUND reference type (design §3): vid → the reference type a
-    // REFERENCE-argument use pins on it (`f(…, v, …)` at a `Lcls;`/array param
-    // → `type(v) <: paramType`). Unlike `object_vids` (a boolean object-use
-    // flag) this carries the TYPE, so a primitive-typed version with NO genuine
-    // primitive producer (its reference nature hidden in a conflated register,
-    // present only in the USE) can be re-typed to the use's reference type — the
-    // v4 = p10(Function1) shape. `ref_arg_conflict` holds vids used at ≥2
-    // DIFFERENT ref-param types (kept exact-match-conservative: skip on
-    // disagreement rather than compute a least-upper-bound).
-    std::unordered_map<std::string, std::string> ref_arg_type;
-    std::unordered_set<std::string> ref_arg_conflict;
+    // USE-BOUND reference type (design §3): vid → the reference type a USE pins
+    // on it. Unlike `object_vids` (a boolean object-use flag) this carries the
+    // TYPE, so a primitive-typed version with NO genuine primitive producer (its
+    // reference nature hidden in a conflated register, present only in the USE)
+    // can be re-typed to the use's reference type — the v4 = p10(Function1)
+    // shape. Sources (all `type(v) <: T` in verified Dalvik, so the def-derived
+    // allocation would satisfy them — here we use them to TYPE a def-less
+    // conflated version): a REFERENCE ARGUMENT (`f(…, v, …)` → paramType), a
+    // FIELD STORE (`obj.f = v` / `Cls.f = v` → the field type), and a THROW
+    // (`throw v` → Throwable). `ref_use_conflict` holds vids pinned at ≥2
+    // DIFFERENT types (kept exact-match-conservative: skip on disagreement
+    // rather than compute a least-upper-bound). Return / array-store are NOT
+    // sources yet — the method return type is not on the graph and the array
+    // element type needs the array's type (deferred, design §3 residual).
+    // Two TIERS, so a lower-priority source can never disable a higher one by
+    // introducing a spurious conflict. PRIMARY = a reference ARGUMENT (a param
+    // type is exact and reliable). FALLBACK = a field store / throw (used only
+    // when no ref-arg pins the vid). A conflict WITHIN a tier (two different
+    // types) skips THAT tier; the primary always wins over the fallback (which
+    // preserves every ref-arg re-type exactly — a field store to an unrelated
+    // type does not revert it, matching the pre-extension committed behaviour).
+    std::unordered_map<std::string, std::string> arg_type, store_type;
+    std::unordered_set<std::string> arg_conflict, store_conflict;
+    auto record = [&](std::unordered_map<std::string, std::string>& m,
+                      std::unordered_set<std::string>& c,
+                      const std::string& vid, const std::string& t) {
+        if (vid.empty() || !is_ref(t)) return;
+        object_vids.insert(vid);
+        auto it = m.find(vid);
+        if (it == m.end()) m[vid] = t;
+        else if (it->second != t) c.insert(vid);
+    };
+    auto note_ref_arg = [&](const std::string& vid, const std::string& t) {
+        record(arg_type, arg_conflict, vid, t);
+    };
+    auto note_ref_store = [&](const std::string& vid, const std::string& t) {
+        record(store_type, store_conflict, vid, t);
+    };
+    // Resolve the use-bound reference type for a vid: the primary (ref-arg) if
+    // present and unconflicted; else the fallback (field-store/throw) if present
+    // and unconflicted; else empty (no re-type). A PRESENT-but-CONFLICTED
+    // primary returns EMPTY — it does NOT descend to the fallback: a vid passed
+    // at two DIFFERENT ref-param types is a genuine least-upper-bound case no
+    // exact-match tier can satisfy, and the store/throw type is not more
+    // trustworthy than the arg types it disagrees with — descending could
+    // re-type to a type incompatible with the arg uses (`Runnable v` passed at
+    // `m(List v)`; adversarial + correctness review converged on this). So a
+    // conflicted primary is left as DAD's type (no-worse), not guessed.
+    auto ref_use_type = [&](const std::string& vid) -> std::string {
+        auto a = arg_type.find(vid);
+        if (a != arg_type.end())
+            return arg_conflict.count(vid) ? std::string{} : a->second;
+        auto s = store_type.find(vid);
+        if (s != store_type.end() && !store_conflict.count(vid)) return s->second;
+        return {};
+    };
     auto note_obj = [&](IRForm* f) {
         if (auto* inv = dynamic_cast<InvokeInstruction*>(f)) {
             if (!inv->base().empty()) object_vids.insert(inv->base());
@@ -527,16 +572,23 @@ static void InferCascadeTypes(Graph& graph) {
             const auto& pt = inv->ptype();
             if (a.size() == pt.size())
                 for (size_t i = 0; i < a.size(); ++i)
-                    if (!a[i].empty() && is_ref(pt[i])) {
-                        object_vids.insert(a[i]);
-                        auto it = ref_arg_type.find(a[i]);
-                        if (it == ref_arg_type.end()) ref_arg_type[a[i]] = pt[i];
-                        else if (it->second != pt[i]) ref_arg_conflict.insert(a[i]);
-                    }
+                    if (!a[i].empty() && is_ref(pt[i])) note_ref_arg(a[i], pt[i]);
         } else if (auto* ie = dynamic_cast<InstanceExpression*>(f)) {
             if (!ie->arg_id().empty()) object_vids.insert(ie->arg_id());
         } else if (auto* ii = dynamic_cast<InstanceInstruction*>(f)) {
+            // iput `obj.field = rhs`: the OWNER is an object; the STORED value is
+            // pinned (fallback tier) to the field's declared type (atype).
             if (!ii->lhs_id().empty()) object_vids.insert(ii->lhs_id());
+            note_ref_store(ii->rhs_id(), ii->atype());
+        } else if (auto* si = dynamic_cast<StaticInstruction*>(f)) {
+            // sput `Cls.field = rhs`: the stored value is pinned to the field type.
+            note_ref_store(si->rhs_id(), si->ftype());
+        } else if (auto* te = dynamic_cast<ThrowExpression*>(f)) {
+            // `throw v`: v is a Throwable in verified Dalvik (only a reference is
+            // throwable). Cast to ThrowExpression SPECIFICALLY — a sibling
+            // RefExpression (MoveExceptionExpression) carries its ref as a catch
+            // DEF, not a use, so a generic RefExpression branch would misread it.
+            note_ref_store(te->ref_id(), "Ljava/lang/Throwable;");
         }
     };
     auto note_int = [&](IRForm* f) {
@@ -1057,31 +1109,32 @@ static void InferCascadeTypes(Graph& graph) {
             if (int_use_vids.count(vid)) continue;
             retypes.emplace_back(vit->second.get(), ref_type);
         } else if (cur_prim && !has_ref && !int_use_vids.count(vid) &&
-                   ref_arg_type.count(vid) && !ref_arg_conflict.count(vid) &&
+                   !ref_use_type(vid).empty() &&
                    no_genuine_prim_producer(vid, dvec) &&
                    !dynamic_cast<ThisParam*>(vit->second.get())) {
             // USE-BOUND prim→ref (design §3, Phase 2 — jadx "type bound from
             // use"): a primitive-typed version with NO reference DEF (the
             // existing mirror needs one — `has_ref`) but whose reference nature
-            // is pinned only by a USE. The `v4 = p10(Function1)` shape: a Dalvik
-            // register shared between a Function1 param and a scratch local, so
-            // split_variables typed the version `int` (last write), the
-            // reference is lost from every def (a move off the conflated
-            // register reports type I), and it survives ONLY at the ref-argument
-            // use `actor(…, v4, …)`. In VERIFIED Dalvik a value passed at a
-            // reference-parameter position IS a reference (the verifier rejects
-            // an int there), and this version is NEVER used as an int
-            // (`!int_use_vids`) and has NO genuine primitive producer
-            // (`no_genuine_prim_producer` — only moves / null / non-prim
-            // results), so it cannot really be an int: the primitive type is a
-            // register-conflation artifact. Re-type to the use-bound reference
-            // type (exact-match: `ref_arg_conflict` skips a version passed at
-            // two different ref-param types rather than computing an LUB). The
-            // `= 0` def then renders `= null` via the existing reference-lhs
-            // null render. Lenient-dex caveat: an unverified `refCall(intVar)`
-            // could over-fire, but that is garbage-in/garbage-out (same
-            // documented precedent as the other use-corroborated re-types).
-            retypes.emplace_back(vit->second.get(), ref_arg_type[vid]);
+            // is pinned only by a USE (a reference argument, a field store, or a
+            // throw — see `ref_use_type`). The `v4 = p10(Function1)` shape: a
+            // Dalvik register shared between a Function1 param and a scratch
+            // local, so split_variables typed the version `int` (last write),
+            // the reference is lost from every def (a move off the conflated
+            // register reports type I), and it survives ONLY at the ref use
+            // `actor(…, v4, …)`. In VERIFIED Dalvik a value at a reference USE
+            // position IS a reference (the verifier rejects an int there), and
+            // this version is NEVER used as an int (`!int_use_vids`) and has NO
+            // genuine primitive producer (`no_genuine_prim_producer` — only
+            // moves / null / non-prim results), so it cannot really be an int:
+            // the primitive type is a register-conflation artifact. Re-type to
+            // the use-bound reference type (exact-match: `ref_use_conflict` skips
+            // a version pinned at two different types rather than computing an
+            // LUB). The `= 0` def then renders `= null` via the existing
+            // reference-lhs null render. Lenient-dex caveat: an unverified
+            // `refCall(intVar)` could over-fire, but that is garbage-in/garbage-
+            // out (same documented precedent as the other use-corroborated
+            // re-types).
+            retypes.emplace_back(vit->second.get(), ref_use_type(vid));
         } else if (cur_prim && !int_required_vids.count(vid)) {
             // prim→WIDER-prim: an `int`-typed version whose value is really a
             // WIDER primitive — `int v = System.currentTimeMillis()` /
