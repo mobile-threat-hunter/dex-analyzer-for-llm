@@ -267,6 +267,55 @@ pass risks the whole-corpus output. So:
   numbering + def/use rewiring — the highest-risk piece; gate behind the sound
   oracle and a full before/after.
 
+### Phase 3 handoff — precise target + plan (2026-07)
+
+After the cascade/mirror/move-cycle/ref-arg passes converged, the remaining
+invalid-Java (~0.07% of methods, dominated by `T v = varOfOtherKind` prim/ref
+mismatches) was shown to be **genuine `has_ref && has_prim` merges only** — a
+version whose def set contains BOTH a real reference producer AND a real
+primitive producer. Everything else (arrays' `arr.length`+`arr[i]`, int-argument
+positions, relay-cycle mistypes, move-from-reference mistypes) is a
+classification artifact or a use-corroboration/propagation gap, NOT a split
+target.
+
+**The target is the code's OWN signal, not an output regex.** Output-text
+regexes are unreliable here (they conflate array `.length`+index, int-args, and
+move mistypes — measured counts swung 0/3/171/123 across regex variants). The
+authoritative genuine-merge set is exactly the versions that hit
+`InferCascadeTypes`' `if (has_unknown || (has_ref && has_prim)) continue;`
+(dataflow.cpp) with `has_ref && has_prim`. Instrument it (an env-gated fprintf
+of `vid`/`cur`/`ref_type`/`prim_type` right before that line) to enumerate the
+set: measured **~348 hits / ~123 distinct type-pairs** on bundled + 4 obfuscated
+APKs (inflated by repeated library classes). Representative pairs: `CharSequence
+× I`, `String × I`, `View × I`, `Object × Z`, `Object × I`, `SimpleArrayMap × I`.
+
+**Plan.** For each `has_ref && has_prim` version v: classify its defs into a
+ref-region (`gt()=='R'`) and a prim-region (`gt()=='P'`) and, per USE, run
+reaching-def to see which region(s) reach it. A use reached by ONLY one region
+is renamed to that region's fresh version-id (pure rename — no control-flow
+change). A use reached by BOTH regions is a genuine phi point (rare — most
+conflations are disjoint-CFG-region register reuse, so most uses are
+single-region) and needs a copy/phi inserted. Start with the disjoint case
+(rename-only, low risk); do the phi case as a separate, later cut.
+
+**Do NOT retry (measured failures):** (a) `saw_block` relay-cycle skip in
+`resolve_prim_width` — re-types one SCC member, leaving the relay partner as a
+new `RefType v = <int>` mismatch. (b) move-from-object propagation (single-def
+`int v = move vSrc` where `vSrc ∈ object_vids`) — object_vids is display-vid-keyed
+so it over-fires on conflated sources; net payoff was ~−6 with a muddled a/b. (c)
+fixpoint over classify+apply — −2. All confirm a use-corroboration/propagation
+shortcut cannot resolve a genuine merge; only a real split can.
+
+**Verification (mandatory — a prior attempt mis-measured a regression):** run the
+a/b with the SAME regex for fix-OFF and fix-ON — never reuse another run's
+baseline (a broad `\d [-+*/%] v` ref-used-as-int regex false-matches `v5 + v1`,
+inflating the count; the narrow clean baseline is ~15 bundled, the broad ~23, not
+329). Metrics: prim/ref-mismatch var-assign (bundled 107 / obf 278 baseline);
+plus REPEATED sweeps (a non-deterministic hang — cf. the historical
+ShortCircuitStruct hang — can pass a single run), a multi-process determinism
+check, parity 28/28, 0-crash, a snapshot diff, and two adversarial reviewers
+explicitly attacking the 0-crash / determinism / parity headline invariants.
+
 ## Oracle (from the tail-position / use-based work)
 
 An independent, def+use consistency check: for every version's final type `T`,
