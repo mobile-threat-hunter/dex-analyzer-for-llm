@@ -526,3 +526,64 @@ def test_object_typed_field_access_gets_owner_cast():
     assert uncast <= 5, (
         f"{uncast} `Object v; v.member` uncast receivers — the owner-cast "
         f"regressed (was ~1 after the field-access cast).")
+
+
+def test_array_used_variable_typed_as_array():
+    """A version used as an ARRAY base (`v[i]`, `v.length`, `arr = v`) but typed
+    a NON-array (DAD's last-write / a lost move-source array type, e.g. `Object v
+    = spanArray` from a Kotlin `getSpans` result) is re-typed to the array type
+    recovered from its def — so every array use is valid at once (root-cause,
+    vs a per-use `((T[]) v)` cast). `SpannableStringKt.clearSpans` reuses the
+    `getSpans()` Object[] result: DAD leaves `Object v; v.length; v[i]`."""
+    dk, desc = _find_method("SpannableString", "clearSpans")
+    if desc is None:
+        # any method that indexes an array-typed local
+        pytest.skip("clearSpans not in the bundled corpus")
+    src = safe_decompile_method_java(dk, desc, timeout=10.0)
+    if is_timeout_marker(src) or not src:
+        pytest.skip("clearSpans did not decompile")
+    # the array-used local is declared an array type, not bare Object.
+    assert re.search(r"\bObject\[\] v\w+\s*=", src) or \
+        re.search(r"[A-Za-z][\w.$]*\[\] v\w+\s*=.*getSpans", src), (
+        f"the getSpans() array result should be an array-typed local.\n{src}")
+    # no `Object v; v.length` (array length on a bare Object) survives here.
+    for v in set(re.findall(r"\bObject (v\w+)\s*[;=]", src)):
+        assert not re.search(r"(?<![\w.])" + re.escape(v) + r"\.length\b", src), (
+            f"{v} is array-length-used but typed bare Object.\n{src}")
+
+
+def test_array_used_not_typed_object_bounded():
+    """Corpus-wide: an `Object v` (or other non-array) used as `v[i]` / `v.length`
+    should be rare — the array-use-driven typing re-types the recoverable ones.
+    Bounds the residual (circular-move / genuine array+non-array conflations that
+    resolve_array_type conservatively skips)."""
+    apks = _apks()
+    if not apks:
+        pytest.skip("no test APK")
+    bad = 0
+    for apk in apks:
+        try:
+            if dexllm.identify(apk).get("dex_count", 0) == 0:
+                continue
+            dk = dexllm.DexKit(apk)
+        except Exception:
+            continue
+        n = 0
+        for c in dk.list_classes():
+            if n >= 6000:
+                break
+            n += 1
+            try:
+                methods = dk.list_class_methods(c)
+            except Exception:
+                continue
+            for desc in methods:
+                out = safe_decompile_method_java(dk, desc, timeout=10.0)
+                if is_timeout_marker(out) or not out:
+                    continue
+                for v in set(re.findall(r"\bObject (v\w+)\s*[;=]", out)):
+                    if re.search(r"(?<![\w.])" + re.escape(v) + r"\[", out):
+                        bad += 1
+    assert bad <= 4, (
+        f"{bad} `Object v; v[i]` array-index-on-Object (was ~2; a jump means "
+        f"the array-use-driven typing regressed).")

@@ -498,6 +498,13 @@ static void InferCascadeTypes(Graph& graph, const std::string& ret_type) {
     // wide value is fine, so the prim→wider branch guards on this narrower set
     // (not all `int_use_vids`).
     std::unordered_set<std::string> int_required_vids;
+    // Vids used as the ARRAY BASE of an aget / aput / array-length — such a
+    // version is provably an ARRAY (`arr[i]`, `arr.length` require an array
+    // operand in valid Dalvik). Where DAD typed it a non-array (e.g. `Object`
+    // from a conflation / a lost move-source array type), we re-type it to the
+    // array type recovered from its def(s), so every array use becomes valid at
+    // once (root-cause, vs a per-use `((T[]) v)` cast).
+    std::unordered_set<std::string> array_use_vids;
     // `==`/`!=` ConditionalExpression operand pairs — resolved in a post-pass
     // (once defs_of is complete): if one operand is a nonzero int constant,
     // the other is proven a primitive and joins int_use_vids.
@@ -665,9 +672,22 @@ static void InferCascadeTypes(Graph& graph, const std::string& ret_type) {
             if (lid) defs_of[*lid].push_back(ins.get());
             note_obj(ins.get());
             note_int(ins.get());
+            auto note_arr = [&](IRForm* f) {
+                if (auto* al = dynamic_cast<ArrayLoadExpression*>(f)) {
+                    if (!al->array_id().empty())
+                        array_use_vids.insert(al->array_id());
+                } else if (auto* as = dynamic_cast<ArrayStoreInstruction*>(f)) {
+                    if (!as->array_id().empty())
+                        array_use_vids.insert(as->array_id());
+                } else if (auto* aln = dynamic_cast<ArrayLengthExpression*>(f)) {
+                    if (!aln->array_id().empty())
+                        array_use_vids.insert(aln->array_id());
+                }
+            };
+            note_arr(ins.get());
             auto rhs = ins->get_rhs();
             if (!rhs.empty() && rhs[0]) { note_obj(rhs[0].get());
-                note_int(rhs[0].get()); }
+                note_int(rhs[0].get()); note_arr(rhs[0].get()); }
         }
     }
     auto is_prim_desc = [](const std::string& t) {
@@ -992,6 +1012,32 @@ static void InferCascadeTypes(Graph& graph, const std::string& ret_type) {
         }
         return true;
     };
+    // Recover the ARRAY type of an array-used version from its def(s): every def
+    // must produce an ARRAY (a def rhs whose type starts with '[', incl. a
+    // check-cast to an array, a move off an array var, an array-returning
+    // method) or be the null constant (array-compatible). A non-array,
+    // non-null def, an unresolved def, or two disagreeing array types → bail
+    // (a genuine conflation, not a lost array type). Returns the agreed array
+    // descriptor, else "".
+    auto resolve_array_type = [&](const std::vector<IRForm*>& dvec)
+            -> std::string {
+        std::string at;
+        for (IRForm* d : dvec) {
+            auto dr = d->get_rhs();
+            if (dr.empty() || !dr[0]) return {};       // unknown → bail
+            if (auto* c = dynamic_cast<Constant*>(dr[0].get()))
+                if (!is_ref(c->get_type()) && c->get_int_value() == 0)
+                    continue;                          // null → array-compatible
+            std::string t = dr[0]->get_type();
+            if (t.size() >= 2 && t[0] == '[') {        // an array producer
+                if (at.empty()) at = std::move(t);
+                else if (at != t) return {};           // conflicting arrays
+            } else {
+                return {};                             // non-array, non-null
+            }
+        }
+        return at;
+    };
     // Two-phase: classify every version reading ONLY pre-mutation types
     // (so the two directions can't interfere), then apply. Direction is
     // symmetric: a version whose current type disagrees with its provable
@@ -1006,6 +1052,18 @@ static void InferCascadeTypes(Graph& graph, const std::string& ret_type) {
         auto vit = dvec[0]->var_map.find(vid);
         if (vit == dvec[0]->var_map.end() || !vit->second) continue;
         const std::string cur = vit->second->get_type();
+        // B (array-use-driven typing): a version used as an array base but typed
+        // a NON-array (`Object` from a conflation, or a lost move-source array
+        // type) is re-typed to the array type recovered from its def(s), so
+        // every array use (`v[i]`, `v.length`, `arr = v`) becomes valid at once
+        // — the root-cause fix vs a per-use `((T[]) v)` cast.
+        if (array_use_vids.count(vid) && !(cur.size() >= 2 && cur[0] == '[')) {
+            std::string at = resolve_array_type(dvec);
+            if (!at.empty()) {
+                retypes.emplace_back(vit->second.get(), at);
+                continue;
+            }
+        }
         const bool cur_ref = is_ref(cur), cur_prim = is_prim_desc(cur);
         if (!cur_ref && !cur_prim) continue;
         bool has_ref = false, has_prim = false, has_unknown = false;
