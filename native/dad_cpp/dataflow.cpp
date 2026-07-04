@@ -455,7 +455,7 @@ static void FixAllocationResultTypes(Graph& graph) {
 // reference class (prim→ref mirror), or a too-narrow primitive → the def width.
 // Two-phase classify-then-apply; every re-type is def-anchored and, where it
 // could be ambiguous, use-corroborated. See docs/type-inference-design.md.
-static void InferCascadeTypes(Graph& graph) {
+static void InferCascadeTypes(Graph& graph, const std::string& ret_type) {
     auto is_ref = [](const std::string& t) {
         return !t.empty() && (t.front() == 'L' || t.front() == '[');
     };
@@ -589,6 +589,13 @@ static void InferCascadeTypes(Graph& graph) {
             // RefExpression (MoveExceptionExpression) carries its ref as a catch
             // DEF, not a use, so a generic RefExpression branch would misread it.
             note_ref_store(te->ref_id(), "Ljava/lang/Throwable;");
+        } else if (auto* ret = dynamic_cast<ReturnInstruction*>(f)) {
+            // `return v`: v is assignment-compatible with the method's declared
+            // return type, so a REFERENCE return type pins v as that reference
+            // (fallback tier — a return type can be a supertype of the value, so
+            // a more specific ref-arg use wins). `ret_type` is the Dalvik
+            // descriptor threaded in from the method meta.
+            if (ret->arg()) note_ref_store(*ret->arg(), ret_type);
         }
     };
     auto note_int = [&](IRForm* f) {
@@ -1168,9 +1175,9 @@ static void InferCascadeTypes(Graph& graph) {
 // (orig_var.type), so a Dalvik register reused across incompatible types
 // leaves its split versions mistyped. This corrects them at the VALUE/version
 // level in two def-anchored passes (docs/type-inference-design.md).
-void FixInitResultTypes(Graph& graph) {
+void FixInitResultTypes(Graph& graph, const std::string& ret_type) {
     FixAllocationResultTypes(graph);  // design §1: allocation ground truth
-    InferCascadeTypes(graph);         // design §2/§3: move-chain cascade/mirror
+    InferCascadeTypes(graph, ret_type);  // design §2/§3: cascade/mirror + use-bound
 }
 
 // Beyond-DAD: see dataflow.h. Materialise a reused receiver register as a local.

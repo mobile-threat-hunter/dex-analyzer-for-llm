@@ -163,7 +163,11 @@ void RegisterPropagation(Graph& graph, ChainMap& du, ChainMap& ud);
 // `prim = new` and `RefType v = <int>` and `v <op> null` (bounded); the `0 new
 // ref-used-as-int` / `prim.member` / boolean-arith claims were a/b-MEASURED
 // (change on vs off) rather than each independently CI-enforced.
-void FixInitResultTypes(Graph& graph);
+// `ret_type` is the method's declared return type — the use-bound typing (design
+// §3) uses it as a fallback-tier reference type for a `return v` position. It
+// defaults to empty (no return-position source) for callers that lack it (the
+// unit-parity tests), which is behaviour-neutral (`is_ref("")` is false).
+void FixInitResultTypes(Graph& graph, const std::string& ret_type = {});
 
 // Beyond-DAD: materialise a reused `this` register as a fresh local.
 //

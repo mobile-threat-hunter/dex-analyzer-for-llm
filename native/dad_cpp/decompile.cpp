@@ -127,7 +127,7 @@ bool DvMethod::BuildProcessedGraph() {
     }
     // Beyond-DAD: re-type `<init>` constructor results from the now-finalized
     // base (split_variables can read a stale base for them — version order).
-    FixInitResultTypes(*graph_);
+    FixInitResultTypes(*graph_, m.ret_type);
     if (mat_this) {
         graph_->number_ins();
         chains = BuildDefUse(*graph_, lparam_keys);

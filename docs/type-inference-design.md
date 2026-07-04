@@ -320,9 +320,28 @@ pass risks the whole-corpus output. So:
   regression):** bundled +19 null-render lines, obfuscated (15-APK) +28. parity
   28/28, determinism (2 fresh processes byte-identical), 0-crash. Reviewers:
   correctness sound; adversarial 5/6 REFUTED + 1 (the conflicted-primary
-  fall-through, FIXED). Return / array-store still TODO (the method return type
-  is not on the graph; the array element type needs the array's type). Genuine
-  `has_ref && has_prim` merges still need a version split (Phase 3).
+  fall-through, FIXED).
+
+  **Phase 2c — return source (2026-07).** Added the RETURN position (`return v` →
+  the method's declared return type) as a FALLBACK-tier source. This needed the
+  method return type threaded into the pass: `FixInitResultTypes` / `InferCascade
+  Types` gained a `const std::string& ret_type` param (from `m.ret_type` at the
+  decompile.cpp call site; header default `= {}` keeps the unit-parity-test
+  callers compiling and behaviour-neutral — `is_ref("")` is false). A returned
+  value is assignment-compatible with the return type (a `return-object` at a
+  reference-return method proves the value is a reference), so it pins the vid to
+  that reference type in the fallback tier (a return type can be a supertype, so
+  a ref-arg still wins). **Measured (a/b, strictly additive vs the committed
+  field-store/throw version, 0 regression):** bundled +110 lines (50 null-renders
+  + `Long`/`Animator`/`SyncQueueItem` re-typed decls) — the largest single-source
+  payoff yet (a conflated register RETURNED as a reference is a common shape).
+  parity 28/28, determinism (2 fresh processes byte-identical), 0-crash.
+  Reviewers: correctness sound, adversarial 6/6 REFUTED (0 findings). Array-store
+  (aput-object) stays TODO: the ArrayStoreInstruction carries only a category
+  MARKER (`"O"`), not the element type descriptor, so the element type would have
+  to be derived from the array variable's (possibly-conflated) type — fragile,
+  low payoff, deferred. Genuine `has_ref && has_prim` merges still need a version
+  split (Phase 3).
 - **Phase 3 — split on conflict.** Implement version splitting for genuinely
   conflated registers (the residual PR #12 leaves). This touches variable
   numbering + def/use rewiring — the highest-risk piece; gate behind the sound
