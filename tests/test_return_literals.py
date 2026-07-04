@@ -18,6 +18,7 @@ APK-free, deterministic gate (incl. NaN/±Inf via crafted bytecode). This is the
 through-the-binding end-to-end backstop. Skips if no test APK is present.
 """
 
+import json
 import glob
 import os
 import re
@@ -293,3 +294,95 @@ def test_text_and_ast_agree_on_corrected_returns():
     if agreed == 0:
         pytest.skip("no corrected-return method reached in the scanned slice")
     assert agreed > 0
+
+
+def test_boolean_assign_literals():
+    """A `const*` opcode builds an INTEGER-typed value, so a `boolean` (Z) local
+    assigned it renders the uncompilable `boolean v = 0;`. The Writer/AST fix
+    emits the boolean literal `false`/`true` instead (same const-typed-int
+    precedent as `return false` and reference→null). This guards that the invalid
+    `boolean v = <0|1>;` form stays eliminated — a regression (the branch removed)
+    would spike it back to the hundreds. A residual `boolean v = <n≠0,1>` (e.g.
+    `= 17`) is a SEPARATE genuine int/boolean type-inference conflation, left
+    untouched (0/1-only guard) and NOT counted here."""
+    apks = _apks()
+    if not apks:
+        pytest.skip("no test APK")
+    bad = []
+    good = 0
+    bad_pat = re.compile(r"^\s*boolean\s+v\w+\s*=\s*[01]\s*;", re.M)
+    good_pat = re.compile(r"^\s*boolean\s+v\w+\s*=\s*(?:true|false)\s*;", re.M)
+    for apk in apks:
+        try:
+            if dexllm.identify(apk).get("dex_count", 0) == 0:
+                continue
+            dk = dexllm.DexKit(apk)
+        except Exception:
+            continue
+        per = 0
+        for c in dk.list_classes():
+            if per >= 3000:
+                break
+            try:
+                src = dk.decompile_class_java(c)
+            except Exception:
+                continue
+            per += 1
+            bad += [(c.split("/")[-1][:24], m.strip())
+                    for m in bad_pat.findall(src)]
+            good += len(good_pat.findall(src))
+    assert len(bad) <= 5, (
+        f"{len(bad)} `boolean v = <0|1>;` (uncompilable — must render false/true). "
+        f"e.g. {bad[:8]}"
+    )
+    assert good > 0, "no `boolean v = false/true;` rendered — the fix is inactive"
+
+
+def test_boolean_decl_text_ast_agree():
+    """The AST DECLARATION path (ins_to_stmt) bypasses write_inplace, so it once
+    emitted a `.boolean`-typed local initialised with an `.int` literal 0/1 while
+    the TEXT said `= false`/`= true` (adversarial-review finding). The shared
+    `typed_rhs_expr` fix makes the AST decl init a boolean literal too. Assert 0
+    boolean-declarations carry an int-literal init in the AST across the corpus."""
+    apks = _apks()
+    if not apks:
+        pytest.skip("no test APK")
+    # a `.boolean`-typed LocalDeclarationStatement whose init is an int literal
+    # 0/1 (the exact case the fix converts to a boolean literal; an int init that
+    # is NOT 0/1, e.g. `boolean v = 17`, is a genuine conflation left alone AND
+    # is text/AST-CONSISTENT, so it must NOT be flagged).
+    bad_ast = re.compile(
+        r'"Literal",\s*"[01]",\s*\[".int",[^]]*\]\],\s*'
+        r'\[\["TypeName",\s*\[".boolean"')
+    mism = 0
+    checked = 0
+    for apk in apks:
+        try:
+            if dexllm.identify(apk).get("dex_count", 0) == 0:
+                continue
+            dk = dexllm.DexKit(apk)
+        except Exception:
+            continue
+        per = 0
+        for c in dk.list_classes():
+            if per >= 1500 or checked >= 60000:
+                break
+            per += 1
+            try:
+                methods = dk.list_class_methods(c)
+            except Exception:
+                continue
+            for desc in methods:
+                try:
+                    res = dk.decompile_method_ast(desc)
+                except Exception:
+                    continue
+                checked += 1
+                if "= false" not in res["source"] and "= true" not in res["source"]:
+                    continue
+                if bad_ast.search(json.dumps(res["ast"])):
+                    mism += 1
+    assert mism == 0, (
+        f"{mism} boolean declarations render `= false/true` in text but an int "
+        f"literal in the AST — the decl-path typed_rhs_expr fix regressed"
+    )

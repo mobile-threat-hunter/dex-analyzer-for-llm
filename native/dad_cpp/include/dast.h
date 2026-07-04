@@ -142,6 +142,13 @@ private:
     void visit_ins(const IRFormPtr& op);
     AstValue ins_to_stmt(IRForm* op, bool is_ctor);      // _visit_ins
     AstValue write_inplace_if_possible(IRForm* lhs, IRForm* rhs);
+    // The rhs of an assignment/declaration, adjusted to the LHS type context so
+    // the AST agrees with the text path (writer.cpp write_inplace / inline decl):
+    // an int-typed const* value in a `Z` lhs → boolean literal; in a reference
+    // lhs → null; in an F/D lhs → the reinterpreted float/double. Shared by
+    // write_inplace_if_possible (reassignment) AND the ins_to_stmt declaration
+    // path (which bypasses write_inplace) so BOTH forms match the text.
+    AstValue typed_rhs_expr(IRForm* lhs, IRForm* rhs);
     AstValue visit_expr(IRForm* op);
     // visit_expr, but if `operand` is an integer Constant in an F/D `target`
     // context (a raw-IEEE-bits float/double const), emit the reinterpreted

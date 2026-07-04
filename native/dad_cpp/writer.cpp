@@ -671,14 +671,30 @@ private:
             };
             const std::string lt = lhs->get_type();
             if (auto* c = dynamic_cast<Constant*>(rhs);
-                c && c->is_const() && is_int_const(c->get_type()) &&
-                c->get_int_value() == 0 && !lt.empty() &&
-                (lt.front() == 'L' || lt.front() == '[')) {
-                w_->WriteIndent();
-                visit_ins(lhs);
-                w_->Write(" = null");
-                w_->EndIns();
-                return;
+                c && c->is_const() && is_int_const(c->get_type())) {
+                const auto v = c->get_int_value();
+                if (v == 0 && !lt.empty() &&
+                    (lt.front() == 'L' || lt.front() == '[')) {
+                    w_->WriteIndent();
+                    visit_ins(lhs);
+                    w_->Write(" = null");
+                    w_->EndIns();
+                    return;
+                }
+                // Beyond-DAD: the const* opcode builds an INTEGER-typed value, so
+                // a `boolean` (Z) lhs assigned it renders the uncompilable `v = 0`
+                // — but a Z register holds only the boolean 0/1, so it is the
+                // literal `false`/`true` (same const-typed-int precedent as the
+                // reference→null case above and the `return false` fix; a genuine
+                // boolean/int conflation whose Z type is itself mistyped is no
+                // worse than DAD's `= 0`, and is left untouched by the type pass).
+                if (lt == "Z" && (v == 0 || v == 1)) {
+                    w_->WriteIndent();
+                    visit_ins(lhs);
+                    w_->Write(v == 1 ? " = true" : " = false");
+                    w_->EndIns();
+                    return;
+                }
             }
         }
         write_ind_visit_end(lhs, " = ", rhs);

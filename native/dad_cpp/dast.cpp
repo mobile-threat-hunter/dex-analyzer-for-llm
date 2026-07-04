@@ -805,7 +805,12 @@ AstValue JSONWriter::ins_to_stmt(IRForm* op, bool is_ctor) {
         if (auto* lv = dynamic_cast<Variable*>(lhs)) {
             if (!lv->declared) {
                 lv->declared = true;
-                AstValue expr = visit_expr(rhs);
+                // Type-context-adjusted init (Z→bool / ref→null / F-D) so a
+                // DECLARATION matches the text path — the text emits the decl
+                // inline through write_inplace, but the AST decl path bypasses it,
+                // which left `boolean v = 0` / `RefType v = 0` in the AST while the
+                // text said `= false` / `= null` (adversarial-review finding).
+                AstValue expr = typed_rhs_expr(lv, rhs);
                 return visit_decl(lv, std::move(expr));
             }
         }
@@ -848,11 +853,20 @@ AstValue JSONWriter::write_inplace_if_possible(IRForm* lhs, IRForm* rhs) {
                               visit_expr_fp_typed(exp_rhs, bin->get_type()), bop);
         }
     }
-    // Beyond-DAD: an integer Constant 0 assigned to a REFERENCE lhs is the null
-    // reference — emit a null literal (mirrors writer.cpp write_inplace and the
-    // return-literal null fix; AST and text agree).
-    // A ThisParam lhs is the pre-existing DAD this-slot-reuse corruption; keep
-    // it DAD-faithful (mirror writer.cpp) rather than diverging to `this = null`.
+    // The rhs adjusted to the LHS type context (null / boolean / F-D), shared
+    // with the declaration path so BOTH forms agree with the text.
+    return Assignment(visit_expr(lhs), typed_rhs_expr(lhs, rhs));
+}
+
+// An int-typed const* value carries no lhs-type context of its own, so it renders
+// by its OWN type ('I' → `LiteralInt`); adjust it to the LHS type so the AST
+// matches the text path (writer.cpp write_inplace / the inline declaration):
+//   reference lhs + 0        → null
+//   boolean (Z) lhs + 0/1    → false/true
+//   F/D lhs + raw-bits int   → the reinterpreted float/double
+// A ThisParam lhs (the pre-existing DAD this-slot-reuse corruption) is kept
+// DAD-faithful rather than diverging to `this = null`.
+AstValue JSONWriter::typed_rhs_expr(IRForm* lhs, IRForm* rhs) {
     if (lhs && !dynamic_cast<ThisParam*>(lhs)) {
         auto is_int_const = [](const std::string& ct) {
             return ct == "I" || ct == "J" || ct == "B" || ct == "S" ||
@@ -860,17 +874,17 @@ AstValue JSONWriter::write_inplace_if_possible(IRForm* lhs, IRForm* rhs) {
         };
         const std::string lt = lhs->get_type();
         if (auto* c = dynamic_cast<Constant*>(rhs);
-            c && c->is_const() && is_int_const(c->get_type()) &&
-            c->get_int_value() == 0 && !lt.empty() &&
-            (lt.front() == 'L' || lt.front() == '[')) {
-            return Assignment(visit_expr(lhs), LiteralNull());
+            c && c->is_const() && is_int_const(c->get_type())) {
+            const auto v = c->get_int_value();
+            if (v == 0 && !lt.empty() &&
+                (lt.front() == 'L' || lt.front() == '['))
+                return LiteralNull();
+            if (lt == "Z" && (v == 0 || v == 1))
+                return LiteralBool(v == 1);
         }
     }
-    // plain assignment: `double v = <raw-bits int const>` → reinterpret the rhs
-    // const against the lhs F/D type (mirrors writer.cpp write_ind_visit_end).
-    return Assignment(visit_expr(lhs),
-                      visit_expr_fp_typed(rhs, lhs ? lhs->get_type()
-                                                   : std::string_view()));
+    return visit_expr_fp_typed(rhs, lhs ? lhs->get_type()
+                                        : std::string_view());
 }
 
 AstValue JSONWriter::visit_expr_fp_typed(IRForm* operand,
