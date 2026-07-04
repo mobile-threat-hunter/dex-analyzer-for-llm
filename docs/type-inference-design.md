@@ -262,6 +262,44 @@ pass risks the whole-corpus output. So:
   field / throw / return (PR #12 only did receiver-invoke). Verify: more
   catch-conflation residual fixed, 0 regression (sound-oracle: every re-type is
   def-anchored + use-corroborated).
+
+  **Phase 2a — use-bound prim→ref from a REFERENCE ARGUMENT (2026-07).** The
+  first use-as-TYPE-source cut (the earlier passes used a use only as a boolean
+  int/object GATE). A primitive-typed version with NO reference DEF (`!has_ref`,
+  so the existing mirror cannot fire), NEVER used as an int (`!int_use_vids`),
+  and passed at a REFERENCE-argument position is re-typed to that param's type.
+  The `int v4 = p10(Function1); actor(…, v4, …)` Kotlin `$default` shape: a
+  Dalvik register shared between a reference param and a scratch local leaves the
+  version typed `int` (last write), the reference lost from every def (a move off
+  the conflated register reports type I), present ONLY at the ref-arg use.
+  Sound on verified Dalvik (a value at a reference-param position IS a reference;
+  the verifier rejects an int there), so the primitive type is a conflation
+  artifact. Two support pieces in `InferCascadeTypes` ([dataflow.cpp](../native/dad_cpp/dataflow.cpp)):
+  a `ref_arg_type` map (vid → the ref param type, from `note_obj`; exact-match —
+  `ref_arg_conflict` skips a vid passed at two different ref-param types rather
+  than compute an LUB), and `has_prim_producer` — a transitive move-resolving
+  check that BLOCKS the re-type if any def's closure contains a genuine primitive
+  producer (nonzero const / arithmetic / prim-invoke / prim-field), while a move
+  to a PARAM (no def) is NOT a producer. Resolving moves is what distinguishes
+  `v4 = p10(param)` (fixable) from `v = move vR; vR = x.intValue()` (blocked — a
+  form-only check misses the int producer behind the move; caught in
+  adversarial-review a/b as a `String v = intValue()` regression, fixed by the
+  move resolution). `has_prim_producer` carries its own work budget (2M, mirrors
+  gt_budget) so its O(2^N) per-path backtracking cannot hang on a crafted nested
+  move-diamond (adversarial-review — the defense was otherwise only emergent via
+  gt() exhausting its budget first on the same closure). **Measured (a/b, 0
+  regression on every axis):** bundled 252 lines improved (≈14 versions re-typed
+  prim→ref + the cascade `= 0`→`= null` null-renders), obfuscated (15-APK
+  sample) 130 lines; parity 28/28, determinism (multi-process 0-diff), 0-crash,
+  the budget cap output-neutral vs uncapped. Lenient-dex caveat (both reviewers,
+  low/suppressed): a genuine int param passed at a ref-arg slot under
+  `check_insns=false` could over-fire to `RefType v = intParam` — verifier-
+  unreachable on strict dex, garbage-in/garbage-out matching the documented
+  precedent for the other use-corroborated re-types; NOT closable cheaply (a
+  move-to-param reads the conflated register type I, indistinguishable from a
+  real int param). Guard: `test_use_bound_prim_to_ref_typing` in
+  `tests/test_cascade_type.py`. Still TODO for Phase 2: the other use positions
+  (field-store value, return, throw, aput-object) as TYPE sources.
 - **Phase 3 — split on conflict.** Implement version splitting for genuinely
   conflated registers (the residual PR #12 leaves). This touches variable
   numbering + def/use rewiring — the highest-risk piece; gate behind the sound

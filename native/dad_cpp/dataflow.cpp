@@ -502,6 +502,17 @@ static void InferCascadeTypes(Graph& graph) {
     // (once defs_of is complete): if one operand is a nonzero int constant,
     // the other is proven a primitive and joins int_use_vids.
     std::vector<std::pair<std::string, std::string>> eqne_pairs;
+    // USE-BOUND reference type (design §3): vid → the reference type a
+    // REFERENCE-argument use pins on it (`f(…, v, …)` at a `Lcls;`/array param
+    // → `type(v) <: paramType`). Unlike `object_vids` (a boolean object-use
+    // flag) this carries the TYPE, so a primitive-typed version with NO genuine
+    // primitive producer (its reference nature hidden in a conflated register,
+    // present only in the USE) can be re-typed to the use's reference type — the
+    // v4 = p10(Function1) shape. `ref_arg_conflict` holds vids used at ≥2
+    // DIFFERENT ref-param types (kept exact-match-conservative: skip on
+    // disagreement rather than compute a least-upper-bound).
+    std::unordered_map<std::string, std::string> ref_arg_type;
+    std::unordered_set<std::string> ref_arg_conflict;
     auto note_obj = [&](IRForm* f) {
         if (auto* inv = dynamic_cast<InvokeInstruction*>(f)) {
             if (!inv->base().empty()) object_vids.insert(inv->base());
@@ -516,7 +527,12 @@ static void InferCascadeTypes(Graph& graph) {
             const auto& pt = inv->ptype();
             if (a.size() == pt.size())
                 for (size_t i = 0; i < a.size(); ++i)
-                    if (!a[i].empty() && is_ref(pt[i])) object_vids.insert(a[i]);
+                    if (!a[i].empty() && is_ref(pt[i])) {
+                        object_vids.insert(a[i]);
+                        auto it = ref_arg_type.find(a[i]);
+                        if (it == ref_arg_type.end()) ref_arg_type[a[i]] = pt[i];
+                        else if (it->second != pt[i]) ref_arg_conflict.insert(a[i]);
+                    }
         } else if (auto* ie = dynamic_cast<InstanceExpression*>(f)) {
             if (!ie->arg_id().empty()) object_vids.insert(ie->arg_id());
         } else if (auto* ii = dynamic_cast<InstanceInstruction*>(f)) {
@@ -852,6 +868,71 @@ static void InferCascadeTypes(Graph& graph) {
         }
         return w;
     };
+    // USE-BOUND prim→ref support (design §3). Does an rhs form transitively
+    // (through moves) contain a genuine primitive PRODUCER? A move is resolved
+    // to its source's defs; a move to a PARAM / input (no def) is NOT a producer
+    // — the register's stale primitive type is a conflation artifact, and a
+    // ref-arg USE pins the version as a reference in verified Dalvik. A NONZERO
+    // constant, an arithmetic / unary / array-length expression, or a
+    // PRIMITIVE-returning invoke/field-get IS a producer (that version really
+    // holds an int on some path — a genuine conflation needing a split, or
+    // lenient-dex garbage — so we must not force it to a reference). Resolving
+    // moves is what distinguishes `v4 = p10(Function1 param)` (fixable — the
+    // move bottoms out at a param) from `v0 = move vR; vR = x.intValue()`
+    // (blocked — the move bottoms out at a genuine int producer, which a
+    // form-only check would miss). A move-CYCLE is neutral; an unresolvable def
+    // (empty rhs) is treated as a possible producer (block), conservatively.
+    //
+    // WORK CAP (adversarial-review, mirrors gt_budget): the per-path RAII
+    // backtracking below is O(2^N) on a crafted nested move-DIAMOND chain — the
+    // same uncatchable CPU-spin family as gt() (which carries gt_budget for
+    // exactly this). Today the classification loop always runs gt() on the same
+    // (superset) closure FIRST, so gt_budget exhaustion forces `has_unknown →
+    // continue` before this ever runs on a pathological closure — but that
+    // defense is EMERGENT. Make it EXPLICIT with an independent budget; on
+    // exhaustion return `true` (a possible producer → BLOCK the re-type, the
+    // conservative/safe bail, matching gt()'s 'U').
+    size_t pp_budget = 2'000'000;
+    std::function<bool(IRForm*, std::set<std::string>&)> has_prim_producer =
+        [&](IRForm* r, std::set<std::string>& seen) -> bool {
+            if (pp_budget == 0) return true;          // work cap → conservative
+            --pp_budget;
+            if (!r) return true;                      // unknown → conservative
+            if (r->is_ident()) {                      // move — resolve source
+                const std::string sid = r->Vid();
+                if (seen.count(sid)) return false;    // cycle → neutral
+                seen.insert(sid);
+                struct Pop { std::set<std::string>& s; const std::string& k;
+                             ~Pop() { s.erase(k); } } pop_{seen, sid};
+                auto it = defs_of.find(sid);
+                if (it == defs_of.end()) return false;  // param/input — NOT a producer
+                for (IRForm* d : it->second) {
+                    auto dr = d->get_rhs();
+                    if (dr.empty() || !dr[0]) return true;  // unresolvable → block
+                    if (has_prim_producer(dr[0].get(), seen)) return true;
+                }
+                return false;
+            }
+            if (auto* c = dynamic_cast<Constant*>(r)) {
+                if (is_ref(c->get_type())) return false;  // const-string/class
+                return c->get_int_value() != 0;           // nonzero int = producer
+            }
+            if (dynamic_cast<BinaryExpression*>(r) ||
+                dynamic_cast<UnaryExpression*>(r) ||
+                dynamic_cast<ArrayLengthExpression*>(r))
+                return true;                          // arithmetic → real int
+            return is_prim_desc(r->get_type());       // prim invoke/field result
+        };
+    auto no_genuine_prim_producer = [&](const std::string& vid,
+                                        const std::vector<IRForm*>& dvec) -> bool {
+        for (IRForm* d : dvec) {
+            auto dr = d->get_rhs();
+            if (dr.empty() || !dr[0]) return false;   // unknown def form → block
+            std::set<std::string> seen{vid};
+            if (has_prim_producer(dr[0].get(), seen)) return false;
+        }
+        return true;
+    };
     // Two-phase: classify every version reading ONLY pre-mutation types
     // (so the two directions can't interfere), then apply. Direction is
     // symmetric: a version whose current type disagrees with its provable
@@ -975,6 +1056,32 @@ static void InferCascadeTypes(Graph& graph) {
             // genuine conflation (needs a version split) → leave DAD's type.
             if (int_use_vids.count(vid)) continue;
             retypes.emplace_back(vit->second.get(), ref_type);
+        } else if (cur_prim && !has_ref && !int_use_vids.count(vid) &&
+                   ref_arg_type.count(vid) && !ref_arg_conflict.count(vid) &&
+                   no_genuine_prim_producer(vid, dvec) &&
+                   !dynamic_cast<ThisParam*>(vit->second.get())) {
+            // USE-BOUND prim→ref (design §3, Phase 2 — jadx "type bound from
+            // use"): a primitive-typed version with NO reference DEF (the
+            // existing mirror needs one — `has_ref`) but whose reference nature
+            // is pinned only by a USE. The `v4 = p10(Function1)` shape: a Dalvik
+            // register shared between a Function1 param and a scratch local, so
+            // split_variables typed the version `int` (last write), the
+            // reference is lost from every def (a move off the conflated
+            // register reports type I), and it survives ONLY at the ref-argument
+            // use `actor(…, v4, …)`. In VERIFIED Dalvik a value passed at a
+            // reference-parameter position IS a reference (the verifier rejects
+            // an int there), and this version is NEVER used as an int
+            // (`!int_use_vids`) and has NO genuine primitive producer
+            // (`no_genuine_prim_producer` — only moves / null / non-prim
+            // results), so it cannot really be an int: the primitive type is a
+            // register-conflation artifact. Re-type to the use-bound reference
+            // type (exact-match: `ref_arg_conflict` skips a version passed at
+            // two different ref-param types rather than computing an LUB). The
+            // `= 0` def then renders `= null` via the existing reference-lhs
+            // null render. Lenient-dex caveat: an unverified `refCall(intVar)`
+            // could over-fire, but that is garbage-in/garbage-out (same
+            // documented precedent as the other use-corroborated re-types).
+            retypes.emplace_back(vit->second.get(), ref_arg_type[vid]);
         } else if (cur_prim && !int_required_vids.count(vid)) {
             // prim→WIDER-prim: an `int`-typed version whose value is really a
             // WIDER primitive — `int v = System.currentTimeMillis()` /

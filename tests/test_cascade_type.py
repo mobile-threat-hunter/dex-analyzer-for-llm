@@ -328,3 +328,58 @@ def test_prim_ref_mismatch_var_assign_bounded():
         f"after ref-arg corroboration; a jump toward ~117 means note_obj's "
         f"ref-argument tagging regressed)."
     )
+
+
+def _find_method(substr, methodname):
+    """Return (dk, desc) for the first bundled method whose class contains
+    `substr` and whose descriptor contains `methodname`, else (None, None)."""
+    for apk in _apks():
+        try:
+            if dexllm.identify(apk).get("dex_count", 0) == 0:
+                continue
+            dk = dexllm.DexKit(apk)
+        except Exception:
+            continue
+        for c in dk.list_classes():
+            if substr not in c:
+                continue
+            try:
+                methods = dk.list_class_methods(c)
+            except Exception:
+                continue
+            for desc in methods:
+                if methodname in desc:
+                    return dk, desc
+    return None, None
+
+
+def test_use_bound_prim_to_ref_typing():
+    """USE-BOUND prim→ref (design §3): a primitive-typed version with NO
+    reference DEF, pinned as a reference ONLY by a ref-argument USE, is re-typed
+    to that use's reference type. The canonical shape is a Kotlin `$default`
+    bridge: a Dalvik register shared between a reference param and a scratch
+    local leaves the version typed `int` (DAD last-write), the reference lost
+    from every def, present only at the ref-arg call — DAD emits
+    `int v = pRefParam; refCall(v)`. The fix re-types it to the param type.
+
+    `ActorKt.actor$default` reuses p10 (`Function1`) as the merged version v4;
+    without the fix it is `int v4; v4 = p10; … actor(…, v4, …)`. With it, v4 is
+    the reference and the `= 0` default renders `= null`."""
+    dk, desc = _find_method("kotlinx/coroutines/channels/ActorKt", "actor$default")
+    if desc is None:
+        pytest.skip("ActorKt.actor$default not in the bundled corpus")
+    out = safe_decompile_method_java(dk, desc, timeout=10.0)
+    if is_timeout_marker(out) or not out:
+        pytest.skip("actor$default did not decompile")
+    # The merged version is now the reference param type, not `int`.
+    assert "Function1 v4" in out, (
+        "the use-bound prim→ref re-type appears disabled: v4 should be typed "
+        f"`Function1` (the ref-arg param), not `int`.\n{out}"
+    )
+    assert re.search(r"\bint v4\b", out) is None, (
+        f"v4 is still declared `int` — the use-bound typing did not fire.\n{out}"
+    )
+    # And its null default renders `= null`, not the uncompilable `= 0`.
+    assert re.search(r"\bv4\s*=\s*null\b", out), (
+        f"v4's reference default should render `= null`.\n{out}"
+    )
