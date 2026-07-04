@@ -990,7 +990,13 @@ AstValue JSONWriter::visit_expr(IRForm* op) {
             const auto* s = std::get_if<std::string>(&x->cst());
             return LiteralString(s ? *s : std::string());
         }
-        if (t == "Z") return LiteralBool(x->get_int_value() == 0);
+        // A Z-typed Constant is the boolean value get_int_value() (0=false,
+        // nonzero=true) — matching the text path (visit_constant_bool(i != 0))
+        // and the sibling AST paths (visit_cond `iv != 0`, the Z-lhs assign
+        // `v == 1`). The earlier `== 0` was an INVERTED port typo (value 0 → the
+        // wrong `true`); a genuinely Z-typed Constant is rare (const* builds 'I')
+        // but wherever reached the AST now agrees with the text.
+        if (t == "Z") return LiteralBool(x->get_int_value() != 0);
         if (t.size() == 1 && std::string("ISCB").find(t[0]) != std::string::npos)
             return LiteralInt(x->cst2());
         if (t == "J") return LiteralLong(x->cst2());
