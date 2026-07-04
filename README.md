@@ -123,7 +123,7 @@ analyzer, or out of the structural scope: adler32/SHA-1 checksums, instruction
 *dataflow* semantics, annotations, debug_info, call_site/method_handle,
 proto shorty-match, access-flag bitmasks, and the offset→map-type cross-check.
 
-**Validated:** clean corpus 0 false-reject · 26/26 C++ test suites · ASan corpus +
+**Validated:** clean corpus 0 false-reject · 29/29 C++ test suites · ASan corpus +
 malformed-dex fuzz **0 heap-overflow/UAF/SEGV** (the same fuzz segfaults 66/120
 with no structural verifier). The verifier adds ~58% to load time (still ~100×
 faster than androguard); decompile throughput is unaffected. Full per-check

@@ -13,8 +13,12 @@
 #include "graph.h"
 #include "instruction.h"
 #include "instruction_dispatch.h"
+#include "ssa.h"
 #include "util.h"
 #include "writer.h"
+
+#include <cstdio>
+#include <cstdlib>
 
 namespace dexkit::dad {
 
@@ -94,6 +98,21 @@ bool DvMethod::BuildProcessedGraph() {
     for (int reg : lparams_) lparam_keys.push_back("v" + std::to_string(reg));
 
     auto chains = BuildDefUse(*graph_, lparam_keys);
+
+    // Phase 1c (SSA rollout): analysis-only oracle. Builds the SSA view and
+    // checks it reconstructs the reaching-def chains, WITHOUT mutating the IR
+    // (output stays byte-identical). Env-gated so it only runs during
+    // validation sweeps. Removed / replaced by the real wiring in Phase 2.
+    if (std::getenv("DEXLLM_SSA_VERIFY")) {
+        auto ssa = BuildSsa(*graph_, lparam_keys);
+        auto rep = VerifySsa(*graph_, lparam_keys, ssa, chains.ud);
+        if (rep.mismatches) {
+            std::fprintf(stderr,
+                         "SSA_ORACLE cls=%s m=%s uses=%ld mism=%ld first=%s\n",
+                         m.cls_name.c_str(), m.name.c_str(), rep.uses_checked,
+                         rep.mismatches, rep.first.c_str());
+        }
+    }
 
     // var_to_name (DAD): int-keyed lvars dict. DAD seeds `var_to_name` with
     // params, then `construct()` populates it with every register it sees

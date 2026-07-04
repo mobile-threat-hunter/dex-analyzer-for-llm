@@ -44,6 +44,7 @@ add_library(dexkit_dad STATIC
     native/dad_cpp/instruction.cpp
     native/dad_cpp/opcode_ins.cpp
     native/dad_cpp/dataflow.cpp
+    native/dad_cpp/ssa.cpp
     native/dad_cpp/control_flow.cpp
     native/dad_cpp/dast.cpp
     native/dad_cpp/writer.cpp
