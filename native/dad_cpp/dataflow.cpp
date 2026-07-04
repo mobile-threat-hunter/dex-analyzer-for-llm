@@ -1902,7 +1902,25 @@ void SplitVariables(Graph& graph,
                 }
             }
             if (dmin >= 0 && !def_type.empty()) {
-                new_version->set_type(def_type);
+                // Beyond-DAD (mixed-version conflation): among a multi-version
+                // register, a version that is itself a genuine ref+nonzero-int
+                // conflation (a real reference def AND a real int-literal def
+                // merging at a phi) has no single Java type — the multi-def
+                // ref-preference above would type it a reference and render the
+                // misleading `zzj v = 1`. The size==1 pre-pass Object-types the
+                // unsplit case; here we cover the split-register case, typing
+                // such a version `Object` (the Writer then casts its ref uses).
+                // Safe to call mid-rename: `conflated` is decided purely from
+                // DIRECT def rhs types — the preceding def-loop's replace_lhs
+                // touches only the LHS, not the rhs region_of reads, and this
+                // version's `ud` use-keys are still intact (each use-loc belongs
+                // to exactly one version, re-keyed only in its own uses-loop
+                // below). Only the flag is consumed; partitions are discarded.
+                bool conflated = false;
+                SplitConflatedVersion(var_str, defs_vec, uses_vec, ud, graph,
+                                      conflated);
+                new_version->set_type(conflated ? std::string("Ljava/lang/Object;")
+                                                 : def_type);
             }
             for (int loc : uses_vec) {
                 IRFormPtr ins = graph.get_ins_from_loc(loc);

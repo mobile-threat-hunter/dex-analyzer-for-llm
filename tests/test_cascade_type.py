@@ -587,3 +587,47 @@ def test_array_used_not_typed_object_bounded():
     assert bad <= 4, (
         f"{bad} `Object v; v[i]` array-index-on-Object (was ~2; a jump means "
         f"the array-use-driven typing regressed).")
+
+
+def test_reftype_eq_nonzero_int_bounded_mixed_version():
+    """A genuine ref+nonzero-int conflation among a MULTI-version register (a
+    register split into a clean reference version AND a conflated version, e.g.
+    `zzj v1 = 1` beside a real `zzj v4`) is typed `Object` in the rename loop —
+    the size==1 pre-pass only covers the unsplit case. Bounds the corpus-wide
+    `RefType v = <nonzero int>` residual (was ~5 before the mixed-version cut)."""
+    apks = _apks()
+    if not apks:
+        pytest.skip("no test APK")
+    _P = ("int", "boolean", "byte", "short", "char", "long", "float",
+          "double", "void", "Object")
+    _RX = re.compile(
+        r"^\s*(?!(?:" + "|".join(_P) + r")\b)(?:\[+)?[A-Za-z_][\w.$]*"
+        r"(?:\[\])*\s+v\w+\s*=\s*-?[1-9]\d*\s*;", re.M)
+    bad = 0
+    for apk in apks:
+        try:
+            if dexllm.identify(apk).get("dex_count", 0) == 0:
+                continue
+            dk = dexllm.DexKit(apk)
+        except Exception:
+            continue
+        n = 0
+        for c in dk.list_classes():
+            if n >= 6000:
+                break
+            n += 1
+            try:
+                methods = dk.list_class_methods(c)
+            except Exception:
+                continue
+            for desc in methods:
+                out = safe_decompile_method_java(dk, desc, timeout=10.0)
+                if is_timeout_marker(out) or not out:
+                    continue
+                bad += len(_RX.findall(out))
+    # ~3 residual (circular-move conflations region_of can't resolve without
+    # gt-style transitive resolution). A jump means the mixed-version Object
+    # typing regressed.
+    assert bad <= 6, (
+        f"{bad} `RefType v = <nonzero int>` misleading conflations (was ~3 "
+        f"after the mixed-version Object typing).")

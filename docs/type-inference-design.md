@@ -254,6 +254,21 @@ typed_object_with_casts` + `test_object_typed_use_gets_explicit_cast` in
 bundled Object-receiver invalids are field-owner / array positions not covered by
 the invoke-receiver cast (a later cut).
 
+**Follow-up — mixed-version conflation (2026-07-05).** The Object-typing above
+initially fired only in `SplitVariables`' size==1 pre-pass — an UNSPLIT register.
+But a register that DOES split into ≥2 versions can still have ONE version that is
+itself a genuine ref+nonzero-int conflation (a reference def AND an int-literal def
+merging at a phi WITHIN that version); the multi-def ref-preference typed it a
+reference → the misleading `zzj v = 1`. The rename loop now calls `SplitConflated
+Version` per split version and Object-types a phi-conflated one too. It is safe to
+call mid-rename because the `conflated` flag is decided purely from DIRECT def rhs
+types — the preceding def-loop's `replace_lhs` mutates only the LHS (not the rhs
+`region_of` reads), and each use-loc belongs to exactly one version (its `ud` key is
+re-keyed only in its own uses-loop). **Measured (a/b):** `RefType v = <nonzero int>`
+bundled 5→3, obf 6→1; Object-receiver invalid 0→0; parity 28/28, determinism,
+0-crash. Reviewers: correctness sound (0 bugs); adversarial 6/6 REFUTED. Guard:
+`test_reftype_eq_nonzero_int_bounded_mixed_version`.
+
 **Move-cycle resolution (2026-07).** A classification-first census of the residual
 found it was NOT dominated by the `genuine` set but by a `gt()` RESOLUTION gap: a
 version whose all-primitive/null defs reconverge through a move-DIAMOND or move-
