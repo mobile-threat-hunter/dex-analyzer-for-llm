@@ -269,6 +269,40 @@ bundled 5→3, obf 6→1; Object-receiver invalid 0→0; parity 28/28, determini
 0-crash. Reviewers: correctness sound (0 bugs); adversarial 6/6 REFUTED. Guard:
 `test_reftype_eq_nonzero_int_bounded_mixed_version`.
 
+**Move-OPCODE ground-truth typing (2026-07-05).** The largest residual after the
+Object+cast work was `T v = wN` where one of {T, decl-type-of w} is a primitive
+and the other a reference — a register reused across a prim and a ref, connected
+by a `move`, one of whose split versions DAD typed wrong (e.g. `OnPrepareListView
+Listener v4 = v1` [v1 an int] or `int v3 = v24` [v24 a View]). These are all
+int↔reference mismatches — Java has no primitive↔reference cast, so the Object+
+cast model does NOT apply; the fix CORRECTS the mistyped version. The ground
+truth is the Dalvik move OPCODE (discarded by DAD / our `MoveImpl`, which
+collapsed move/move-wide/move-object into one `MoveExpression`): on verified
+Dalvik `move-object` copies a reference, `move` a 32-bit primitive, `move-wide` a
+64-bit primitive. The kind is threaded onto `MoveExpression` (`MoveKind`), and a
+BOUNDED-FIXPOINT post-pass in `InferCascadeTypes` — run AFTER the cascade/mirror
+`retypes` are applied, so it reads FINAL types — re-types a single-def move-DEST
+whose declared type contradicts its opcode (move-object dest declared primitive →
+source's reference type; move/-wide dest declared reference → source's primitive
+type). Anti-conflation guards leave a version also used as the contradicting kind
+(`object_vids`/`int_use_vids`, or a move-source of the contradicting opcode via
+`moveobj_src_vids`/`moveprim_src_vids` — a move-object dest that is also a
+plain-move source is a genuine prim+ref conflation needing a version split).
+Reading the source's FINAL type structurally enforces kind-consistency (`<Type> v
+= src` never emits `ref v = primSrc`), and the fixpoint converges move CHAINS
+(round 1 fixes the first link, round 2 the second). Termination is guaranteed by
+monotonicity (each version's def has one fixed opcode kind → fires at most once →
+no oscillation; a move-cycle re-types nothing); the round<32 cap is a
+crafted-input work backstop (real chains ≤3 links). **Measured (a/b):** `T v = wN`
+kind-mismatch bundled 108→36, obfuscated 55→31, with 0 added mismatches (line-set
+diff on both corpora: 72/24 removed, 0 added); parity 28/28, determinism, 0-crash.
+Two review rounds (initial + delta after the fixpoint restructure): correctness 0
+bugs; adversarial the confirmed two-hop-chain finding REFUTED post-fix + 1
+crafted-only >32-link cap escape (documented GIGO). Root-cause IR/dataflow re-type
+(text and AST agree). Guards: move-kind fixtures in `dataflow_parity_test.cpp`.
+Residual: genuine object+int MERGES (a real ref def AND a real prim def that merge
+on one register) still need a version split.
+
 **Move-cycle resolution (2026-07).** A classification-first census of the residual
 found it was NOT dominated by the `genuine` set but by a `gt()` RESOLUTION gap: a
 version whose all-primitive/null defs reconverge through a move-DIAMOND or move-

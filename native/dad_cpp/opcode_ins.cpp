@@ -112,9 +112,14 @@ IRFormPtr AssignLit(std::string_view op_type, int64_t val_cst,
 namespace {
 
 // Shared move-family body (move / movefrom16 / movewide / moveobject / etc.).
-IRFormPtr MoveImpl(std::string_view dst, std::string_view src, Vmap& vmap) {
+// `kind` records the move OPCODE class (beyond-DAD ground-truth for the
+// type-inference pass — see MoveKind).
+IRFormPtr MoveImpl(std::string_view dst, std::string_view src, Vmap& vmap,
+                   MoveKind kind) {
     auto regs = GetVariables(vmap, {dst, src});
-    return std::make_shared<MoveExpression>(regs[0], regs[1]);
+    auto mv = std::make_shared<MoveExpression>(regs[0], regs[1]);
+    mv->set_move_kind(kind);
+    return mv;
 }
 
 // Shared move-result body.
@@ -141,15 +146,15 @@ IRFormPtr ConstNumImpl(std::string_view dst, int64_t value,
 IRFormPtr Nop() { return std::make_shared<NopExpression>(); }
 
 // DAD: opcode_ins.py:152-211 move family (10 variants, same body).
-IRFormPtr Move(std::string_view a, std::string_view b, Vmap& v)              { return MoveImpl(a, b, v); }
-IRFormPtr MoveFrom16(std::string_view aa, std::string_view bbbb, Vmap& v)    { return MoveImpl(aa, bbbb, v); }
-IRFormPtr Move16(std::string_view aaaa, std::string_view bbbb, Vmap& v)      { return MoveImpl(aaaa, bbbb, v); }
-IRFormPtr MoveWide(std::string_view a, std::string_view b, Vmap& v)          { return MoveImpl(a, b, v); }
-IRFormPtr MoveWideFrom16(std::string_view aa, std::string_view bbbb, Vmap& v){ return MoveImpl(aa, bbbb, v); }
-IRFormPtr MoveWide16(std::string_view aaaa, std::string_view bbbb, Vmap& v)  { return MoveImpl(aaaa, bbbb, v); }
-IRFormPtr MoveObject(std::string_view a, std::string_view b, Vmap& v)        { return MoveImpl(a, b, v); }
-IRFormPtr MoveObjectFrom16(std::string_view aa, std::string_view bbbb, Vmap& v){return MoveImpl(aa, bbbb, v);}
-IRFormPtr MoveObject16(std::string_view aaaa, std::string_view bbbb, Vmap& v){ return MoveImpl(aaaa, bbbb, v); }
+IRFormPtr Move(std::string_view a, std::string_view b, Vmap& v)              { return MoveImpl(a, b, v, MoveKind::Plain); }
+IRFormPtr MoveFrom16(std::string_view aa, std::string_view bbbb, Vmap& v)    { return MoveImpl(aa, bbbb, v, MoveKind::Plain); }
+IRFormPtr Move16(std::string_view aaaa, std::string_view bbbb, Vmap& v)      { return MoveImpl(aaaa, bbbb, v, MoveKind::Plain); }
+IRFormPtr MoveWide(std::string_view a, std::string_view b, Vmap& v)          { return MoveImpl(a, b, v, MoveKind::Wide); }
+IRFormPtr MoveWideFrom16(std::string_view aa, std::string_view bbbb, Vmap& v){ return MoveImpl(aa, bbbb, v, MoveKind::Wide); }
+IRFormPtr MoveWide16(std::string_view aaaa, std::string_view bbbb, Vmap& v)  { return MoveImpl(aaaa, bbbb, v, MoveKind::Wide); }
+IRFormPtr MoveObject(std::string_view a, std::string_view b, Vmap& v)        { return MoveImpl(a, b, v, MoveKind::Object); }
+IRFormPtr MoveObjectFrom16(std::string_view aa, std::string_view bbbb, Vmap& v){return MoveImpl(aa, bbbb, v, MoveKind::Object);}
+IRFormPtr MoveObject16(std::string_view aaaa, std::string_view bbbb, Vmap& v){ return MoveImpl(aaaa, bbbb, v, MoveKind::Object); }
 
 // DAD: opcode_ins.py:215-229 move-result family.
 IRFormPtr MoveResult(std::string_view aa, IRFormPtr ret, Vmap& v)       { return MoveResultImpl(aa, std::move(ret), v); }

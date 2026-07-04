@@ -505,6 +505,14 @@ static void InferCascadeTypes(Graph& graph, const std::string& ret_type) {
     // array type recovered from its def(s), so every array use becomes valid at
     // once (root-cause, vs a per-use `((T[]) v)` cast).
     std::unordered_set<std::string> array_use_vids;
+    // Move-opcode ground truth (beyond-DAD): a vid used as the SOURCE of a
+    // `move-object` provably holds a REFERENCE there; a vid used as the source of
+    // a `move`/`move-wide` provably holds a PRIMITIVE there. These corroborate a
+    // move-DEST re-type (below) AND, symmetrically, BLOCK it: a version whose def
+    // is a plain move (→ prim) but which is ALSO a move-object source is a
+    // GENUINE prim+ref conflation (no single type), so the guard leaves it.
+    std::unordered_set<std::string> moveobj_src_vids;   // source of a move-object
+    std::unordered_set<std::string> moveprim_src_vids;  // source of a move/-wide
     // `==`/`!=` ConditionalExpression operand pairs — resolved in a post-pass
     // (once defs_of is complete): if one operand is a nonzero int constant,
     // the other is proven a primitive and joins int_use_vids.
@@ -685,6 +693,23 @@ static void InferCascadeTypes(Graph& graph, const std::string& ret_type) {
                 }
             };
             note_arr(ins.get());
+            // Move-opcode ground truth: record the SOURCE vid by kind. A
+            // MoveResultExpression is a MoveExpression subclass but carries
+            // MoveKind::Unknown, so it is naturally excluded.
+            if (auto* mv = dynamic_cast<MoveExpression*>(ins.get())) {
+                switch (mv->move_kind()) {
+                    case MoveKind::Object:
+                        if (!mv->rhs_id().empty())
+                            moveobj_src_vids.insert(mv->rhs_id());
+                        break;
+                    case MoveKind::Plain:
+                    case MoveKind::Wide:
+                        if (!mv->rhs_id().empty())
+                            moveprim_src_vids.insert(mv->rhs_id());
+                        break;
+                    default: break;
+                }
+            }
             auto rhs = ins->get_rhs();
             if (!rhs.empty() && rhs[0]) { note_obj(rhs[0].get());
                 note_int(rhs[0].get()); note_arr(rhs[0].get()); }
@@ -1230,6 +1255,80 @@ static void InferCascadeTypes(Graph& graph, const std::string& ret_type) {
         }
     }
     for (auto& [var, t] : retypes) var->set_type(t);
+
+    // MOVE-OPCODE ground truth (beyond-DAD) — a SEPARATE fixpoint pass AFTER the
+    // cascade/mirror retypes are applied, so it reads FINAL types. A single-def
+    // version whose def is a MoveExpression carries the KIND of the moved value
+    // in the Dalvik opcode (move-object → reference, move/-wide → primitive).
+    // When the DECLARED type contradicts that kind the register was reused and
+    // DAD's last-write typed this version wrong (`int v3 = v24` where v24 is a
+    // View via move-object; `Listener v4 = v1` where v1 is an int via move) — the
+    // opcode is authoritative, so re-type the DEST to agree.
+    //
+    // Reads FINAL types (not the two-phase pre-mutation snapshot) — closes the
+    // reviewer-found hole where a source independently re-typed by the cascade/
+    // mirror would make `<Type> v = src` kind-INCONSISTENT (`ref v = primSrc`):
+    // the guard `is_ref(st)` / `is_prim_desc(st)` now sees the source's settled
+    // type. A BOUNDED FIXPOINT (iterate while changed, cap 32) converges a move
+    // CHAIN — fixing the first `move-object` link makes the second link's source
+    // a reference on the next round (a single pass would leave `int v2 = LFoo v1`
+    // because v1 was still primitive when v2 was visited).
+    //
+    // ANTI-CONFLATION GUARDS (unchanged): the version must NOT also be used as
+    // the contradicting kind — a direct use (`object_vids` — which includes
+    // return/throw/ref-arg/ref-field-store via `record` — / `int_use_vids`) OR a
+    // move-SOURCE of the contradicting opcode (`moveobj_src_vids` /
+    // `moveprim_src_vids`). A prim-move DEST that is also a move-object source is
+    // a GENUINE prim+ref conflation (no single Java type) and is left. On
+    // VERIFIED dex the move opcode is ground truth (the verifier rejects a
+    // move-object of a primitive, and a genuine primitive value stored via
+    // aput-object / ref-cast); on lenient dex an uncovered object-use position
+    // (aput-object / check-cast) is GIGO, matching the documented precedent.
+    //
+    // TERMINATION: each version's def is ONE move with ONE fixed opcode kind, so
+    // a version can fire at most its single matching branch (move-object → the
+    // →ref branch, needs cur_prim; move/-wide → the →prim branch, needs cur_ref)
+    // and, once flipped, its cur no longer satisfies that branch — so EVERY
+    // version re-types AT MOST ONCE. The fixpoint therefore converges in ≤(#move
+    // versions) rounds regardless of the cap, and a pure move-cycle with no
+    // ground-truth producer re-types nothing (is_ref/is_prim_desc never holds) →
+    // no oscillation. The `round < 32` cap is a crafted-input WORK backstop (not
+    // needed for correctness): a real move chain is ≤3 links (measured 0 added
+    // lines OFF→ON on 188k+43k methods), so 32 always fully converges. A crafted
+    // move-object chain LONGER than 32 links crossing a type-reuse boundary could
+    // truncate at the frontier and leave one boundary `int vK+1 = LFoo vK` line —
+    // deterministic (unseeded string-hash iteration + fixed cap), no crash, no
+    // worse than DAD's baseline on that crafted input; same "no silent cap"
+    // documented-GIGO posture as gt_budget / the emit-walk depth guard.
+    bool moved = true;
+    for (int round = 0; moved && round < 32; ++round) {
+        moved = false;
+        for (auto& [vid, dvec] : defs_of) {
+            if (dvec.size() != 1) continue;
+            auto* mv = dynamic_cast<MoveExpression*>(dvec[0]);
+            if (!mv) continue;
+            auto vit = dvec[0]->var_map.find(vid);
+            if (vit == dvec[0]->var_map.end() || !vit->second) continue;
+            const std::string cur = vit->second->get_type();
+            const bool cur_ref = is_ref(cur), cur_prim = is_prim_desc(cur);
+            if (!cur_ref && !cur_prim) continue;
+            auto srcr = mv->get_rhs();
+            IRForm* src = (!srcr.empty() && srcr[0]) ? srcr[0].get() : nullptr;
+            if (!src) continue;
+            const std::string st = src->get_type();  // FINAL source type
+            MoveKind mk = mv->move_kind();
+            if (mk == MoveKind::Object && cur_prim && is_ref(st) &&
+                !int_use_vids.count(vid) && !moveprim_src_vids.count(vid)) {
+                vit->second->set_type(st);
+                moved = true;
+            } else if ((mk == MoveKind::Plain || mk == MoveKind::Wide) &&
+                       cur_ref && is_prim_desc(st) &&
+                       !object_vids.count(vid) && !moveobj_src_vids.count(vid)) {
+                vit->second->set_type(st);
+                moved = true;
+            }
+        }
+    }
 }
 
 // Driver — DAD types every register version from the register's LAST write

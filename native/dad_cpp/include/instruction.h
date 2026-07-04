@@ -370,6 +370,15 @@ private:
     void Accept(Visitor& v) override;
 };
 
+// Beyond-DAD: the Dalvik move OPCODE (move / move-wide / move-object) fixes the
+// KIND of the moved value — move-object copies a reference, move a 32-bit prim,
+// move-wide a 64-bit prim. DAD collapses all three into one MoveExpression and
+// discards this; we keep it as a ground-truth signal for the type-inference pass
+// to correct a move-DEST whose declared type contradicts the opcode (a register-
+// reuse mistype). Default `Unknown` (move-result / synthesised moves that carry
+// no opcode kind) is inert.
+enum class MoveKind { Unknown, Plain, Wide, Object };
+
 // DAD: instruction.py:247 MoveExpression — register-to-register move IR.
 // DAD: instruction.py:248 __init__(lhs, rhs):
 //   - lhs/rhs are both Variable-like IRForms.
@@ -378,6 +387,10 @@ private:
 class MoveExpression : public IRForm {
 public:
     MoveExpression(IRFormPtr lhs, IRFormPtr rhs);
+
+    // Beyond-DAD move-opcode kind (see MoveKind). Set by the opcode handlers.
+    MoveKind move_kind() const noexcept { return move_kind_; }
+    void set_move_kind(MoveKind k) noexcept { move_kind_ = k; }
 
     // DAD: instruction.py:255 has_side_effect → False (explicit override).
     bool has_side_effect() const noexcept override { return false; }
@@ -411,6 +424,7 @@ public:
 protected:
     std::string lhs_;
     std::string rhs_;
+    MoveKind move_kind_ = MoveKind::Unknown;
     void Accept(Visitor& v) override;
 };
 

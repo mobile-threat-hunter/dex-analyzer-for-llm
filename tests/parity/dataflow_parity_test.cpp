@@ -443,6 +443,90 @@ int main() {
                   self->get_type(), "LSub;");
     }
 
+    // --- move-opcode ground truth (→ref): single-def move-object dest ---------
+    //   `move-object v0, v9` (v9 a reference) but v0 declared `int` by register
+    //   reuse — DAD's last-write mistyped this version. The main mirror needs an
+    //   OBJECT use for a single-def version, so it leaves it; the move-opcode
+    //   post-pass re-types v0 to the source's reference type (the opcode is
+    //   ground truth — a move-object copies a reference on verified Dalvik).
+    {
+        Graph g;
+        auto vref = std::make_shared<Variable>("v9");
+        vref->set_type("LBar;");
+        auto v0 = std::make_shared<Variable>("v0");
+        auto mv = std::make_shared<MoveExpression>(v0, vref);
+        mv->set_move_kind(MoveKind::Object);
+        v0->set_type("I");  // conflation mistype (declared a primitive)
+        StatementBlock blk("A", {mv});
+        ReturnBlock r("R", {});
+        g.add_node(&blk); g.add_node(&r);
+        g.add_edge(&blk, &r);
+        g.entry = &blk;
+        g.compute_rpo();
+        check_str("move-kind: mistyped int before fix", v0->get_type(), "I");
+        FixInitResultTypes(g);
+        check_str("move-kind: move-object dest re-typed to source ref LBar;",
+                  v0->get_type(), "LBar;");
+    }
+
+    // --- move-opcode ground truth: two-hop move-object CHAIN (fixpoint) --------
+    //   `move-object v0, v9; move-object v1, v0` — both dests declared int by
+    //   reuse. A single pass would fix v0 (source v9 ref) but leave v1 reading
+    //   v0's pre-fix `int` → residual `int v1 = LBar v0`. The bounded FIXPOINT
+    //   reading FINAL types converges: round 1 fixes v0, round 2 fixes v1.
+    {
+        Graph g;
+        auto vref = std::make_shared<Variable>("v9");
+        vref->set_type("LBar;");
+        auto v0 = std::make_shared<Variable>("v0");
+        auto mv0 = std::make_shared<MoveExpression>(v0, vref);
+        mv0->set_move_kind(MoveKind::Object);
+        v0->set_type("I");
+        auto v1 = std::make_shared<Variable>("v1");
+        auto mv1 = std::make_shared<MoveExpression>(v1, v0);
+        mv1->set_move_kind(MoveKind::Object);
+        v1->set_type("I");
+        StatementBlock blk("A", {mv0, mv1});
+        ReturnBlock r("R", {});
+        g.add_node(&blk); g.add_node(&r);
+        g.add_edge(&blk, &r);
+        g.entry = &blk;
+        g.compute_rpo();
+        FixInitResultTypes(g);
+        check_str("move-kind: chain link1 → ref", v0->get_type(), "LBar;");
+        check_str("move-kind: chain link2 → ref (fixpoint, no int=LBar residual)",
+                  v1->get_type(), "LBar;");
+    }
+
+    // --- move-opcode ground truth: anti-conflation guard leaves genuine merge --
+    //   v0 is a move-object DEST (→ would be ref) but ALSO a plain-move SOURCE
+    //   (`move v7, v0` — used as a primitive). That is a genuine prim+ref
+    //   conflation with no single Java type, so `!moveprim_src_vids` blocks the
+    //   →ref re-type and v0 is LEFT at DAD's type (a version split would be
+    //   needed). Guards against the pass "fixing" a real conflation.
+    {
+        Graph g;
+        auto vref = std::make_shared<Variable>("v9");
+        vref->set_type("LBar;");
+        auto v0 = std::make_shared<Variable>("v0");
+        auto mv0 = std::make_shared<MoveExpression>(v0, vref);   // v0 = move-object v9
+        mv0->set_move_kind(MoveKind::Object);
+        v0->set_type("I");
+        auto v7 = std::make_shared<Variable>("v7");
+        v7->set_type("I");
+        auto mv1 = std::make_shared<MoveExpression>(v7, v0);     // v7 = move v0 (plain)
+        mv1->set_move_kind(MoveKind::Plain);
+        StatementBlock blk("A", {mv0, mv1});
+        ReturnBlock r("R", {});
+        g.add_node(&blk); g.add_node(&r);
+        g.add_edge(&blk, &r);
+        g.entry = &blk;
+        g.compute_rpo();
+        FixInitResultTypes(g);
+        check_str("move-kind: conflation (move-obj dest + plain-move src) LEFT",
+                  v0->get_type(), "I");
+    }
+
     std::printf("\n%s — %d failure(s)\n", g_fail ? "FAIL" : "PASS", g_fail);
     return g_fail ? 1 : 0;
 }

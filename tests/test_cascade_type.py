@@ -281,13 +281,20 @@ def test_ref_equals_nonzero_int_bounded(scanned):
 def test_prim_ref_mismatch_var_assign_bounded():
     """`T1 v = v2;` where one of {T1, decl-type-of v2} is primitive and the other
     a reference is uncompilable — a register conflated across a prim and a ref
-    reused via a move. The prim→ref MIRROR fixes the sub-class where the version
-    is used at a REFERENCE-ARGUMENT position (`int v = findViewById(); removeView
-    (v)` → `View v`), now that note_obj corroborates ref-arg uses (not only
-    receiver / field-owner). This bounds the residual (bundled a/b 117 → 107); a
-    regression that disables the ref-arg corroboration jumps it back up. The
-    residual is genuine object+int merges + reference uses in still-uncovered
-    positions (return / throw / aput-object), which need a version split."""
+    reused via a move. Two fixes bound this residual: the prim→ref MIRROR (a
+    version used at a REFERENCE-ARGUMENT position — `int v = findViewById();
+    removeView(v)` → `View v`), and the MOVE-OPCODE ground truth (a single-def
+    move-DEST whose declared type contradicts the move opcode — `move-object` ⇒
+    reference, `move`/`move-wide` ⇒ primitive — is re-typed to agree, e.g.
+    `OnPrepareListViewListener v4 = v1` [v1 int via `move`] → `int v4 = v1`). The
+    move-opcode fix (a bounded-fixpoint post-pass reading FINAL types) cut the
+    bundled residual 108 → 36 (obfuscated 55 → 31) with 0 new mismatches (verified
+    by an OFF/ON line-set diff on both corpora — 72/24 removed, 0 added — the
+    fixpoint converges move CHAINS and reads settled source types so no
+    move-chain-boundary cascade appears). A regression toward ~108 means the
+    move-opcode kind plumbing or the corroboration regressed. The residual is
+    genuine object+int merges (a real ref def AND a real prim def on one register)
+    that need a version split."""
     apks = _apks()
     if not apks:
         pytest.skip("no test APK")
@@ -323,10 +330,10 @@ def test_prim_ref_mismatch_var_assign_bounded():
                     rt = dt.get(m.group(3))
                     if rt and (m.group(1) in prims) != (rt in prims):
                         mism += 1
-    assert mism <= 112, (
-        f"{mism} `T v = varOfOtherKind;` prim/ref-mismatch assigns (bundled ~107 "
-        f"after ref-arg corroboration; a jump toward ~117 means note_obj's "
-        f"ref-argument tagging regressed)."
+    assert mism <= 48, (
+        f"{mism} `T v = varOfOtherKind;` prim/ref-mismatch assigns (bundled ~36 "
+        f"after the move-opcode ground-truth fixpoint; a jump toward ~108 means "
+        f"the move-kind plumbing or corroboration regressed)."
     )
 
 
