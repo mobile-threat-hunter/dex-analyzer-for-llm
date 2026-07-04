@@ -260,9 +260,10 @@ public:
 
     // ─── visit_put_instance: DAD writer.py:524 ───────────────────────────
     void visit_put_instance(IRForm* lhs, std::string_view name,
-                            std::string_view ftype, IRForm* rhs) override {
+                            std::string_view ftype, IRForm* rhs,
+                            std::string_view owner) override {
         w_->WriteIndent();
-        visit_ins(lhs);
+        emit_base_maybe_cast(lhs, owner);  // `((Owner) v).field = …` for Object v
         w_->Write(".");
         w_->Write(name);
         w_->Write(" = ");
@@ -275,6 +276,26 @@ public:
     void visit_new(std::string_view atype, NewInstance* /*data*/) override {
         w_->Write("new ");
         w_->Write(GetType(atype));
+    }
+
+    // Beyond-DAD (LLM-comprehension): emit `((target) base)` when `base` is an
+    // Object-typed variable used where a MORE SPECIFIC reference type is known
+    // (a field owner, an array element), else emit `base` verbatim. Makes each
+    // Object-var use type-explicit for the consuming LLM. `this` is never cast
+    // (its type is the class); a no-op Object→Object target is skipped.
+    void emit_base_maybe_cast(IRForm* base, std::string_view target) {
+        if (base && !dynamic_cast<ThisParam*>(base)
+            && base->get_type() == "Ljava/lang/Object;"
+            && !target.empty() && target != "java.lang.Object"
+            && target != "Object") {
+            w_->Write("((");
+            w_->Write(std::string(target));
+            w_->Write(") ");
+            visit_ins(base);
+            w_->Write(")");
+        } else {
+            visit_ins(base);
+        }
     }
 
     // ─── visit_invoke: DAD writer.py:542 ─────────────────────────────────
@@ -635,8 +656,9 @@ public:
         }
     }
     void visit_get_instance(IRForm* arg, std::string_view name,
-                            std::string_view /*ftype*/) override {
-        visit_ins(arg);
+                            std::string_view /*ftype*/,
+                            std::string_view owner) override {
+        emit_base_maybe_cast(arg, owner);  // `((Owner) v).field` for Object v
         w_->Write(".");
         w_->Write(name);
     }

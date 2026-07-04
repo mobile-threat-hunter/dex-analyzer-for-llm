@@ -472,3 +472,57 @@ def test_object_typed_use_gets_explicit_cast():
         f"{noop} `((Object) v).m()` no-op casts — the Object→Object exclusion "
         f"regressed."
     )
+
+
+def test_object_typed_field_access_gets_owner_cast():
+    """An Object-typed variable used as the OWNER of a field access (`v.field`
+    read or write) gets an explicit `((OwnerClass) v).field` cast, so the LLM
+    sees the receiver's real type (Kotlin coroutine state machines reuse a
+    register as the Continuation and access `.label` / `.L$0`; DAD leaves the
+    uncompilable `Object v; v.label`). Corpus-scan: assert the cast form fires
+    and no `Object v; v.<non-Object-field>` receiver survives beyond a small
+    residual (field owner unknown / not covered)."""
+    apks = _apks()
+    if not apks:
+        pytest.skip("no test APK")
+    _OBJM = {"toString", "hashCode", "equals", "getClass", "notify",
+             "notifyAll", "wait", "length"}
+    field_casts = uncast = 0
+    for apk in apks:
+        try:
+            if dexllm.identify(apk).get("dex_count", 0) == 0:
+                continue
+            dk = dexllm.DexKit(apk)
+        except Exception:
+            continue
+        n = 0
+        for c in dk.list_classes():
+            if n >= 6000:
+                break
+            n += 1
+            try:
+                methods = dk.list_class_methods(c)
+            except Exception:
+                continue
+            for desc in methods:
+                out = safe_decompile_method_java(dk, desc, timeout=10.0)
+                if is_timeout_marker(out) or not out:
+                    continue
+                # `((Owner) v).field` — a cast immediately owning a field access
+                field_casts += len(re.findall(
+                    r"\(\([A-Za-z][\w.$]*\)\s+[vp]\w+\)\.[A-Za-z]", out))
+                # residual: `Object v` whose name is a bare field/method owner
+                for v in set(re.findall(r"\bObject (v\w+)\s*[;=]", out)):
+                    for mm in re.finditer(
+                            r"(?<![\w.])" + re.escape(v) + r"\.(\w+)", out):
+                        if mm.group(1) not in _OBJM:
+                            uncast += 1
+    # the owner-cast machinery fires (field-access + receiver casts)
+    assert field_casts > 0, (
+        "no `((Owner) v).field/method` casts — the owner-cast pass is off")
+    # bundled residual `Object v; v.member` is small (field-owner unknown /
+    # array positions not yet covered — a later cut). Was ~12 before the field
+    # cast; the receiver + field casts cut it to ~1.
+    assert uncast <= 5, (
+        f"{uncast} `Object v; v.member` uncast receivers — the owner-cast "
+        f"regressed (was ~1 after the field-access cast).")

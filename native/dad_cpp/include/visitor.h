@@ -87,7 +87,8 @@ public:
     virtual void visit_put_instance(IRForm* /*lhs*/,
                                     std::string_view /*name*/,
                                     std::string_view /*ftype*/,
-                                    IRForm* /*rhs*/)                 {}
+                                    IRForm* /*rhs*/,
+                                    std::string_view /*owner*/ = {}) {}
     virtual void visit_new(std::string_view /*atype*/,
                            NewInstance* /*data*/)                    {}
 
@@ -143,7 +144,8 @@ public:
                                          IRForm* /*arg*/)              {}
     virtual void visit_get_instance(IRForm* /*arg*/,
                                      std::string_view /*name*/,
-                                     std::string_view /*ftype*/)      {}
+                                     std::string_view /*ftype*/,
+                                     std::string_view /*owner*/ = {}) {}
     virtual void visit_get_static(std::string_view /*cls*/,
                                    std::string_view /*name*/)         {}
 

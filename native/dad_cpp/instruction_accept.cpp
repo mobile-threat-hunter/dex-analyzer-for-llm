@@ -93,7 +93,8 @@ void StaticInstruction::Accept(Visitor& v) {
 }
 
 void InstanceInstruction::Accept(Visitor& v) {
-    v.visit_put_instance(MapGet(*this, lhs_), name_, atype(), MapGet(*this, rhs_));
+    v.visit_put_instance(MapGet(*this, lhs_), name_, atype(), MapGet(*this, rhs_),
+                         cls());
 }
 
 // =============================================================================
@@ -206,7 +207,7 @@ void ConditionalZExpression::Accept(Visitor& v) {
 }
 
 void InstanceExpression::Accept(Visitor& v) {
-    v.visit_get_instance(MapGet(*this, arg_), name_, ftype_);
+    v.visit_get_instance(MapGet(*this, arg_), name_, ftype_, cls());
 }
 
 void StaticExpression::Accept(Visitor& v) {
