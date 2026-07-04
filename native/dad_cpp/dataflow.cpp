@@ -505,6 +505,18 @@ static void InferCascadeTypes(Graph& graph) {
     auto note_obj = [&](IRForm* f) {
         if (auto* inv = dynamic_cast<InvokeInstruction*>(f)) {
             if (!inv->base().empty()) object_vids.insert(inv->base());
+            // A value passed at a REFERENCE parameter position is provably a
+            // reference in valid Dalvik (you cannot pass an int where a `Lcls;`/
+            // array param is declared), so it corroborates the object type — the
+            // mirror re-types a `prim v` used ONLY as `m(v)` at a ref-arg (e.g.
+            // `int v3 = findViewById(); removeView(v3)` → `View v3`), and the
+            // ref→prim cascade conservatively skips it. args↔ptype are 1:1
+            // (ParseParamsType); a size mismatch (varargs edge) is skipped.
+            const auto& a = inv->args();
+            const auto& pt = inv->ptype();
+            if (a.size() == pt.size())
+                for (size_t i = 0; i < a.size(); ++i)
+                    if (!a[i].empty() && is_ref(pt[i])) object_vids.insert(a[i]);
         } else if (auto* ie = dynamic_cast<InstanceExpression*>(f)) {
             if (!ie->arg_id().empty()) object_vids.insert(ie->arg_id());
         } else if (auto* ii = dynamic_cast<InstanceInstruction*>(f)) {

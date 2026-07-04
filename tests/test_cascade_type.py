@@ -276,3 +276,55 @@ def test_ref_equals_nonzero_int_bounded(scanned):
         f"reference). Bundled ~8 after the eq/ne pass (baseline ~100 without it); "
         f"a jump means the eq/ne re-type is disabled or regressed."
     )
+
+
+def test_prim_ref_mismatch_var_assign_bounded():
+    """`T1 v = v2;` where one of {T1, decl-type-of v2} is primitive and the other
+    a reference is uncompilable — a register conflated across a prim and a ref
+    reused via a move. The prim→ref MIRROR fixes the sub-class where the version
+    is used at a REFERENCE-ARGUMENT position (`int v = findViewById(); removeView
+    (v)` → `View v`), now that note_obj corroborates ref-arg uses (not only
+    receiver / field-owner). This bounds the residual (bundled a/b 117 → 107); a
+    regression that disables the ref-arg corroboration jumps it back up. The
+    residual is genuine object+int merges + reference uses in still-uncovered
+    positions (return / throw / aput-object), which need a version split."""
+    apks = _apks()
+    if not apks:
+        pytest.skip("no test APK")
+    prims = set(_PRIMS)
+    decl = re.compile(r"^\s*([A-Za-z_][\w.$]*(?:\[\])*)\s+(v\w+)\s*[=;]", re.M)
+    assign = re.compile(
+        r"^\s*([A-Za-z_][\w.$]*(?:\[\])*)\s+(v\w+)\s*=\s*(v\w+)\s*;", re.M)
+    mism = 0
+    for apk in apks:
+        try:
+            if dexllm.identify(apk).get("dex_count", 0) == 0:
+                continue
+            dk = dexllm.DexKit(apk)
+        except Exception:
+            continue
+        per = 0
+        for c in dk.list_classes():
+            if per >= 6000:
+                break
+            per += 1
+            try:
+                methods = dk.list_class_methods(c)
+            except Exception:
+                continue
+            for desc in methods:
+                out = safe_decompile_method_java(dk, desc, timeout=10.0)
+                if is_timeout_marker(out) or not out:
+                    continue
+                dt = {}
+                for m in decl.finditer(out):
+                    dt.setdefault(m.group(2), m.group(1))
+                for m in assign.finditer(out):
+                    rt = dt.get(m.group(3))
+                    if rt and (m.group(1) in prims) != (rt in prims):
+                        mism += 1
+    assert mism <= 112, (
+        f"{mism} `T v = varOfOtherKind;` prim/ref-mismatch assigns (bundled ~107 "
+        f"after ref-arg corroboration; a jump toward ~117 means note_obj's "
+        f"ref-argument tagging regressed)."
+    )
