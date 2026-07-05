@@ -15,6 +15,7 @@
 #pragma once
 
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace dexkit::ext {
@@ -83,5 +84,26 @@ IocResult ExtractIocs(DexKitExt& ext, bool with_xref = true, bool denoise = true
 // differential against the Python scan (the corpus gate cannot inject strings).
 // Returns each category's sorted values (IocIndicator.methods empty).
 IocResult IocScanStrings(const std::vector<std::string>& strings);
+
+// One content:// provider-URI hit: a bundled dataset URI referenced by the app,
+// its provider `family`, and the referencing methods (xref).
+struct ProviderHit {
+    std::string uri;
+    std::string family;
+    std::vector<std::string> methods;
+};
+
+// Mirror of dexllm.providers.detect_content_providers (issue #13). A bundled
+// content:// URI (gen/content_uris_data.h) is reported iff it occurs as a
+// SUBSTRING of some value-string; `family` comes from the dataset and (with_xref)
+// `methods` from the same L7 search the network IoCs use. Sorted by URI.
+std::vector<ProviderHit> DetectContentProviders(DexKitExt& ext,
+                                                bool with_xref = true,
+                                                int xref_limit = 300);
+
+// Test seam: the content:// substring match over a SUPPLIED string list (no xref).
+// Returns (uri, family) hits sorted by URI, mirroring providers.match_content_uris.
+std::vector<std::pair<std::string, std::string>> DetectProvidersFromStrings(
+    const std::vector<std::string>& strings);
 
 }  // namespace dexkit::ext

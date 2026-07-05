@@ -14,13 +14,19 @@ from __future__ import annotations
 
 import glob
 import random
+import re
 from pathlib import Path
 
 import pytest
 
 import dexllm
-from dexllm._dexkit_core import _ioc_scan_strings
+from dexllm._dexkit_core import _detect_providers_from_strings, _ioc_scan_strings
 from dexllm.ioc import IOC_CATEGORIES, _scan_value_strings, extract_iocs
+from dexllm.providers import (
+    detect_content_providers,
+    load_content_uris,
+    match_content_uris,
+)
 
 REPO = Path(__file__).resolve().parents[1]
 _APKS = sorted(glob.glob(str(REPO / "test_apk" / "APK" / "*.apk")))
@@ -52,6 +58,22 @@ def test_extract_iocs_native_matches_python(apk):
         assert cpp == py, (
             f"{Path(apk).name} cfg=({with_xref},{denoise},{xref_limit}): "
             f"C++ ExtractIocs diverges from Python extract_iocs"
+        )
+
+    # content:// providers (issue #13) — same byte-identical contract. Methods are
+    # compared IN ORDER (not sorted): both bindings call one FindMethodsUsingStrings,
+    # so order/dedup must match too. xref_limit 0 and 1 exercise the budget-exhausted
+    # tail (hits past the budget must still be reported with empty methods).
+    def _pnorm(rows):
+        return [(r["uri"], r["family"], tuple(r["methods"])) for r in rows]
+
+    for with_xref, xref_limit in [(True, 300), (False, 300), (True, 1), (True, 0)]:
+        pyp = _pnorm(detect_content_providers(dk, with_xref=with_xref,
+                                              xref_limit=xref_limit))
+        cppp = _pnorm(dk.detect_content_providers_native(with_xref, xref_limit))
+        assert cppp == pyp, (
+            f"{Path(apk).name} cfg=({with_xref},{xref_limit}): "
+            f"C++ DetectContentProviders diverges from Python"
         )
 
 
@@ -104,6 +126,60 @@ def test_scan_fuzz_differential():
         got = _norm_scan(_ioc_scan_strings([s]))
         want = _norm_scan(_scan_value_strings([s], False, frozenset()))
         assert got == want, f"scanner fuzz divergence on {s!r}: C++={got} Python={want}"
+
+
+# --- content:// provider substring-match differential (crafted + fuzz). ---
+
+def test_content_uris_header_in_sync_with_dataset():
+    """The committed gen/content_uris_data.h must match data/content_uris.json.
+
+    The C++ port never re-sorts — it trusts the codegen-baked array — so a stale
+    header (JSON edited without re-running scripts/gen_content_uris_data.py) would
+    silently diverge from the Python path. This is the deterministic guard the
+    fuzz differential only catches probabilistically.
+    """
+    header = (REPO / "native" / "core_ext" / "gen" / "content_uris_data.h").read_text()
+    pairs = re.findall(r'\{"((?:[^"\\]|\\.)*)",\s*"((?:[^"\\]|\\.)*)"\}', header)
+    header_rows = [
+        (u.encode().decode("unicode_escape"), f.encode().decode("unicode_escape"))
+        for u, f in pairs
+    ]
+    dataset = load_content_uris()
+    expected = sorted((uri, meta["family"]) for uri, meta in dataset.items())
+    assert header_rows == expected, (
+        "content_uris_data.h is out of sync with content_uris.json — "
+        "re-run scripts/gen_content_uris_data.py"
+    )
+
+
+def test_provider_match_seam_crafted():
+    keys = list(load_content_uris())
+    cases = [
+        "content://sms/inbox/1", "content://smsfoo", "xcontent://sms",
+        "content://call_log/calls/filter/9", "no-provider-here", "content://",
+        keys[0], keys[-1], keys[5] + "/extra",
+    ]
+    for s in cases:
+        assert [tuple(t) for t in _detect_providers_from_strings([s])] == \
+            match_content_uris([s]), f"provider seam diverges on {s!r}"
+
+
+def test_provider_match_seam_fuzz():
+    """Random strings from content:// fragments: C++ substring match == Python."""
+    keys = list(load_content_uris())
+    frags = keys[:40] + [
+        "content://", "content://sms/inbox/1", "content://smsfoo", "xcontent://x",
+        "random", "content://contacts/people/", "", "沖content://sms",
+    ]
+    tails = ["", "/9", "z", "/data", "?q=1"]
+    rng = random.Random(31)
+    for _ in range(20000):
+        batch = [
+            rng.choice(frags) + rng.choice(tails)
+            for _ in range(rng.randint(0, 3))
+        ]
+        got = [tuple(t) for t in _detect_providers_from_strings(batch)]
+        assert got == match_content_uris(batch), f"provider fuzz divergence on {batch!r}"
 
 
 @pytest.mark.skipif(not _APKS, reason="no bundled test APK")

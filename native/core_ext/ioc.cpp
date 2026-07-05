@@ -30,6 +30,7 @@
 #include <vector>
 
 #include "dexkit_ext.h"
+#include "gen/content_uris_data.h"
 #include "gen/word_ranges.h"
 #include "public_suffix.h"
 
@@ -637,6 +638,51 @@ IocResult IocScanStrings(const std::vector<std::string>& strings) {
     r.emails = to_rows(emails);
     r.onion = to_rows(onion);
     return r;
+}
+
+std::vector<std::pair<std::string, std::string>> DetectProvidersFromStrings(
+    const std::vector<std::string>& strings) {
+    // Fast filter: only the value-strings that mention content:// at all.
+    std::vector<const std::string*> candidates;
+    for (const std::string& s : strings)
+        if (s.find("content://") != std::string::npos) candidates.push_back(&s);
+
+    // A dataset URI (kContentUris is sorted) is a hit iff it is a substring of some
+    // candidate. Iterating the sorted array yields hits already in URI order,
+    // matching the Python path's sorted iteration.
+    std::vector<std::pair<std::string, std::string>> hits;
+    for (const auto& [uri, family] : gen::kContentUris) {
+        for (const std::string* s : candidates) {
+            if (s->find(uri) != std::string::npos) {
+                hits.emplace_back(std::string(uri), std::string(family));
+                break;
+            }
+        }
+    }
+    return hits;
+}
+
+std::vector<ProviderHit> DetectContentProviders(DexKitExt& ext, bool with_xref,
+                                                int xref_limit) {
+    int budget = xref_limit;
+    std::vector<ProviderHit> result;
+    for (auto& [uri, family] : DetectProvidersFromStrings(ext.ListValueStrings())) {
+        ProviderHit ph;
+        ph.uri = uri;
+        ph.family = family;
+        if (with_xref && budget > 0) {
+            try {
+                for (const auto& m : ext.FindMethodsUsingStrings(
+                         {uri}, /*match_type=*/"contains", /*ignore_case=*/false))
+                    ph.methods.push_back(m.descriptor);
+            } catch (...) {
+                ph.methods.clear();
+            }
+            --budget;
+        }
+        result.push_back(std::move(ph));
+    }
+    return result;
 }
 
 }  // namespace dexkit::ext

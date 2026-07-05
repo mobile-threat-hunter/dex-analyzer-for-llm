@@ -62,6 +62,7 @@ from .filters import (
 from .format import format_class, format_class_summary
 from .ioc import IOC_CATEGORIES, extract_iocs
 from .packer import add_dumped_dexes
+from .providers import detect_content_providers
 from .safe import (
     DEFAULT_TIMEOUT_S,
     is_timeout_marker,
@@ -89,6 +90,7 @@ __all__ = [
     "IOC_CATEGORIES",
     "dangerous_permission_apis",
     "dangerous_permission_api_callers",
+    "detect_content_providers",
     "extract_iocs",
     "find_call_sites_to_ref",
     "format_class",

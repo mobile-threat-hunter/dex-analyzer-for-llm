@@ -228,6 +228,22 @@ public:
         out["onion"] = to_list(r.onion);
         return out;
     }
+
+    // Issue #13: content:// provider-URI detection. C++ port of
+    // dexllm.providers.detect_content_providers, shared with the WASM binding.
+    // Returns [{"uri", "family", "methods"}] sorted by URI.
+    py::list detect_content_providers_native(bool with_xref, int xref_limit) {
+        py::list out;
+        for (const auto& h : dexkit::ext::DetectContentProviders(ext_, with_xref,
+                                                                 xref_limit)) {
+            py::dict d;
+            d["uri"] = h.uri;
+            d["family"] = h.family;
+            d["methods"] = py::cast(h.methods);
+            out.append(d);
+        }
+        return out;
+    }
     dexkit::ext::ClassSummary
     get_class_summary(const std::string& descriptor) const {
         return ext_.GetClassSummary(descriptor);
@@ -731,6 +747,12 @@ PYBIND11_MODULE(_dexkit_core, m) {
              "Issue #13: network-IoC extraction (URLs/IPs/domains/emails/onion) "
              "with bundled public-suffix data. C++ engine port shared with the "
              "WASM binding; mirrors dexllm.ioc.extract_iocs.")
+        .def("detect_content_providers_native",
+             &PyDexKit::detect_content_providers_native,
+             py::arg("with_xref") = true, py::arg("xref_limit") = 300,
+             "Issue #13: content:// provider-URI detection over bundled AOSP data. "
+             "C++ engine port shared with the WASM binding; mirrors "
+             "dexllm.providers.detect_content_providers.")
         .def("decompile_class", &PyDexKit::decompile_class,
              py::arg("class_descriptor"))
         .def("decompile_method", &PyDexKit::decompile_method,
@@ -773,4 +795,20 @@ PYBIND11_MODULE(_dexkit_core, m) {
         py::arg("strings"),
         "Test seam: C++ IoC scanners over a supplied string list (denoise off, no "
         "xref). Returns {category: [value]}. Mirrors dexllm.ioc._scan_value_strings.");
+
+    // Test seam for content:// providers (issue #13): the substring match over a
+    // supplied string list (no xref). Returns [(uri, family)] sorted by URI.
+    m.def(
+        "_detect_providers_from_strings",
+        [](const std::vector<std::string>& strings) {
+            py::list out;
+            for (auto& [uri, family] :
+                 dexkit::ext::DetectProvidersFromStrings(strings)) {
+                out.append(py::make_tuple(uri, family));
+            }
+            return out;
+        },
+        py::arg("strings"),
+        "Test seam: content:// substring match over a supplied string list. "
+        "Returns [(uri, family)]. Mirrors dexllm.providers.match_content_uris.");
 }

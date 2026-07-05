@@ -305,6 +305,16 @@ public-suffix data (`native/core_ext/gen/psl_data.h`), instead of a consumer
 re-implementing the scan and shipping its own PSL copy. Prefer the Python
 `extract_iocs` in Python code; this is the WASM-shared backend.
 
+### `dexllm.detect_content_providers(dk, *, with_xref=True, xref_limit=300) -> list`
+The `content://` provider query-URIs (SMS / contacts / call-log / calendar handles
+that `ContentResolver` takes — the surface `READ_SMS`/`READ_CONTACTS` gate, invisible
+to the `@RequiresPermission` signature map because the `Uri` is assembled at runtime)
+referenced by the app's value-strings, matched against a bundled AOSP-derived dataset
+(`data/content_uris.json`). Returns `[{'uri', 'family', 'methods'}]` sorted by URI; a
+dataset URI is a hit iff it occurs as a substring of some value-string.
+`dk.detect_content_providers_native(with_xref=True, xref_limit=300)` is the
+byte-identical C++ engine port shared with the WASM binding (issue #13).
+
 ---
 
 ## 9. Dangerous permission APIs (Python)
