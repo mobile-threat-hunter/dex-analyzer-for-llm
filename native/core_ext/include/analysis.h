@@ -14,6 +14,7 @@
 
 #pragma once
 
+#include <map>
 #include <string>
 #include <utility>
 #include <vector>
@@ -105,5 +106,37 @@ std::vector<ProviderHit> DetectContentProviders(DexKitExt& ext,
 // Returns (uri, family) hits sorted by URI, mirroring providers.match_content_uris.
 std::vector<std::pair<std::string, std::string>> DetectProvidersFromStrings(
     const std::vector<std::string>& strings);
+
+// ---------------------------------------------------------------------------
+// Capability summarisation (issue #13, Phase 2) — C++ port of
+// dexllm.capability.summarize_capabilities over the bundled API catalog
+// (gen/android_api_data.h), shared with the pybind + embind bindings.
+
+// One catalog API found in the APK.
+struct CapabilityApiHit {
+    std::string api_signature;
+    std::vector<std::string> permissions;  // catalog order (may be empty)
+    std::vector<std::string> categories;   // catalog order
+    int call_site_count = 0;               // total call sites (not distinct callers)
+    std::vector<std::string> callers;      // distinct caller descriptors, sorted
+};
+
+// Aggregated capability profile. Counts are sorted maps (order-insensitive vs the
+// Python Counter; deterministic for serialisation). api_hits is in catalog order.
+struct CapabilityReport {
+    std::map<std::string, int> permissions;  // permission -> #invocations
+    std::map<std::string, int> categories;   // category  -> #invocations
+    std::map<std::string, std::vector<std::string>> by_caller;  // caller -> sorted perms
+    std::vector<CapabilityApiHit> api_hits;
+    int total_call_sites = 0;
+    std::string catalog_version;
+    int catalog_size = 0;
+    int matched_apis = 0;
+};
+
+// Walk the bundled catalog, resolve each API's call sites (FindCallSitesToApi),
+// aggregate permissions / categories / by-caller. Mirrors summarize_capabilities
+// (without the only_categories filter). Deterministic (sorted maps + callers).
+CapabilityReport SummarizeCapabilities(DexKitExt& ext);
 
 }  // namespace dexkit::ext

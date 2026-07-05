@@ -229,6 +229,35 @@ public:
         return out;
     }
 
+    // Issue #13 (Phase 2): capability summarisation. C++ port of
+    // dexllm.capability.summarize_capabilities, shared with the WASM binding.
+    py::dict summarize_capabilities_native() {
+        auto r = dexkit::ext::SummarizeCapabilities(ext_);
+        py::dict out;
+        out["permissions"] = py::cast(r.permissions);
+        out["categories"] = py::cast(r.categories);
+        py::dict by_caller;
+        for (const auto& [caller, perms] : r.by_caller)
+            by_caller[py::str(caller)] = py::cast(perms);
+        out["by_caller"] = by_caller;
+        py::list hits;
+        for (const auto& h : r.api_hits) {
+            py::dict hd;
+            hd["api_signature"] = h.api_signature;
+            hd["permissions"] = py::cast(h.permissions);
+            hd["categories"] = py::cast(h.categories);
+            hd["call_site_count"] = h.call_site_count;
+            hd["callers"] = py::cast(h.callers);
+            hits.append(hd);
+        }
+        out["api_hits"] = hits;
+        out["total_call_sites"] = r.total_call_sites;
+        out["catalog_version"] = r.catalog_version;
+        out["catalog_size"] = r.catalog_size;
+        out["matched_apis"] = r.matched_apis;
+        return out;
+    }
+
     // Issue #13: content:// provider-URI detection. C++ port of
     // dexllm.providers.detect_content_providers, shared with the WASM binding.
     // Returns [{"uri", "family", "methods"}] sorted by URI.
@@ -753,6 +782,11 @@ PYBIND11_MODULE(_dexkit_core, m) {
              "Issue #13: content:// provider-URI detection over bundled AOSP data. "
              "C++ engine port shared with the WASM binding; mirrors "
              "dexllm.providers.detect_content_providers.")
+        .def("summarize_capabilities_native",
+             &PyDexKit::summarize_capabilities_native,
+             "Issue #13 (Phase 2): capability profile over the bundled API->"
+             "permission/category catalog. C++ engine port shared with the WASM "
+             "binding; mirrors dexllm.capability.summarize_capabilities.")
         .def("decompile_class", &PyDexKit::decompile_class,
              py::arg("class_descriptor"))
         .def("decompile_method", &PyDexKit::decompile_method,
