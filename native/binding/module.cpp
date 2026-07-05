@@ -12,6 +12,7 @@
 #include <unordered_set>
 #include <vector>
 
+#include "analysis.h"
 #include "api_ref.h"
 #include "decompiler.h"
 #include "dexitem_code_source.h"
@@ -179,6 +180,29 @@ public:
         return ext_.FindCallSitesToApi(api_descriptor);
     }
     void warm_analysis_caches() { ext_.WarmAnalysisCaches(); }
+
+    // Issue #13 — engine-side permission→API→callers join (bundled data). Mirrors
+    // dexllm.dangerous_api.dangerous_permission_api_callers; the same C++ join
+    // backs the WASM binding, so both consumers share one implementation + data.
+    py::list permission_callers(bool app_only) {
+        py::list out;
+        for (const auto& g : dexkit::ext::PermissionCallers(ext_, app_only)) {
+            py::dict gd;
+            gd["perm"] = g.perm;
+            gd["protectionLevel"] = g.protection_level;
+            py::list rows;
+            for (const auto& r : g.rows) {
+                py::dict rd;
+                rd["api"] = r.api;
+                rd["descriptors"] = py::cast(r.descriptors);
+                rd["callers"] = py::cast(r.callers);
+                rows.append(rd);
+            }
+            gd["rows"] = rows;
+            out.append(gd);
+        }
+        return out;
+    }
     dexkit::ext::ClassSummary
     get_class_summary(const std::string& descriptor) const {
         return ext_.GetClassSummary(descriptor);
@@ -671,6 +695,11 @@ PYBIND11_MODULE(_dexkit_core, m) {
              "First call warms upstream analysis caches (may take a few seconds).")
         .def("warm_analysis_caches", &PyDexKit::warm_analysis_caches,
              "Eagerly warm upstream caches needed for L2/L4 (otherwise lazy).")
+        .def("permission_callers", &PyDexKit::permission_callers,
+             py::arg("app_only") = true,
+             "Issue #13: dangerous permission → used API → callers (bundled AOSP "
+             "data). C++ engine join shared with the WASM binding; mirrors "
+             "dexllm.dangerous_permission_api_callers.")
         .def("decompile_class", &PyDexKit::decompile_class,
              py::arg("class_descriptor"))
         .def("decompile_method", &PyDexKit::decompile_method,
