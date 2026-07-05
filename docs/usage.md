@@ -368,6 +368,39 @@ MCP tool (returns `{indicators, counts}`).
 > `iocextract` was evaluated but its regexes backtrack catastrophically on the dotted
 > blobs dex strings contain, so only the safe `tldextract` PSL lookup is used.
 
+### `content://` provider query URIs
+
+The `content://` URIs a `ContentResolver` reads are the real handles for
+SMS / contacts / call-log / calendar — the surface `READ_SMS` / `READ_CONTACTS`
+gate, and invisible to the `@RequiresPermission` map (the `Uri` is assembled at
+runtime). `detect_content_providers` matches the app's value-strings against a
+bundled AOSP provider-URI dataset (`src/dexllm/data/content_uris.json`):
+
+```python
+for hit in dexllm.detect_content_providers(dk):
+    print(hit["uri"], hit["family"], "<-", hit["methods"][:1])
+# content://sms sms <- ['Lb/g/a/m/f;->run()V']
+```
+
+### Engine C++ ports (shared with the WASM binding)
+
+`extract_iocs`, `detect_content_providers`, `summarize_capabilities`, and
+`dangerous_permission_api_callers` each have a byte-identical **C++ engine port** —
+`dk.extract_iocs_native()`, `dk.detect_content_providers_native()`,
+`dk.summarize_capabilities_native()`, `dk.permission_callers()` — so the WASM
+(embind) binding and pybind run **one implementation over the engine-bundled AOSP
+datasets** (issue #13), instead of a consumer re-implementing the join and shipping
+its own copy. Prefer the Python functions in Python code; the `*_native` variants
+are the WASM-shared backend, verified byte-identical by a full-corpus + fuzz
+differential (`tests/test_ioc_native.py`, `tests/test_capability_native.py`).
+
+The bundled AOSP data — the dangerous `@RequiresPermission` slice
+(`dangerous_perm_api.json`) and the provider URIs (`content_uris.json`) — is a
+committed snapshot of [aosp_data_set](https://github.com/mobile-threat-hunter/aosp_data_set)
+(dangerous slice + content-URI CSVs), verified in sync with upstream as of the
+2026-07-04 dataset revision. (`android_api_map.json` is a separate hand-seed catalog
+for `summarize_capabilities`, extend at will.)
+
 ---
 
 ## Dangerous-permission API usage
