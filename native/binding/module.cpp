@@ -203,6 +203,31 @@ public:
         }
         return out;
     }
+
+    // Issue #13: network-IoC extraction. C++ port of dexllm.ioc.extract_iocs,
+    // shared with the WASM binding. Returns the same shape as the Python API —
+    // {category: [{"value": str, "methods": [str]}]} in IOC_CATEGORIES order — so
+    // it can be verified byte-identical against extract_iocs.
+    py::dict extract_iocs_native(bool with_xref, bool denoise, int xref_limit) {
+        auto r = dexkit::ext::ExtractIocs(ext_, with_xref, denoise, xref_limit);
+        auto to_list = [](const std::vector<dexkit::ext::IocIndicator>& rows) {
+            py::list out;
+            for (const auto& ind : rows) {
+                py::dict d;
+                d["value"] = ind.value;
+                d["methods"] = py::cast(ind.methods);
+                out.append(d);
+            }
+            return out;
+        };
+        py::dict out;
+        out["urls"] = to_list(r.urls);
+        out["ips"] = to_list(r.ips);
+        out["domains"] = to_list(r.domains);
+        out["emails"] = to_list(r.emails);
+        out["onion"] = to_list(r.onion);
+        return out;
+    }
     dexkit::ext::ClassSummary
     get_class_summary(const std::string& descriptor) const {
         return ext_.GetClassSummary(descriptor);
@@ -700,6 +725,12 @@ PYBIND11_MODULE(_dexkit_core, m) {
              "Issue #13: dangerous permission → used API → callers (bundled AOSP "
              "data). C++ engine join shared with the WASM binding; mirrors "
              "dexllm.dangerous_permission_api_callers.")
+        .def("extract_iocs_native", &PyDexKit::extract_iocs_native,
+             py::arg("with_xref") = true, py::arg("denoise") = true,
+             py::arg("xref_limit") = 300,
+             "Issue #13: network-IoC extraction (URLs/IPs/domains/emails/onion) "
+             "with bundled public-suffix data. C++ engine port shared with the "
+             "WASM binding; mirrors dexllm.ioc.extract_iocs.")
         .def("decompile_class", &PyDexKit::decompile_class,
              py::arg("class_descriptor"))
         .def("decompile_method", &PyDexKit::decompile_method,
@@ -717,4 +748,29 @@ PYBIND11_MODULE(_dexkit_core, m) {
           py::arg("descriptor"),
           "Returns true if the descriptor uses a known framework prefix "
           "(Landroid/, Ljava/, Lkotlin/, ...).");
+
+    // Test seam for the IoC scanners (issue #13): run refang + the five scanners +
+    // PSL validation over a supplied string list (denoise off, no xref), returning
+    // {category: [value, ...]}. Lets the differential test inject crafted strings
+    // the corpus-only gate cannot reach. Not part of the stable public API.
+    m.def(
+        "_ioc_scan_strings",
+        [](const std::vector<std::string>& strings) {
+            auto r = dexkit::ext::IocScanStrings(strings);
+            auto vals = [](const std::vector<dexkit::ext::IocIndicator>& rows) {
+                py::list out;
+                for (const auto& ind : rows) out.append(ind.value);
+                return out;
+            };
+            py::dict d;
+            d["urls"] = vals(r.urls);
+            d["ips"] = vals(r.ips);
+            d["domains"] = vals(r.domains);
+            d["emails"] = vals(r.emails);
+            d["onion"] = vals(r.onion);
+            return d;
+        },
+        py::arg("strings"),
+        "Test seam: C++ IoC scanners over a supplied string list (denoise off, no "
+        "xref). Returns {category: [value]}. Mirrors dexllm.ioc._scan_value_strings.");
 }

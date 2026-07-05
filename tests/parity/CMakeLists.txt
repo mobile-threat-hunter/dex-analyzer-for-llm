@@ -21,6 +21,17 @@ foreach(src ${PARITY_TEST_SOURCES})
     add_test(NAME ${name} COMMAND ${name})
 endforeach()
 
+# psl_parity_test needs the public-suffix matcher, which lives in dexkit_ext.
+# Compile it directly into the test (no dexkit_static link) — it only needs the
+# generated PSL header (native/core_ext/gen) and the public API header.
+if(TARGET psl_parity_test)
+    target_sources(psl_parity_test PRIVATE
+        "${CMAKE_SOURCE_DIR}/native/core_ext/public_suffix.cpp")
+    target_include_directories(psl_parity_test PRIVATE
+        "${CMAKE_SOURCE_DIR}/native/core_ext/include"
+        "${CMAKE_SOURCE_DIR}/native/core_ext")
+endif()
+
 list(LENGTH PARITY_TEST_TARGETS PARITY_TEST_COUNT)
 message(STATUS "Registered ${PARITY_TEST_COUNT} parity test(s)")
 

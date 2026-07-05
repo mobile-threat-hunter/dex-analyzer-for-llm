@@ -296,6 +296,15 @@ dexllm.extract_iocs(dk).keys()          # dict_keys(['urls', 'ips', 'domains', '
 ```
 `dexllm.IOC_CATEGORIES == ('urls', 'ips', 'domains', 'emails', 'onion')`.
 
+### `dk.extract_iocs_native(with_xref=True, denoise=True, xref_limit=300) -> dict`
+The **C++ engine port** of `extract_iocs` (issue #13), returning the identical
+`{category: [{'value', 'methods'}]}` shape and byte-identical results (verified by a
+full-corpus + fuzz differential, `tests/test_ioc_native.py`). It exists so the WASM
+(embind) binding and pybind share ONE implementation over the engine-bundled
+public-suffix data (`native/core_ext/gen/psl_data.h`), instead of a consumer
+re-implementing the scan and shipping its own PSL copy. Prefer the Python
+`extract_iocs` in Python code; this is the WASM-shared backend.
+
 ---
 
 ## 9. Dangerous permission APIs (Python)

@@ -30,6 +30,8 @@ add_library(dexkit_ext STATIC
     native/core_ext/dexitem_code_source.cpp
     native/core_ext/dex_verifier.cpp
     native/core_ext/analysis.cpp
+    native/core_ext/public_suffix.cpp
+    native/core_ext/ioc.cpp
 )
 target_include_directories(dexkit_ext PUBLIC native/core_ext/include native/dad_cpp/include)
 target_link_libraries(dexkit_ext PUBLIC dexkit_static)

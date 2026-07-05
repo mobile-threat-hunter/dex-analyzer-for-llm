@@ -266,35 +266,15 @@ def _host_of(url: str) -> str:
     return authority.split(":", 1)[0].lower()
 
 
-def extract_iocs(
-    dk: Any,
-    *,
-    with_xref: bool = True,
-    denoise: bool = True,
-    xref_limit: int = 300,
-) -> dict[str, list[dict[str, Any]]]:
-    """Extract network indicators (URLs / IPs / domains / emails / onion) from ``dk``.
+def _scan_value_strings(
+    strings: list[str], denoise: bool, dex_packages: frozenset[str]
+) -> dict[str, set[str]]:
+    """Refang + the five scanners + PSL validation + URL-host fold into value sets.
 
-    Args:
-        dk: A loaded ``dexllm.DexKit`` instance.
-        with_xref: If True, attach the referencing method descriptors to each
-            indicator (the "where in the code" view). One L7 search per indicator.
-        denoise: If True, drop residual identifier hosts (dex packages, xmlns URIs)
-            that survive into the candidate set.
-        xref_limit: Cap on indicators cross-referenced, spent highest-signal first.
-
-    Returns:
-        A dict keyed by :data:`IOC_CATEGORIES`; each value a list of
-        ``{"value": str, "methods": list[str]}`` sorted by value.
+    The pure extraction, factored out of :func:`extract_iocs` so the C++ port's
+    scanner (``_ioc_scan_strings``) can be diff-tested against the SAME logic on
+    crafted strings (denoise off). Returns a dict of sets keyed by IOC_CATEGORIES.
     """
-    strings = dk.list_value_strings()
-
-    dex_packages: frozenset[str] = frozenset()
-    if denoise:
-        descriptors = list(dk.list_classes())
-        descriptors += [t.descriptor for t in dk.list_external_type_refs(False)]
-        dex_packages = _dex_package_prefixes(descriptors)
-
     urls: set[str] = set()
     ips: set[str] = set()
     domains: set[str] = set()
@@ -342,13 +322,43 @@ def extract_iocs(
         ):
             domains.add(h)
 
-    buckets = {
+    return {
         "urls": urls,
         "ips": ips,
         "domains": domains,
         "emails": emails,
         "onion": onion,
     }
+
+
+def extract_iocs(
+    dk: Any,
+    *,
+    with_xref: bool = True,
+    denoise: bool = True,
+    xref_limit: int = 300,
+) -> dict[str, list[dict[str, Any]]]:
+    """Extract network indicators (URLs / IPs / domains / emails / onion) from ``dk``.
+
+    Args:
+        dk: A loaded ``dexllm.DexKit`` instance.
+        with_xref: If True, attach the referencing method descriptors to each
+            indicator (the "where in the code" view). One L7 search per indicator.
+        denoise: If True, drop residual identifier hosts (dex packages, xmlns URIs)
+            that survive into the candidate set.
+        xref_limit: Cap on indicators cross-referenced, spent highest-signal first.
+
+    Returns:
+        A dict keyed by :data:`IOC_CATEGORIES`; each value a list of
+        ``{"value": str, "methods": list[str]}`` sorted by value.
+    """
+    dex_packages: frozenset[str] = frozenset()
+    if denoise:
+        descriptors = list(dk.list_classes())
+        descriptors += [t.descriptor for t in dk.list_external_type_refs(False)]
+        dex_packages = _dex_package_prefixes(descriptors)
+
+    buckets = _scan_value_strings(dk.list_value_strings(), denoise, dex_packages)
 
     xref_budget = xref_limit
     result: dict[str, list[dict[str, Any]]] = {}
