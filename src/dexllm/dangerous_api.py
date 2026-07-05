@@ -18,9 +18,11 @@ matching is the tiebreak when a ``(class, method)`` has several overloads of the
 arity; a lone overload (of its arity) matches on name alone, so a signature edge case
 can never drop a real hit.
 
-The permission -> API table ships bundled (``data/dangerous_perm_api.json``, the
-dangerous slice of the AOSP dataset). Point ``dataset_path`` (or ``$DEXLLM_AOSP_DATASET``)
-at a checkout of the full dataset to use a fresher / wider table.
+The full permission -> API table + protection-level buckets ship bundled
+(``data/perm_api.json`` — all levels — + ``data/perm_levels.json``); the dangerous
+slice is DERIVED from them (single source of truth). Point ``dataset_path`` (or
+``$DEXLLM_AOSP_DATASET``) at a checkout of the full AOSP dataset to use a fresher
+table, or regenerate the bundled files with ``scripts/gen_perm_data.py``.
 """
 
 from __future__ import annotations
@@ -35,9 +37,42 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from ._dexkit_core import DexKit
 
-__all__ = ["dangerous_permission_apis", "dangerous_permission_api_callers"]
+__all__ = [
+    "dangerous_permission_apis",
+    "dangerous_permission_api_callers",
+    "permission_api_callers",
+    "PERM_LEVELS",
+]
 
-_BUNDLED = Path(__file__).parent / "data" / "dangerous_perm_api.json"
+# The full permission→API surface + its protection levels (issue #14). The
+# dangerous slice is DERIVED from these (a `dangerous` filter), so there is one
+# bundled source of truth, not a separate committed dangerous file.
+_BUNDLED_PERM_API = Path(__file__).parent / "data" / "perm_api.json"
+_BUNDLED_PERM_LEVELS = Path(__file__).parent / "data" / "perm_levels.json"
+
+# Canonical protection-level buckets (Android's raw protectionLevel is a
+# `base|flag|flag` string; we bucket by base). Order = the web panel's grouping.
+PERM_LEVELS = ("dangerous", "signature", "internal", "normal", "other")
+
+
+def _level_bucket(raw: str) -> str:
+    """Bucket a raw AOSP ``protectionLevel`` (e.g. ``signature|privileged``) to a base.
+
+    `dangerous` wins if present (matches the historical substring filter — no other
+    level contains that token); then any `signature*` base, `internal`, `normal`,
+    else `other` (incl. an unknown/absent level).
+    """
+    toks = [t.strip().lower() for t in str(raw).split("|")]
+    if "dangerous" in toks:
+        return "dangerous"
+    if any(t.startswith("signature") for t in toks):
+        return "signature"
+    if "internal" in toks:
+        return "internal"
+    if "normal" in toks:
+        return "normal"
+    return "other"
+
 
 # A dataset entry is `pkg.Class#member`, optionally followed by a `(signature)` that
 # runs to the end. Anchored so a malformed scrape (e.g. a stray Kotlin source line
@@ -220,64 +255,91 @@ def _parse_api(entry: str) -> tuple[str, str, tuple[str, ...] | None]:
     return cls, name, tuple(_param_simple(p) for p in _split_top_level(params))
 
 
-def _load_dangerous_map(dataset_path: str | None) -> dict[str, tuple[str, ...]]:
-    """Load the dangerous-permission -> API map.
-
-    With no ``dataset_path`` (and no ``$DEXLLM_AOSP_DATASET``), the bundled slim
-    table is used. Otherwise the full AOSP dataset at that directory is read and
-    the dangerous slice is computed live. The ``$DEXLLM_AOSP_DATASET`` env var is
-    resolved here (not inside the cache) so a later change to it is honoured.
-    """
-    return _load_dangerous_map_cached(
-        dataset_path or os.environ.get("DEXLLM_AOSP_DATASET") or ""
-    )
+def _resolve_root(dataset_path: str | None) -> str:
+    """Resolve the dataset root (explicit arg, then env, then bundled ``""``)."""
+    return dataset_path or os.environ.get("DEXLLM_AOSP_DATASET") or ""
 
 
 @lru_cache(maxsize=8)
-def _load_dangerous_map_cached(root: str) -> dict[str, tuple[str, ...]]:
-    """Load and cache the map, keyed on the resolved dataset root (``""`` = bundled).
+def _load_perm_api_map_cached(root: str) -> dict[str, tuple[str, ...]]:
+    """Return the full permission -> API map (all protection levels), cached by root.
 
-    Each value is the tuple of full ``pkg.Class#method(signature)`` entries gating
-    that permission.
+    ``root == ""`` reads the bundled ``perm_api.json``; otherwise the full metalava
+    table at ``root`` is read and each perm's APIs filtered to real member refs.
     """
     if not root:
-        raw = json.loads(_BUNDLED.read_text())
+        raw = json.loads(_BUNDLED_PERM_API.read_text())
         return {perm: tuple(apis) for perm, apis in raw.items()}
 
     base = Path(root)
-    perm_file = base / "permissions.json"
-    # Prefer the metalava-extracted table: clean, canonical signatures (no
-    # annotations / param-names / Kotlin source quirks), fully-qualified types.
-    # Fall back to the raw scrape for older dataset checkouts.
+    # Prefer the metalava-extracted table (clean canonical signatures); fall back
+    # to the raw scrape for older dataset checkouts.
     api_file = base / "perm_api_metalava_by_perm.json"
     if not api_file.is_file():
         api_file = base / "perm_api_by_perm.json"
-    if not perm_file.is_file() or not api_file.is_file():
+    if not api_file.is_file():
         raise FileNotFoundError(
-            f"AOSP dataset at {root!r} must contain permissions.json + "
+            f"AOSP dataset at {root!r} must contain "
             f"perm_api_metalava_by_perm.json (or perm_api_by_perm.json)"
         )
-    perms = json.loads(perm_file.read_text())
-    if not isinstance(perms, list):
-        raise ValueError(f"{perm_file} must be a JSON list of permission entries")
-    dangerous = {
-        p["name"]
-        for p in perms
-        if isinstance(p, dict)
-        and "name" in p
-        and "dangerous" in str(p.get("protectionLevel", "")).lower()
-    }
     table = json.loads(api_file.read_text())
     if not isinstance(table, dict):
         raise ValueError(
             f"{api_file} must be a JSON object mapping permission -> [apis]"
         )
     out: dict[str, tuple[str, ...]] = {}
-    for perm in sorted(dangerous):
-        refs = sorted({r for r in table.get(perm, []) if _REF.match(r)})
+    for perm in sorted(table):
+        refs = sorted({r for r in table[perm] if _REF.match(r)})
         if refs:
             out[perm] = tuple(refs)
     return out
+
+
+@lru_cache(maxsize=8)
+def _load_perm_levels_cached(root: str) -> dict[str, str]:
+    """Permission -> canonical protection-level bucket, cached by root.
+
+    ``root == ""`` reads the bundled ``perm_levels.json``; otherwise it is computed
+    from the dataset's ``permissions.json`` protectionLevel via :func:`_level_bucket`.
+    """
+    if not root:
+        return dict(json.loads(_BUNDLED_PERM_LEVELS.read_text()))
+    perm_file = Path(root) / "permissions.json"
+    if not perm_file.is_file():
+        raise FileNotFoundError(
+            f"AOSP dataset at {root!r} must contain permissions.json"
+        )
+    perms = json.loads(perm_file.read_text())
+    if not isinstance(perms, list):
+        raise ValueError(f"{perm_file} must be a JSON list of permission entries")
+    return {
+        p["name"]: _level_bucket(p.get("protectionLevel", ""))
+        for p in perms
+        if isinstance(p, dict) and "name" in p
+    }
+
+
+def _load_dangerous_map(dataset_path: str | None) -> dict[str, tuple[str, ...]]:
+    """Return the dangerous-permission -> API map (dangerous slice of the full table).
+
+    Derived from the full map + level buckets (single source of truth), so no
+    separate dangerous file is committed. Honours ``dataset_path`` /
+    ``$DEXLLM_AOSP_DATASET`` (else bundled).
+    """
+    root = _resolve_root(dataset_path)
+    full = _load_perm_api_map_cached(root)
+    levels = _load_perm_levels_cached(root)
+    return {p: full[p] for p in full if levels.get(p) == "dangerous"}
+
+
+def _load_full_map(dataset_path: str | None) -> dict[str, tuple[str, ...]]:
+    """Return the full permission -> API map (all levels)."""
+    return _load_perm_api_map_cached(_resolve_root(dataset_path))
+
+
+def _load_levels(dataset_path: str | None) -> dict[str, str]:
+    """Return the permission -> level bucket map."""
+    return _load_perm_levels_cached(_resolve_root(dataset_path))
 
 
 def _external_method_index(dk: DexKit) -> dict[tuple[str, str], list[Any]]:
@@ -366,7 +428,11 @@ def dangerous_permission_apis(
     """
     table = _load_dangerous_map(dataset_path)
     index = _external_method_index(dk)
-    overloads = _overload_index(table)
+    # Overload disambiguation uses the FULL table's overload set — an overload set is
+    # a property of the (class, method), so knowing every overload (not just those
+    # under a dangerous perm) is strictly more precise, and keeps this consistent with
+    # permission_api_callers filtered to dangerous. Corpus-neutral on real APKs.
+    overloads = _overload_index(_load_full_map(dataset_path))
     result: dict[str, list[str]] = {}
     for perm, sigs in table.items():
         used: list[str] = []
@@ -413,7 +479,9 @@ def dangerous_permission_api_callers(
     """
     table = _load_dangerous_map(dataset_path)
     index = _external_method_index(dk)
-    overloads = _overload_index(table)
+    # Full-table overload set (see dangerous_permission_apis) — consistent with
+    # permission_api_callers(levels={"dangerous"}); corpus-neutral on real APKs.
+    overloads = _overload_index(_load_full_map(dataset_path))
     result: dict[str, list[dict[str, Any]]] = {}
     for perm, sigs in table.items():
         rows: list[dict[str, Any]] = []
@@ -448,4 +516,94 @@ def dangerous_permission_api_callers(
                 )
         if rows:
             result[perm] = rows
+    return result
+
+
+def _rows_for_perm(
+    dk: DexKit,
+    sigs: tuple[str, ...],
+    index: dict[tuple[str, str], list[Any]],
+    overloads: dict[tuple[str, str], dict[int, int]],
+    app_only: bool,
+) -> list[dict[str, Any]]:
+    """Resolve one permission's used APIs to ``[{api, descriptors, callers}]`` rows.
+
+    The shared join used by :func:`dangerous_permission_api_callers` and
+    :func:`permission_api_callers` — overload-disambiguated matching, then the
+    distinct callers of each matched overload (framework callers dropped under
+    ``app_only``). Only APIs with ≥1 kept caller yield a row.
+    """
+    rows: list[dict[str, Any]] = []
+    for sig in sigs:
+        cls, method, types = _parse_api(sig)
+        if types is None:
+            continue
+        refs = index.get((cls, method))
+        if not refs:
+            continue
+        arity_map = overloads.get((cls, method), {})
+        matched = [r for r in refs if _ref_matches(r, types, arity_map)]
+        if not matched:
+            continue
+        descriptors: list[str] = []
+        callers: set[str] = set()
+        for ref in matched:
+            desc = f"{ref.class_descriptor}->{ref.name}{ref.proto}"
+            descriptors.append(desc)
+            for site in dk.find_call_sites_to_api(desc):
+                caller = site.caller_descriptor
+                if app_only and _is_framework_caller(caller):
+                    continue
+                callers.add(caller)
+        if callers:
+            rows.append(
+                {
+                    "api": sig,
+                    "descriptors": sorted(set(descriptors)),
+                    "callers": sorted(callers),
+                }
+            )
+    return rows
+
+
+def permission_api_callers(
+    dk: DexKit,
+    *,
+    app_only: bool = True,
+    levels: "set[str] | None" = None,
+    dataset_path: str | None = None,
+) -> list[dict[str, Any]]:
+    """Return every permission's used APIs + callers, across ALL protection levels.
+
+    The full-surface generalisation of :func:`dangerous_permission_api_callers`
+    (issue #14): it joins the **full** AOSP permission→API table (not just the
+    dangerous slice) against the APK's references and returns each permission group
+    with its real ``protectionLevel`` bucket (see :data:`PERM_LEVELS`).
+
+    Args:
+        dk: A loaded ``dexllm.DexKit`` instance.
+        app_only: Drop framework/library callers (as in the dangerous variant).
+        levels: If given, keep only permissions whose level bucket is in this set
+            (e.g. ``{"dangerous", "signature"}``); ``None`` = all levels.
+        dataset_path: Optional dataset override (else ``$DEXLLM_AOSP_DATASET``, else
+            bundled).
+
+    Returns:
+        A list of ``{"perm", "protectionLevel", "rows": [{"api", "descriptors",
+        "callers"}]}`` sorted by permission — the same shape the C++ / WASM
+        ``permission_callers`` binding returns. Only perms/APIs with ≥1 kept caller.
+    """
+    table = _load_full_map(dataset_path)
+    level_map = _load_levels(dataset_path)
+    index = _external_method_index(dk)
+    overloads = _overload_index(table)
+    want = set(levels) if levels is not None else None
+    result: list[dict[str, Any]] = []
+    for perm in table:  # bundled perm_api.json is sorted by permission
+        lvl = level_map.get(perm, "other")
+        if want is not None and lvl not in want:
+            continue
+        rows = _rows_for_perm(dk, table[perm], index, overloads, app_only)
+        if rows:
+            result.append({"perm": perm, "protectionLevel": lvl, "rows": rows})
     return result

@@ -767,9 +767,10 @@ PYBIND11_MODULE(_dexkit_core, m) {
              "Eagerly warm upstream caches needed for L2/L4 (otherwise lazy).")
         .def("permission_callers", &PyDexKit::permission_callers,
              py::arg("app_only") = true,
-             "Issue #13: dangerous permission → used API → callers (bundled AOSP "
-             "data). C++ engine join shared with the WASM binding; mirrors "
-             "dexllm.dangerous_permission_api_callers.")
+             "Issue #13/#14: permission → used API → callers across ALL protection "
+             "levels (each group's real protectionLevel bucket), over the bundled "
+             "AOSP data. C++ engine join shared with the WASM binding; mirrors "
+             "dexllm.permission_api_callers.")
         .def("extract_iocs_native", &PyDexKit::extract_iocs_native,
              py::arg("with_xref") = true, py::arg("denoise") = true,
              py::arg("xref_limit") = 300,

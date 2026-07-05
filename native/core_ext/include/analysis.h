@@ -30,20 +30,21 @@ struct PermCallerRow {
     std::vector<std::string> callers;      // distinct caller method descriptors
 };
 
-// A dangerous permission and the used, called APIs gating it.
+// A permission and the used, called APIs gating it.
 struct PermCallerGroup {
     std::string perm;
-    std::string protection_level;          // always "dangerous" (bundled slice)
+    std::string protection_level;          // bucket: dangerous/signature/internal/normal/other
     std::vector<PermCallerRow> rows;
 };
 
-// Mirror of dexllm.dangerous_api.dangerous_permission_api_callers (bundled data).
-// For each dangerous permission whose gated APIs are actually referenced by the
-// APK's external method refs, resolve each used API to its matched overload
-// descriptor(s) and the methods that invoke it. `app_only` (default true) drops
-// callers that are bundled framework / official-library code (androidx / kotlin /
-// java / com.google.android …); an API whose only callers are framework code is
-// omitted. Groups/rows with no kept caller are omitted. Deterministic (sorted).
+// Mirror of dexllm.dangerous_api.permission_api_callers (bundled data) — the FULL
+// permission surface across ALL protection levels (issue #14), each group carrying
+// its real `protection_level` bucket. For each permission whose gated APIs are
+// referenced by the APK's external method refs, resolve each used API to its matched
+// overload descriptor(s) and the methods that invoke it. `app_only` (default true)
+// drops callers that are bundled framework / official-library code (androidx /
+// kotlin / java / com.google.android …); an API whose only callers are framework
+// code is omitted. Groups/rows with no kept caller are omitted. Deterministic.
 std::vector<PermCallerGroup> PermissionCallers(DexKitExt& ext, bool app_only = true);
 
 // ---------------------------------------------------------------------------

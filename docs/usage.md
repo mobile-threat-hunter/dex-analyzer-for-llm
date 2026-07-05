@@ -385,19 +385,20 @@ for hit in dexllm.detect_content_providers(dk):
 ### Engine C++ ports (shared with the WASM binding)
 
 `extract_iocs`, `detect_content_providers`, `summarize_capabilities`, and
-`dangerous_permission_api_callers` each have a byte-identical **C++ engine port** —
+`permission_api_callers` each have a byte-identical **C++ engine port** —
 `dk.extract_iocs_native()`, `dk.detect_content_providers_native()`,
-`dk.summarize_capabilities_native()`, `dk.permission_callers()` — so the WASM
-(embind) binding and pybind run **one implementation over the engine-bundled AOSP
-datasets** (issue #13), instead of a consumer re-implementing the join and shipping
-its own copy. Prefer the Python functions in Python code; the `*_native` variants
+`dk.summarize_capabilities_native()`, `dk.permission_callers()` (all protection
+levels) — so the WASM (embind) binding and pybind run **one implementation over the
+engine-bundled AOSP datasets** (issue #13/#14), instead of a consumer re-implementing
+the join and shipping its own copy. Prefer the Python functions in Python code; the `*_native` variants
 are the WASM-shared backend, verified byte-identical by a full-corpus + fuzz
 differential (`tests/test_ioc_native.py`, `tests/test_capability_native.py`).
 
-The bundled AOSP data — the dangerous `@RequiresPermission` slice
-(`dangerous_perm_api.json`) and the provider URIs (`content_uris.json`) — is a
-committed snapshot of [aosp_data_set](https://github.com/mobile-threat-hunter/aosp_data_set)
-(dangerous slice + content-URI CSVs), verified in sync with upstream as of the
+The bundled AOSP data — the full `@RequiresPermission` permission→API map + level
+buckets (`perm_api.json` / `perm_levels.json`, all protection levels) and the provider
+URIs (`content_uris.json`) — is a committed snapshot of
+[aosp_data_set](https://github.com/mobile-threat-hunter/aosp_data_set) (metalava
+permission table + content-URI CSVs), verified in sync with upstream as of the
 2026-07-04 dataset revision. (`android_api_map.json` is a separate hand-seed catalog
 for `summarize_capabilities`, extend at will.)
 
@@ -439,6 +440,26 @@ day/night theming) is library plumbing, not the app's own behaviour. Pass
 dexllm.dangerous_permission_api_callers(dk, app_only=False)   # include framework callers
 ```
 
+### All protection levels
+
+`permission_api_callers` generalises this to the **full** permission surface — not just
+the ~25 dangerous permissions, but all levels (`dangerous` / `signature` / `internal` /
+`normal`, per `dexllm.PERM_LEVELS`), each group carrying its real `protectionLevel`:
+
+```python
+for g in dexllm.permission_api_callers(dk):           # app_only=True by default
+    print(g["protectionLevel"], g["perm"], "→", len(g["rows"]), "APIs")
+# signature  android.permission.WRITE_SECURE_SETTINGS → 1 APIs
+# dangerous  android.permission.READ_SMS → 2 APIs
+
+# filter to a subset of levels
+sig = dexllm.permission_api_callers(dk, levels={"signature", "internal"})
+```
+
+It returns `[{"perm", "protectionLevel", "rows": [{"api", "descriptors", "callers"}]}]`
+sorted by permission — the same shape the C++/WASM `permission_callers()` binding
+returns (the dangerous slice is just this filtered to `protectionLevel == "dangerous"`).
+
 The table carries the full method signature for each gated API, so **overloads are
 matched precisely** — `getLastKnownLocation(String)` and its `LastLocationRequest`
 overload are distinguished, and only the one the app actually references is reported
@@ -446,13 +467,14 @@ overload are distinguished, and only the one the app actually references is repo
 overload of an arity still matches on that alone, so a signature edge case can't drop
 a real hit).
 
-The dangerous-permission→API table ships bundled (the dangerous slice of AOSP's
-metalava-extracted signature inventory — clean, fully-qualified types). Pass
-`dataset_path="…/aosp_data_set"` (or set `$DEXLLM_AOSP_DATASET`) to use a fresher /
-wider checkout (it prefers `perm_api_metalava_by_perm.json`, falling back to the raw
-`perm_api_by_perm.json`). Both are also MCP tools
-(`dangerous_permission_apis`, `dangerous_permission_api_callers`; the latter takes
-`app_only`).
+The full permission→API table (`perm_api.json`, 564 perms across all levels) + the
+protection-level buckets (`perm_levels.json`) ship bundled — AOSP's metalava-extracted
+signature inventory (clean, fully-qualified types); the dangerous slice is DERIVED from
+them (single source of truth). Regenerate from a fresher checkout with
+`python scripts/gen_perm_data.py /path/to/aosp_data_set`, or pass
+`dataset_path="…/aosp_data_set"` (or set `$DEXLLM_AOSP_DATASET`) at call time to
+compute live. `dangerous_permission_apis` / `dangerous_permission_api_callers` are also
+MCP tools (the latter takes `app_only`).
 
 ---
 

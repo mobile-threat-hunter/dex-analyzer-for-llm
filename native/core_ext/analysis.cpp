@@ -160,7 +160,7 @@ std::vector<PermCallerGroup> PermissionCallers(DexKitExt& ext, bool app_only) {
         if (callers.empty()) continue;   // no (kept) caller → drop the API
 
         if (!group) {
-            result.push_back({e.perm, "dangerous", {}});
+            result.push_back({e.perm, e.level, {}});  // real protection-level bucket
             group = &result.back();
         }
         PermCallerRow row;

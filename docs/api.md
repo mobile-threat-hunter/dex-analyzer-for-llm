@@ -340,6 +340,15 @@ dexllm.dangerous_permission_apis(dk)
 ### `dexllm.dangerous_permission_api_callers(dk, app_only=True) -> dict`
 Same, plus the calling methods (default drops bundled framework/library callers).
 
+### `dexllm.permission_api_callers(dk, *, app_only=True, levels=None) -> list`
+The full-surface generalisation (issue #14): **all** protection levels, not just the
+dangerous slice. Returns `[{"perm", "protectionLevel", "rows": [{"api", "descriptors",
+"callers"}]}]` sorted by permission, each group with its real `protectionLevel` bucket
+(`dexllm.PERM_LEVELS = (dangerous, signature, internal, normal, other)`); pass `levels=`
+to filter. `dk.permission_callers(app_only)` is the byte-identical C++ engine port
+shared with the WASM binding. The bundled `perm_api.json` (564 perms) + `perm_levels.json`
+are the single source of truth; the dangerous variants derive from them.
+
 ---
 
 ## 10. Packer / multi-source (Python)

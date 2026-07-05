@@ -42,8 +42,10 @@ from .capability import (
     summarize_capabilities,
 )
 from .dangerous_api import (
+    PERM_LEVELS,
     dangerous_permission_api_callers,
     dangerous_permission_apis,
+    permission_api_callers,
 )
 from .descriptors import (
     descriptor_to_java,
@@ -88,8 +90,10 @@ __all__ = [
     "filter_method_refs",
     "filter_type_refs",
     "IOC_CATEGORIES",
+    "PERM_LEVELS",
     "dangerous_permission_apis",
     "dangerous_permission_api_callers",
+    "permission_api_callers",
     "detect_content_providers",
     "extract_iocs",
     "find_call_sites_to_ref",

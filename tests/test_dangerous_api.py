@@ -39,14 +39,26 @@ def dk():
     return dexllm.DexKit(apks[0])
 
 
-def test_bundled_table_ships_and_is_dangerous_only():
-    data = REPO / "src" / "dexllm" / "data" / "dangerous_perm_api.json"
-    table = json.loads(data.read_text())
-    assert table, "bundled dangerous_perm_api.json is empty"
-    # every key is a permission name; every value a list of pkg.Class#method
-    for perm, apis in table.items():
+def test_bundled_full_tables_ship_and_dangerous_derives():
+    # Single source of truth (issue #14): the full perm→API map + level buckets
+    # ship; the dangerous slice is DERIVED from them, not a separate file.
+    from dexllm.dangerous_api import _load_dangerous_map, _load_full_map, _load_levels
+
+    data = REPO / "src" / "dexllm" / "data"
+    perm_api = json.loads((data / "perm_api.json").read_text())
+    perm_levels = json.loads((data / "perm_levels.json").read_text())
+    assert perm_api and perm_levels
+    for perm, apis in perm_api.items():
         assert perm.count(".") >= 1 and apis
         assert all("#" in a for a in apis)
+    from dexllm.dangerous_api import PERM_LEVELS
+
+    assert set(perm_levels.values()) <= set(PERM_LEVELS)
+    # The derived dangerous map is non-empty and dangerous-only.
+    full, levels = _load_full_map(None), _load_levels(None)
+    dangerous = _load_dangerous_map(None)
+    assert dangerous and set(dangerous) < set(full)
+    assert all(levels.get(p) == "dangerous" for p in dangerous)
 
 
 def test_dangerous_permission_apis_detects_real_usage(dk):
@@ -188,6 +200,7 @@ def test_overload_disambiguation(monkeypatch):
         )
     }
     monkeypatch.setattr(da, "_load_dangerous_map", lambda _p: table)
+    monkeypatch.setattr(da, "_load_full_map", lambda _p: table)
     apis = da.dangerous_permission_apis(_OverloadDK())
     used = apis["android.permission.ACCESS_FINE_LOCATION"]
     assert used == [
@@ -207,6 +220,7 @@ def test_single_overload_name_fallback(monkeypatch):
         )
     }
     monkeypatch.setattr(da, "_load_dangerous_map", lambda _p: table)
+    monkeypatch.setattr(da, "_load_full_map", lambda _p: table)
 
     class _DK(_OverloadDK):
         def list_external_method_refs(self, framework_only):
@@ -304,28 +318,28 @@ def test_lru_cache_honours_env_change():
 
 
 def test_override_missing_files_clear_error(tmp_path):
-    from dexllm.dangerous_api import _load_dangerous_map_cached
+    from dexllm.dangerous_api import _load_dangerous_map
 
     with pytest.raises(FileNotFoundError):
-        _load_dangerous_map_cached(str(tmp_path))  # empty dir, no JSON files
+        _load_dangerous_map(str(tmp_path))  # empty dir, no JSON files
 
 
 def test_override_wrong_shape_clear_error(tmp_path):
-    from dexllm.dangerous_api import _load_dangerous_map_cached
+    from dexllm.dangerous_api import _load_dangerous_map
 
     (tmp_path / "permissions.json").write_text('{"a": 1}')  # dict, expected list
     (tmp_path / "perm_api_by_perm.json").write_text("{}")
     with pytest.raises(ValueError):
-        _load_dangerous_map_cached(str(tmp_path))
+        _load_dangerous_map(str(tmp_path))
 
 
 def test_override_api_file_non_dict_clear_error(tmp_path):
-    from dexllm.dangerous_api import _load_dangerous_map_cached
+    from dexllm.dangerous_api import _load_dangerous_map
 
     (tmp_path / "permissions.json").write_text("[]")  # valid (empty) list
     (tmp_path / "perm_api_by_perm.json").write_text("[1, 2]")  # list, expected object
     with pytest.raises(ValueError):
-        _load_dangerous_map_cached(str(tmp_path))
+        _load_dangerous_map(str(tmp_path))
 
 
 def test_dataset_path_override(dk):
@@ -388,6 +402,7 @@ def test_same_arity_overloads_need_type_match(monkeypatch):
         )
     }
     monkeypatch.setattr(da, "_load_dangerous_map", lambda _p: table)
+    monkeypatch.setattr(da, "_load_full_map", lambda _p: table)
 
     class _DK:
         def list_external_method_refs(self, framework_only):
@@ -410,6 +425,7 @@ def test_constructor_entries_match_init_refs(monkeypatch):
         )
     }
     monkeypatch.setattr(da, "_load_dangerous_map", lambda _p: table)
+    monkeypatch.setattr(da, "_load_full_map", lambda _p: table)
 
     class _DK:
         def list_external_method_refs(self, framework_only):
@@ -437,6 +453,7 @@ def test_inner_class_separator_canonicalised(monkeypatch):
         "android.permission.FOO": ("android.app.Notification.Builder#setX(int i)",)
     }
     monkeypatch.setattr(da, "_load_dangerous_map", lambda _p: table)
+    monkeypatch.setattr(da, "_load_full_map", lambda _p: table)
 
     class _DK:
         def list_external_method_refs(self, framework_only):
