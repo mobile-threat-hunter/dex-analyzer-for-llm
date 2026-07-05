@@ -135,6 +135,30 @@ For version v with ASSIGN bounds A = {a_i} and USE bounds U = {u_j}:
   (same census OFF/ON, line-set 0-added, the `v1` loop correct, parity 28/28,
   determinism, repeated 0-crash/0-hang sweeps, ≥2 adversarial reviewers, HACK
   self-check). Retire the subsumed heuristics as SSA proves them redundant.
+
+  **First cut ATTEMPTED and REVERTED — "SSA web-conflict → Object" regresses,
+  0 improvement.** Wiring the B2 web-conflict set into `SplitConflatedVersion`'s
+  `conflated` decision (env-gated `DEXLLM_SSA_TYPES`, region_of still driving the
+  clean split) measured, on the bundled corpus a/b: OFF byte-identical; ON
+  Object-declared +73, casts +39, `boolean v = 17` invalid +2, and fixed NOTHING
+  (the genuine `prim = new` / `RefType v = <nonzero int>` patterns were already 0
+  in OFF). Regressions were correctly-typed allocations turned into Object+cast
+  (`java.io.File v0_0 = new File()` → `Object v0_0`; `Path v2_1 = new Path()` →
+  `Object`). **Root cause (principled):** `conflicts_use == 0` from B2 means NO SSA
+  version carries both a reference USE and a primitive USE — so there is no genuine
+  per-value un-typeable conflation in the bounds. Every web conflict is a phi-merge
+  of separately-typed versions, which the pipeline's reaching-def (`ud`) analysis
+  correctly SPLITS into concrete-typed locals. The `region_of` heuristic already
+  Object-types the truly-unsplittable conflations (`has_r && has_p` from the direct
+  defs at a phi-use), so SSA-web-conflict → Object only ADDS the disjoint-splittable
+  cases as regressions. **Conclusion: re-detecting conflations with SSA is not the
+  win — the heuristic already covers the genuine set.** The value of the SSA
+  selection, if B3 is pursued, is CONCRETE type CORRECTION of non-conflict versions
+  (replacing the cascade/mirror/move-opcode heuristics with the SSA-selected
+  concrete types), which needs a def-loc↔pipeline-version mapping and must BEAT an
+  already-strong concrete typer — larger scope, uncertain ROI. B4 propagation
+  (typing move/aget/param results from the source version; ~116k unconstrained) is
+  its prerequisite.
 - **B4 (optional) — propagation / search.** Add a bounded `TypeUpdate`-style
   propagation or `TypeSearch` pass only for residual hard cases B3 leaves.
 
