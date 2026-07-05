@@ -148,7 +148,53 @@ SsaResult BuildSsa(Graph& graph, const std::vector<std::string>& params) {
         }
     }
 
-    // --- phi insertion (Cytron iterated dominance frontier) ------------------
+    // --- liveness (pruned SSA) -----------------------------------------------
+    // Minimal (Cytron) SSA places a phi at the iterated dominance frontier of
+    // EVERY def, including for registers that are DEAD at the join. In optimized
+    // / obfuscated dex a single Dalvik register is reused across many unrelated
+    // live ranges; a dead phi at a join FALSELY merges those ranges into one SSA
+    // web, manufacturing int↔reference conflicts corpus-wide. Pruned SSA places
+    // a phi for reg at block w ONLY when reg is LIVE-IN at w. Backward dataflow:
+    //   use[b]  = registers used in b before being (re)defined in b
+    //   def[b]  = registers defined in b
+    //   live_in[b]  = use[b] ∪ (live_out[b] \ def[b])
+    //   live_out[b] = ∪ live_in[succ]
+    // Monotone → terminates. Reachable blocks only (same set as phi placement).
+    std::map<NodeBase*, std::set<std::string>> use_b, def_b, live_in;
+    for (NodeBase* b : blocks) {
+        std::set<std::string> defined;
+        for (const auto& [loc, ins] : LocWithIns(b)) {
+            if (!ins) continue;
+            for (const std::string& u : ins->get_used_vars())
+                if (regs.count(u) && !defined.count(u)) use_b[b].insert(u);
+            auto lhs = ins->GetLhsId();
+            if (lhs.has_value() && !lhs->empty()) {
+                def_b[b].insert(*lhs);
+                defined.insert(*lhs);
+            }
+        }
+        live_in[b];   // seed every reachable block (empty)
+    }
+    for (bool changed = true; changed;) {
+        changed = false;
+        for (auto it = blocks.rbegin(); it != blocks.rend(); ++it) {
+            NodeBase* b = *it;
+            std::set<std::string> out;
+            std::set<NodeBase*> seen;
+            for (NodeBase* s : graph.all_sucs(b)) {
+                if (!reachable(s) || !seen.insert(s).second) continue;
+                auto lit = live_in.find(s);
+                if (lit != live_in.end())
+                    out.insert(lit->second.begin(), lit->second.end());
+            }
+            std::set<std::string> in = use_b[b];
+            for (const std::string& v : out)
+                if (!def_b[b].count(v)) in.insert(v);
+            if (in != live_in[b]) { live_in[b] = std::move(in); changed = true; }
+        }
+    }
+
+    // --- phi insertion (Cytron iterated dominance frontier, liveness-pruned) --
     // phis_at[block] = phi indices placed at that block. has_phi[(reg,block)]
     // dedups. Registers processed in sorted order for determinism.
     std::map<NodeBase*, std::vector<int>> phis_at;
@@ -165,6 +211,9 @@ SsaResult BuildSsa(Graph& graph, const std::vector<std::string>& params) {
             if (dfit == df.end()) continue;
             for (NodeBase* w : dfit->second) {   // DF is (num,name)-sorted
                 if (has_phi.count({reg, w})) continue;
+                // Pruned SSA: no phi where reg is not live-in (dead phi).
+                auto lvit = live_in.find(w);
+                if (lvit == live_in.end() || !lvit->second.count(reg)) continue;
                 has_phi.insert({reg, w});
                 int idx = static_cast<int>(res.phis.size());
                 SsaPhi phi;
@@ -409,6 +458,389 @@ SsaOracle VerifySsa(Graph& graph, const std::vector<std::string>& /*params*/,
         }
     }
     return rep;
+}
+
+// -----------------------------------------------------------------------------
+// Phase B1: type-bounds model.
+// -----------------------------------------------------------------------------
+namespace {
+
+// A Dalvik reference descriptor is `L...;` (class) or `[...` (array). Everything
+// else that is a real descriptor is a primitive (Z/B/C/S/I/J/F/D) or void.
+// (Local mirror of dataflow.cpp's anonymous is_ref — kept small, not shared, to
+// avoid a header dependency for a two-line test.)
+bool BoundIsRef(const std::string& t) {
+    return !t.empty() && (t.front() == 'L' || t.front() == '[');
+}
+bool BoundIsPrim(const std::string& t) {
+    static const std::string kPrim = "ZBCSIJFD";
+    return t.size() == 1 && kPrim.find(t[0]) != std::string::npos;
+}
+
+// The type the DEFINING instruction produces = the type of its rhs expression.
+// get_type() already resolves per IR class (NEW→class, INVOKE→return/base,
+// CONST→literal type, field→field type, MOVE_EXCEPTION→catch type, CHECK_CAST→
+// cast type), which is exactly what SplitVariables reads as the def type.
+//
+// EXCEPTION — an ARRAY LOAD (`vDst = vArr[i]`) derives its element type by
+// stripping one '[' from the ARRAY operand's CURRENT (shared, DAD last-write)
+// Variable type — STALE when the array register is reused across types, so it
+// reports e.g. "I" for a `String[]` load (the exact false conflict this creates:
+// an aget-object result mistyped I merges with a reference use). Same staleness
+// family as a reg-move; return "" (no ASSIGN bound — the version's type comes
+// from its USES / Phase B4 propagation). A primitive/reference aget alike is
+// affected, so all array loads are skipped.
+std::string ProducedType(IRForm* ins) {
+    auto rhs = ins->get_rhs();
+    if (rhs.empty() || !rhs[0]) return {};
+    if (dynamic_cast<ArrayLoadExpression*>(rhs[0].get())) return {};
+    return rhs[0]->get_type();
+}
+
+// A narrow-int literal 0 is the polymorphic null/zero — in Dalvik `const 0` is
+// BOTH the integer 0 and the null reference (the writer already renders `= null`
+// for a reference lhs). It constrains NEITHER primitive nor reference on its own;
+// recording its ASSIGN bound as "I" would force a FALSE int↔ref conflict wherever
+// a `cond ? obj : null` phi-merges the 0 with a real reference. So a def whose rhs
+// is such a literal contributes NO ASSIGN bound — the version's type is decided by
+// its USE positions. (A wide/float/double zero — J/F/D — is a genuine primitive
+// 0, NOT null-compatible, so it is NOT skipped.)
+bool IsNarrowZeroConst(IRForm* ins) {
+    auto rhs = ins->get_rhs();
+    if (rhs.empty() || !rhs[0]) return false;
+    auto* c = dynamic_cast<Constant*>(rhs[0].get());
+    if (!c || c->get_int_value() != 0) return false;
+    const std::string& t = c->get_type();
+    return t == "I" || t == "Z" || t == "B" || t == "C" || t == "S";
+}
+
+// A register-to-register move (`vDst = move[/object/wide] vSrc`) copies a value;
+// its produced type is the SOURCE's type. But get_type() reads the source
+// Variable's CURRENT (DAD last-write) type — STALE when the source register is
+// reused across types after the move, so it reports e.g. "I" for a value that is
+// really an array. Taking that as the ASSIGN bound manufactures false int↔ref
+// conflicts corpus-wide. In real SSA a move is an equality edge resolved by type
+// PROPAGATION (jadx TypeUpdate; our Phase B4). Until then, a reg-move def
+// contributes NO ASSIGN bound — the version's type comes from its USES (which are
+// position-exact). A move-RESULT (MoveKind::Unknown — the result of an invoke)
+// keeps its assign: its source is a fresh gen-ret typed by the callee return, not
+// a reused register, so it is reliable.
+bool IsRegMoveDef(IRForm* ins) {
+    auto* mv = dynamic_cast<MoveExpression*>(ins);
+    return mv && mv->move_kind() != MoveKind::Unknown;
+}
+
+}  // namespace
+
+BoundsResult ComputeTypeBounds(
+    Graph& graph, const SsaResult& ssa,
+    const std::map<std::string, std::string>& param_types,
+    const std::string& ret_type) {
+    BoundsResult out;
+
+    // Reverse def_site: a real def loc -> the (reg, version) it defines. Each loc
+    // defines at most one register (the instruction's single LHS), so this is
+    // well-formed. Live-in versions (DEF_LIVEIN) get their ASSIGN bound directly
+    // from param_types; phi / undef versions have no ASSIGN bound of their own.
+    std::map<int, std::pair<std::string, int>> real_def;   // loc -> (reg, ver)
+    for (const auto& [key, loc] : ssa.def_site) {
+        if (loc >= 0) {
+            real_def[loc] = key;
+        } else if (loc == SsaResult::DEF_LIVEIN) {
+            auto pit = param_types.find(key.first);
+            if (pit != param_types.end() && !pit->second.empty())
+                out.bounds[key].assign = pit->second;
+        }
+    }
+
+    // Record a USE bound: vid used at loc L requires type `t`. Map the use to its
+    // SSA version via use_version, then attach the typed bound to that value.
+    auto note_use = [&](const std::string& vid, int loc, const std::string& t) {
+        if (vid.empty() || t.empty()) return;
+        auto vit = ssa.use_version.find({vid, loc});
+        if (vit == ssa.use_version.end()) return;   // not an SSA-tracked use
+        out.bounds[{vid, vit->second}].uses.push_back(t);
+    };
+
+    // Detect the required type of each operand position of `f` at loc L. Mirrors
+    // note_obj / note_int in dataflow.cpp, but every position now yields a TYPED
+    // bound instead of a boolean gate. Run on both the instruction and its rhs[0]
+    // (a value-producing invoke/field-access is nested in rhs, a void statement
+    // is the top-level ins — same dual dispatch note_obj uses).
+    auto note_bounds = [&](IRForm* f, int loc) {
+        if (auto* inv = dynamic_cast<InvokeInstruction*>(f)) {
+            // receiver requires the method's declaring class. Use the RAW Dalvik
+            // descriptor triple()[0] — NOT cls(), which is the GetType()-CONVERTED
+            // Java form ("Foo" / "java.lang.String"). Every other bound in the
+            // model (and is_assignable) is a raw descriptor; a converted receiver
+            // bound would fail BoundIsRef and be silently dropped, losing the
+            // "used as a reference" signal.
+            note_use(inv->base(), loc, inv->triple()[0]);
+            const auto& a = inv->args();
+            const auto& pt = inv->ptype();
+            if (a.size() == pt.size())
+                for (size_t i = 0; i < a.size(); ++i)
+                    note_use(a[i], loc, pt[i]);   // arg requires the param type
+        } else if (auto* ie = dynamic_cast<InstanceExpression*>(f)) {
+            // iget `v = obj.field`: the object requires the declaring class
+            // (raw descriptor via clsdesc(), not the converted cls()).
+            note_use(ie->arg_id(), loc, ie->clsdesc());
+        } else if (auto* ii = dynamic_cast<InstanceInstruction*>(f)) {
+            // iput `obj.field = rhs`: owner requires class (raw clsdesc()), value
+            // requires the field type (atype, already a raw descriptor).
+            note_use(ii->lhs_id(), loc, ii->clsdesc());
+            note_use(ii->rhs_id(), loc, ii->atype());
+        } else if (auto* si = dynamic_cast<StaticInstruction*>(f)) {
+            // sput `Cls.field = rhs`: the stored value requires the field type.
+            note_use(si->rhs_id(), loc, si->ftype());
+        } else if (auto* te = dynamic_cast<ThrowExpression*>(f)) {
+            note_use(te->ref_id(), loc, "Ljava/lang/Throwable;");
+        } else if (auto* ret = dynamic_cast<ReturnInstruction*>(f)) {
+            if (ret->arg()) note_use(*ret->arg(), loc, ret_type);
+        } else if (auto* be = dynamic_cast<BinaryExpression*>(f)) {
+            // arithmetic operands require the operation's primitive width;
+            // `instanceof` (arg1 is the tested OBJECT) is not an int use.
+            if (be->op() != "instanceof") {
+                std::string w = BoundIsPrim(be->get_type()) ? be->get_type() : "I";
+                note_use(be->arg1_id(), loc, w);
+                note_use(be->arg2_id(), loc, w);
+            }
+        } else if (auto* ue = dynamic_cast<UnaryExpression*>(f)) {
+            std::string w = BoundIsPrim(ue->get_type()) ? ue->get_type() : "I";
+            note_use(ue->arg_id(), loc, w);
+        } else if (auto* al = dynamic_cast<ArrayLoadExpression*>(f)) {
+            note_use(al->idx_id(), loc, "I");            // array index is int
+        } else if (auto* as = dynamic_cast<ArrayStoreInstruction*>(f)) {
+            note_use(as->index_id(), loc, "I");
+        } else if (auto* na = dynamic_cast<NewArrayExpression*>(f)) {
+            note_use(na->size_id(), loc, "I");           // array size is int
+        } else if (auto* sw = dynamic_cast<SwitchExpression*>(f)) {
+            note_use(sw->src_id(), loc, "I");            // switch selector is int
+        } else if (auto* cz = dynamic_cast<ConditionalZExpression*>(f)) {
+            // Dalvik if-ltz/lez/gtz/gez compare an INT; if-eqz/nez is the
+            // reference null-check, so only the ordered ops prove an int use.
+            const std::string& op = cz->op();
+            if (op == "<" || op == "<=" || op == ">" || op == ">=")
+                note_use(cz->arg_id(), loc, "I");
+        } else if (auto* ce = dynamic_cast<ConditionalExpression*>(f)) {
+            const std::string& op = ce->op();
+            if (op == "<" || op == "<=" || op == ">" || op == ">=") {
+                note_use(ce->arg1_id(), loc, "I");
+                note_use(ce->arg2_id(), loc, "I");
+            }
+        }
+    };
+
+    for (NodeBase* n : graph.nodes) {
+        auto* bb = dynamic_cast<BasicBlock*>(n);
+        if (!bb) continue;
+        for (const auto& [loc, ins] : bb->get_loc_with_ins()) {
+            if (!ins) continue;
+            // ASSIGN bound for the version defined at this loc.
+            auto dit = real_def.find(loc);
+            if (dit != real_def.end() && !IsNarrowZeroConst(ins.get()) &&
+                !IsRegMoveDef(ins.get())) {
+                std::string p = ProducedType(ins.get());
+                if (!p.empty()) out.bounds[dit->second].assign = p;
+            }
+            // USE bounds from this instruction (and its rhs value expression).
+            note_bounds(ins.get(), loc);
+            auto rhs = ins->get_rhs();
+            if (!rhs.empty() && rhs[0]) note_bounds(rhs[0].get(), loc);
+        }
+    }
+
+    // Dedup + sort each version's USE bounds for determinism.
+    for (auto& [key, tb] : out.bounds) {
+        std::sort(tb.uses.begin(), tb.uses.end());
+        tb.uses.erase(std::unique(tb.uses.begin(), tb.uses.end()), tb.uses.end());
+    }
+    return out;
+}
+
+// -----------------------------------------------------------------------------
+// Phase B2: phi-web merge + hierarchy-based selection.
+// -----------------------------------------------------------------------------
+namespace {
+
+int PrimRank(char c) {
+    switch (c) {
+        case 'J': return 2;       // long
+        case 'F': return 3;       // float
+        case 'D': return 4;       // double
+        default:  return 1;       // Z/B/C/S/I (int-category)
+    }
+}
+
+// Pick the narrowest reference satisfying every constraint: a supertype of each
+// ASSIGN (each produced value assignable to it) AND a subtype of each USE
+// (assignable to each required position), decided by the partial-sound oracle.
+// Falls back conservatively (a single produced type, else the sorted-first
+// bound) when the oracle cannot prove a unifying relationship — never invents a
+// type outside the bound set. `refs` is the sorted-deduped union of all ref
+// bounds; `assigns` / `uses` are their sorted-deduped ref subsets.
+std::string SelectRef(
+    const std::vector<std::string>& assigns,
+    const std::vector<std::string>& uses,
+    const std::vector<std::string>& refs,
+    const std::function<bool(std::string_view, std::string_view)>& is_assignable) {
+    auto assignable = [&](const std::string& a, const std::string& b) {
+        return a == b || (is_assignable && is_assignable(a, b));
+    };
+    // A candidate c is valid iff every ASSIGN is assignable to c and c is
+    // assignable to every USE.
+    std::vector<std::string> valid;
+    for (const std::string& c : refs) {
+        bool ok = true;
+        for (const std::string& a : assigns)
+            if (!assignable(a, c)) { ok = false; break; }
+        if (ok)
+            for (const std::string& u : uses)
+                if (!assignable(c, u)) { ok = false; break; }
+        if (ok) valid.push_back(c);
+    }
+    if (!valid.empty()) {
+        // Narrowest = a valid type assignable to every other valid (most
+        // specific). refs is sorted → the first such is deterministic.
+        for (const std::string& c : valid) {
+            bool narrowest = true;
+            for (const std::string& o : valid)
+                if (!assignable(c, o)) { narrowest = false; break; }
+            if (narrowest) return c;
+        }
+        return valid.front();      // no provable minimum → deterministic first
+    }
+    // No candidate satisfies every bound under the partial-sound oracle.
+    //  * A SINGLE produced (assign) type is authoritative: the value IS that
+    //    type, and an unprovable USE relationship is a framework subtype the
+    //    dex-only oracle cannot see (real, just invisible) — return it.
+    //  * TWO OR MORE mutually-incompatible reference types (assigns the oracle
+    //    cannot unify, or uses with no common assign) is a genuine ref-vs-ref
+    //    conflation the design defers — return EMPTY so SelectTypes marks the
+    //    web UNRESOLVED rather than picking a type that satisfies no USE
+    //    position (the unsound arbitrary pick an adversarial review flagged).
+    if (assigns.size() == 1) return assigns.front();
+    if (assigns.empty() && uses.size() == 1) return uses.front();
+    if (assigns.empty() && uses.empty())
+        return refs.empty() ? std::string{} : refs.front();
+    return {};
+}
+
+}  // namespace
+
+SelectResult SelectTypes(
+    const SsaResult& ssa, const BoundsResult& bounds,
+    const std::function<bool(std::string_view, std::string_view)>&
+        is_assignable) {
+    SelectResult out;
+
+    // --- version universe + index map (for union-find) -----------------------
+    // Every version appears as a def_site key (real / phi / live-in / undef).
+    std::vector<std::pair<std::string, int>> vers;
+    std::map<std::pair<std::string, int>, int> idx;
+    for (const auto& [key, loc] : ssa.def_site) {
+        (void)loc;
+        idx[key] = static_cast<int>(vers.size());
+        vers.push_back(key);
+    }
+    const int N = static_cast<int>(vers.size());
+    if (N == 0) return out;
+
+    // --- union-find: a phi ties its result and every operand (same reg) -------
+    std::vector<int> parent(N);
+    for (int i = 0; i < N; ++i) parent[i] = i;
+    std::function<int(int)> find = [&](int x) {
+        while (parent[x] != x) { parent[x] = parent[parent[x]]; x = parent[x]; }
+        return x;
+    };
+    auto unite = [&](int a, int b) { parent[find(a)] = find(b); };
+    for (const SsaPhi& phi : ssa.phis) {
+        auto rit = idx.find({phi.reg, phi.result});
+        if (rit == idx.end()) continue;
+        for (const auto& [pred, ov] : phi.operands) {
+            (void)pred;
+            auto oit = idx.find({phi.reg, ov});
+            if (oit != idx.end()) unite(rit->second, oit->second);
+        }
+    }
+
+    // --- pool each web's ASSIGN / USE bounds ---------------------------------
+    // Root index → the set of ASSIGN + USE bound types (deduped, split ref/prim).
+    std::map<int, std::vector<std::string>> web_assign, web_use;
+    for (int i = 0; i < N; ++i) {
+        auto bit = bounds.bounds.find(vers[i]);
+        if (bit == bounds.bounds.end()) continue;
+        int r = find(i);
+        if (!bit->second.assign.empty())
+            web_assign[r].push_back(bit->second.assign);
+        for (const std::string& u : bit->second.uses)
+            web_use[r].push_back(u);
+    }
+
+    // --- select per web, then broadcast to every member ----------------------
+    std::map<int, SelectedType> web_type;
+    std::set<int> roots;
+    for (int i = 0; i < N; ++i) roots.insert(find(i));
+    for (int r : roots) {
+        SelectedType sel;
+        std::vector<std::string>& A = web_assign[r];
+        std::vector<std::string>& U = web_use[r];
+        auto sortdedup = [](std::vector<std::string>& v) {
+            std::sort(v.begin(), v.end());
+            v.erase(std::unique(v.begin(), v.end()), v.end());
+        };
+        sortdedup(A);
+        sortdedup(U);
+
+        std::vector<std::string> ref_a, ref_u, refs, prims;
+        bool has_ref = false, has_prim = false;
+        bool ref_use = false, prim_use = false;
+        auto classify = [&](const std::string& t, std::vector<std::string>& refbin,
+                            bool is_use) {
+            if (BoundIsRef(t)) {
+                has_ref = true; refbin.push_back(t); refs.push_back(t);
+                if (is_use) ref_use = true;
+            } else if (BoundIsPrim(t)) {
+                has_prim = true; prims.push_back(t);
+                if (is_use) prim_use = true;
+            }
+        };
+        for (const std::string& a : A) classify(a, ref_a, false);
+        for (const std::string& u : U) classify(u, ref_u, true);
+        sortdedup(refs);
+
+        ++out.webs;
+        if (has_ref && has_prim) {
+            // Genuine int↔reference conflation — no single Java type.
+            sel.type = "Ljava/lang/Object;";
+            sel.conflict = true;
+            sel.resolved = true;
+            sel.note = "prim={";
+            for (const auto& p : prims) { sel.note += p; sel.note += ','; }
+            sel.note += "} ref={";
+            for (const auto& r : refs) { sel.note += r; sel.note += ','; }
+            sel.note += "}";
+            ++out.conflicts;
+            if (ref_use && prim_use) ++out.conflicts_use;
+        } else if (has_ref) {
+            sel.type = SelectRef(ref_a, ref_u, refs, is_assignable);
+            sel.resolved = !sel.type.empty();
+        } else if (has_prim) {
+            // Widen to the widest rank present (I vs J vs F vs D).
+            std::string best;
+            int best_rank = 0;
+            for (const std::string& p : prims) {
+                int rk = PrimRank(p[0]);
+                if (rk > best_rank) { best_rank = rk; best = p; }
+            }
+            sel.type = best;
+            sel.resolved = !best.empty();
+        }
+        web_type[r] = std::move(sel);
+    }
+    for (int i = 0; i < N; ++i)
+        out.types[vers[i]] = web_type[find(i)];
+    return out;
 }
 
 }  // namespace dexkit::dad

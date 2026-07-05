@@ -93,10 +93,42 @@ For version v with ASSIGN bounds A = {a_i} and USE bounds U = {u_j}:
 - **B1 — bounds model.** Build, per SSA version, the ASSIGN bound (def type) and
   the USE bounds (the position table above) from our IR. Env-gated dump; validate
   the bounds are sane on the corpus. No output change yet.
-- **B2 — phi merge + selection.** Merge bounds across phi webs; select the best
-  type per version via `is_assignable`. Produce a `version → type` map. Validate
-  against the current typing (expect: agrees on the 99.97%, differs on the
-  conflation residual). No output change yet (analysis-only compare).
+- **B2 — phi merge + selection. (DONE, analysis-only, uncommitted.)** Merge
+  bounds across phi webs (union-find on phi result↔operands); select per version
+  via `is_assignable` (narrowest ⊒ ASSIGN, ⊑ USE; exact-fallback); prim/ref
+  conflict → `Object`; all-prim → widest rank. `version → type` map + env-gated
+  dump (`DEXLLM_BOUNDS_DUMP` → `TYPES` lines, `DEXLLM_BOUNDS_DETAIL` → conflict
+  notes, `DEXLLM_BOUNDS_METHOD=<name>` → per-version bounds). No output change
+  (byte-identical), deterministic, SSA-oracle-clean on bundled + obfuscated,
+  parity 29/29.
+  **Three false-conflict sources found + fixed (raw per-version merge conflict is
+  a gross over-count without them):**
+  1. **Pruned SSA (liveness).** Minimal (Cytron) SSA places a phi at the iterated
+     DF of every def, including where the register is DEAD at the join. A Dalvik
+     register reused across unrelated live ranges then gets a dead phi that
+     FALSELY merges the ranges into one web → manufactured int↔ref conflicts.
+     `BuildSsa` now runs backward liveness (use/def/live_in fixpoint) and places a
+     phi only where the register is live-in. Web conflicts 7132→998; the
+     use-vs-use subset (`conflicts_use`: a real prim USE AND a real ref USE on one
+     web) 2042→**0**. (Phase 1 SSA is now pruned, not minimal; oracle still
+     0-mismatch.)
+  2. **Narrow-zero const = null (polymorphic).** `const 0` is BOTH int 0 and the
+     null reference; recording its ASSIGN as `I` forces a false conflict on every
+     `cond ? obj : null` phi-merge. A narrow-int literal 0 contributes no ASSIGN
+     bound (its type comes from uses).
+  3. **Stale shared-Variable produced type.** A reg-move (`vDst = move vSrc`) and
+     an array load (`vDst = vArr[i]`) both derive their produced type from a
+     SHARED operand Variable's CURRENT (DAD last-write) type — STALE when that
+     register is reused (e.g. an aget-object on a `String[]` reports `I`, then
+     falsely conflicts with a String use). Both skip the ASSIGN bound (type from
+     uses / Phase B4 propagation).
+  **Measured residual (pruned):** bundled 865 web conflicts, obfuscated 3794,
+  both `conflicts_use == 0`. Dominant shape `prim={I} ref={Throwable}` (try-catch
+  register reuse) + heavily-reused scratch registers in huge reflection methods.
+  This is STILL larger than the ~0.03% invalid-Java residual — most are register
+  reuses the current pipeline splits correctly, so **B3 must not blindly Object-
+  type the conflict set** (the a/b gate enforces this). B4 propagation (typing
+  move/aget results from the source version) would shrink the ~90k unconstrained.
 - **B3 — out-of-SSA wiring.** Feed the selected types into `SplitVariables` /
   `lvars`, replacing the `FixInitResultTypes` cascade/mirror heuristics for the
   cases SSA covers; ref+prim conflict → Object+cast. **Output changes → a/b gate**

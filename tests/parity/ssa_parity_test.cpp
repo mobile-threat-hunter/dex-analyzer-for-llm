@@ -247,11 +247,16 @@ int main() {
         auto v0p = std::make_shared<Variable>("v0");
         auto v0l = std::make_shared<Variable>("v0");
         auto v0s = std::make_shared<Variable>("v0");
+        auto v0x = std::make_shared<Variable>("v0");
+        auto v1x = std::make_shared<Variable>("v1");
         auto dp = std::make_shared<AssignExpression>(v0p, c0);
         auto dl = std::make_shared<AssignExpression>(v0l, c1);
         auto ds = std::make_shared<AssignExpression>(v0s, c2);
+        // v0 USED after the loop (X: v1=v0) so it stays live across the join /
+        // header — under pruned SSA a DEAD register gets no phi.
+        auto ux = std::make_shared<MoveExpression>(v1x, v0x);
         StatementBlock p("P", {dp}), h("H", {}), b("B", {}), l("L", {dl}),
-            s("S", {ds}), c("C", {}), x("X", {});
+            s("S", {ds}), c("C", {}), x("X", {ux});
         for (NodeBase* n : std::initializer_list<NodeBase*>{
                  &p, &h, &b, &l, &s, &c, &x}) g.add_node(n);
         g.entry = &p;
@@ -294,6 +299,249 @@ int main() {
         auto df = DominanceFrontiers(g, cyclic);   // must return, not hang
         icheck("hang: cyclic idom returns", 1, 1);
         (void)df;
+    }
+
+    // === Phase B1: type-bounds model =====================================
+    auto scheck = [&](const char* label, const std::string& got,
+                      const std::string& want) {
+        bool eq = (got == want);
+        if (!eq) ++g_fail;
+        std::printf("%s %-34s got=%-24s want=%s\n", eq ? "[ok]  " : "[FAIL]",
+                    label, got.c_str(), want.c_str());
+    };
+    auto has_use = [](const dad::BoundsResult& b, const std::string& reg,
+                      int ver, const std::string& t) {
+        auto it = b.bounds.find({reg, ver});
+        if (it == b.bounds.end()) return false;
+        return std::find(it->second.uses.begin(), it->second.uses.end(), t)
+               != it->second.uses.end();
+    };
+    auto assign_of = [](const dad::BoundsResult& b, const std::string& reg,
+                        int ver) -> std::string {
+        auto it = b.bounds.find({reg, ver});
+        return it == b.bounds.end() ? std::string{} : it->second.assign;
+    };
+
+    // (1) ASSIGN from a new-instance def + USE from the receiver of a later
+    //     call; a prim const passed at a reference param = an int↔ref CONFLICT.
+    //   A: v0 = new LFoo;        (assign v0#1 = LFoo)
+    //      v0.bar()              (use    v0#1 = LFoo, receiver)
+    //      v2 = 5                (assign v2#1 = I)
+    //      v0.baz(v2)            (use    v2#1 = String  → v2 conflicts I vs String)
+    {
+        Graph g;
+        auto ni = std::make_shared<NewInstance>("LFoo;");
+        auto v0d = std::make_shared<Variable>("v0");
+        auto d0 = std::make_shared<AssignExpression>(v0d, ni);
+        auto v0r = std::make_shared<Variable>("v0");
+        // clsname ("Foo") is the GetType-CONVERTED form cls() returns in the real
+        // pipeline; the raw Dalvik descriptor lives in triple()[0] ("LFoo;"). The
+        // receiver USE bound MUST be recorded from triple()[0] — a converted
+        // "Foo" would fail BoundIsRef and be silently dropped (correctness fix).
+        InvokeInstruction::Triple tr{"LFoo;", "bar", "()V"};
+        auto call = std::make_shared<InvokeInstruction>(
+            "Foo", "bar", v0r, "V", std::vector<std::string>{},
+            std::vector<IRFormPtr>{}, tr);
+        auto c5 = std::make_shared<Constant>(std::string("5"), "I", int64_t{5});
+        auto v2d = std::make_shared<Variable>("v2");
+        auto d2 = std::make_shared<AssignExpression>(v2d, c5);
+        auto v0r2 = std::make_shared<Variable>("v0");
+        auto v2u = std::make_shared<Variable>("v2");
+        InvokeInstruction::Triple tr2{"LFoo;", "baz", "(Ljava/lang/String;)V"};
+        auto call2 = std::make_shared<InvokeInstruction>(
+            "LFoo;", "baz", v0r2, "V",
+            std::vector<std::string>{"Ljava/lang/String;"},
+            std::vector<IRFormPtr>{v2u}, tr2);
+        StatementBlock a("A", {d0, call, d2, call2});
+        g.add_node(&a);
+        g.entry = &a;
+        g.compute_rpo();
+        g.number_ins();
+        auto ssa = BuildSsa(g, {});
+        auto bnds = ComputeTypeBounds(g, ssa, {}, "V");
+        scheck("bounds: v0#1 assign new-instance", assign_of(bnds, "v0", 1),
+               "LFoo;");
+        icheck("bounds: v0#1 used as receiver",
+               has_use(bnds, "v0", 1, "LFoo;") ? 1 : 0, 1);
+        scheck("bounds: v2#1 assign const-int", assign_of(bnds, "v2", 1), "I");
+        icheck("bounds: v2#1 used as String-arg",
+               has_use(bnds, "v2", 1, "Ljava/lang/String;") ? 1 : 0, 1);
+    }
+
+    // (2) A live-in PARAM's ASSIGN bound comes from param_types; a `return v`
+    //     contributes the method-return-type USE bound.
+    //   entry: return v3   (params={v3:LBar;}, ret=LBar;)
+    {
+        Graph g;
+        auto v3u = std::make_shared<Variable>("v3");
+        auto ret = std::make_shared<ReturnInstruction>(v3u);
+        StatementBlock a("A", {ret});
+        g.add_node(&a);
+        g.entry = &a;
+        g.compute_rpo();
+        g.number_ins();
+        auto ssa = BuildSsa(g, {"v3"});
+        auto bnds = ComputeTypeBounds(g, ssa, {{"v3", "LBar;"}}, "LBar;");
+        scheck("bounds: v3#0 live-in assign", assign_of(bnds, "v3", 0), "LBar;");
+        icheck("bounds: v3#0 return USE bound",
+               has_use(bnds, "v3", 0, "LBar;") ? 1 : 0, 1);
+    }
+
+    // === Phase B2: phi-web merge + hierarchy selection ===================
+    auto sel_of = [](const dad::SelectResult& s, const std::string& reg,
+                     int ver) -> dad::SelectedType {
+        auto it = s.types.find({reg, ver});
+        return it == s.types.end() ? dad::SelectedType{} : it->second;
+    };
+
+    // (3) A single-def reference version resolves to its produced type; a
+    //     prim-def used as a reference is a CONFLICT → Object.
+    //   A: v0 = new LFoo;  v0.bar();  v2 = 5;  v0.baz(v2)   (baz param0 = String)
+    {
+        Graph g;
+        auto ni = std::make_shared<NewInstance>("LFoo;");
+        auto v0d = std::make_shared<Variable>("v0");
+        auto d0 = std::make_shared<AssignExpression>(v0d, ni);
+        auto v0r = std::make_shared<Variable>("v0");
+        // clsname ("Foo") is the GetType-CONVERTED form cls() returns in the real
+        // pipeline; the raw Dalvik descriptor lives in triple()[0] ("LFoo;"). The
+        // receiver USE bound MUST be recorded from triple()[0] — a converted
+        // "Foo" would fail BoundIsRef and be silently dropped (correctness fix).
+        InvokeInstruction::Triple tr{"LFoo;", "bar", "()V"};
+        auto call = std::make_shared<InvokeInstruction>(
+            "Foo", "bar", v0r, "V", std::vector<std::string>{},
+            std::vector<IRFormPtr>{}, tr);
+        auto c5 = std::make_shared<Constant>(std::string("5"), "I", int64_t{5});
+        auto v2d = std::make_shared<Variable>("v2");
+        auto d2 = std::make_shared<AssignExpression>(v2d, c5);
+        auto v0r2 = std::make_shared<Variable>("v0");
+        auto v2u = std::make_shared<Variable>("v2");
+        InvokeInstruction::Triple tr2{"LFoo;", "baz", "(Ljava/lang/String;)V"};
+        auto call2 = std::make_shared<InvokeInstruction>(
+            "LFoo;", "baz", v0r2, "V",
+            std::vector<std::string>{"Ljava/lang/String;"},
+            std::vector<IRFormPtr>{v2u}, tr2);
+        StatementBlock a("A", {d0, call, d2, call2});
+        g.add_node(&a);
+        g.entry = &a;
+        g.compute_rpo();
+        g.number_ins();
+        auto ssa = BuildSsa(g, {});
+        auto bnds = ComputeTypeBounds(g, ssa, {}, "V");
+        auto sel = SelectTypes(ssa, bnds, nullptr);
+        scheck("select: v0#1 -> LFoo", sel_of(sel, "v0", 1).type, "LFoo;");
+        icheck("select: v0#1 not conflict", sel_of(sel, "v0", 1).conflict ? 1 : 0,
+               0);
+        scheck("select: v2#1 conflict -> Object", sel_of(sel, "v2", 1).type,
+               "Ljava/lang/Object;");
+        icheck("select: v2#1 is conflict", sel_of(sel, "v2", 1).conflict ? 1 : 0,
+               1);
+    }
+
+    // (4) PHI-WEB merge: a register defined as a reference on one arm and an int
+    //     on the other, merging at a join, is one conflated web → Object across
+    //     ALL its versions (the residual B3 resolves with Object + casts).
+    //   A → {T, F} → J.  T: v0 = new LFoo ;  F: v0 = 7 ;  J: v0.bar()
+    {
+        Graph g;
+        auto ni = std::make_shared<NewInstance>("LFoo;");
+        auto v0t = std::make_shared<Variable>("v0");
+        auto dt = std::make_shared<AssignExpression>(v0t, ni);   // T: v0 = new
+        auto c7 = std::make_shared<Constant>(std::string("7"), "I", int64_t{7});
+        auto v0f = std::make_shared<Variable>("v0");
+        auto df_ = std::make_shared<AssignExpression>(v0f, c7);  // F: v0 = 7
+        auto v0j = std::make_shared<Variable>("v0");
+        InvokeInstruction::Triple tr{"LFoo;", "bar", "()V"};
+        auto call = std::make_shared<InvokeInstruction>(
+            "LFoo;", "bar", v0j, "V", std::vector<std::string>{},
+            std::vector<IRFormPtr>{}, tr);
+        StatementBlock a("A", {}), t("T", {dt}), f("F", {df_}), j("J", {call});
+        g.add_node(&a); g.add_node(&t); g.add_node(&f); g.add_node(&j);
+        g.entry = &a;
+        g.add_edge(&a, &t); g.add_edge(&a, &f);
+        g.add_edge(&t, &j); g.add_edge(&f, &j);
+        g.compute_rpo();
+        g.number_ins();
+        auto ssa = BuildSsa(g, {});
+        auto bnds = ComputeTypeBounds(g, ssa, {}, "V");
+        auto sel = SelectTypes(ssa, bnds, nullptr);
+        icheck("select: phi-web #conflicts==1", sel.conflicts == 1 ? 1 : 0, 1);
+        // Every BOUND v0 version (the two arm defs + the phi result — NOT the
+        // unused v0#0 entry value) is Object across the merged web.
+        bool all_obj = true;
+        for (auto& [k, tb] : bnds.bounds) {
+            (void)tb;
+            if (k.first != "v0") continue;
+            if (sel_of(sel, k.first, k.second).type != "Ljava/lang/Object;")
+                all_obj = false;
+        }
+        icheck("select: phi-web bound v0 -> Object", all_obj ? 1 : 0, 1);
+    }
+
+    // (5) A `const 0` merged with a reference is the NULL reference, NOT an
+    //     int↔ref conflict. Narrow-zero contributes no ASSIGN bound, so the web
+    //     resolves to the reference (regression guard for the false-conflict the
+    //     naive model produced on every `cond ? obj : null`).
+    //   A → {T, F} → J.  T: v0 = new LFoo ;  F: v0 = 0 (null) ;  J: v0.bar()
+    {
+        Graph g;
+        auto ni = std::make_shared<NewInstance>("LFoo;");
+        auto v0t = std::make_shared<Variable>("v0");
+        auto dt = std::make_shared<AssignExpression>(v0t, ni);
+        auto c0 = std::make_shared<Constant>(std::string("0"), "I", int64_t{0});
+        auto v0f = std::make_shared<Variable>("v0");
+        auto df_ = std::make_shared<AssignExpression>(v0f, c0);  // F: v0 = null
+        auto v0j = std::make_shared<Variable>("v0");
+        InvokeInstruction::Triple tr{"LFoo;", "bar", "()V"};
+        auto call = std::make_shared<InvokeInstruction>(
+            "LFoo;", "bar", v0j, "V", std::vector<std::string>{},
+            std::vector<IRFormPtr>{}, tr);
+        StatementBlock a("A", {}), t("T", {dt}), f("F", {df_}), j("J", {call});
+        g.add_node(&a); g.add_node(&t); g.add_node(&f); g.add_node(&j);
+        g.entry = &a;
+        g.add_edge(&a, &t); g.add_edge(&a, &f);
+        g.add_edge(&t, &j); g.add_edge(&f, &j);
+        g.compute_rpo();
+        g.number_ins();
+        auto ssa = BuildSsa(g, {});
+        auto bnds = ComputeTypeBounds(g, ssa, {}, "V");
+        auto sel = SelectTypes(ssa, bnds, nullptr);
+        icheck("select: null-merge NOT a conflict", sel.conflicts == 0 ? 1 : 0, 1);
+        bool all_foo = true;
+        for (auto& [k, tb] : bnds.bounds) {
+            (void)tb;
+            if (k.first == "v0" &&
+                sel_of(sel, k.first, k.second).type != "LFoo;")
+                all_foo = false;
+        }
+        icheck("select: null-merge web -> LFoo", all_foo ? 1 : 0, 1);
+    }
+
+    // (6) Pruned SSA regression: a register defined but DEAD at a join gets no
+    //     phi, so its unrelated redefinitions do NOT merge into one web. Here v0
+    //     is defined as a reference in T and an int in F, but NEVER used after
+    //     the join — no phi, no false int↔ref conflict.
+    //   A → {T, F} → J(empty).  T: v0 = new LFoo ;  F: v0 = 7 ;  (v0 dead at J)
+    {
+        Graph g;
+        auto ni = std::make_shared<NewInstance>("LFoo;");
+        auto v0t = std::make_shared<Variable>("v0");
+        auto dt = std::make_shared<AssignExpression>(v0t, ni);
+        auto c7 = std::make_shared<Constant>(std::string("7"), "I", int64_t{7});
+        auto v0f = std::make_shared<Variable>("v0");
+        auto df_ = std::make_shared<AssignExpression>(v0f, c7);
+        StatementBlock a("A", {}), t("T", {dt}), f("F", {df_}), j("J", {});
+        g.add_node(&a); g.add_node(&t); g.add_node(&f); g.add_node(&j);
+        g.entry = &a;
+        g.add_edge(&a, &t); g.add_edge(&a, &f);
+        g.add_edge(&t, &j); g.add_edge(&f, &j);
+        g.compute_rpo();
+        g.number_ins();
+        auto ssa = BuildSsa(g, {});
+        icheck("prune: dead v0 -> no phi", ssa.phis.empty() ? 1 : 0, 1);
+        auto bnds = ComputeTypeBounds(g, ssa, {}, "V");
+        auto sel = SelectTypes(ssa, bnds, nullptr);
+        icheck("prune: dead redef -> no conflict", sel.conflicts == 0 ? 1 : 0, 1);
     }
 
     std::printf(g_fail ? "\n%d checks FAILED\n" : "\nall SSA checks passed\n",
