@@ -152,13 +152,35 @@ For version v with ASSIGN bounds A = {a_i} and USE bounds U = {u_j}:
   Object-types the truly-unsplittable conflations (`has_r && has_p` from the direct
   defs at a phi-use), so SSA-web-conflict → Object only ADDS the disjoint-splittable
   cases as regressions. **Conclusion: re-detecting conflations with SSA is not the
-  win — the heuristic already covers the genuine set.** The value of the SSA
-  selection, if B3 is pursued, is CONCRETE type CORRECTION of non-conflict versions
-  (replacing the cascade/mirror/move-opcode heuristics with the SSA-selected
-  concrete types), which needs a def-loc↔pipeline-version mapping and must BEAT an
-  already-strong concrete typer — larger scope, uncertain ROI. B4 propagation
-  (typing move/aget/param results from the source version; ~116k unconstrained) is
-  its prerequisite.
+  win — the heuristic already covers the genuine set.**
+
+  **Second cut ATTEMPTED and REVERTED — SSA concrete-type correction (prim↔ref
+  flip) yields ZERO measurable improvement.** A narrower corrector fed
+  `SplitVariables` a `loc → SSA concrete type` map (RESOLVED, NON-conflict only)
+  and adopted the SSA type for a split version ONLY where it is a
+  reference-vs-primitive FLIP of the heuristic `def_type` (the `int v = refVar` /
+  `RefType v = intVar` mismatch bucket). Env-gated `DEXLLM_SSA_TYPES`; OFF
+  byte-identical. Measured (bundled a/b): **1183 type flips** (927 prim→ref, 256
+  ref→prim) but EVERY invalid-Java metric flat — `prim_used_as_object` 344→344,
+  `ref_used_as_int` 280→280, `prim = new` 0→0, `RefType = <nonzero int>` 0→0. Root
+  cause: the flipped versions are dominated by ones RegisterPropagation inlines /
+  DCE removes downstream (their type never reaches a declaration in the final
+  text), and the ones that survive are genuine multi-type conflations where the
+  SSA pick is no more correct than the heuristic's for a given use (a `String`↔`int`
+  reused register is wrong as EITHER single type — the `conflicts_use == 0`
+  property again). Net: type churn, no correctness gain, some quality regressions
+  (`String v → int v`).
+
+  **Overall B3 conclusion (both cuts, data-backed):** the accreted heuristics
+  (cascade / mirror / move-opcode + `region_of` Object) are already near-optimal
+  for a single-type-per-variable model; SSA selection does not beat them when
+  wired to change output. The residual invalid-Java is genuine multi-type
+  register conflation, which only TRUE version-splitting (rename the phi web into
+  per-use variables — the memory-#30 dead-end for this IR) or the existing
+  Object+cast (already applied) can address. **B1/B2 remain valuable as sound
+  analysis infrastructure** (precise conflation measurement, the SSA oracle); B3
+  output-wiring is not pursued further without a new idea that beats the
+  heuristic. B4 propagation would only refine coverage, not change this outcome.
 - **B4 (optional) — propagation / search.** Add a bounded `TypeUpdate`-style
   propagation or `TypeSearch` pass only for residual hard cases B3 leaves.
 
