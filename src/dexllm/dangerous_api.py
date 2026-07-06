@@ -80,6 +80,19 @@ def _level_bucket(raw: str) -> str:
 # junk rather than `(` or end — is rejected instead of stored and later mis-parsed.
 _REF = re.compile(r"^[\w.$]+#[A-Za-z_$][\w$]*(\(.*\))?$")
 
+# The AOSP runtime-enforcement bridge (runtime_perm_api_by_perm.json) records a
+# public API by param COUNT, not types: `Class#method(Nargs)`. We represent each
+# such param as this sentinel — a token no real Dalvik simple type equals. It only
+# supplies the ARITY: _ref_matches consults it purely to disambiguate a genuine
+# MULTI-overload method (an ambiguous same-arity overload is skipped, since the
+# sentinel never compares equal to a real type — fail-closed, never mis-matched). A
+# LONE runtime method matches on name alone (the `total<=1` short-circuit — the same
+# recall-over-precision behaviour metalava's lone full-typed overloads already have),
+# so its declared arity is not a gate. Printable ASCII + not a codegen-blob delimiter.
+_ARITY_ONLY = "*"
+_ARITY_ONLY_RE = re.compile(r"\s*(\d+)args\s*")
+_MAX_ARITY = 256  # Dalvik caps a method at 255 args; a larger N is malformed → inert
+
 # Caller classes that are bundled framework / official-library code. A dangerous
 # API call from here is library plumbing (e.g. androidx permission helpers,
 # Play-services location) rather than the app's own behaviour — `app_only` filters
@@ -252,6 +265,13 @@ def _parse_api(entry: str) -> tuple[str, str, tuple[str, ...] | None]:
     params = _ANNOTATION.sub(" ", rest[open_p + 1 : close_p])
     if not params.strip():
         return cls, name, ()
+    # Runtime-enforcement bridge sig `method(Nargs)` — arity only, no types. Emit N
+    # sentinels so arity matches but a real type never does (see _ARITY_ONLY). N is
+    # capped (a >255-arg method can't exist in Dalvik, so a larger N never matches a
+    # real ref and the cap just bounds the allocation against a malformed dataset).
+    m = _ARITY_ONLY_RE.fullmatch(params)
+    if m:
+        return cls, name, (_ARITY_ONLY,) * min(int(m.group(1)), _MAX_ARITY)
     return cls, name, tuple(_param_simple(p) for p in _split_top_level(params))
 
 

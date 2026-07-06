@@ -467,10 +467,12 @@ overload are distinguished, and only the one the app actually references is repo
 overload of an arity still matches on that alone, so a signature edge case can't drop
 a real hit).
 
-The full permission→API table (`perm_api.json`, 564 perms across all levels) + the
+The full permission→API table (`perm_api.json`, 571 perms across all levels) + the
 protection-level buckets (`perm_levels.json`) ship bundled — AOSP's metalava-extracted
-signature inventory (clean, fully-qualified types); the dangerous slice is DERIVED from
-them (single source of truth). Regenerate from a fresher checkout with
+`@RequiresPermission` inventory (clean, fully-qualified types) plus the AOSP
+runtime-enforcement bridge (runtime-enforced public APIs that carry no annotation, e.g.
+`SmsManager#copyMessageToIcc` → SEND_SMS; recorded arity-only, matched on arity); the
+dangerous slice is DERIVED from them (single source of truth). Regenerate from a fresher checkout with
 `python scripts/gen_perm_data.py /path/to/aosp_data_set`, or pass
 `dataset_path="…/aosp_data_set"` (or set `$DEXLLM_AOSP_DATASET`) at call time to
 compute live. `dangerous_permission_apis` / `dangerous_permission_api_callers` are also

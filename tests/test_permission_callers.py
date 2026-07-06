@@ -78,6 +78,60 @@ def test_blob_codec_roundtrips_non_ascii_and_specials():
         assert decoded == s.encode("utf-8"), f"blob codec not byte-identical: {s!r}"
 
 
+def test_runtime_enforcement_apis_merged():
+    """Issue: the AOSP runtime-ENFORCEMENT bridge (runtime_perm_api_by_perm.json) is
+    merged into the bundled table — public APIs that are runtime-enforced but carry no
+    @RequiresPermission annotation (so metalava misses them), e.g. SmsManager ICC ops
+    → SEND_SMS. Their sigs are arity-only `Class#method(Nargs)`; _parse_api yields N
+    sentinels so arity-primary matching still works. The merge is strictly ADDITIVE
+    (verified separately vs pre-merge: 0 metalava rows changed)."""
+    from dexllm.dangerous_api import _ARITY_ONLY, _parse_api
+
+    # arity-only parse → N sentinels (not one bogus param named "3args")
+    cls, name, types = _parse_api("android.telephony.SmsManager#copyMessageToIcc(3args)")
+    assert (cls, name) == ("android.telephony.SmsManager", "copyMessageToIcc")
+    assert types == (_ARITY_ONLY, _ARITY_ONLY, _ARITY_ONLY)
+    assert _parse_api("a.B#m(0args)")[2] == ()  # 0-arity
+    # the sentinel never equals a real Dalvik simple type (so an ambiguous same-arity
+    # overload is conservatively skipped, never mis-matched)
+    from dexllm.dangerous_api import _dalvik_param_types
+
+    assert _ARITY_ONLY not in _dalvik_param_types("(Ljava/lang/String;I)V")
+
+    # the bundled table carries the runtime-enforced SMS ICC ops under SEND_SMS
+    perm_api = json.loads(
+        (_REPO / "src" / "dexllm" / "data" / "perm_api.json").read_text()
+    )
+    send_sms = perm_api.get("android.permission.SEND_SMS", [])
+    assert any(
+        "SmsManager#copyMessageToIcc(" in s for s in send_sms
+    ), "runtime-enforced SmsManager#copyMessageToIcc not merged under SEND_SMS"
+
+
+def test_runtime_merge_is_additive_invariant():
+    """The merge's additive guarantee, locked portably from the BUNDLED table alone:
+    every arity-only (runtime) (class, method) must be DISJOINT from every full-typed
+    (metalava) (class, method). If they overlapped, adding the runtime arity would
+    perturb that metalava method's overload map — changing existing output. (This is
+    exactly what _merge_runtime's GLOBAL (class, method) dedup guarantees.)"""
+    from dexllm.dangerous_api import _ARITY_ONLY, _parse_api
+
+    perm_api = json.loads(
+        (_REPO / "src" / "dexllm" / "data" / "perm_api.json").read_text()
+    )
+    metalava_cm, arity_only_cm = set(), set()
+    for sigs in perm_api.values():
+        for sig in sigs:
+            c, m, t = _parse_api(sig)
+            if t is None:
+                continue
+            (arity_only_cm if t and all(x == _ARITY_ONLY for x in t) else metalava_cm).add(
+                (c, m)
+            )
+    overlap = metalava_cm & arity_only_cm
+    assert not overlap, f"runtime merge perturbs metalava methods: {sorted(overlap)[:5]}"
+
+
 def test_roundtrip_records_reconstructs_fields():
     """_roundtrip_records (the build-time self-check the codegen runs) must reconstruct
     multi-field records incl. a non-ASCII field and an empty (0-arity) param field."""

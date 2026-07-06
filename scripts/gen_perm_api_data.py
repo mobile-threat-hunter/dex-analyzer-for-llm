@@ -20,6 +20,7 @@ from __future__ import annotations
 import pathlib
 
 from dexllm.dangerous_api import (
+    _ARITY_ONLY,
     _load_full_map,
     _load_levels,
     _overload_index,
@@ -173,6 +174,21 @@ def main() -> None:
             if types is None:
                 continue
             entries.append((perm, level, cls, method, sig, types))
+
+    # An arity-only (runtime-enforcement) entry carries the type-less sentinel, so it
+    # can only be matched on ARITY; if two distinct such sigs ever shared (class,
+    # method, arity) — e.g. a whitespace-variant `(3 args)` surviving set-dedup — the
+    # overload count for that arity would be ≥2, making _ref_matches fall through to
+    # the `ref_types == types` compare, which the sentinel ALWAYS fails → a real hit
+    # would be silently dropped (false negative). Assert that dead path stays dead, so
+    # such a future dataset change fails the codegen loudly instead. (0 on current data.)
+    for _, _, cls, method, _, types in entries:
+        if types and all(t == _ARITY_ONLY for t in types):
+            n = overloads.get((cls, method), {}).get(len(types), 0)
+            assert n <= 1, (
+                f"arity-only overload ambiguity for {cls}#{method}({len(types)}args): "
+                f"{n} same-arity sigs — the sentinel match would drop real hits"
+            )
 
     # Build the two flat blobs. Assert no payload contains a delimiter (would
     # corrupt the parse) — Java sigs / simple type names are all printable ASCII.
