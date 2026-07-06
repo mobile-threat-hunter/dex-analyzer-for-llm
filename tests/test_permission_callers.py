@@ -49,6 +49,49 @@ def test_perm_data_sorted_and_header_in_sync():
     )
 
 
+def _load_codegen():
+    spec = importlib.util.spec_from_file_location(
+        "_gen_perm_api_data", _REPO / "scripts" / "gen_perm_api_data.py"
+    )
+    gen = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(gen)
+    return gen
+
+
+def test_blob_codec_roundtrips_non_ascii_and_specials():
+    """Issue #15 blob codec: the C++-literal escaper must round-trip ANY byte through
+    the compiler-decode, including non-ASCII (multi-byte UTF-8) and codepoints > 0o777
+    — an earlier draft octal-escaped the Python CODEPOINT, silently corrupting é (233→
+    1 byte vs UTF-8's 2) and mis-emitting a 5-digit octal for CJK. Guards adversarial
+    finding #1 (the bundled corpus is ASCII-only, so the sha256 a/b cannot catch it)."""
+    gen = _load_codegen()
+    for s in [
+        "com.example.Café",  # U+00E9 (2-byte UTF-8)
+        "com.example.ᐁ",  # U+1441 (3-byte, codepoint > 0o777)
+        "emoji.😀.Cls",  # U+1F600 (4-byte, supplementary)
+        'sig(java.util.List<java.lang.String>, "quoted", back\\slash)',
+        "digits123.after456",  # a digit right after data (octal-absorb guard)
+        "",  # empty
+        "a\x1eb",  # would-be RS in payload — escaper still round-trips the bytes
+    ]:
+        decoded = gen._decode_cpp_literal(gen._cpp_escape_blob(s))
+        assert decoded == s.encode("utf-8"), f"blob codec not byte-identical: {s!r}"
+
+
+def test_roundtrip_records_reconstructs_fields():
+    """_roundtrip_records (the build-time self-check the codegen runs) must reconstruct
+    multi-field records incl. a non-ASCII field and an empty (0-arity) param field."""
+    gen = _load_codegen()
+    FS, PS = gen.FS, gen.PS
+    recs = [
+        FS.join(["android.permission.FOO", "dangerous", "com.x.Café", "m", "sig()", ""]),
+        FS.join(["p", "normal", "C", "n", "s", PS.join(["int", "String"])]),
+    ]
+    got = gen._roundtrip_records(recs)
+    assert got[0] == ["android.permission.FOO", "dangerous", "com.x.Café", "m", "sig()", ""]
+    assert got[1][5].split(PS) == ["int", "String"]
+
+
 def _norm(groups):
     """Normalise groups for equality — group order AND within-group row order matter
     (both paths return an ordered list), so rows stay an ordered tuple, not a dict."""
