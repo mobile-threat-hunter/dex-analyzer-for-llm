@@ -658,22 +658,7 @@ uint32_t FindTypeIdx(const dexkit::DexItem& item, std::string_view desc) {
     return dex::kNoIndex;
 }
 
-// Find method_idx of (class_idx, name, proto) in this dex, or kNoIndex.
-uint32_t FindMethodIdx(const dexkit::DexItem& item, uint32_t class_idx,
-                       std::string_view name, std::string_view proto) {
-    const auto& reader = item.GetReader();
-    const auto& strings = item.GetStrings();
-    const auto method_ids = reader.MethodIds();
-    const auto proto_ids = reader.ProtoIds();
-    for (size_t i = 0; i < method_ids.size(); ++i) {
-        const auto& m = method_ids[i];
-        if (m.class_idx != class_idx) continue;
-        if (strings[m.name_idx] != name) continue;
-        if (BuildProtoDescriptor(item, proto_ids[m.proto_idx]) != proto) continue;
-        return static_cast<uint32_t>(i);
-    }
-    return dex::kNoIndex;
-}
+// (method_idx resolution is now indexed — see FindMethodIdxIndexed + ApiResolveIndex.)
 
 // Build "Lcom/x/Y;->foo(I)V" for a method_idx in a given dex.
 std::string BuildMethodSignature(const dexkit::DexItem& item, uint32_t method_idx) {
@@ -1211,6 +1196,44 @@ void DexKitExt::WarmAnalysisCaches() {
     analysis_caches_warm_ = true;
 }
 
+void DexKitExt::EnsureApiResolveIndex() {
+    // Lazy one-shot build guarded by a plain bool (no mutex), matching the sibling
+    // WarmAnalysisCaches. THREAD-SAFETY PRECONDITION: every caller-analysis entry
+    // point (find_call_sites_to_api / resolve_call_args / permission_callers /
+    // summarize_capabilities_native) is bound WITHOUT py::gil_scoped_release, so the
+    // GIL serializes them and this build runs exactly once with no data race. The
+    // decompile paths that DO release the GIL never touch api_resolve_index_. If any
+    // caller-analysis binding is ever given gil_scoped_release, this build (and
+    // WarmAnalysisCaches) must first gain a std::once_flag / mutex.
+    if (api_resolve_index_built_) return;
+    const int dex_num = core_->GetDexNum();
+    api_resolve_index_.resize(static_cast<size_t>(dex_num));
+    for (int i = 0; i < dex_num; ++i) {
+        auto* item_ptr = core_->GetDexItem(static_cast<uint16_t>(i));
+        if (item_ptr == nullptr) continue;
+        const auto& item = *item_ptr;
+        auto& idx = api_resolve_index_[static_cast<size_t>(i)];
+
+        // type_name → type_idx (unique; emplace keeps the first/lowest idx, matching
+        // FindTypeIdx's first-match). Keys are string_views into the dex mmap, which
+        // outlives this index (DexItem lifetime == DexKit lifetime).
+        const auto& type_names = item.GetTypeNames();
+        idx.type_to_idx.reserve(type_names.size());
+        for (size_t t = 0; t < type_names.size(); ++t)
+            idx.type_to_idx.emplace(type_names[t], static_cast<uint32_t>(t));
+
+        // class_idx → its method_idxs, in ascending method_idx order (method_ids are
+        // spec-sorted, so pushing in index order keeps each list ascending). Covers
+        // ALL method refs, incl. referenced-only framework methods (unlike the core's
+        // class_method_ids, which holds only methods with a ClassData body).
+        const auto method_ids = item.GetReader().MethodIds();
+        for (size_t m = 0; m < method_ids.size(); ++m)
+            idx.class_methods[method_ids[m].class_idx].push_back(
+                static_cast<uint32_t>(m));
+    }
+    api_resolve_index_built_ = true;
+}
+
 namespace {
 
 const char* ArgKindName(dexkit::DexItem::ArgKind k) {
@@ -1289,6 +1312,129 @@ ArgOrigin ConvertArg(const dexkit::DexItem& item,
     return o;
 }
 
+// O(1) counterparts of FindTypeIdx / FindMethodIdx using a prebuilt ApiResolveIndex
+// (see dexkit_ext.h). Byte-identical to the linear scans: the type map is an exact
+// bijection (unique descriptors) and the per-class method list is ascending, so the
+// first name+proto match equals FindMethodIdx's first ascending match.
+uint32_t FindTypeIdxIndexed(const ApiResolveIndex& idx, std::string_view desc) {
+    auto it = idx.type_to_idx.find(desc);
+    return it == idx.type_to_idx.end() ? dex::kNoIndex : it->second;
+}
+uint32_t FindMethodIdxIndexed(const dexkit::DexItem& item, const ApiResolveIndex& idx,
+                              uint32_t class_idx, std::string_view name,
+                              std::string_view proto) {
+    auto it = idx.class_methods.find(class_idx);
+    if (it == idx.class_methods.end()) return dex::kNoIndex;
+    const auto& reader = item.GetReader();
+    const auto& strings = item.GetStrings();
+    const auto method_ids = reader.MethodIds();
+    const auto proto_ids = reader.ProtoIds();
+    for (uint32_t mi : it->second) {  // ascending → first match = FindMethodIdx contract
+        const auto& m = method_ids[mi];
+        if (strings[m.name_idx] != name) continue;
+        if (BuildProtoDescriptor(item, proto_ids[m.proto_idx]) != proto) continue;
+        return mi;
+    }
+    return dex::kNoIndex;
+}
+
+// One resolved caller of a target API: the dex the caller LIVES in, its method_idx
+// there, and the target's method_idx IN THAT dex (for the per-site filter).
+struct CallerRef {
+    const dexkit::DexItem* item;
+    uint32_t caller_idx;
+    uint32_t local_target;
+};
+
+// Resolve every caller of the target API across all dexes via the callee→callers
+// REVERSE index (O(callers), not the old O(all-methods) scan), honouring DexKit's
+// cross-dex aggregation: BuildCrossRefAggregates MOVES an app-declared method's
+// callers into its DECLARING dex — tagged with their SOURCE dex_id — and clears the
+// source list. So each caller entry (origin_dex, caller_idx) must be walked in its
+// ORIGIN dex, with the target re-resolved to that dex's own method_idx (mirroring
+// DexItem::GetCallMethods' ori_dex_id branch). For a framework/undeclared target no
+// aggregation happens (each dex keeps its own callers, origin == that dex), so this
+// reduces to the old per-dex behaviour. Emission order matches the old full scan:
+// dexes ascending, then (origin_dex, caller_idx) ascending.
+std::vector<CallerRef> CollectApiCallers(dexkit::DexKit* core,
+                                         const std::vector<ApiResolveIndex>& resolve_index,
+                                         std::string_view target_class,
+                                         std::string_view target_name,
+                                         std::string_view target_proto) {
+    std::vector<CallerRef> out;
+    const int dex_num = core->GetDexNum();
+    for (int i = 0; i < dex_num; ++i) {
+        auto* item_ptr = core->GetDexItem(static_cast<uint16_t>(i));
+        if (item_ptr == nullptr) continue;
+        const auto& item = *item_ptr;
+        if (static_cast<size_t>(i) >= resolve_index.size()) continue;
+        const auto& idx = resolve_index[i];
+
+        uint32_t cls_type_idx = FindTypeIdxIndexed(idx, target_class);
+        if (cls_type_idx == dex::kNoIndex) continue;
+        uint32_t target_method_idx =
+            FindMethodIdxIndexed(item, idx, cls_type_idx, target_name, target_proto);
+        if (target_method_idx == dex::kNoIndex) continue;
+
+        const auto& caller_index = item.GetMethodCallerIds();
+        if (target_method_idx >= caller_index.size()) continue;
+        // Dedup by (origin_dex, caller_idx) — the raw index lists a caller once per
+        // invoke site; ascending order matches the old per-dex ascending scan.
+        std::vector<std::pair<uint16_t, uint32_t>> callers(
+            caller_index[target_method_idx].begin(),
+            caller_index[target_method_idx].end());
+        std::sort(callers.begin(), callers.end());
+        callers.erase(std::unique(callers.begin(), callers.end()), callers.end());
+
+        // Cross-dex callers share their origin dex's target method_idx — resolve it
+        // ONCE per origin group (callers are sorted by origin_dex), not per caller.
+        int cached_origin = -1;
+        const dexkit::DexItem* cached_item = nullptr;
+        uint32_t cached_target = dex::kNoIndex;
+        for (const auto& [origin_dex, caller_idx] : callers) {
+            if (origin_dex == item.GetDexId()) {
+                out.push_back({&item, caller_idx, target_method_idx});
+                continue;
+            }
+            // Cross-dex caller: walk it in its OWN dex, filtering on the target's
+            // method_idx as seen from THAT dex (the caller invoked the target via
+            // its own dex's method ref).
+            if (origin_dex != cached_origin) {
+                cached_origin = origin_dex;
+                cached_item = core->GetDexItem(origin_dex);
+                cached_target = dex::kNoIndex;
+                if (cached_item != nullptr &&
+                    origin_dex < resolve_index.size()) {
+                    const auto& oidx = resolve_index[origin_dex];
+                    uint32_t oct = FindTypeIdxIndexed(oidx, target_class);
+                    if (oct != dex::kNoIndex)
+                        cached_target = FindMethodIdxIndexed(*cached_item, oidx, oct,
+                                                             target_name, target_proto);
+                }
+            }
+            if (cached_item == nullptr || cached_target == dex::kNoIndex) continue;
+            out.push_back({cached_item, caller_idx, cached_target});
+        }
+    }
+    // Final global order = (caller's LIVING dex, caller_idx) — exactly the old
+    // forward scan's order (dex-ascending outer loop, caller-ascending inner). Within
+    // one declaring/framework group the emission is already in this order, so this is
+    // a no-op for the common single-declaring-dex and framework targets. It only
+    // reorders the pathological case a single per-group emission cannot: a class
+    // declared with a body in TWO+ dexes (multi-source / add_dumped_dexes(prefer) /
+    // packer dump), where reference-only callers aggregate into the LOWEST declaring
+    // dex while a higher declaring dex keeps its own — two groups emit, breaking the
+    // global (living-dex, caller_idx) order. Sorting here makes list order a stable
+    // contract matching the pre-redesign scan in ALL cases (keys are unique — each
+    // caller is emitted once — so a plain sort is a total order).
+    std::sort(out.begin(), out.end(), [](const CallerRef& a, const CallerRef& b) {
+        uint32_t da = a.item->GetDexId(), db = b.item->GetDexId();
+        if (da != db) return da < db;
+        return a.caller_idx < b.caller_idx;
+    });
+    return out;
+}
+
 }  // namespace
 
 std::vector<ResolvedCallSite>
@@ -1301,45 +1447,27 @@ DexKitExt::ResolveCallArgs(std::string_view api_descriptor) {
     }
 
     WarmAnalysisCaches();
+    EnsureApiResolveIndex();
 
-    const int dex_num = core_->GetDexNum();
-    for (int i = 0; i < dex_num; ++i) {
-        auto* item_ptr = core_->GetDexItem(static_cast<uint16_t>(i));
-        if (item_ptr == nullptr) continue;
-        const auto& item = *item_ptr;
-
-        uint32_t cls_type_idx = FindTypeIdx(item, target_class);
-        if (cls_type_idx == dex::kNoIndex) continue;
-        uint32_t target_method_idx =
-            FindMethodIdx(item, cls_type_idx, target_name, target_proto);
-        if (target_method_idx == dex::kNoIndex) continue;
-
-        const auto& invoking = item.GetMethodInvokingIds();
-        for (size_t caller_idx = 0; caller_idx < invoking.size(); ++caller_idx) {
-            bool any_match = false;
-            for (uint32_t callee_idx : invoking[caller_idx]) {
-                if (callee_idx == target_method_idx) { any_match = true; break; }
+    for (const auto& cr : CollectApiCallers(core_.get(), api_resolve_index_, target_class,
+                                            target_name, target_proto)) {
+        const auto& item = *cr.item;
+        auto sites = item.AnalyzeMethodInvokes(cr.caller_idx);
+        std::string caller_sig = BuildMethodSignature(item, cr.caller_idx);
+        for (const auto& s : sites) {
+            if (s.method_idx != cr.local_target) continue;
+            ResolvedCallSite cs;
+            cs.caller_dex_id = item.GetDexId();
+            cs.caller_method_idx = cr.caller_idx;
+            cs.caller_descriptor = caller_sig;
+            cs.callee_descriptor = std::string(api_descriptor);
+            cs.bytecode_offset = static_cast<int32_t>(s.bytecode_offset);
+            cs.invoke_opcode = s.opcode;
+            cs.args.reserve(s.args.size());
+            for (const auto& a : s.args) {
+                cs.args.push_back(ConvertArg(item, a));
             }
-            if (!any_match) continue;
-
-            auto sites = item.AnalyzeMethodInvokes(static_cast<uint32_t>(caller_idx));
-            std::string caller_sig =
-                BuildMethodSignature(item, static_cast<uint32_t>(caller_idx));
-            for (const auto& s : sites) {
-                if (s.method_idx != target_method_idx) continue;
-                ResolvedCallSite cs;
-                cs.caller_dex_id = item.GetDexId();
-                cs.caller_method_idx = static_cast<uint32_t>(caller_idx);
-                cs.caller_descriptor = caller_sig;
-                cs.callee_descriptor = std::string(api_descriptor);
-                cs.bytecode_offset = static_cast<int32_t>(s.bytecode_offset);
-                cs.invoke_opcode = s.opcode;
-                cs.args.reserve(s.args.size());
-                for (const auto& a : s.args) {
-                    cs.args.push_back(ConvertArg(item, a));
-                }
-                out.push_back(std::move(cs));
-            }
+            out.push_back(std::move(cs));
         }
     }
     return out;
@@ -1355,49 +1483,28 @@ DexKitExt::FindCallSitesToApi(std::string_view api_descriptor) {
     }
 
     WarmAnalysisCaches();
+    EnsureApiResolveIndex();
 
-    const int dex_num = core_->GetDexNum();
-    for (int i = 0; i < dex_num; ++i) {
-        auto* item_ptr = core_->GetDexItem(static_cast<uint16_t>(i));
-        if (item_ptr == nullptr) continue;
-        const auto& item = *item_ptr;
-
-        // Step 1: does this dex even reference the target class?
-        uint32_t cls_type_idx = FindTypeIdx(item, target_class);
-        if (cls_type_idx == dex::kNoIndex) continue;
-
-        // Step 2: locate the exact method_idx within this dex's MethodIds.
-        uint32_t target_method_idx =
-            FindMethodIdx(item, cls_type_idx, target_name, target_proto);
-        if (target_method_idx == dex::kNoIndex) continue;
-
-        // Step 3: scan caller→callees map for this target. method_invoking_ids
-        // gives us only candidate callers; the per-site offsets come from
-        // walking each candidate's bytecode (L2.5).
-        const auto& invoking = item.GetMethodInvokingIds();
-        for (size_t caller_idx = 0; caller_idx < invoking.size(); ++caller_idx) {
-            bool any_match = false;
-            for (uint32_t callee_idx : invoking[caller_idx]) {
-                if (callee_idx == target_method_idx) { any_match = true; break; }
-            }
-            if (!any_match) continue;
-
-            // Walk caller's instruction stream to recover each invoke's
-            // byte_offset + invoke_opcode.
-            auto sites = item.EnumerateInvokeSites(static_cast<uint32_t>(caller_idx));
-            std::string caller_sig =
-                BuildMethodSignature(item, static_cast<uint32_t>(caller_idx));
-            for (const auto& s : sites) {
-                if (s.method_idx != target_method_idx) continue;
-                CallSite cs;
-                cs.caller_dex_id = item.GetDexId();
-                cs.caller_method_idx = static_cast<uint32_t>(caller_idx);
-                cs.caller_descriptor = caller_sig;
-                cs.callee_descriptor = std::string(api_descriptor);
-                cs.bytecode_offset = static_cast<int32_t>(s.bytecode_offset);
-                cs.invoke_opcode = s.opcode;
-                out.push_back(std::move(cs));
-            }
+    // The callee→callers reverse index gives the target's callers directly
+    // (O(callers), not the old O(all-methods) scan); CollectApiCallers resolves each
+    // caller in its own dex (honouring cross-dex aggregation) via api_resolve_index_
+    // (O(1) target lookup). Walk each caller's bytecode for the per-site byte_offset
+    // + opcode → identical output.
+    for (const auto& cr : CollectApiCallers(core_.get(), api_resolve_index_, target_class,
+                                            target_name, target_proto)) {
+        const auto& item = *cr.item;
+        auto sites = item.EnumerateInvokeSites(cr.caller_idx);
+        std::string caller_sig = BuildMethodSignature(item, cr.caller_idx);
+        for (const auto& s : sites) {
+            if (s.method_idx != cr.local_target) continue;
+            CallSite cs;
+            cs.caller_dex_id = item.GetDexId();
+            cs.caller_method_idx = cr.caller_idx;
+            cs.caller_descriptor = caller_sig;
+            cs.callee_descriptor = std::string(api_descriptor);
+            cs.bytecode_offset = static_cast<int32_t>(s.bytecode_offset);
+            cs.invoke_opcode = s.opcode;
+            out.push_back(std::move(cs));
         }
     }
     return out;

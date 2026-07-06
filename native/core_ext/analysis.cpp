@@ -8,6 +8,7 @@
 #include <set>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -110,11 +111,23 @@ bool RefMatches(const ExternalMethodRef& ref,
 
 }  // namespace
 
+// Hash for the (class, method) index key — the index is probed by exact key only
+// (never iterated), so an unordered_map is a drop-in that turns the O(refs·log n)
+// build + O(log n) probes into O(1) average, with byte-identical output.
+struct PairHash {
+    size_t operator()(const std::pair<std::string, std::string>& p) const {
+        size_t h1 = std::hash<std::string>{}(p.first);
+        size_t h2 = std::hash<std::string>{}(p.second);
+        return h1 ^ (h2 + 0x9e3779b97f4a7c15ULL + (h1 << 6) + (h1 >> 2));
+    }
+};
+
 std::vector<PermCallerGroup> PermissionCallers(DexKitExt& ext, bool app_only) {
     // Index the APK's external method refs by (java_class_dotted, method_name),
     // aliasing every <init> under the class simple name (the dataset writes a ctor
     // as `Class#SimpleName(...)`). Mirrors dangerous_api._external_method_index.
-    std::map<std::pair<std::string, std::string>, std::vector<ExternalMethodRef>>
+    std::unordered_map<std::pair<std::string, std::string>,
+                       std::vector<ExternalMethodRef>, PairHash>
         index;
     for (auto& ref : ext.ListExternalMethodRefs(/*framework_only=*/false)) {
         std::string cls = ClassToDotted(ref.class_descriptor);

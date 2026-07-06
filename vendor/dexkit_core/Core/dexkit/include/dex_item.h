@@ -82,6 +82,15 @@ public:
     [[nodiscard]] const std::vector<std::vector<uint32_t>> &
     GetMethodInvokingIds() const { return method_invoking_ids; }
 
+    // dexllm extension hook — the callee→callers REVERSE index (indexed by this
+    // dex's method_idx; each entry a list of (caller_dex_id, caller_method_id)).
+    // Lets "who calls method X" be an O(1)+O(callers) lookup instead of scanning
+    // the whole caller→callees map. Valid after InitCache(kMethodCaller) /
+    // InitFullCache(). (GetCallMethods wraps this as MethodBeans; this raw form is
+    // for callers that need the caller method_idx, e.g. to walk its invoke sites.)
+    [[nodiscard]] const std::vector<std::vector<std::pair<uint16_t, uint32_t>>> &
+    GetMethodCallerIds() const { return method_caller_ids; }
+
     // dexllm L1.5 extension hooks — per-class declared member access. Valid
     // after InitBaseCache (i.e. immediately after construction). Empty / kNoIndex
     // for type_idx that has no class_def in this dex.

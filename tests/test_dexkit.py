@@ -8,6 +8,8 @@ Run:  pytest tests -v
 
 import re
 
+import pytest
+
 import dexllm
 
 # ── self-contained (no APK) ──────────────────────────────────────────────────
@@ -93,6 +95,41 @@ def test_search_call_sites(dk):
         "Landroid/util/Log;->d(Ljava/lang/String;Ljava/lang/String;)I"
     )
     assert isinstance(sites, list)  # may be empty if the APK never logs
+
+
+def test_call_sites_cross_dex_multidex():
+    """find_call_sites_to_api / resolve_call_args must find a CROSS-DEX caller — a
+    target method declared in one classes*.dex but invoked from another. The caller
+    reverse-index redesign made this the sharp edge (DexKit aggregates cross-dex
+    callers into the declaring dex, tagged with their source dex_id)."""
+    import glob
+    import os
+
+    apk = os.path.join(
+        os.path.dirname(__file__), "..", "test_apk", "APK", "multidex.apk"
+    )
+    if not glob.glob(apk):
+        pytest.skip("multidex.apk fixture missing")
+    dk = dexllm.DexKit(apk)
+    assert dk.dex_count() > 1
+    # Foobar is declared in dex 0; Blafoo (dex 1) calls its <init> and somemethod.
+    for target in (
+        "Lcom/foobar/foo/Foobar;-><init>()V",
+        "Lcom/foobar/foo/Foobar;->somemethod(Ljava/lang/String;)V",
+    ):
+        callers = {s.caller_descriptor for s in dk.find_call_sites_to_api(target)}
+        assert any("Lcom/blafoo/bar/Blafoo;" in c for c in callers), (
+            f"cross-dex caller of {target} lost: {callers}"
+        )
+        # resolve_call_args must also see the cross-dex caller (same reverse-index path)
+        rca = {s.caller_descriptor for s in dk.resolve_call_args(target)}
+        assert any("Lcom/blafoo/bar/Blafoo;" in c for c in rca)
+        # ORDER CONTRACT: the reverse-index path emits callers in (living-dex,
+        # caller_method_idx) order — identical to the pre-redesign forward scan. Lock
+        # it so a future grouping change can't silently reorder the returned list.
+        sites = dk.find_call_sites_to_api(target)
+        keys = [(s.caller_dex_id, s.caller_method_idx) for s in sites]
+        assert keys == sorted(keys), f"caller order not (dex, method_idx)-sorted: {keys}"
 
 
 # ── external API enumeration ─────────────────────────────────────────────────

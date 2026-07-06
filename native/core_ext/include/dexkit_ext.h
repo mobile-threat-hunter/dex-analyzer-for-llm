@@ -3,15 +3,30 @@
 
 #pragma once
 
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <vector>
 
 #include "api_ref.h"
 #include "dexkit.h"  // upstream LuckyPray DexKit
 
 namespace dexkit::ext {
+
+// Per-dex O(1) target-resolution index for the caller reverse-index path
+// (CollectApiCallers). Replaces the per-call O(num_types)+O(num_methods) linear
+// scans (FindTypeIdx/FindMethodIdx) with hash lookups. Dex type_ids are unique by
+// descriptor and method_ids unique+ascending by (class,name,proto) — enforced by
+// the structural verifier even in lenient mode — so each lookup is exact and the
+// ascending per-class method list preserves FindMethodIdx's first-match contract
+// (byte-identical resolution). Built lazily; empty (indices unbuilt) until then.
+struct ApiResolveIndex {
+    std::unordered_map<std::string_view, uint32_t> type_to_idx;  // type_name → type_idx
+    std::unordered_map<uint32_t, std::vector<uint32_t>>
+        class_methods;  // class_idx → ascending method_idxs (all refs, not just declared)
+};
 
 // Lightweight container probe — identifies a file by content (dex magic + zip
 // central directory / PK signature), NOT by its extension. Lets callers verify
@@ -242,10 +257,16 @@ private:
     void CollectSource(const std::string& path, bool check_insns,
                        std::vector<std::unique_ptr<dexkit::MemMap>>& out);
 
+    // Lazily build api_resolve_index_ (one ApiResolveIndex per dex) for O(1) target
+    // resolution in the caller reverse-index path. Idempotent (guarded by the flag).
+    void EnsureApiResolveIndex();
+
     std::string apk_path_;
     std::vector<std::string> sources_;  // original construction sources
     std::unique_ptr<dexkit::DexKit> core_;
     bool analysis_caches_warm_ = false;
+    std::vector<ApiResolveIndex> api_resolve_index_;  // one per dex, empty until built
+    bool api_resolve_index_built_ = false;
     std::unique_ptr<DexItemCodeSource> code_source_;  // lazy-constructed
     std::vector<DexVerifyStatus> verify_status_;      // load-boundary verdicts
 };
