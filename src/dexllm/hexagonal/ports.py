@@ -19,7 +19,6 @@ from .model import (
     CapabilityReport,
     ContainerInfo,
     ContentProviderUse,
-    DangerousApiUsage,
     DecompiledClass,
     DecompiledMethod,
     DexVerifyStatus,
@@ -110,11 +109,18 @@ class PermissionAnalysisPort(Protocol):
     def permission_callers(
         self, *, app_only: bool = True
     ) -> tuple[PermissionCallerGroup, ...]:
-        """Permissions the app exercises through real API calls, with callers."""
-        ...
+        """Return every permission the app exercises through real API calls.
 
-    def dangerous_permission_apis(self) -> tuple[DangerousApiUsage, ...]:
-        """Dangerous-permission gated APIs the app references (no callers)."""
+        Covers ALL protection levels — each :class:`PermissionCallerGroup` is tagged
+        with its ``protection_level`` (dangerous / signature / internal / normal /
+        other) and carries the gated APIs + the app methods that call them. This is
+        the full permission surface. ``app_only`` drops framework/library callers.
+
+        The dangerous-only slice is a one-liner filter::
+
+            [g for g in session.permission_callers(app_only=False)
+             if g.protection_level == "dangerous"]
+        """
         ...
 
 

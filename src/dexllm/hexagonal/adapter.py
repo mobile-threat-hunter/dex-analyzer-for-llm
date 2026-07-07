@@ -21,7 +21,6 @@ from .model import (
     CapabilityReport,
     ContainerInfo,
     ContentProviderUse,
-    DangerousApiUsage,
     DecompiledClass,
     DecompiledMethod,
     DexVerifyStatus,
@@ -267,14 +266,6 @@ class DexKitAdapter:
                 ),
             )
             for g in self._dk.permission_callers(app_only)
-        )
-
-    def dangerous_permission_apis(self) -> tuple[DangerousApiUsage, ...]:
-        """Return dangerous-permission gated APIs the app references (no callers)."""
-        table = dexllm.dangerous_permission_apis(self._dk)
-        return tuple(
-            DangerousApiUsage(permission=perm, apis=tuple(apis))
-            for perm, apis in sorted(table.items())
         )
 
     # -- IndicatorExtractionPort --

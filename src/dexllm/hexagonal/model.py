@@ -340,27 +340,6 @@ class PermissionCallerGroup:
     rows: tuple[PermissionCallerRow, ...]
 
 
-@dataclass(frozen=True)
-class DangerousApiUsage:
-    """A dangerous permission and the gated APIs the app references.
-
-    The ``dangerous``-only slice (no caller resolution) — a convenience view for
-    the fastest "does this app touch sensitive data?" check. Use
-    :class:`PermissionCallerGroup` (via ``permission_callers``) for the full surface
-    across every protection level.
-
-    Example (real, a2dp.Vol)::
-
-        DangerousApiUsage(
-            permission='android.permission.ACCESS_FINE_LOCATION',
-            apis=('android.location.LocationManager#getLastKnownLocation(String)',
-                  'android.location.LocationManager#isProviderEnabled(1args)'))
-    """
-
-    permission: str
-    apis: tuple[str, ...]
-
-
 # ── indicators (IOC) ─────────────────────────────────────────────────────────
 
 

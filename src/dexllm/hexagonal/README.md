@@ -97,10 +97,10 @@ fields are `tuple`s; `Mapping` fields are read-only views. See
 - **`PermissionCallerRow`** `(api, descriptors, callers)` — one gated API and the
   app methods that call it.
 - **`PermissionCallerGroup`** `(permission, protection_level, rows)` — a permission,
-  its protection-level bucket, and its referenced gated APIs. See the
-  [protection-level reference](#protection-levels).
-- **`DangerousApiUsage`** `(permission, apis)` — the `dangerous`-only slice (no
-  callers), the fast "touches sensitive data?" view.
+  its protection-level bucket, and its referenced gated APIs (ALL protection levels).
+  See the [protection-level reference](#protection-levels). The dangerous-only view
+  is a one-liner filter (`[g for g in permission_callers(app_only=False) if
+  g.protection_level == "dangerous"]`).
 
 ### Indicators (IOC)
 - **`Indicator`** `(value, methods)` — one network indicator + the app methods
@@ -135,7 +135,7 @@ so a consumer depends on just what it needs:
 | **`DecompilationPort`** | `decompile_method`, `decompile_method_with_pc_map`, `decompile_class`, `decompile_method_ast` |
 | **`EnumerationPort`** | `list_classes`, `list_class_methods`, `list_value_strings`, `list_external_method_refs`, `verify_report` |
 | **`CrossReferencePort`** | `find_call_sites`, `resolve_call_args` |
-| **`PermissionAnalysisPort`** | `permission_callers`, `dangerous_permission_apis` |
+| **`PermissionAnalysisPort`** | `permission_callers` (all protection levels) |
 | **`IndicatorExtractionPort`** | `extract_iocs` |
 | **`CapabilityPort`** | `summarize_capabilities` |
 | **`ContentProviderPort`** | `detect_content_providers` |
@@ -207,8 +207,10 @@ matches; `decompile_*` return a model with `found=False` / empty `source`.
 | **internal** | internal flags (role / installer), A12+ | ❌ | Not obtainable by a normal app. |
 | **other** | no / unknown `protectionLevel` | — | Catch-all. |
 
-`permission_callers()` returns **all** levels; `dangerous_permission_apis()` is the
-`dangerous`-only convenience slice.
+`permission_callers()` returns **all** levels; filter to
+`g.protection_level == "dangerous"` for the dangerous-only view. (The raw
+reference-level `dexllm.dangerous_permission_apis(dk)` is still reachable via
+`session.raw` if you need it.)
 
 ---
 
