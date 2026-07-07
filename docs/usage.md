@@ -544,6 +544,59 @@ print(dk.decompile_method_java(
 
 ---
 
+## Typed API — hexagonal ports & adapters (`dexllm.hexagonal`)
+
+The calls above return a mix of `str`, `list`, `dict`, and pybind objects. For
+embedding dexllm in a larger system, `dexllm.hexagonal` wraps the same engine in a
+**ports-and-adapters** layer: `@runtime_checkable` Protocol *ports* (the use-case
+interfaces) and frozen-dataclass *domain models* with an accurate type on every
+argument and return value — so callers program against types, not dict keys.
+
+```python
+from dexllm.hexagonal import open_apk, identify, DexAnalysisUseCase
+
+# identify is load-free; open_apk returns a session satisfying DexAnalysisUseCase
+info = identify("app.apk")                      # -> ContainerInfo(format, is_apk, has_manifest, dex_count)
+session: DexAnalysisUseCase = open_apk("app.apk")
+# packer/unpack: open_apk([dumped_dex, "app.apk"], lenient=True)  (earlier source wins)
+
+m = session.decompile_method("Lcom/x/Y;->m(I)V")          # -> DecompiledMethod(descriptor, source, found, pc_map)
+d = session.decompile_method_with_pc_map("Lcom/x/Y;->m(I)V")  # + pc_map: tuple[SourceLocation(line, byte_offset)]
+c = session.decompile_class("Lcom/x/Y;")                  # -> DecompiledClass(descriptor, source)
+a = session.decompile_method_ast("Lcom/x/Y;->m(I)V")      # -> MethodAst(name, proto, ast, pc_map, ...)
+
+for cls in session.list_classes():                        # -> tuple[str, ...]
+    for meth in session.list_class_methods(cls): ...       # -> tuple[str, ...]
+refs = session.list_external_method_refs(framework_only=True)  # -> tuple[ExternalMethodRef, ...]
+
+sites = session.find_call_sites("Landroid/util/Log;->d(...)I")  # -> tuple[CallSite, ...]
+for rc in session.resolve_call_args("...->getInstance(Ljava/lang/String;)..."):
+    for arg in rc.args: arg.kind, arg.string_value          # -> ArgOrigin (only the kind's field set)
+
+for g in session.permission_callers(app_only=True):       # -> tuple[PermissionCallerGroup, ...]
+    g.permission, g.protection_level                        # dangerous|signature|internal|normal|other
+    for row in g.rows: row.api, row.callers                 # PermissionCallerRow
+
+ioc = session.extract_iocs()                              # -> IocReport; ioc.domains: tuple[Indicator(value, methods)]
+cap = session.summarize_capabilities()                   # -> CapabilityReport(api_hits, permissions, categories, ...)
+prov = session.detect_content_providers()                # -> tuple[ContentProviderUse(uri, family, methods)]
+
+session.raw       # the underlying dexllm.DexKit (escape hatch for L7 search etc.)
+```
+
+The models are immutable (frozen; `Mapping` fields are read-only views) — the
+value-object models are also hashable, while the two carrying a `Mapping`
+(`CapabilityReport`, `MethodAst`) are not. The ports are structural, so
+`isinstance(session, DecompilationPort)` works and any object with the same methods
+satisfies the contract (test doubles need no base class). Split ports —
+`DecompilationPort`, `EnumerationPort`, `CrossReferencePort`,
+`PermissionAnalysisPort`, `IndicatorExtractionPort`, `CapabilityPort`,
+`ContentProviderPort`, `ContainerProbePort` — let a consumer depend on just the
+concern it needs. See [`src/dexllm/hexagonal/`](../src/dexllm/hexagonal/)
+(`model.py` / `ports.py` / `adapter.py`).
+
+---
+
 ## Architecture
 
 ```

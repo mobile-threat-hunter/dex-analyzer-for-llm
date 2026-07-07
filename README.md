@@ -290,6 +290,20 @@ for site in dk.find_call_sites_to_api("Landroid/util/Log;->d(Ljava/lang/String;L
     print(site)
 ```
 
+**Typed API for embedding** — `dexllm.hexagonal` wraps the same engine in
+ports & adapters (`@runtime_checkable` Protocol use cases + frozen-dataclass
+models with an accurate type on every argument/return):
+
+```python
+from dexllm.hexagonal import open_apk, DexAnalysisUseCase
+
+session: DexAnalysisUseCase = open_apk("app.apk")
+session.decompile_method("Lcom/x/Y;->m(I)V")   # -> DecompiledMethod
+session.permission_callers(app_only=True)      # -> tuple[PermissionCallerGroup]
+```
+
+See [docs/usage.md](docs/usage.md#typed-api--hexagonal-ports--adapters-dexllmhexagonal).
+
 LLM backends (need the `[all]` extra):
 
 ```bash

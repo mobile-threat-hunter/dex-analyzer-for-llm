@@ -469,6 +469,30 @@ Where one argument came from (intra-method).
 
 ---
 
+## Typed hexagonal API (`dexllm.hexagonal`)
+
+For embedding, `dexllm.hexagonal` wraps this surface in ports & adapters:
+`@runtime_checkable` Protocol ports + frozen-dataclass models with an accurate
+type on every argument/return.
+
+```python
+from dexllm.hexagonal import open_apk, identify, DexAnalysisUseCase
+
+session: DexAnalysisUseCase = open_apk("app.apk")   # or open_apk([dump, apk], lenient=True)
+session.decompile_method("Lcom/x/Y;->m(I)V")        # -> DecompiledMethod
+session.permission_callers(app_only=True)           # -> tuple[PermissionCallerGroup]
+session.extract_iocs()                              # -> IocReport
+session.raw                                          # underlying DexKit (escape hatch)
+```
+
+Ports: `DexAnalysisUseCase` (composite) + `DecompilationPort` / `EnumerationPort`
+/ `CrossReferencePort` / `PermissionAnalysisPort` / `IndicatorExtractionPort` /
+`CapabilityPort` / `ContentProviderPort` / `ContainerProbePort`. Full walkthrough
+in [usage.md](usage.md#typed-api--hexagonal-ports--adapters-dexllmhexagonal);
+source in `src/dexllm/hexagonal/`.
+
+---
+
 ## Notes
 
 - **Descriptors in / typed objects or strings out.** Enumeration + decompile
