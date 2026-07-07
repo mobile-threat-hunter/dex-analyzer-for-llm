@@ -23,7 +23,9 @@ from .model import (
     DecompiledClass,
     DecompiledMethod,
     DexVerifyStatus,
+    ExternalFieldRef,
     ExternalMethodRef,
+    ExternalTypeRef,
     FieldInfo,
     IocReport,
     MethodAst,
@@ -62,6 +64,14 @@ class DecompilationPort(Protocol):
         self, method_descriptor: str, *, include_source: bool = True
     ) -> MethodAst:
         """Return a method's structured AST (+ source unless disabled)."""
+        ...
+
+    def render_method_smali(self, method_descriptor: str) -> str:
+        """Render one method as baksmali-style smali (``""`` if unknown/external)."""
+        ...
+
+    def render_class_smali(self, class_descriptor: str) -> str:
+        """Render a whole class as baksmali-style smali (``""`` if external)."""
         ...
 
 
@@ -117,6 +127,18 @@ class EnumerationPort(Protocol):
         self, *, framework_only: bool = True
     ) -> tuple[ExternalMethodRef, ...]:
         """Framework / library methods the app references but does not define."""
+        ...
+
+    def list_external_field_refs(
+        self, *, framework_only: bool = True
+    ) -> tuple[ExternalFieldRef, ...]:
+        """Framework / library fields the app references but does not define."""
+        ...
+
+    def list_external_type_refs(
+        self, *, framework_only: bool = True
+    ) -> tuple[ExternalTypeRef, ...]:
+        """Framework / library types the app references but does not declare."""
         ...
 
     def verify_report(self) -> tuple[DexVerifyStatus, ...]:

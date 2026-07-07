@@ -25,7 +25,9 @@ from .model import (
     DecompiledClass,
     DecompiledMethod,
     DexVerifyStatus,
+    ExternalFieldRef,
     ExternalMethodRef,
+    ExternalTypeRef,
     FieldInfo,
     Indicator,
     IocReport,
@@ -80,6 +82,29 @@ def _to_ext_ref(r: object) -> ExternalMethodRef:
         parameters=tuple(r.parameters),  # type: ignore[attr-defined]
         is_constructor=r.is_constructor,  # type: ignore[attr-defined]
         is_static_initializer=r.is_static_initializer,  # type: ignore[attr-defined]
+        referenced_in_dex_ids=tuple(r.referenced_in_dex_ids),  # type: ignore[attr-defined]
+    )
+
+
+def _to_ext_field_ref(r: object) -> ExternalFieldRef:
+    """Convert a pybind external field ref to the typed model."""
+    return ExternalFieldRef(
+        class_descriptor=r.class_descriptor,  # type: ignore[attr-defined]
+        name=r.name,  # type: ignore[attr-defined]
+        type=r.type,  # type: ignore[attr-defined]
+        java_class=r.java_class,  # type: ignore[attr-defined]
+        java_type=r.java_type,  # type: ignore[attr-defined]
+        java_signature=r.java_signature,  # type: ignore[attr-defined]
+        signature=r.signature,  # type: ignore[attr-defined]
+        referenced_in_dex_ids=tuple(r.referenced_in_dex_ids),  # type: ignore[attr-defined]
+    )
+
+
+def _to_ext_type_ref(r: object) -> ExternalTypeRef:
+    """Convert a pybind external type ref to the typed model."""
+    return ExternalTypeRef(
+        descriptor=r.descriptor,  # type: ignore[attr-defined]
+        java_name=r.java_name,  # type: ignore[attr-defined]
         referenced_in_dex_ids=tuple(r.referenced_in_dex_ids),  # type: ignore[attr-defined]
     )
 
@@ -184,6 +209,14 @@ class DexKitAdapter:
             ),
         )
 
+    def render_method_smali(self, method_descriptor: str) -> str:
+        """Render one method as baksmali-style smali (empty if unknown/external)."""
+        return self._dk.render_method_smali(method_descriptor)
+
+    def render_class_smali(self, class_descriptor: str) -> str:
+        """Render a whole class as baksmali-style smali (empty if external)."""
+        return self._dk.render_class_smali(class_descriptor)
+
     # -- EnumerationPort --
 
     def list_classes(self) -> tuple[str, ...]:
@@ -224,6 +257,24 @@ class DexKitAdapter:
         """Return framework / library methods the app references but doesn't define."""
         return tuple(
             _to_ext_ref(r) for r in self._dk.list_external_method_refs(framework_only)
+        )
+
+    def list_external_field_refs(
+        self, *, framework_only: bool = True
+    ) -> tuple[ExternalFieldRef, ...]:
+        """Return framework / library fields the app references but doesn't define."""
+        return tuple(
+            _to_ext_field_ref(r)
+            for r in self._dk.list_external_field_refs(framework_only)
+        )
+
+    def list_external_type_refs(
+        self, *, framework_only: bool = True
+    ) -> tuple[ExternalTypeRef, ...]:
+        """Return framework / library types the app references but doesn't declare."""
+        return tuple(
+            _to_ext_type_ref(r)
+            for r in self._dk.list_external_type_refs(framework_only)
         )
 
     def verify_report(self) -> tuple[DexVerifyStatus, ...]:

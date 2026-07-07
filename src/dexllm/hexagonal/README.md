@@ -82,6 +82,11 @@ fields are `tuple`s; `Mapping` fields are read-only views. See
   java_signature, signature, return_type, parameters, is_constructor,
   is_static_initializer, referenced_in_dex_ids)` — a framework/library method the
   app references but does not define.
+- **`ExternalFieldRef`** `(class_descriptor, name, type, java_class, java_type,
+  java_signature, signature, referenced_in_dex_ids)` — the field analogue.
+- **`ExternalTypeRef`** `(descriptor, java_name, referenced_in_dex_ids)` — a
+  framework/library type the app references but does not declare (may be an array
+  descriptor, e.g. `[Landroid/content/Intent;`).
 
 ### Class inspection
 The C++ `get_class_summary` bundles class metadata + fields + methods into one
@@ -147,8 +152,8 @@ so a consumer depends on just what it needs:
 | Port | Methods |
 |---|---|
 | **`ContainerProbePort`** | `identify(path) -> ContainerInfo` |
-| **`DecompilationPort`** | `decompile_method`, `decompile_method_with_pc_map`, `decompile_class`, `decompile_method_ast` |
-| **`EnumerationPort`** | `list_classes` / `list_classes_in_dex`, `list_class_methods`, `list_field_descriptors` / `list_field_descriptors_in_dex`, `list_method_descriptors` / `list_method_descriptors_in_dex`, `list_value_strings`, `list_external_method_refs`, `verify_report` (uniform scope axis: bare = all dexes, `…_in_dex(dex_id)` = one dex) |
+| **`DecompilationPort`** | `decompile_method`, `decompile_method_with_pc_map`, `decompile_class`, `decompile_method_ast`, `render_method_smali`, `render_class_smali` |
+| **`EnumerationPort`** | `list_classes` / `list_classes_in_dex`, `list_class_methods`, `list_field_descriptors` / `list_field_descriptors_in_dex`, `list_method_descriptors` / `list_method_descriptors_in_dex`, `list_value_strings`, `list_external_method_refs` / `list_external_field_refs` / `list_external_type_refs`, `verify_report` (uniform scope axis: bare = all dexes, `…_in_dex(dex_id)` = one dex) |
 | **`DexExtractionPort`** | `extract_dex_bytes` (raw per-dex byte extraction; packer/dump primitive) |
 | **`ClassInspectionPort`** | `class_info`, `class_fields` (metadata + fields split out; methods via `list_class_methods`) |
 | **`CrossReferencePort`** | `find_call_sites`, `resolve_call_args`, `find_field_readers`, `find_field_writers`, `find_type_references` |

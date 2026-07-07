@@ -23,7 +23,9 @@ from dexllm.hexagonal import (
     DexAnalysisUseCase,
     DexExtractionPort,
     EnumerationPort,
+    ExternalFieldRef,
     ExternalMethodRef,
+    ExternalTypeRef,
     IndicatorExtractionPort,
     IocReport,
     MethodAst,
@@ -54,6 +56,9 @@ _HASHABLE_MODELS = [
     ArgOrigin,
     PermissionCallerGroup,
     IocReport,
+    ExternalMethodRef,
+    ExternalFieldRef,
+    ExternalTypeRef,
 ]
 # models carrying a Mapping — frozen but NOT hashable (documented)
 _MAPPING_MODELS = [CapabilityReport, MethodAst]
@@ -194,6 +199,16 @@ def test_typed_enumeration_and_xref(apk_path):
     assert refs and all(isinstance(r, ExternalMethodRef) for r in refs)
     r = refs[0]
     assert r.class_descriptor.startswith("L") and isinstance(r.parameters, tuple)
+    # external field / type refs — symmetric with method refs, distinct typed models.
+    # Require non-empty (mirrors the method-ref guard above) so a converter that
+    # regressed to an empty tuple can't pass the all(...) assertions vacuously.
+    frefs = session.list_external_field_refs(framework_only=True)
+    assert frefs and all(isinstance(f, ExternalFieldRef) for f in frefs)
+    assert all(f.signature == f"{f.class_descriptor}->{f.name}:{f.type}" for f in frefs)
+    trefs = session.list_external_type_refs(framework_only=True)
+    assert trefs and all(isinstance(t, ExternalTypeRef) for t in trefs)
+    # external types are reference (L…;) or array ([…) descriptors, never primitives
+    assert all(t.descriptor and t.descriptor[0] in "L[" for t in trefs)
     # find_call_sites / resolve_call_args → typed, with per-kind ArgOrigin
     for rc in session.resolve_call_args(
         "Landroid/util/Log;->d(Ljava/lang/String;Ljava/lang/String;)I"
@@ -201,6 +216,32 @@ def test_typed_enumeration_and_xref(apk_path):
         assert rc.callee_descriptor.endswith(")I")
         for arg in rc.args:
             assert isinstance(arg, ArgOrigin) and isinstance(arg.kind, str)
+
+
+def test_typed_smali_rendering(apk_path):
+    """DecompilationPort renders baksmali-style smali; empty string for external."""
+    session = open_apk(apk_path)
+    rendered = False
+    for cls in session.list_classes():
+        methods = session.list_class_methods(cls)
+        if not methods:
+            continue
+        m = methods[0]
+        sm = session.render_method_smali(m)
+        if sm:
+            # the rendered method's FIRST line is its own descriptor verbatim, and the
+            # body carries smali structure — a load-bearing content check, not just
+            # "non-empty" (which any smali would satisfy via a stray "->").
+            assert sm.splitlines()[0] == m
+            assert ".registers" in sm
+            cs = session.render_class_smali(cls)
+            assert cs.startswith(".class ") and cls in cs
+            rendered = True
+            break
+    assert rendered, "no method rendered smali on the fixture APK"
+    # unknown / external → empty string, never an exception
+    assert session.render_method_smali("Lno/such/C;->x()V") == ""
+    assert session.render_class_smali("Lno/such/C;") == ""
 
 
 def test_enumeration_companions_typed(apk_path):

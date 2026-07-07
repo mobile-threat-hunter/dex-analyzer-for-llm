@@ -209,6 +209,55 @@ class ExternalMethodRef:
     referenced_in_dex_ids: tuple[int, ...]
 
 
+@dataclass(frozen=True)
+class ExternalFieldRef:
+    """A field whose declaring class is not defined in any loaded dex.
+
+    That is, a framework / library field the app reads or writes. Its full
+    descriptor is ``signature`` (``Lcls;->name:Type``).
+
+    Example (real, a2dp.Vol_137.apk)::
+
+        ExternalFieldRef(
+            class_descriptor='Landroid/app/ActivityManager$RunningAppProcessInfo;',
+            name='pid', type='I',
+            java_class='android.app.ActivityManager$RunningAppProcessInfo',
+            java_type='int',
+            java_signature='android.app.ActivityManager$RunningAppProcessInfo.pid : int',
+            signature='Landroid/app/ActivityManager$RunningAppProcessInfo;->pid:I',
+            referenced_in_dex_ids=(0,))
+    """
+
+    class_descriptor: str
+    name: str
+    type: str
+    java_class: str
+    java_type: str
+    java_signature: str
+    signature: str
+    referenced_in_dex_ids: tuple[int, ...]
+
+
+@dataclass(frozen=True)
+class ExternalTypeRef:
+    """A type referenced by the app but not declared in any loaded dex.
+
+    That is, a framework / library class the app touches (as a field/param/return
+    type, superclass, instanceof, etc.).
+
+    Example (real, a2dp.Vol_137.apk)::
+
+        ExternalTypeRef(
+            descriptor='Landroid/accessibilityservice/AccessibilityServiceInfo;',
+            java_name='android.accessibilityservice.AccessibilityServiceInfo',
+            referenced_in_dex_ids=(0,))
+    """
+
+    descriptor: str
+    java_name: str
+    referenced_in_dex_ids: tuple[int, ...]
+
+
 # ── class inspection ─────────────────────────────────────────────────────────
 # Fine-grained decomposition of a class (the C++ get_class_summary bundles all of
 # these — class metadata + fields + methods — into one object; the hexagonal layer
