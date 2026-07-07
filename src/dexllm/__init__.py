@@ -111,4 +111,4 @@ __all__ = [
     "signature",
     "summarize_capabilities",
 ]
-__version__ = "0.1.16"
+__version__ = "0.2.0"
