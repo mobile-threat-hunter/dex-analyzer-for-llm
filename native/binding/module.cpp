@@ -312,9 +312,9 @@ public:
     std::string render_class_smali(const std::string& descriptor) const {
         return ext_.RenderClassSmali(descriptor);
     }
-    // Both decompile_method_java and decompile_method route through the
-    // new dad_cpp Decompiler. The `_java` suffix is preserved for API
-    // back-compat with existing tooling (sweep script, /dexkit-* skills).
+    // Java text decompile via the dad_cpp Decompiler facade. The `_java` suffix
+    // is the stable public name (sweep script, /dexkit-* skills, hexagonal, tests);
+    // GIL is released at the binding site for true parallel decompilation.
     std::string decompile_method_java(const std::string& descriptor) const {
         return decompiler_->DecompileMethod(descriptor);
     }
@@ -338,12 +338,6 @@ public:
         return decompiler_->DecompileClass(descriptor);
     }
 
-    std::string decompile_class(const std::string& descriptor) {
-        return decompiler_->DecompileClass(descriptor);
-    }
-    std::string decompile_method(const std::string& descriptor) {
-        return decompiler_->DecompileMethod(descriptor);
-    }
     py::dict decompile_method_ast(const std::string& descriptor,
                                   bool include_source) {
         auto ast = decompiler_->DecompileMethodAst(descriptor, include_source);
@@ -704,7 +698,7 @@ PYBIND11_MODULE(_dexkit_core, m) {
              py::arg("method_descriptor"),
              "Decompile a single method to Java via DAD C++ port. "
              "Releases the GIL during execution to allow true parallel "
-             "decompilation. Alias of decompile_method.")
+             "decompilation.")
         .def("decompile_method_java_with_pc",
              &PyDexKit::decompile_method_java_with_pc,
              py::arg("method_descriptor"),
@@ -724,7 +718,7 @@ PYBIND11_MODULE(_dexkit_core, m) {
              },
              py::arg("class_descriptor"),
              "Decompile a whole class to Java via DAD C++ port. "
-             "Releases the GIL during execution. Alias of decompile_class.")
+             "Releases the GIL during execution.")
         .def("decompile_method_ast", &PyDexKit::decompile_method_ast,
              py::arg("method_descriptor"), py::arg("include_source") = true,
              "Return a structured method dict: "
@@ -783,10 +777,6 @@ PYBIND11_MODULE(_dexkit_core, m) {
              "levels (each group's real protectionLevel bucket), over the bundled "
              "AOSP data. C++ engine join shared with the WASM binding; mirrors "
              "dexllm.permission_api_callers.")
-        .def("decompile_class", &PyDexKit::decompile_class,
-             py::arg("class_descriptor"))
-        .def("decompile_method", &PyDexKit::decompile_method,
-             py::arg("method_descriptor"))
         .def("decompiler_clear_cache", &PyDexKit::decompiler_clear_cache)
         .def("decompiler_cache_size", &PyDexKit::decompiler_cache_size)
         .def("decompiler_set_cache_capacity",
