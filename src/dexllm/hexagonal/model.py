@@ -210,7 +210,13 @@ class ResolvedCallSite:
 
 @dataclass(frozen=True)
 class PermissionCallerRow:
-    """One gated API under a permission, plus the app methods that call it."""
+    """One gated API under a permission, plus the app methods that call it.
+
+    ``api`` is the AOSP dataset signature (e.g. ``android.telephony.SmsManager#
+    sendTextMessage(...)``; runtime-enforcement-bridge entries are arity-only,
+    ``...#method(Nargs)``). ``descriptors`` are the matching dex method descriptors
+    the app references; ``callers`` are the app methods that invoke them.
+    """
 
     api: str
     descriptors: tuple[str, ...]
@@ -221,8 +227,22 @@ class PermissionCallerRow:
 class PermissionCallerGroup:
     """A permission, its protection-level bucket, and its referenced gated APIs.
 
-    Each row has a (kept) caller. ``protection_level`` ∈ dangerous / signature /
-    internal / normal / other.
+    Each row has a (kept) caller. ``protection_level`` is the Android
+    ``protectionLevel`` bucketed to its base — one of:
+
+    - ``dangerous`` — needs runtime user consent; touches private data / sensitive
+      device functions (CAMERA, READ_SMS, ACCESS_FINE_LOCATION, RECORD_AUDIO). The
+      primary triage signal that an app handles sensitive data.
+    - ``normal`` — auto-granted at install, low risk (INTERNET, ACCESS_NETWORK_STATE,
+      VIBRATE).
+    - ``signature`` — granted only to apps signed with the SAME key as the declarer;
+      a normal third-party app CANNOT hold it (platform/OEM only). A non-system app
+      *referencing* such an API (MANAGE_USERS, STATUS_BAR_SERVICE, INTERACT_ACROSS_
+      USERS) is a notable signal — privilege probing, repackaged system code, or a
+      library false positive.
+    - ``internal`` — granted by internal flags (role / installer), not by signature
+      or consent (Android 12+); not obtainable by a normal app.
+    - ``other`` — no / unknown ``protectionLevel`` in the dataset (catch-all).
     """
 
     permission: str
@@ -234,7 +254,10 @@ class PermissionCallerGroup:
 class DangerousApiUsage:
     """A dangerous permission and the gated APIs the app references.
 
-    The dangerous slice, without caller resolution.
+    The ``dangerous``-only slice (no caller resolution) — a convenience view for
+    the fastest "does this app touch sensitive data?" check. Use
+    :class:`PermissionCallerGroup` (via ``permission_callers``) for the full surface
+    across every protection level.
     """
 
     permission: str
