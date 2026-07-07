@@ -33,6 +33,10 @@ class ContainerInfo:
 
     ``format`` is ``"dex" | "zip" | "unknown"``; ``is_apk`` iff a zip carrying an
     AndroidManifest.xml.
+
+    Example (real, a2dp.Vol_137.apk)::
+
+        ContainerInfo(format='zip', is_apk=True, has_manifest=True, dex_count=1)
     """
 
     format: str
@@ -46,6 +50,10 @@ class DexVerifyStatus:
     """One loaded dex's structural-verification verdict.
 
     ``reason`` is empty when ``valid``; a rejected dex never reached the core.
+
+    Example (real)::
+
+        DexVerifyStatus(dex_id=0, name='classes.dex', valid=True, reason='')
     """
 
     dex_id: int
@@ -63,6 +71,10 @@ class SourceLocation:
 
     ``line`` is a 1-based index into ``source.split("\n")`` (only ``\n`` delimits
     — do not use ``str.splitlines()``).
+
+    Example (real, Utils#getDisplaySize)::
+
+        SourceLocation(line=4, byte_offset=24)
     """
 
     line: int
@@ -75,6 +87,10 @@ class StatementLocation:
 
     ``statement_index`` is a post-order-DFS statement sequence number — NOT a
     source line (that is why it is a distinct model from :class:`SourceLocation`).
+
+    Example (real, Utils#getDisplaySize)::
+
+        StatementLocation(statement_index=0, byte_offset=24)
     """
 
     statement_index: int
@@ -90,6 +106,15 @@ class DecompiledMethod:
     :attr:`MethodAst.found`, which reports whether the method was *located* — also
     False on the rare located-but-empty emit. ``pc_map`` is populated only by the
     with-pc-map decompile; empty otherwise.
+
+    Example (real, Utils#getDisplaySize; source abbreviated, newlines shown as ⏎)::
+
+        DecompiledMethod(
+            descriptor='Lcom/example/.../Utils;->getDisplaySize(...)Landroid/graphics/Point;',
+            source='public static android.graphics.Point getDisplaySize('
+                   'android.content.Context p4) ⏎ { ⏎     android.view.Display v0 = ...',
+            found=True,
+            pc_map=(SourceLocation(line=4, byte_offset=24), ...))
     """
 
     descriptor: str
@@ -100,7 +125,14 @@ class DecompiledMethod:
 
 @dataclass(frozen=True)
 class DecompiledClass:
-    """Full Java text of one class (package + header + fields + method bodies)."""
+    """Full Java text of one class (package + header + fields + method bodies).
+
+    Example (real; source abbreviated)::
+
+        DecompiledClass(
+            descriptor='La2dp/Vol/ALauncher;',
+            source='package a2dp.Vol; ⏎ public class ALauncher extends ... { ... }')
+    """
 
     descriptor: str
     source: str
@@ -115,6 +147,13 @@ class MethodAst:
     statement-index ↔ byte-offset map kept out of ``ast`` so the tree matches
     androguard. Holds a ``Mapping`` (``ast``), so this model is immutable but NOT
     hashable.
+
+    Example (real, Fragment#getId)::
+
+        MethodAst(found=True, class_name='Landroid/support/v4/app/Fragment;',
+                  name='getId', proto='()I', return_type='I', param_types=(),
+                  access_flags=..., source='public int getId() { ... }',
+                  ast={'triple': (...), 'body': [...]}, pc_map=(...,))
     """
 
     found: bool
@@ -142,6 +181,19 @@ class ExternalMethodRef:
     """A method whose declaring class is not defined in any loaded dex.
 
     That is, a framework / library API the app references.
+
+    Example (real, a2dp.Vol_137.apk)::
+
+        ExternalMethodRef(
+            class_descriptor='Landroid/accessibilityservice/AccessibilityServiceInfo;',
+            name='getCanRetrieveWindowContent', proto='()Z',
+            java_class='android.accessibilityservice.AccessibilityServiceInfo',
+            java_signature='android.accessibilityservice.AccessibilityServiceInfo.'
+                           'getCanRetrieveWindowContent() -> boolean',
+            signature='Landroid/accessibilityservice/AccessibilityServiceInfo;->'
+                      'getCanRetrieveWindowContent()Z',
+            return_type='Z', parameters=(), is_constructor=False,
+            is_static_initializer=False, referenced_in_dex_ids=(0,))
     """
 
     class_descriptor: str
@@ -168,6 +220,10 @@ class ArgOrigin:
     are set. ``kind`` is one of ConstString / ConstInt / ConstWide / ConstClass /
     ConstNull / FieldRead / MethodReturn / Parameter / NewInstance / NewArray /
     Unknown.
+
+    Example (real, the first arg of a Log.d call in a2dp.Vol)::
+
+        ArgOrigin(kind='ConstString', reg_num=1, string_value='A2DP Volume')
     """
 
     kind: str
@@ -182,7 +238,15 @@ class ArgOrigin:
 
 @dataclass(frozen=True)
 class CallSite:
-    """One bytecode call site invoking the queried API."""
+    """One bytecode call site invoking the queried API.
+
+    Example (real, a call to Log.d in a2dp.Vol)::
+
+        CallSite(caller_descriptor='La2dp/Vol/MyApplication;->onCreate()V',
+                 caller_dex_id=0, caller_method_idx=278,
+                 callee_descriptor='Landroid/util/Log;->d(...)I',
+                 bytecode_offset=14, invoke_opcode=113)
+    """
 
     caller_descriptor: str
     caller_dex_id: int
@@ -194,7 +258,17 @@ class CallSite:
 
 @dataclass(frozen=True)
 class ResolvedCallSite:
-    """A call site plus a resolved :class:`ArgOrigin` per argument register."""
+    """A call site plus a resolved :class:`ArgOrigin` per argument register.
+
+    Example (real, the same Log.d call — args resolved)::
+
+        ResolvedCallSite(caller_descriptor='La2dp/Vol/MyApplication;->onCreate()V',
+                         caller_dex_id=0, caller_method_idx=278,
+                         callee_descriptor='Landroid/util/Log;->d(...)I',
+                         bytecode_offset=14, invoke_opcode=113,
+                         args=(ArgOrigin(kind='ConstString', reg_num=1,
+                                         string_value='A2DP Volume'), ...))
+    """
 
     caller_descriptor: str
     caller_dex_id: int
@@ -216,6 +290,14 @@ class PermissionCallerRow:
     sendTextMessage(...)``; runtime-enforcement-bridge entries are arity-only,
     ``...#method(Nargs)``). ``descriptors`` are the matching dex method descriptors
     the app references; ``callers`` are the app methods that invoke them.
+
+    Example (real, a2dp.Vol under ACCESS_COARSE_LOCATION)::
+
+        PermissionCallerRow(
+            api='android.location.LocationManager#getLastKnownLocation(String)',
+            descriptors=('Landroid/location/LocationManager;->'
+                         'getLastKnownLocation(Ljava/lang/String;)Landroid/location/Location;',),
+            callers=('La2dp/Vol/StoreLoc;->grabGPS()V',))
     """
 
     api: str
@@ -243,6 +325,14 @@ class PermissionCallerGroup:
     - ``internal`` — granted by internal flags (role / installer), not by signature
       or consent (Android 12+); not obtainable by a normal app.
     - ``other`` — no / unknown ``protectionLevel`` in the dataset (catch-all).
+
+    Example (real, a2dp.Vol)::
+
+        PermissionCallerGroup(
+            permission='android.permission.ACCESS_COARSE_LOCATION',
+            protection_level='dangerous',
+            rows=(PermissionCallerRow(api='android.location.LocationManager#'
+                                          'getLastKnownLocation(String)', ...), ...))
     """
 
     permission: str
@@ -258,6 +348,13 @@ class DangerousApiUsage:
     the fastest "does this app touch sensitive data?" check. Use
     :class:`PermissionCallerGroup` (via ``permission_callers``) for the full surface
     across every protection level.
+
+    Example (real, a2dp.Vol)::
+
+        DangerousApiUsage(
+            permission='android.permission.ACCESS_FINE_LOCATION',
+            apis=('android.location.LocationManager#getLastKnownLocation(String)',
+                  'android.location.LocationManager#isProviderEnabled(1args)'))
     """
 
     permission: str
@@ -272,6 +369,13 @@ class Indicator:
     """One network indicator with the app methods that reference it.
 
     ``methods`` is empty when extracted without cross-reference.
+
+    Example (real, tvleanback — a domain in an ExoPlayer string)::
+
+        Indicator(value='dolby.com',
+                  methods=('Lcom/google/android/exoplayer2/source/dash/manifest/'
+                           'DashManifestParser;->parseAudioChannelConfiguration('
+                           'Lorg/xmlpull/v1/XmlPullParser;)I', ...))
     """
 
     value: str
@@ -283,6 +387,12 @@ class IocReport:
     """Static network indicators recovered from the app's value strings.
 
     Defang-aware and public-suffix-validated.
+
+    Example (real, tvleanback)::
+
+        IocReport(urls=(), ips=(),
+                  domains=(Indicator(value='dolby.com', methods=(...)),),
+                  emails=(), onion=())
     """
 
     urls: tuple[Indicator, ...]
@@ -300,6 +410,16 @@ class CapabilityHit:
     """One capability-catalog API the app exercises.
 
     Carries its call-site count and the permissions / categories it maps to.
+
+    Example (real, a2dp.Vol)::
+
+        CapabilityHit(
+            api_signature='Landroid/location/LocationManager;->'
+                          'getLastKnownLocation(Ljava/lang/String;)Landroid/location/Location;',
+            call_site_count=1,
+            permissions=('android.permission.ACCESS_FINE_LOCATION',
+                         'android.permission.ACCESS_COARSE_LOCATION'),
+            categories=('LOCATION',), callers=(...))
     """
 
     api_signature: str
@@ -316,6 +436,15 @@ class CapabilityReport:
     Matched catalog APIs, aggregate permission / category counts, and a caller →
     permissions map. Holds ``Mapping`` fields, so this model is immutable (the
     mappings are read-only views) but NOT hashable.
+
+    Example (real, a2dp.Vol)::
+
+        CapabilityReport(catalog_version='0.1-seed', catalog_size=45,
+                         matched_apis=10, total_call_sites=56,
+                         permissions={'android.permission.ACCESS_FINE_LOCATION': 1, ...},
+                         categories={'LOCATION': 1, ...},
+                         api_hits=(CapabilityHit(...), ...),
+                         by_caller={'La2dp/Vol/StoreLoc;->grabGPS()V': (...)})
     """
 
     catalog_version: str
@@ -344,6 +473,11 @@ class ContentProviderUse:
 
     The runtime-assembled surface invisible to the ``@RequiresPermission`` map.
     ``family`` is e.g. sms / contacts / call-log / calendar.
+
+    Example (shape; ``uri`` / ``family`` are framework constants, caller illustrative)::
+
+        ContentProviderUse(uri='content://com.android.contacts', family='contacts',
+                           methods=('Lcom/example/app/ContactReader;->load(...)...',))
     """
 
     uri: str
