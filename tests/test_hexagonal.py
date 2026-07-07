@@ -165,8 +165,11 @@ def test_open_apk_conforms_to_use_case(apk_path):
 
 def test_sources_round_trip_and_pathlib(apk_path):
     """Single str and pathlib.Path inputs both round-trip through .sources."""
-    assert open_apk(apk_path).sources == (apk_path,)
+    session = open_apk(apk_path)
+    assert session.sources == (apk_path,)
     assert open_apk(pathlib.Path(apk_path)).sources == (apk_path,)
+    # apk_path is the primary source convenience — equal to sources[0]
+    assert session.apk_path == session.sources[0] == apk_path
 
 
 def test_identify_and_container_probe(apk_path):
@@ -415,6 +418,13 @@ def test_enumeration_companions_multidex():
     for s in slices:
         union |= s
     assert union == set(session.list_classes())
+    # locate_class_dex must attribute each class to its OWN dex across >1 dex — the
+    # cross-dex case a single-dex fixture can't exercise (a class in dex 1 must
+    # return 1). One sample per dex keeps it cheap.
+    for d in range(session.dex_count()):
+        sample = next(iter(slices[d]))
+        assert session.locate_class_dex(sample) == d
+        assert session.class_info(sample).dex_id == d  # cheap path == heavy path
     # each dex extracts as its own dex blob (own magic + own file_size)
     for d in range(session.dex_count()):
         b = session.extract_dex_bytes(d)
@@ -485,6 +495,10 @@ def test_class_inspection_decomposed(apk_path):
     assert all(isinstance(f, FieldInfo) for f in fields)
     # methods are the separate list_class_methods query, not bundled here
     assert isinstance(session.list_class_methods(cls), tuple)
+    # locate_class_dex — the cheap dex-attribution lookup; equals class_info().dex_id
+    # (same result, cheaper path) and -1 for a class no dex declares
+    assert session.locate_class_dex(cls) == info.dex_id
+    assert session.locate_class_dex("Lno/such/Class;") == -1
 
 
 def test_type_references_xref(apk_path):

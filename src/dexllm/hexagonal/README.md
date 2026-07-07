@@ -163,7 +163,7 @@ so a consumer depends on just what it needs:
 | **`DecompilationPort`** | `decompile_method`, `decompile_method_with_pc_map`, `decompile_class`, `decompile_method_ast`, `render_method_smali`, `render_class_smali` |
 | **`EnumerationPort`** | `list_classes` / `list_classes_in_dex`, `list_class_methods`, `list_field_descriptors` / `list_field_descriptors_in_dex`, `list_method_descriptors` / `list_method_descriptors_in_dex`, `list_value_strings`, `list_external_method_refs` / `list_external_field_refs` / `list_external_type_refs`, `verify_report` (uniform scope axis: bare = all dexes, `…_in_dex(dex_id)` = one dex) |
 | **`DexExtractionPort`** | `extract_dex_bytes` (raw per-dex byte extraction; packer/dump primitive) |
-| **`ClassInspectionPort`** | `class_info`, `class_fields` (metadata + fields split out; methods via `list_class_methods`) |
+| **`ClassInspectionPort`** | `class_info`, `class_fields`, `locate_class_dex` (metadata + fields split out; methods via `list_class_methods`; `locate_class_dex` = cheap declaring-dex lookup, vs the heavy `class_info().dex_id`) |
 | **`CrossReferencePort`** | `find_call_sites`, `resolve_call_args`, `find_field_readers`, `find_field_writers`, `find_type_references` |
 | **`SearchPort`** | `find_classes_by_name` / `by_super` / `implementing` / `by_annotation` / `using_strings`, `find_methods_by_name` / `by_annotation` / `using_strings` / `using_int_literals` / `using_double_literals`, `batch_find_{classes,methods}_using_strings` (DexKit's L1–L7 search; `match_type` ∈ `MatchType`) |
 | **`PermissionAnalysisPort`** | `permission_callers` (all protection levels) |
@@ -172,7 +172,8 @@ so a consumer depends on just what it needs:
 | **`ContentProviderPort`** | `detect_content_providers` |
 
 **`DexAnalysisUseCase`** composes the ten session-bound ports (every port except
-`ContainerProbePort`, which is load-free) and adds `sources` / `dex_count()`. It is
+`ContainerProbePort`, which is load-free) and adds `sources` / `apk_path` (=
+`sources[0]`) / `dex_count()`. It is
 the single interface a consumer annotates against — the analogue of a top-level
 application use-case interface.
 

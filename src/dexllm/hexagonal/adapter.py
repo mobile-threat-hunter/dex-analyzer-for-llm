@@ -192,6 +192,11 @@ class DexKitAdapter:
         """Return the source paths this session was constructed from."""
         return tuple(self._dk.sources())
 
+    @property
+    def apk_path(self) -> str:
+        """Return the primary (first) source path — equal to ``sources[0]``."""
+        return self._dk.apk_path()
+
     def dex_count(self) -> int:
         """Return the number of dexes loaded into this session."""
         return self._dk.dex_count()
@@ -548,6 +553,10 @@ class DexKitAdapter:
             FieldInfo(name=f.name, type=f.type, access_flags=f.access_flags)
             for f in s.fields
         )
+
+    def locate_class_dex(self, class_descriptor: str) -> int:
+        """Return the id of the dex that declares the class, or -1 if external."""
+        return self._dk.locate_class_dex(class_descriptor)
 
     # -- PermissionAnalysisPort --
 

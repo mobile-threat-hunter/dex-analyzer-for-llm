@@ -330,6 +330,15 @@ class ClassInspectionPort(Protocol):
         """Return the class's declared fields (name, type, access flags)."""
         ...
 
+    def locate_class_dex(self, class_descriptor: str) -> int:
+        """Return the id of the dex that DECLARES the class, or ``-1`` if external.
+
+        The cheap dex-attribution lookup: it resolves only the declaring dex, unlike
+        :meth:`class_info` which builds the whole class summary just to read
+        ``.dex_id``. Use this when only the dex location is needed.
+        """
+        ...
+
 
 @runtime_checkable
 class PermissionAnalysisPort(Protocol):
@@ -401,13 +410,21 @@ class DexAnalysisUseCase(
     """The full inbound use-case surface of one loaded APK / dex source.
 
     Composes every session-bound port; the adapter (:class:`~dexllm.hexagonal.adapter.DexKitAdapter`)
-    implements it over a ``dexllm.DexKit``. Also exposes the construction sources
-    and the loaded dex count.
+    implements it over a ``dexllm.DexKit``. Also exposes the construction sources,
+    the primary source ``apk_path`` (= ``sources[0]``), and the loaded dex count.
     """
 
     @property
     def sources(self) -> tuple[str, ...]:
         """The source paths this session was constructed from."""
+        ...
+
+    @property
+    def apk_path(self) -> str:
+        """The primary (first) source path — ``sources[0]``.
+
+        A convenience for the common single-source case; equal to ``sources[0]``.
+        """
         ...
 
     def dex_count(self) -> int:
