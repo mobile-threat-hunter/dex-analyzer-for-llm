@@ -13,7 +13,6 @@
 #include "graph.h"
 #include "instruction.h"
 #include "instruction_dispatch.h"
-#include "ssa.h"
 #include "util.h"
 #include "writer.h"
 
@@ -98,121 +97,6 @@ bool DvMethod::BuildProcessedGraph() {
     for (int reg : lparams_) lparam_keys.push_back("v" + std::to_string(reg));
 
     auto chains = BuildDefUse(*graph_, lparam_keys);
-
-    // Phase 1c (SSA rollout): analysis-only oracle. Builds the SSA view and
-    // checks it reconstructs the reaching-def chains, WITHOUT mutating the IR
-    // (output stays byte-identical). Env-gated so it only runs during
-    // validation sweeps. Removed / replaced by the real wiring in Phase 2.
-    if (std::getenv("DEXLLM_SSA_VERIFY")) {
-        auto ssa = BuildSsa(*graph_, lparam_keys);
-        auto rep = VerifySsa(*graph_, lparam_keys, ssa, chains.ud);
-        if (rep.mismatches) {
-            std::fprintf(stderr,
-                         "SSA_ORACLE cls=%s m=%s uses=%ld mism=%ld first=%s\n",
-                         m.cls_name.c_str(), m.name.c_str(), rep.uses_checked,
-                         rep.mismatches, rep.first.c_str());
-        }
-    }
-
-    // Phase B1 (type-inference v2): build the ASSIGN/USE bounds model over the
-    // SSA view and dump aggregate + optional per-version detail. Analysis-only —
-    // computes bounds, mutates nothing (output byte-identical). Env-gated so it
-    // only runs during validation sweeps; retired when B2/B3 wire selection in.
-    if (std::getenv("DEXLLM_BOUNDS_DUMP")) {
-        auto ssa = BuildSsa(*graph_, lparam_keys);
-        // A live-in param's ASSIGN bound is its DECLARED descriptor, taken from
-        // the method meta — NOT vmap_[k]->get_type(), which is the shared param
-        // Variable's CURRENT (DAD last-write) type and is STALE for a param
-        // register reused across types (the very staleness the pruned-SSA /
-        // move / aget skips remove). Mirror the param-creation loop
-        // (BuildProcessedGraph above): the receiver at `start` (its class), then
-        // each declared param, a wide param occupying two registers.
-        std::map<std::string, std::string> param_types;
-        {
-            int reg = start;
-            if (!is_static) {
-                param_types["v" + std::to_string(reg)] = m.cls_name;
-                ++reg;
-            }
-            for (const std::string& pt : m.params_type) {
-                param_types["v" + std::to_string(reg)] = pt;
-                reg += static_cast<int>(GetTypeSize(pt));
-            }
-        }
-        auto bnds = ComputeTypeBounds(*graph_, ssa, param_types, m.ret_type);
-        long n_ver = 0, n_assign = 0, n_use = 0, n_conflict = 0;
-        for (const auto& [key, tb] : bnds.bounds) {
-            ++n_ver;
-            if (!tb.assign.empty()) ++n_assign;
-            if (!tb.uses.empty()) ++n_use;
-            // A prim/ref conflict across this version's bounds = a genuine
-            // int↔reference conflation (the residual B2/B3 will resolve to
-            // Object+cast). Counts ANY assign-or-use primitive together with
-            // ANY assign-or-use reference.
-            bool has_ref = false, has_prim = false;
-            auto scan = [&](const std::string& t) {
-                if (t.empty()) return;
-                if (t.front() == 'L' || t.front() == '[') has_ref = true;
-                else if (t.size() == 1 &&
-                         std::string("ZBCSIJFD").find(t[0]) != std::string::npos)
-                    has_prim = true;
-            };
-            scan(tb.assign);
-            for (const auto& u : tb.uses) scan(u);
-            if (has_ref && has_prim) {
-                ++n_conflict;
-                if (std::getenv("DEXLLM_BOUNDS_DETAIL")) {
-                    std::string us;
-                    for (const auto& u : tb.uses) { us += u; us += ' '; }
-                    std::fprintf(stderr,
-                        "BOUNDS_CONFLICT cls=%s m=%s reg=%s ver=%d assign=%s uses=[ %s]\n",
-                        m.cls_name.c_str(), m.name.c_str(), key.first.c_str(),
-                        key.second, tb.assign.c_str(), us.c_str());
-                }
-            }
-        }
-        std::fprintf(stderr,
-                     "BOUNDS cls=%s m=%s versions=%ld assign=%ld used=%ld conflict=%ld\n",
-                     m.cls_name.c_str(), m.name.c_str(), n_ver, n_assign, n_use,
-                     n_conflict);
-
-        // Phase B2: phi-web merge + hierarchy selection. Post-merge web-conflict
-        // is the TRUE int↔ref conflation residual (vs B1's raw per-version
-        // count, which double-counts phi-web arms). Analysis-only.
-        auto sel = SelectTypes(ssa, bnds, is_assignable_);
-        long resolved = 0, unconstrained = 0;
-        for (const auto& [key, st] : sel.types) {
-            (void)key;
-            if (st.resolved) ++resolved; else ++unconstrained;
-        }
-        std::fprintf(stderr,
-                     "TYPES cls=%s m=%s webs=%ld conflict=%ld confuse=%ld resolved=%ld uncon=%ld\n",
-                     m.cls_name.c_str(), m.name.c_str(), sel.webs, sel.conflicts,
-                     sel.conflicts_use, resolved, unconstrained);
-        if (const char* mn = std::getenv("DEXLLM_BOUNDS_METHOD")) {
-            if (m.name == mn) {
-                for (const auto& [key, tb] : bnds.bounds) {
-                    std::string us;
-                    for (const auto& u : tb.uses) { us += u; us += ' '; }
-                    auto sit = sel.types.find(key);
-                    std::fprintf(stderr,
-                        "BND %s#%d assign=[%s] uses=[%s] -> sel=%s%s\n",
-                        key.first.c_str(), key.second, tb.assign.c_str(),
-                        us.c_str(),
-                        sit != sel.types.end() ? sit->second.type.c_str() : "?",
-                        sit != sel.types.end() && sit->second.conflict ? " CONF" : "");
-                }
-            }
-        }
-        if (std::getenv("DEXLLM_BOUNDS_DETAIL")) {
-            for (const auto& [key, st] : sel.types)
-                if (st.conflict)
-                    std::fprintf(stderr,
-                        "TYPES_CONFLICT cls=%s m=%s reg=%s ver=%d %s\n",
-                        m.cls_name.c_str(), m.name.c_str(), key.first.c_str(),
-                        key.second, st.note.c_str());
-        }
-    }
 
     // var_to_name (DAD): int-keyed lvars dict. DAD seeds `var_to_name` with
     // params, then `construct()` populates it with every register it sees
