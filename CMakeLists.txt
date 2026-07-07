@@ -24,6 +24,15 @@ add_subdirectory("${DEXKIT_CORE_ROOT}/Core" dexkit_core_build EXCLUDE_FROM_ALL)
 find_package(Python COMPONENTS Interpreter Development.Module REQUIRED)
 find_package(pybind11 CONFIG REQUIRED)
 
+# The vendored DexKit Core (dexkit_static) uses a pthread ThreadPool, so pthread
+# must be on the final link of EVERY consumer. The pybind module gets it via
+# Python's link flags, but a standalone consumer (the parity-test executables,
+# which link dexkit_dad -> dexkit_ext -> dexkit_static) does not — link Threads
+# explicitly and propagate it, else manylinux's strict linker fails with
+# `undefined reference to pthread_create` (only relied on transitively before).
+set(THREADS_PREFER_PTHREAD_FLAG ON)
+find_package(Threads REQUIRED)
+
 # Our C++ extension over DexKit.
 add_library(dexkit_ext STATIC
     native/core_ext/dexkit_ext.cpp
@@ -32,7 +41,7 @@ add_library(dexkit_ext STATIC
     native/core_ext/analysis.cpp
 )
 target_include_directories(dexkit_ext PUBLIC native/core_ext/include native/dad_cpp/include)
-target_link_libraries(dexkit_ext PUBLIC dexkit_static)
+target_link_libraries(dexkit_ext PUBLIC dexkit_static Threads::Threads)
 
 # DexKit-DAD decompiler.
 add_library(dexkit_dad STATIC
