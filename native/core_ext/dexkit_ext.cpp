@@ -1199,9 +1199,9 @@ void DexKitExt::WarmAnalysisCaches() {
 void DexKitExt::EnsureApiResolveIndex() {
     // Lazy one-shot build guarded by a plain bool (no mutex), matching the sibling
     // WarmAnalysisCaches. THREAD-SAFETY PRECONDITION: every caller-analysis entry
-    // point (find_call_sites_to_api / resolve_call_args / permission_callers /
-    // summarize_capabilities_native) is bound WITHOUT py::gil_scoped_release, so the
-    // GIL serializes them and this build runs exactly once with no data race. The
+    // point (find_call_sites_to_api / resolve_call_args / permission_callers) is
+    // bound WITHOUT py::gil_scoped_release, so the GIL serializes them and this
+    // build runs exactly once with no data race. The
     // decompile paths that DO release the GIL never touch api_resolve_index_. If any
     // caller-analysis binding is ever given gil_scoped_release, this build (and
     // WarmAnalysisCaches) must first gain a std::once_flag / mutex.

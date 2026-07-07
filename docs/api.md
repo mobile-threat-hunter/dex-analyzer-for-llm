@@ -282,14 +282,6 @@ r.categories    # Counter({'REFLECTION': 3476, 'CRYPTO': 202, 'RISKY': 45, ...})
 ```
 The `dexllm.capability` module also exposes `ApiHit` / `CapabilityReport` types.
 
-### `dk.summarize_capabilities_native() -> dict`
-The **C++ engine port** of `summarize_capabilities` (issue #13, Phase 2), returning
-the report as a dict (`permissions`, `categories`, `by_caller`, `api_hits`,
-`total_call_sites`, `catalog_version`, `catalog_size`, `matched_apis`) over the
-engine-bundled catalog (`native/core_ext/gen/android_api_data.h`). Byte-identical to
-the Python path (`tests/test_capability_native.py`); it exists so the WASM (embind)
-binding and pybind share one join. Prefer `summarize_capabilities` in Python code.
-
 ---
 
 ## 8. IOC extraction (Python)
@@ -304,15 +296,6 @@ dexllm.extract_iocs(dk).keys()          # dict_keys(['urls', 'ips', 'domains', '
 ```
 `dexllm.IOC_CATEGORIES == ('urls', 'ips', 'domains', 'emails', 'onion')`.
 
-### `dk.extract_iocs_native(with_xref=True, denoise=True, xref_limit=300) -> dict`
-The **C++ engine port** of `extract_iocs` (issue #13), returning the identical
-`{category: [{'value', 'methods'}]}` shape and byte-identical results (verified by a
-full-corpus + fuzz differential, `tests/test_ioc_native.py`). It exists so the WASM
-(embind) binding and pybind share ONE implementation over the engine-bundled
-public-suffix data (`native/core_ext/gen/psl_data.h`), instead of a consumer
-re-implementing the scan and shipping its own PSL copy. Prefer the Python
-`extract_iocs` in Python code; this is the WASM-shared backend.
-
 ### `dexllm.detect_content_providers(dk, *, with_xref=True, xref_limit=300) -> list`
 The `content://` provider query-URIs (SMS / contacts / call-log / calendar handles
 that `ContentResolver` takes — the surface `READ_SMS`/`READ_CONTACTS` gate, invisible
@@ -320,8 +303,6 @@ to the `@RequiresPermission` signature map because the `Uri` is assembled at run
 referenced by the app's value-strings, matched against a bundled AOSP-derived dataset
 (`data/content_uris.json`). Returns `[{'uri', 'family', 'methods'}]` sorted by URI; a
 dataset URI is a hit iff it occurs as a substring of some value-string.
-`dk.detect_content_providers_native(with_xref=True, xref_limit=300)` is the
-byte-identical C++ engine port shared with the WASM binding (issue #13).
 
 ---
 

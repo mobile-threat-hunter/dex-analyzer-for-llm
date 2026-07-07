@@ -411,17 +411,19 @@ for hit in dexllm.detect_content_providers(dk):
 # content://sms sms <- ['Lb/g/a/m/f;->run()V']
 ```
 
-### Engine C++ ports (shared with the WASM binding)
+### Engine C++ port — permission callers (shared with the WASM binding)
 
-`extract_iocs`, `detect_content_providers`, `summarize_capabilities`, and
-`permission_api_callers` each have a byte-identical **C++ engine port** —
-`dk.extract_iocs_native()`, `dk.detect_content_providers_native()`,
-`dk.summarize_capabilities_native()`, `dk.permission_callers()` (all protection
-levels) — so the WASM (embind) binding and pybind run **one implementation over the
-engine-bundled AOSP datasets** (issue #13/#14), instead of a consumer re-implementing
-the join and shipping its own copy. Prefer the Python functions in Python code; the `*_native` variants
-are the WASM-shared backend, verified byte-identical by a full-corpus + fuzz
-differential (`tests/test_ioc_native.py`, `tests/test_capability_native.py`).
+`permission_api_callers` has a byte-identical **C++ engine port**,
+`dk.permission_callers()` (all protection levels), so the WASM (embind) binding and
+pybind run **one implementation over the engine-bundled AOSP dataset** (issue #14).
+The pybind/hexagonal permission surface uses this C++ join directly.
+
+The IoC / content-provider / capability analyses are **pure Python**
+(`dexllm.extract_iocs` / `detect_content_providers` / `summarize_capabilities`) —
+the canonical, ReDoS-safe, PSL-validated implementations dexllm's own API uses. The
+earlier C++ mirrors of these three (which existed only to back the WASM binding)
+were removed: dexllm does not carry web-only engine code, and a WASM consumer must
+vendor its own in-browser engine.
 
 The bundled AOSP data — the full `@RequiresPermission` permission→API map + level
 buckets (`perm_api.json` / `perm_levels.json`, all protection levels) and the provider

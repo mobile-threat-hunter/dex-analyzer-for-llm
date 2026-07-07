@@ -8,11 +8,10 @@ so a static call-signature scan never sees it). This module recovers them
 statically: it matches the app's value-strings against a bundled AOSP-derived
 provider-URI dataset and ties each hit back to the referencing method(s).
 
-Issue #13 — the dataset (``data/content_uris.json``) and the join live in the
-engine (single source of truth) so the WASM and pybind bindings, and any future
-consumer, share ONE implementation instead of re-forking the data + logic. The C++
-port (``native/core_ext/ioc.cpp`` `DetectContentProviders`) mirrors this, verified
-byte-identical (``tests/test_ioc_native.py``).
+Issue #13 — the dataset (``data/content_uris.json``) and the join are the
+canonical Python implementation dexllm's API uses. (A WASM consumer that needs
+in-browser detection must vendor its own engine; dexllm no longer carries a C++
+mirror of this pure-Python logic.)
 
 Match semantics (mirrors dexllm-web #16's ``detectProviders``): a dataset URI is a
 hit iff it occurs as a SUBSTRING of some value-string; the ``family`` comes from the
@@ -50,8 +49,8 @@ def match_content_uris(strings: list[str]) -> list[tuple[str, str]]:
     """Return the (uri, family) dataset hits over ``strings``, sorted by URI.
 
     A dataset URI is a hit iff it occurs as a substring of some string (the #16
-    ``detectProviders`` semantics). Factored out so the C++ port
-    (``_detect_providers_from_strings``) can be diff-tested on crafted strings.
+    ``detectProviders`` semantics). Factored out so the match can be unit-tested on
+    crafted strings without a DexKit.
     """
     dataset = load_content_uris()
     candidates = [s for s in strings if "content://" in s]

@@ -235,75 +235,6 @@ public:
         return out;
     }
 
-    // Issue #13: network-IoC extraction. C++ port of dexllm.ioc.extract_iocs,
-    // shared with the WASM binding. Returns the same shape as the Python API —
-    // {category: [{"value": str, "methods": [str]}]} in IOC_CATEGORIES order — so
-    // it can be verified byte-identical against extract_iocs.
-    py::dict extract_iocs_native(bool with_xref, bool denoise, int xref_limit) {
-        auto r = dexkit::ext::ExtractIocs(ext_, with_xref, denoise, xref_limit);
-        auto to_list = [](const std::vector<dexkit::ext::IocIndicator>& rows) {
-            py::list out;
-            for (const auto& ind : rows) {
-                py::dict d;
-                d["value"] = ind.value;
-                d["methods"] = py::cast(ind.methods);
-                out.append(d);
-            }
-            return out;
-        };
-        py::dict out;
-        out["urls"] = to_list(r.urls);
-        out["ips"] = to_list(r.ips);
-        out["domains"] = to_list(r.domains);
-        out["emails"] = to_list(r.emails);
-        out["onion"] = to_list(r.onion);
-        return out;
-    }
-
-    // Issue #13 (Phase 2): capability summarisation. C++ port of
-    // dexllm.capability.summarize_capabilities, shared with the WASM binding.
-    py::dict summarize_capabilities_native() {
-        auto r = dexkit::ext::SummarizeCapabilities(ext_);
-        py::dict out;
-        out["permissions"] = py::cast(r.permissions);
-        out["categories"] = py::cast(r.categories);
-        py::dict by_caller;
-        for (const auto& [caller, perms] : r.by_caller)
-            by_caller[py::str(caller)] = py::cast(perms);
-        out["by_caller"] = by_caller;
-        py::list hits;
-        for (const auto& h : r.api_hits) {
-            py::dict hd;
-            hd["api_signature"] = h.api_signature;
-            hd["permissions"] = py::cast(h.permissions);
-            hd["categories"] = py::cast(h.categories);
-            hd["call_site_count"] = h.call_site_count;
-            hd["callers"] = py::cast(h.callers);
-            hits.append(hd);
-        }
-        out["api_hits"] = hits;
-        out["total_call_sites"] = r.total_call_sites;
-        out["catalog_version"] = r.catalog_version;
-        out["catalog_size"] = r.catalog_size;
-        out["matched_apis"] = r.matched_apis;
-        return out;
-    }
-
-    // Issue #13: content:// provider-URI detection. C++ port of
-    // dexllm.providers.detect_content_providers, shared with the WASM binding.
-    // Returns [{"uri", "family", "methods"}] sorted by URI.
-    py::list detect_content_providers_native(bool with_xref, int xref_limit) {
-        py::list out;
-        for (const auto& h : dexkit::ext::DetectContentProviders(ext_, with_xref,
-                                                                 xref_limit)) {
-            py::dict d;
-            d["uri"] = h.uri;
-            d["family"] = h.family;
-            d["methods"] = py::cast(h.methods);
-            out.append(d);
-        }
-        return out;
-    }
     dexkit::ext::ClassSummary
     get_class_summary(const std::string& descriptor) const {
         return ext_.GetClassSummary(descriptor);
@@ -852,23 +783,6 @@ PYBIND11_MODULE(_dexkit_core, m) {
              "levels (each group's real protectionLevel bucket), over the bundled "
              "AOSP data. C++ engine join shared with the WASM binding; mirrors "
              "dexllm.permission_api_callers.")
-        .def("extract_iocs_native", &PyDexKit::extract_iocs_native,
-             py::arg("with_xref") = true, py::arg("denoise") = true,
-             py::arg("xref_limit") = 300,
-             "Issue #13: network-IoC extraction (URLs/IPs/domains/emails/onion) "
-             "with bundled public-suffix data. C++ engine port shared with the "
-             "WASM binding; mirrors dexllm.ioc.extract_iocs.")
-        .def("detect_content_providers_native",
-             &PyDexKit::detect_content_providers_native,
-             py::arg("with_xref") = true, py::arg("xref_limit") = 300,
-             "Issue #13: content:// provider-URI detection over bundled AOSP data. "
-             "C++ engine port shared with the WASM binding; mirrors "
-             "dexllm.providers.detect_content_providers.")
-        .def("summarize_capabilities_native",
-             &PyDexKit::summarize_capabilities_native,
-             "Issue #13 (Phase 2): capability profile over the bundled API->"
-             "permission/category catalog. C++ engine port shared with the WASM "
-             "binding; mirrors dexllm.capability.summarize_capabilities.")
         .def("decompile_class", &PyDexKit::decompile_class,
              py::arg("class_descriptor"))
         .def("decompile_method", &PyDexKit::decompile_method,
@@ -886,45 +800,4 @@ PYBIND11_MODULE(_dexkit_core, m) {
           py::arg("descriptor"),
           "Returns true if the descriptor uses a known framework prefix "
           "(Landroid/, Ljava/, Lkotlin/, ...).");
-
-    // Test seam for the IoC scanners (issue #13): run refang + the five scanners +
-    // PSL validation over a supplied string list (denoise off, no xref), returning
-    // {category: [value, ...]}. Lets the differential test inject crafted strings
-    // the corpus-only gate cannot reach. Not part of the stable public API.
-    m.def(
-        "_ioc_scan_strings",
-        [](const std::vector<std::string>& strings) {
-            auto r = dexkit::ext::IocScanStrings(strings);
-            auto vals = [](const std::vector<dexkit::ext::IocIndicator>& rows) {
-                py::list out;
-                for (const auto& ind : rows) out.append(ind.value);
-                return out;
-            };
-            py::dict d;
-            d["urls"] = vals(r.urls);
-            d["ips"] = vals(r.ips);
-            d["domains"] = vals(r.domains);
-            d["emails"] = vals(r.emails);
-            d["onion"] = vals(r.onion);
-            return d;
-        },
-        py::arg("strings"),
-        "Test seam: C++ IoC scanners over a supplied string list (denoise off, no "
-        "xref). Returns {category: [value]}. Mirrors dexllm.ioc._scan_value_strings.");
-
-    // Test seam for content:// providers (issue #13): the substring match over a
-    // supplied string list (no xref). Returns [(uri, family)] sorted by URI.
-    m.def(
-        "_detect_providers_from_strings",
-        [](const std::vector<std::string>& strings) {
-            py::list out;
-            for (auto& [uri, family] :
-                 dexkit::ext::DetectProvidersFromStrings(strings)) {
-                out.append(py::make_tuple(uri, family));
-            }
-            return out;
-        },
-        py::arg("strings"),
-        "Test seam: content:// substring match over a supplied string list. "
-        "Returns [(uri, family)]. Mirrors dexllm.providers.match_content_uris.");
 }

@@ -271,9 +271,9 @@ def _scan_value_strings(
 ) -> dict[str, set[str]]:
     """Refang + the five scanners + PSL validation + URL-host fold into value sets.
 
-    The pure extraction, factored out of :func:`extract_iocs` so the C++ port's
-    scanner (``_ioc_scan_strings``) can be diff-tested against the SAME logic on
-    crafted strings (denoise off). Returns a dict of sets keyed by IOC_CATEGORIES.
+    The pure extraction, factored out of :func:`extract_iocs` so the scanner can be
+    unit-tested on crafted strings (denoise off) without a DexKit. Returns a dict of
+    sets keyed by IOC_CATEGORIES.
     """
     urls: set[str] = set()
     ips: set[str] = set()
