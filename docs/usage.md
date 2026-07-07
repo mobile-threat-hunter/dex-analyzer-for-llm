@@ -630,7 +630,7 @@ satisfies the contract (test doubles need no base class). Split ports —
 `DecompilationPort`, `EnumerationPort`, `DexExtractionPort`, `ClassInspectionPort`,
 `CrossReferencePort`, `SearchPort`, `PermissionAnalysisPort`,
 `IndicatorExtractionPort`, `CapabilityPort`, `ContentProviderPort`,
-`ContainerProbePort` — let a consumer depend on just the concern it needs. See [`src/dexllm/hexagonal/`](../src/dexllm/hexagonal/)
+`CacheControlPort`, `ContainerProbePort` — let a consumer depend on just the concern it needs. See [`src/dexllm/hexagonal/`](../src/dexllm/hexagonal/)
 (`model.py` / `ports.py` / `adapter.py`).
 
 ---

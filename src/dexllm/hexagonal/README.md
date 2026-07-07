@@ -170,8 +170,9 @@ so a consumer depends on just what it needs:
 | **`IndicatorExtractionPort`** | `extract_iocs` |
 | **`CapabilityPort`** | `summarize_capabilities` |
 | **`ContentProviderPort`** | `detect_content_providers` |
+| **`CacheControlPort`** | `decompiler_cache_capacity` / `set_decompiler_cache_capacity` / `decompiler_cache_size` / `clear_decompiler_cache`, `warm_analysis_caches` (operational cache/lifecycle knobs, not analysis — a long-lived embedder bounds/frees/warms caches without dropping to `.raw`) |
 
-**`DexAnalysisUseCase`** composes the ten session-bound ports (every port except
+**`DexAnalysisUseCase`** composes the eleven session-bound ports (every port except
 `ContainerProbePort`, which is load-free) and adds `sources` / `apk_path` (=
 `sources[0]`) / `dex_count()`. It is
 the single interface a consumer annotates against — the analogue of a top-level

@@ -49,6 +49,7 @@ from .model import (
     TypeReferences,
 )
 from .ports import (
+    CacheControlPort,
     CapabilityPort,
     ClassInspectionPort,
     ContainerProbePort,
@@ -83,6 +84,7 @@ __all__ = [
     "IndicatorExtractionPort",
     "CapabilityPort",
     "ContentProviderPort",
+    "CacheControlPort",
     # search
     "MatchType",
     "ClassMatch",

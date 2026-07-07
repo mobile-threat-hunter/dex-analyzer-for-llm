@@ -13,11 +13,15 @@ import pytest
 
 from dexllm.hexagonal import (
     ArgOrigin,
+    CacheControlPort,
+    CapabilityPort,
     CapabilityReport,
+    ClassInspectionPort,
     ClassMatch,
     ContainerInfo,
     ContainerProbe,
     ContainerProbePort,
+    ContentProviderPort,
     CrossReferencePort,
     DecompilationPort,
     DecompiledMethod,
@@ -45,10 +49,14 @@ _PORTS = [
     DecompilationPort,
     EnumerationPort,
     DexExtractionPort,
+    ClassInspectionPort,
     CrossReferencePort,
     SearchPort,
     PermissionAnalysisPort,
     IndicatorExtractionPort,
+    CapabilityPort,
+    ContentProviderPort,
+    CacheControlPort,
 ]
 
 # value-object models (only tuple/scalar fields) — must be hashable
@@ -344,6 +352,49 @@ def test_search_rejects_bare_string(apk_path):
         session.find_classes_using_strings("http")
     with pytest.raises(TypeError):
         session.batch_find_methods_using_strings({"q": "http"})  # bare value
+
+
+def test_cache_control(apk_path, sample_method):
+    """CacheControlPort — the operational cache/lifecycle knobs actually take effect:
+    capacity set/get round-trips, the size reflects a decompile then a clear, and
+    warm_analysis_caches is a no-op-safe None-returning call."""
+    session = open_apk(apk_path)
+    assert isinstance(session, CacheControlPort)
+    session.set_decompiler_cache_capacity(8192)
+    assert session.decompiler_cache_capacity() == 8192
+    session.clear_decompiler_cache()
+    assert session.decompiler_cache_size() == 0
+    session.decompile_method(sample_method)  # caches one entry
+    assert session.decompiler_cache_size() == 1
+    session.clear_decompiler_cache()
+    assert session.decompiler_cache_size() == 0
+    assert session.warm_analysis_caches() is None  # operational, returns nothing
+
+
+def test_cache_is_per_session_and_lru_bounded(apk_path):
+    """The decompiler cache is PER-SESSION (per DexKit instance), not process-global,
+    and the LRU capacity is enforced. Both are the contract the port's docstrings
+    imply and the properties a long-lived embedder relies on — a future refactor to a
+    global singleton or an unbounded cache would leave the single-session test green
+    while breaking these."""
+    a, b = open_apk(apk_path), open_apk(apk_path)
+    # cross-session isolation: mutating a's cache must not touch b's
+    a.set_decompiler_cache_capacity(123)
+    assert b.decompiler_cache_capacity() != 123  # b keeps the default
+    m = next(mm for c in a.list_classes() for mm in a.list_class_methods(c)[:1] if mm)
+    a.clear_decompiler_cache()
+    b.clear_decompiler_cache()
+    a.decompile_method(m)
+    assert a.decompiler_cache_size() == 1 and b.decompiler_cache_size() == 0
+
+    # LRU cap enforced: cap=1, two distinct methods -> size never exceeds 1
+    two = [mm for c in a.list_classes() for mm in a.list_class_methods(c)][:2]
+    if len(two) >= 2 and two[0] != two[1]:
+        a.set_decompiler_cache_capacity(1)
+        a.clear_decompiler_cache()
+        a.decompile_method(two[0])
+        a.decompile_method(two[1])
+        assert a.decompiler_cache_size() <= 1
 
 
 def test_enumeration_companions_typed(apk_path):

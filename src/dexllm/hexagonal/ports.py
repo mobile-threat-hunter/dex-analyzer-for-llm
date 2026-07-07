@@ -394,6 +394,36 @@ class ContentProviderPort(Protocol):
 
 
 @runtime_checkable
+class CacheControlPort(Protocol):
+    """Session cache / lifecycle control — the operational (non-analysis) knobs.
+
+    A long-lived embedder uses these to bound memory, free it between analyses, and
+    warm caches before a latency-sensitive batch. Separated from the analysis ports
+    so an analysis-only consumer never sees them.
+    """
+
+    def decompiler_cache_capacity(self) -> int:
+        """Return the decompiled-method LRU capacity (entries; 0 = unbounded)."""
+        ...
+
+    def set_decompiler_cache_capacity(self, capacity: int) -> None:
+        """Set the decompiled-method LRU capacity (0 disables eviction)."""
+        ...
+
+    def decompiler_cache_size(self) -> int:
+        """Return the number of methods currently cached."""
+        ...
+
+    def clear_decompiler_cache(self) -> None:
+        """Evict every cached decompiled method (free memory)."""
+        ...
+
+    def warm_analysis_caches(self) -> None:
+        """Eagerly warm the upstream L2/L4 caches (else built lazily on first use)."""
+        ...
+
+
+@runtime_checkable
 class DexAnalysisUseCase(
     DecompilationPort,
     EnumerationPort,
@@ -405,6 +435,7 @@ class DexAnalysisUseCase(
     IndicatorExtractionPort,
     CapabilityPort,
     ContentProviderPort,
+    CacheControlPort,
     Protocol,
 ):
     """The full inbound use-case surface of one loaded APK / dex source.

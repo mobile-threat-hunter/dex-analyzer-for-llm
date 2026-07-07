@@ -633,6 +633,28 @@ class DexKitAdapter:
             for p in dexllm.detect_content_providers(self._dk, with_xref=with_xref)
         )
 
+    # -- CacheControlPort --
+
+    def decompiler_cache_capacity(self) -> int:
+        """Return the decompiled-method LRU capacity (entries; 0 = unbounded)."""
+        return self._dk.decompiler_cache_capacity()
+
+    def set_decompiler_cache_capacity(self, capacity: int) -> None:
+        """Set the decompiled-method LRU capacity (0 disables eviction)."""
+        self._dk.decompiler_set_cache_capacity(capacity)
+
+    def decompiler_cache_size(self) -> int:
+        """Return the number of methods currently cached."""
+        return self._dk.decompiler_cache_size()
+
+    def clear_decompiler_cache(self) -> None:
+        """Evict every cached decompiled method (free memory)."""
+        self._dk.decompiler_clear_cache()
+
+    def warm_analysis_caches(self) -> None:
+        """Eagerly warm the upstream L2/L4 caches (else built lazily on first use)."""
+        self._dk.warm_analysis_caches()
+
 
 def _to_container_info(path: SourceLike) -> ContainerInfo:
     """Probe a file by content (no load) and convert to the typed model."""
