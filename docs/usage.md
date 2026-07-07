@@ -622,10 +622,10 @@ value-object models are also hashable, while the two carrying a `Mapping`
 (`CapabilityReport`, `MethodAst`) are not. The ports are structural, so
 `isinstance(session, DecompilationPort)` works and any object with the same methods
 satisfies the contract (test doubles need no base class). Split ports —
-`DecompilationPort`, `EnumerationPort`, `CrossReferencePort`,
-`PermissionAnalysisPort`, `IndicatorExtractionPort`, `CapabilityPort`,
-`ContentProviderPort`, `ContainerProbePort` — let a consumer depend on just the
-concern it needs. See [`src/dexllm/hexagonal/`](../src/dexllm/hexagonal/)
+`DecompilationPort`, `EnumerationPort`, `DexExtractionPort`, `ClassInspectionPort`,
+`CrossReferencePort`, `PermissionAnalysisPort`, `IndicatorExtractionPort`,
+`CapabilityPort`, `ContentProviderPort`, `ContainerProbePort` — let a consumer
+depend on just the concern it needs. See [`src/dexllm/hexagonal/`](../src/dexllm/hexagonal/)
 (`model.py` / `ports.py` / `adapter.py`).
 
 ---

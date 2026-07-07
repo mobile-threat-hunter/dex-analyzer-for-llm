@@ -21,6 +21,7 @@ from dexllm.hexagonal import (
     DecompilationPort,
     DecompiledMethod,
     DexAnalysisUseCase,
+    DexExtractionPort,
     EnumerationPort,
     ExternalMethodRef,
     IndicatorExtractionPort,
@@ -38,6 +39,7 @@ _PORTS = [
     DexAnalysisUseCase,
     DecompilationPort,
     EnumerationPort,
+    DexExtractionPort,
     CrossReferencePort,
     PermissionAnalysisPort,
     IndicatorExtractionPort,
@@ -114,18 +116,21 @@ def test_mapping_backed_models_are_immutable_but_not_hashable():
     with pytest.raises(TypeError):
         hash(ma)
     # ast may be None (not-found method) — the field is Optional
-    assert MethodAst(
-        found=False,
-        class_name="",
-        name="",
-        proto="",
-        return_type="",
-        param_types=(),
-        access_flags=0,
-        source="",
-        ast=None,
-        pc_map=(),
-    ).ast is None
+    assert (
+        MethodAst(
+            found=False,
+            class_name="",
+            name="",
+            proto="",
+            return_type="",
+            param_types=(),
+            access_flags=0,
+            source="",
+            ast=None,
+            pc_map=(),
+        ).ast
+        is None
+    )
 
 
 def test_arg_origin_only_kinds_field_is_set():
@@ -198,6 +203,73 @@ def test_typed_enumeration_and_xref(apk_path):
             assert isinstance(arg, ArgOrigin) and isinstance(arg.kind, str)
 
 
+def test_enumeration_companions_typed(apk_path):
+    """EnumerationPort companions: per-dex classes, flat member descriptors, raw dex.
+
+    Mirrors the raw-binding test_enumeration_companions, but through the typed port —
+    every return is a tuple[str, ...] (or bytes), and the invariants hold: the union
+    of per-dex classes == list_classes, and extract_dex_bytes returns THIS dex's slice
+    (its own magic + file_size), not the shared image.
+    """
+    session = open_apk(apk_path)
+    all_classes = set(session.list_classes())
+    per_dex: set[str] = set()
+    for d in range(session.dex_count()):
+        chunk = session.list_classes_in_dex(d)
+        assert isinstance(chunk, tuple)
+        per_dex |= set(chunk)
+    assert per_dex == all_classes
+    assert session.list_classes_in_dex(9999) == ()
+
+    fields = session.list_all_field_descriptors()
+    methods = session.list_all_method_descriptors()
+    assert isinstance(fields, tuple) and isinstance(methods, tuple)
+    assert fields and methods
+    assert all(":" in f and "->" in f for f in fields[:50])
+    assert all("(" in m and "->" in m for m in methods[:50])
+
+    raw = session.extract_dex_bytes(0)
+    assert isinstance(raw, bytes) and raw[:4] == b"dex\n"
+    # the slice is THIS dex only — length == the header's file_size, not the map len
+    assert len(raw) == int.from_bytes(raw[32:36], "little")
+    assert session.extract_dex_bytes(9999) == b""
+
+
+def test_enumeration_companions_multidex():
+    """Genuine multidex: list_classes_in_dex must SLICE by dex, not ignore dex_id.
+
+    The single-dex apk_path fixture makes the union==all invariant vacuous (a broken
+    "return all classes regardless of dex_id" impl would still pass), so this loads a
+    real >1-dex container and asserts the per-dex slices are DISJOINT, each non-empty,
+    and partition list_classes — a wrong-slice impl cannot pass. extract_dex_bytes is
+    likewise checked to yield a distinct dex per id.
+    """
+    import glob
+    import os
+
+    apk = os.path.join(
+        os.path.dirname(__file__), "..", "test_apk", "APK", "multidex.apk"
+    )
+    if not glob.glob(apk):
+        pytest.skip("multidex.apk fixture missing")
+    session = open_apk(apk)
+    if session.dex_count() < 2:
+        pytest.skip("multidex.apk did not load as >1 dex")
+    slices = [set(session.list_classes_in_dex(d)) for d in range(session.dex_count())]
+    assert all(slices), "a dex slice is empty"
+    for i in range(len(slices)):
+        for j in range(i + 1, len(slices)):
+            assert slices[i].isdisjoint(slices[j]), "per-dex class slices overlap"
+    union: set[str] = set()
+    for s in slices:
+        union |= s
+    assert union == set(session.list_classes())
+    # each dex extracts as its own dex blob (own magic + own file_size)
+    for d in range(session.dex_count()):
+        b = session.extract_dex_bytes(d)
+        assert b[:4] == b"dex\n" and len(b) == int.from_bytes(b[32:36], "little")
+
+
 def test_field_xref_readers_writers(apk_path):
     """CrossReferencePort exposes field read/write xref (L2.5): the descriptors of
     methods that iget*/sget* (read) or iput*/sput* (write) a field. The direction is
@@ -232,7 +304,11 @@ def test_class_inspection_decomposed(apk_path):
 
     session = open_apk(apk_path)
     assert isinstance(session, ClassInspectionPort)
-    cls = next(c for c in session.list_classes() if session.raw.get_class_summary(c).is_internal)
+    cls = next(
+        c
+        for c in session.list_classes()
+        if session.raw.get_class_summary(c).is_internal
+    )
     info = session.class_info(cls)
     assert isinstance(info, ClassInfo)
     assert info.descriptor == cls and info.superclass.startswith("L")

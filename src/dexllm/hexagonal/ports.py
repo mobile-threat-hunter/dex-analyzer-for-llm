@@ -73,8 +73,24 @@ class EnumerationPort(Protocol):
         """Every class descriptor declared in any loaded dex."""
         ...
 
+    def list_classes_in_dex(self, dex_id: int) -> tuple[str, ...]:
+        """Every class descriptor declared in one specific loaded dex.
+
+        The per-dex view of :meth:`list_classes` — for multidex attribution (which
+        ``classes*.dex`` a class lives in). Empty for an out-of-range ``dex_id``.
+        """
+        ...
+
     def list_class_methods(self, class_descriptor: str) -> tuple[str, ...]:
         """Every declared method descriptor of the given class."""
+        ...
+
+    def list_all_field_descriptors(self) -> tuple[str, ...]:
+        """Every declared field descriptor (``Lcls;->name:Type``) across all dexes."""
+        ...
+
+    def list_all_method_descriptors(self) -> tuple[str, ...]:
+        """Every declared method descriptor (``Lcls;->name(proto)ret``) across all dexes."""
         ...
 
     def list_value_strings(self) -> tuple[str, ...]:
@@ -89,6 +105,25 @@ class EnumerationPort(Protocol):
 
     def verify_report(self) -> tuple[DexVerifyStatus, ...]:
         """Per-loaded-dex structural-verification verdicts."""
+        ...
+
+
+@runtime_checkable
+class DexExtractionPort(Protocol):
+    """Raw per-dex byte extraction from a loaded source (container concern).
+
+    Distinct from enumeration (which lists descriptors/strings) — this yields the
+    raw dex image, the packer/dump-analysis primitive.
+    """
+
+    def extract_dex_bytes(self, dex_id: int) -> bytes:
+        """Return the raw bytes of one loaded dex (its own ``file_size`` slice).
+
+        The logical dex's own slice — ``header_off`` is applied, so a
+        concatenated / packer container yields THIS dex, not the shared image.
+        Empty ``bytes`` for an out-of-range ``dex_id``. Feeds a runtime-decrypted
+        dex back into analysis via ``add_dumped_dexes``.
+        """
         ...
 
 
@@ -200,6 +235,7 @@ class ContentProviderPort(Protocol):
 class DexAnalysisUseCase(
     DecompilationPort,
     EnumerationPort,
+    DexExtractionPort,
     ClassInspectionPort,
     CrossReferencePort,
     PermissionAnalysisPort,

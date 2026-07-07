@@ -148,7 +148,8 @@ so a consumer depends on just what it needs:
 |---|---|
 | **`ContainerProbePort`** | `identify(path) -> ContainerInfo` |
 | **`DecompilationPort`** | `decompile_method`, `decompile_method_with_pc_map`, `decompile_class`, `decompile_method_ast` |
-| **`EnumerationPort`** | `list_classes`, `list_class_methods`, `list_value_strings`, `list_external_method_refs`, `verify_report` |
+| **`EnumerationPort`** | `list_classes`, `list_classes_in_dex`, `list_class_methods`, `list_all_field_descriptors`, `list_all_method_descriptors`, `list_value_strings`, `list_external_method_refs`, `verify_report` |
+| **`DexExtractionPort`** | `extract_dex_bytes` (raw per-dex byte extraction; packer/dump primitive) |
 | **`ClassInspectionPort`** | `class_info`, `class_fields` (metadata + fields split out; methods via `list_class_methods`) |
 | **`CrossReferencePort`** | `find_call_sites`, `resolve_call_args`, `find_field_readers`, `find_field_writers`, `find_type_references` |
 | **`PermissionAnalysisPort`** | `permission_callers` (all protection levels) |
@@ -156,7 +157,7 @@ so a consumer depends on just what it needs:
 | **`CapabilityPort`** | `summarize_capabilities` |
 | **`ContentProviderPort`** | `detect_content_providers` |
 
-**`DexAnalysisUseCase`** composes the eight session-bound ports (every port except
+**`DexAnalysisUseCase`** composes the nine session-bound ports (every port except
 `ContainerProbePort`, which is load-free) and adds `sources` / `dex_count()`. It is
 the single interface a consumer annotates against — the analogue of a top-level
 application use-case interface.

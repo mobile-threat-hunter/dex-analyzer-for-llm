@@ -190,9 +190,21 @@ class DexKitAdapter:
         """Return every class descriptor declared in any loaded dex."""
         return tuple(self._dk.list_classes())
 
+    def list_classes_in_dex(self, dex_id: int) -> tuple[str, ...]:
+        """Return every class descriptor declared in one specific loaded dex."""
+        return tuple(self._dk.list_classes_in_dex(dex_id))
+
     def list_class_methods(self, class_descriptor: str) -> tuple[str, ...]:
         """Return every declared method descriptor of the given class."""
         return tuple(self._dk.list_class_methods(class_descriptor))
+
+    def list_all_field_descriptors(self) -> tuple[str, ...]:
+        """Return every declared field descriptor across all loaded dexes."""
+        return tuple(self._dk.list_all_field_descriptors())
+
+    def list_all_method_descriptors(self) -> tuple[str, ...]:
+        """Return every declared method descriptor across all loaded dexes."""
+        return tuple(self._dk.list_all_method_descriptors())
 
     def list_value_strings(self) -> tuple[str, ...]:
         """Return every distinct string the app loads as a value."""
@@ -217,6 +229,12 @@ class DexKitAdapter:
             )
             for x in self._dk.verify_report()
         )
+
+    # -- DexExtractionPort --
+
+    def extract_dex_bytes(self, dex_id: int) -> bytes:
+        """Return the raw bytes of one loaded dex (its own file_size slice)."""
+        return self._dk.extract_dex_bytes(dex_id)
 
     # -- CrossReferencePort --
 
