@@ -194,11 +194,17 @@ public:
     std::vector<std::string> list_classes_in_dex(int dex_id) const {
         return ext_.ListClassesInDex(dex_id);
     }
-    std::vector<std::string> list_all_field_descriptors() const {
-        return ext_.ListAllFieldDescriptors();
+    std::vector<std::string> list_field_descriptors() const {
+        return ext_.ListFieldDescriptors();
     }
-    std::vector<std::string> list_all_method_descriptors() const {
-        return ext_.ListAllMethodDescriptors();
+    std::vector<std::string> list_field_descriptors_in_dex(int dex_id) const {
+        return ext_.ListFieldDescriptorsInDex(dex_id);
+    }
+    std::vector<std::string> list_method_descriptors() const {
+        return ext_.ListMethodDescriptors();
+    }
+    std::vector<std::string> list_method_descriptors_in_dex(int dex_id) const {
+        return ext_.ListMethodDescriptorsInDex(dex_id);
     }
     py::bytes extract_dex_bytes(int dex_id) const {
         const auto v = ext_.GetDexBytes(dex_id);
@@ -819,12 +825,22 @@ PYBIND11_MODULE(_dexkit_core, m) {
              py::arg("dex_id"),
              "Descriptors of every class DECLARED in the given loaded dex (0-based). "
              "list_classes() is the union across all dexes; this is one dex.")
-        .def("list_all_field_descriptors", &PyDexKit::list_all_field_descriptors,
+        .def("list_field_descriptors", &PyDexKit::list_field_descriptors,
              "Every field descriptor (\"Lcls;->name:Type\") across all loaded dexes "
-             "(referenced + declared).")
-        .def("list_all_method_descriptors", &PyDexKit::list_all_method_descriptors,
+             "(the dex id-table references: declared + referenced). Exactly the "
+             "concatenation of list_field_descriptors_in_dex over every dex.")
+        .def("list_field_descriptors_in_dex",
+             &PyDexKit::list_field_descriptors_in_dex, py::arg("dex_id"),
+             "Field descriptors of ONE loaded dex (0-based); empty if out of range. "
+             "The per-dex form of list_field_descriptors().")
+        .def("list_method_descriptors", &PyDexKit::list_method_descriptors,
              "Every method descriptor (\"Lcls;->name(proto)ret\") across all loaded "
-             "dexes (referenced + declared).")
+             "dexes (the dex id-table references: declared + referenced). Exactly the "
+             "concatenation of list_method_descriptors_in_dex over every dex.")
+        .def("list_method_descriptors_in_dex",
+             &PyDexKit::list_method_descriptors_in_dex, py::arg("dex_id"),
+             "Method descriptors of ONE loaded dex (0-based); empty if out of range. "
+             "The per-dex form of list_method_descriptors().")
         .def("extract_dex_bytes", &PyDexKit::extract_dex_bytes, py::arg("dex_id"),
              "Raw bytes of the given loaded dex image; empty bytes if dex_id is out "
              "of range.")

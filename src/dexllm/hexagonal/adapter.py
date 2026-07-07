@@ -198,13 +198,21 @@ class DexKitAdapter:
         """Return every declared method descriptor of the given class."""
         return tuple(self._dk.list_class_methods(class_descriptor))
 
-    def list_all_field_descriptors(self) -> tuple[str, ...]:
-        """Return every declared field descriptor across all loaded dexes."""
-        return tuple(self._dk.list_all_field_descriptors())
+    def list_field_descriptors(self) -> tuple[str, ...]:
+        """Return every field descriptor across all loaded dexes."""
+        return tuple(self._dk.list_field_descriptors())
 
-    def list_all_method_descriptors(self) -> tuple[str, ...]:
-        """Return every declared method descriptor across all loaded dexes."""
-        return tuple(self._dk.list_all_method_descriptors())
+    def list_field_descriptors_in_dex(self, dex_id: int) -> tuple[str, ...]:
+        """Return every field descriptor of one specific loaded dex."""
+        return tuple(self._dk.list_field_descriptors_in_dex(dex_id))
+
+    def list_method_descriptors(self) -> tuple[str, ...]:
+        """Return every method descriptor across all loaded dexes."""
+        return tuple(self._dk.list_method_descriptors())
+
+    def list_method_descriptors_in_dex(self, dex_id: int) -> tuple[str, ...]:
+        """Return every method descriptor of one specific loaded dex."""
+        return tuple(self._dk.list_method_descriptors_in_dex(dex_id))
 
     def list_value_strings(self) -> tuple[str, ...]:
         """Return every distinct string the app loads as a value."""

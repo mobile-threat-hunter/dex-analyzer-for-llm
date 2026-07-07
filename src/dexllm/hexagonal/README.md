@@ -148,7 +148,7 @@ so a consumer depends on just what it needs:
 |---|---|
 | **`ContainerProbePort`** | `identify(path) -> ContainerInfo` |
 | **`DecompilationPort`** | `decompile_method`, `decompile_method_with_pc_map`, `decompile_class`, `decompile_method_ast` |
-| **`EnumerationPort`** | `list_classes`, `list_classes_in_dex`, `list_class_methods`, `list_all_field_descriptors`, `list_all_method_descriptors`, `list_value_strings`, `list_external_method_refs`, `verify_report` |
+| **`EnumerationPort`** | `list_classes` / `list_classes_in_dex`, `list_class_methods`, `list_field_descriptors` / `list_field_descriptors_in_dex`, `list_method_descriptors` / `list_method_descriptors_in_dex`, `list_value_strings`, `list_external_method_refs`, `verify_report` (uniform scope axis: bare = all dexes, `…_in_dex(dex_id)` = one dex) |
 | **`DexExtractionPort`** | `extract_dex_bytes` (raw per-dex byte extraction; packer/dump primitive) |
 | **`ClassInspectionPort`** | `class_info`, `class_fields` (metadata + fields split out; methods via `list_class_methods`) |
 | **`CrossReferencePort`** | `find_call_sites`, `resolve_call_args`, `find_field_readers`, `find_field_writers`, `find_type_references` |

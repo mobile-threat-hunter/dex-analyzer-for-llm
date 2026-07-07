@@ -85,12 +85,28 @@ class EnumerationPort(Protocol):
         """Every declared method descriptor of the given class."""
         ...
 
-    def list_all_field_descriptors(self) -> tuple[str, ...]:
-        """Every declared field descriptor (``Lcls;->name:Type``) across all dexes."""
+    def list_field_descriptors(self) -> tuple[str, ...]:
+        """Every field descriptor (``Lcls;->name:Type``) across all loaded dexes.
+
+        The dex id-table references (declared + referenced) — exactly the
+        concatenation of :meth:`list_field_descriptors_in_dex` over every dex.
+        """
         ...
 
-    def list_all_method_descriptors(self) -> tuple[str, ...]:
-        """Every declared method descriptor (``Lcls;->name(proto)ret``) across all dexes."""
+    def list_field_descriptors_in_dex(self, dex_id: int) -> tuple[str, ...]:
+        """Every field descriptor of one specific loaded dex (empty if out of range)."""
+        ...
+
+    def list_method_descriptors(self) -> tuple[str, ...]:
+        """Every method descriptor (``Lcls;->name(proto)ret``) across all loaded dexes.
+
+        The dex id-table references (declared + referenced) — exactly the
+        concatenation of :meth:`list_method_descriptors_in_dex` over every dex.
+        """
+        ...
+
+    def list_method_descriptors_in_dex(self, dex_id: int) -> tuple[str, ...]:
+        """Every method descriptor of one specific loaded dex (empty if out of range)."""
         ...
 
     def list_value_strings(self) -> tuple[str, ...]:

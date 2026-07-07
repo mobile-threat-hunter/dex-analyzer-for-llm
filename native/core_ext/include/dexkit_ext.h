@@ -256,12 +256,17 @@ public:
     [[nodiscard]] TypeReferences
     FindTypeReferences(std::string_view type_descriptor);
 
-    // L8 enumeration companions (parity with the WASM binding).
-    // Declared classes of ONE loaded dex (ListClasses is all dexes).
+    // L8 enumeration companions. Uniform scope axis: the bare form is all loaded
+    // dexes; the ...InDex(dex_id) form is one dex (empty if dex_id out of range),
+    // and the all-dexes form is exactly the concatenation over dexes.
+    // Classes: DECLARED types (TypeDefFlags). Field/method descriptors: the dex's
+    // id-table references (declared + referenced), so a cross-dex reference recurs
+    // once per referencing dex.
     [[nodiscard]] std::vector<std::string> ListClassesInDex(int dex_id) const;
-    // Every field / method descriptor across all loaded dexes (referenced + declared).
-    [[nodiscard]] std::vector<std::string> ListAllFieldDescriptors() const;
-    [[nodiscard]] std::vector<std::string> ListAllMethodDescriptors() const;
+    [[nodiscard]] std::vector<std::string> ListFieldDescriptors() const;
+    [[nodiscard]] std::vector<std::string> ListFieldDescriptorsInDex(int dex_id) const;
+    [[nodiscard]] std::vector<std::string> ListMethodDescriptors() const;
+    [[nodiscard]] std::vector<std::string> ListMethodDescriptorsInDex(int dex_id) const;
     // Raw bytes of one loaded dex image (empty if dex_id is out of range).
     [[nodiscard]] std::vector<uint8_t> GetDexBytes(int dex_id) const;
 

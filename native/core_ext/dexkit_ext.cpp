@@ -1624,26 +1624,46 @@ std::vector<std::string> DexKitExt::ListClassesInDex(int dex_id) const {
     return out;
 }
 
-std::vector<std::string> DexKitExt::ListAllFieldDescriptors() const {
+std::vector<std::string> DexKitExt::ListFieldDescriptorsInDex(int dex_id) const {
+    std::vector<std::string> out;
+    if (dex_id < 0 || dex_id >= core_->GetDexNum()) return out;
+    auto* item = core_->GetDexItem(static_cast<uint16_t>(dex_id));
+    if (item == nullptr) return out;
+    const auto field_ids = item->GetReader().FieldIds();
+    out.reserve(field_ids.size());
+    for (uint32_t fid = 0; fid < field_ids.size(); ++fid)
+        out.push_back(BuildFieldSignature(*item, fid));
+    return out;
+}
+
+std::vector<std::string> DexKitExt::ListFieldDescriptors() const {
     std::vector<std::string> out;
     for (int d = 0; d < core_->GetDexNum(); ++d) {
-        auto* item = core_->GetDexItem(static_cast<uint16_t>(d));
-        if (item == nullptr) continue;
-        const auto field_ids = item->GetReader().FieldIds();
-        for (uint32_t fid = 0; fid < field_ids.size(); ++fid)
-            out.push_back(BuildFieldSignature(*item, fid));
+        auto per_dex = ListFieldDescriptorsInDex(d);
+        out.insert(out.end(), std::make_move_iterator(per_dex.begin()),
+                   std::make_move_iterator(per_dex.end()));
     }
     return out;
 }
 
-std::vector<std::string> DexKitExt::ListAllMethodDescriptors() const {
+std::vector<std::string> DexKitExt::ListMethodDescriptorsInDex(int dex_id) const {
+    std::vector<std::string> out;
+    if (dex_id < 0 || dex_id >= core_->GetDexNum()) return out;
+    auto* item = core_->GetDexItem(static_cast<uint16_t>(dex_id));
+    if (item == nullptr) return out;
+    const auto method_ids = item->GetReader().MethodIds();
+    out.reserve(method_ids.size());
+    for (uint32_t mid = 0; mid < method_ids.size(); ++mid)
+        out.push_back(BuildMethodSignature(*item, mid));
+    return out;
+}
+
+std::vector<std::string> DexKitExt::ListMethodDescriptors() const {
     std::vector<std::string> out;
     for (int d = 0; d < core_->GetDexNum(); ++d) {
-        auto* item = core_->GetDexItem(static_cast<uint16_t>(d));
-        if (item == nullptr) continue;
-        const auto method_ids = item->GetReader().MethodIds();
-        for (uint32_t mid = 0; mid < method_ids.size(); ++mid)
-            out.push_back(BuildMethodSignature(*item, mid));
+        auto per_dex = ListMethodDescriptorsInDex(d);
+        out.insert(out.end(), std::make_move_iterator(per_dex.begin()),
+                   std::make_move_iterator(per_dex.end()));
     }
     return out;
 }

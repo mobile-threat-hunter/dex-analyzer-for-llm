@@ -147,9 +147,9 @@ def test_call_sites_cross_dex_multidex():
         "Lcom/foobar/foo/Foobar;->somemethod(Ljava/lang/String;)V",
     ):
         callers = {s.caller_descriptor for s in dk.find_call_sites_to_api(target)}
-        assert any("Lcom/blafoo/bar/Blafoo;" in c for c in callers), (
-            f"cross-dex caller of {target} lost: {callers}"
-        )
+        assert any(
+            "Lcom/blafoo/bar/Blafoo;" in c for c in callers
+        ), f"cross-dex caller of {target} lost: {callers}"
         # resolve_call_args must also see the cross-dex caller (same reverse-index path)
         rca = {s.caller_descriptor for s in dk.resolve_call_args(target)}
         assert any("Lcom/blafoo/bar/Blafoo;" in c for c in rca)
@@ -158,7 +158,9 @@ def test_call_sites_cross_dex_multidex():
         # it so a future grouping change can't silently reorder the returned list.
         sites = dk.find_call_sites_to_api(target)
         keys = [(s.caller_dex_id, s.caller_method_idx) for s in sites]
-        assert keys == sorted(keys), f"caller order not (dex, method_idx)-sorted: {keys}"
+        assert keys == sorted(
+            keys
+        ), f"caller order not (dex, method_idx)-sorted: {keys}"
 
 
 # ── external API enumeration ─────────────────────────────────────────────────
@@ -173,15 +175,24 @@ def test_type_references(dk):
 
 
 def test_enumeration_companions(dk):
-    """list_classes_in_dex / list_all_* / extract_dex_bytes (WASM-parity bindings)."""
+    """Per-dex enumeration + extraction: uniform bare/all vs ...InDex(dex_id) axis."""
     all_classes = set(dk.list_classes())
     per_dex = set()
     for d in range(dk.dex_count()):
         per_dex |= set(dk.list_classes_in_dex(d))
-    assert per_dex == all_classes  # union of per-dex == all
+    assert per_dex == all_classes  # union of per-dex == all (classes: declared)
     assert dk.list_classes_in_dex(9999) == []
-    assert len(dk.list_all_field_descriptors()) > 0
-    assert len(dk.list_all_method_descriptors()) > 0
+    # field/method descriptors: the all-dexes form is exactly the concatenation of
+    # the per-dex form (id-table references, so cross-dex refs recur — a set union
+    # would drop them; concatenation is the correct invariant here).
+    f_concat, m_concat = [], []
+    for d in range(dk.dex_count()):
+        f_concat += dk.list_field_descriptors_in_dex(d)
+        m_concat += dk.list_method_descriptors_in_dex(d)
+    assert f_concat == dk.list_field_descriptors() and len(f_concat) > 0
+    assert m_concat == dk.list_method_descriptors() and len(m_concat) > 0
+    assert dk.list_field_descriptors_in_dex(9999) == []
+    assert dk.list_method_descriptors_in_dex(-1) == []
     raw = dk.extract_dex_bytes(0)
     assert isinstance(raw, bytes) and raw[:4] == b"dex\n"
     # the slice is THIS dex only — length == the header's file_size, not the map len

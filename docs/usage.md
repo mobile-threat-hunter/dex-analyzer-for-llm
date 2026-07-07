@@ -202,10 +202,13 @@ tr.methods_returning   # methods returning it
 tr.methods_with_param  # methods taking it as a param
 ```
 
-Enumeration companions: `dk.list_classes_in_dex(dex_id)` (one dex's declared
-classes), `dk.list_all_field_descriptors()` / `dk.list_all_method_descriptors()`
-(every descriptor across dexes), `dk.extract_dex_bytes(dex_id)` (raw dex image
-bytes).
+Per-dex enumeration follows a uniform scope axis — the bare form is all loaded
+dexes, the `…_in_dex(dex_id)` form is one dex (empty if out of range), and the
+all-dexes form is exactly the per-dex concatenation: `dk.list_classes` /
+`dk.list_classes_in_dex(dex_id)` (declared classes), `dk.list_field_descriptors` /
+`dk.list_field_descriptors_in_dex(dex_id)`, `dk.list_method_descriptors` /
+`dk.list_method_descriptors_in_dex(dex_id)` (id-table references), and
+`dk.extract_dex_bytes(dex_id)` (raw dex image bytes).
 
 ---
 

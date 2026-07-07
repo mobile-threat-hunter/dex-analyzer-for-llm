@@ -221,12 +221,21 @@ def test_enumeration_companions_typed(apk_path):
     assert per_dex == all_classes
     assert session.list_classes_in_dex(9999) == ()
 
-    fields = session.list_all_field_descriptors()
-    methods = session.list_all_method_descriptors()
+    fields = session.list_field_descriptors()
+    methods = session.list_method_descriptors()
     assert isinstance(fields, tuple) and isinstance(methods, tuple)
     assert fields and methods
     assert all(":" in f and "->" in f for f in fields[:50])
     assert all("(" in m and "->" in m for m in methods[:50])
+    # the all-dexes form is exactly the per-dex concatenation (uniform scope axis)
+    f_concat: tuple[str, ...] = ()
+    m_concat: tuple[str, ...] = ()
+    for d in range(session.dex_count()):
+        f_concat += session.list_field_descriptors_in_dex(d)
+        m_concat += session.list_method_descriptors_in_dex(d)
+    assert f_concat == fields and m_concat == methods
+    assert session.list_field_descriptors_in_dex(9999) == ()
+    assert session.list_method_descriptors_in_dex(-1) == ()
 
     raw = session.extract_dex_bytes(0)
     assert isinstance(raw, bytes) and raw[:4] == b"dex\n"
@@ -236,13 +245,15 @@ def test_enumeration_companions_typed(apk_path):
 
 
 def test_enumeration_companions_multidex():
-    """Genuine multidex: list_classes_in_dex must SLICE by dex, not ignore dex_id.
+    """Genuine multidex: per-dex enumeration must SLICE by dex, not ignore dex_id.
 
-    The single-dex apk_path fixture makes the union==all invariant vacuous (a broken
-    "return all classes regardless of dex_id" impl would still pass), so this loads a
-    real >1-dex container and asserts the per-dex slices are DISJOINT, each non-empty,
-    and partition list_classes — a wrong-slice impl cannot pass. extract_dex_bytes is
-    likewise checked to yield a distinct dex per id.
+    The single-dex apk_path fixture makes the union/concat invariants vacuous (a
+    broken "return everything regardless of dex_id" impl would still pass), so this
+    loads a real >1-dex container. Asserts: class slices are DISJOINT/non-empty and
+    partition list_classes; extract_dex_bytes yields a distinct dex per id; and the
+    field/method aggregate equals the per-dex CONCATENATION with a genuine cross-dex
+    duplicate present (so a set-union impl would drop it and fail) — the case the
+    single-dex fixture cannot exercise.
     """
     import glob
     import os
@@ -268,6 +279,24 @@ def test_enumeration_companions_multidex():
     for d in range(session.dex_count()):
         b = session.extract_dex_bytes(d)
         assert b[:4] == b"dex\n" and len(b) == int.from_bytes(b[32:36], "little")
+
+    # field/method descriptors: the all-dexes form is the per-dex CONCATENATION,
+    # NOT a set union — the dex id-tables reference the same framework members
+    # (java/lang/Object etc.) from both dexes, so those recur. This is the case the
+    # single-dex fixture can't exercise: assert the aggregate carries a genuine
+    # cross-dex duplicate (so a union-based impl would drop it and FAIL the concat
+    # equality below — the assertion is non-vacuous here).
+    m_agg = session.list_method_descriptors()
+    m_concat: tuple[str, ...] = ()
+    for d in range(session.dex_count()):
+        m_concat += session.list_method_descriptors_in_dex(d)
+    assert m_concat == m_agg
+    assert len(m_agg) > len(set(m_agg)), "expected cross-dex method recurrence"
+    f_agg = session.list_field_descriptors()
+    f_concat: tuple[str, ...] = ()
+    for d in range(session.dex_count()):
+        f_concat += session.list_field_descriptors_in_dex(d)
+    assert f_concat == f_agg
 
 
 def test_field_xref_readers_writers(apk_path):
