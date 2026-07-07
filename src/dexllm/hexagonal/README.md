@@ -92,6 +92,9 @@ fields are `tuple`s; `Mapping` fields are read-only views. See
 - **`CallSite`** `(caller_descriptor, caller_dex_id, caller_method_idx,
   callee_descriptor, bytecode_offset, invoke_opcode)` — one call site of an API.
 - **`ResolvedCallSite`** — a `CallSite` plus `args: tuple[ArgOrigin, ...]`.
+- Field read/write xref (`find_field_readers` / `find_field_writers`) returns plain
+  method descriptors `tuple[str, ...]` — the methods that iget*/sget* (read) or
+  iput*/sput* (write) a `Lcls;->name:Type` field (from dexkit's L2.5 reverse index).
 
 ### Permission analysis
 - **`PermissionCallerRow`** `(api, descriptors, callers)` — one gated API and the
@@ -134,7 +137,7 @@ so a consumer depends on just what it needs:
 | **`ContainerProbePort`** | `identify(path) -> ContainerInfo` |
 | **`DecompilationPort`** | `decompile_method`, `decompile_method_with_pc_map`, `decompile_class`, `decompile_method_ast` |
 | **`EnumerationPort`** | `list_classes`, `list_class_methods`, `list_value_strings`, `list_external_method_refs`, `verify_report` |
-| **`CrossReferencePort`** | `find_call_sites`, `resolve_call_args` |
+| **`CrossReferencePort`** | `find_call_sites`, `resolve_call_args`, `find_field_readers`, `find_field_writers` |
 | **`PermissionAnalysisPort`** | `permission_callers` (all protection levels) |
 | **`IndicatorExtractionPort`** | `extract_iocs` |
 | **`CapabilityPort`** | `summarize_capabilities` |

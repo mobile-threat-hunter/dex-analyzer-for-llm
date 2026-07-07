@@ -179,6 +179,14 @@ public:
     find_call_sites_to_api(const std::string& api_descriptor) {
         return ext_.FindCallSitesToApi(api_descriptor);
     }
+    std::vector<std::string>
+    find_field_read_methods(const std::string& field_descriptor) {
+        return ext_.FindFieldReadMethods(field_descriptor);
+    }
+    std::vector<std::string>
+    find_field_write_methods(const std::string& field_descriptor) {
+        return ext_.FindFieldWriteMethods(field_descriptor);
+    }
     void warm_analysis_caches() { ext_.WarmAnalysisCaches(); }
 
     // Issue #13 — engine-side permission→API→callers join (bundled data). Mirrors
@@ -763,6 +771,16 @@ PYBIND11_MODULE(_dexkit_core, m) {
              py::arg("api_descriptor"),
              "L2: every call site invoking the given API (\"Lpkg/Cls;->name(args)Ret;\"). "
              "First call warms upstream analysis caches (may take a few seconds).")
+        .def("find_field_read_methods", &PyDexKit::find_field_read_methods,
+             py::arg("field_descriptor"),
+             "L2.5: descriptors of every method that READS (iget*/sget*) the given "
+             "field (\"Lpkg/Cls;->name:Type\"), from the core's field_get_method_ids "
+             "reverse index. Empty if the field isn't declared in a loaded dex. "
+             "Warms the analysis caches on first use.")
+        .def("find_field_write_methods", &PyDexKit::find_field_write_methods,
+             py::arg("field_descriptor"),
+             "L2.5: descriptors of every method that WRITES (iput*/sput*) the given "
+             "field (\"Lpkg/Cls;->name:Type\"). Companion to find_field_read_methods.")
         .def("warm_analysis_caches", &PyDexKit::warm_analysis_caches,
              "Eagerly warm upstream caches needed for L2/L4 (otherwise lazy).")
         .def("permission_callers", &PyDexKit::permission_callers,

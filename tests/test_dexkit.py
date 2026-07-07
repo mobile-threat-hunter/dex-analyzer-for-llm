@@ -97,6 +97,35 @@ def test_search_call_sites(dk):
     assert isinstance(sites, list)  # may be empty if the APK never logs
 
 
+def test_field_read_write_xref(dk):
+    """L2.5 field xref — methods that iget/sget (read) vs iput/sput (write) a field.
+
+    The DIRECTION is verified against the method's smali, so a reader/writer swap
+    (FieldGetMethods vs FieldPutMethods wired backwards) is caught, not just the
+    membership. An unknown field returns []."""
+    assert dk.find_field_read_methods("Lno/such/Class;->x:I") == []
+    for cls in dk.list_classes():
+        for f in getattr(dk.get_class_summary(cls), "fields", []):
+            fd = f"{cls}->{f.name}:{f.type}"
+            rd = dk.find_field_read_methods(fd)
+            wr = dk.find_field_write_methods(fd)
+            assert all(isinstance(m, str) and "->" in m for m in rd + wr)
+            # a method that ONLY reads must contain an iget*/sget* of the field;
+            # a method that ONLY writes must contain an iput*/sput* — verified via
+            # smali so the two directions can't be silently swapped.
+            reader_only = [m for m in rd if m not in wr]
+            writer_only = [m for m in wr if m not in rd]
+            if reader_only:
+                sm = dk.render_method_smali(reader_only[0])
+                assert f.name in sm and ("iget" in sm or "sget" in sm)
+                return
+            if writer_only:
+                sm = dk.render_method_smali(writer_only[0])
+                assert f.name in sm and ("iput" in sm or "sput" in sm)
+                return
+    pytest.skip("no field with a direction-distinct read/write xref in the test APK")
+
+
 def test_call_sites_cross_dex_multidex():
     """find_call_sites_to_api / resolve_call_args must find a CROSS-DEX caller — a
     target method declared in one classes*.dex but invoked from another. The caller

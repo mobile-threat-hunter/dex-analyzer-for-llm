@@ -181,6 +181,17 @@ for site in dk.find_call_sites_to_api(
 
 Each site is a distinct invoke instruction — if the same caller invokes the API twice, you get two entries. `bytecode_offset` is the absolute byte offset within the method's code item.
 
+### L2.5 — field read/write xref
+
+Which methods **read** (`iget*`/`sget*`) or **write** (`iput*`/`sput*`) a field —
+from dexkit's exact `field_get_method_ids` / `field_put_method_ids` reverse index:
+
+```python
+fd = "La2dp/Vol/StoreLoc;->MAX_ACC:F"          # Lcls;->name:Type
+dk.find_field_read_methods(fd)                  # -> [method descriptors that read it]
+dk.find_field_write_methods(fd)                 # -> [method descriptors that write it]
+```
+
 ---
 
 ## L3 — what permissions / categories does this APK exercise?
@@ -572,6 +583,8 @@ refs = session.list_external_method_refs(framework_only=True)  # -> tuple[Extern
 sites = session.find_call_sites("Landroid/util/Log;->d(...)I")  # -> tuple[CallSite, ...]
 for rc in session.resolve_call_args("...->getInstance(Ljava/lang/String;)..."):
     for arg in rc.args: arg.kind, arg.string_value          # -> ArgOrigin (only the kind's field set)
+session.find_field_readers("Lcom/x/Y;->token:Ljava/lang/String;")  # -> methods that iget/sget it
+session.find_field_writers("Lcom/x/Y;->token:Ljava/lang/String;")  # -> methods that iput/sput it
 
 for g in session.permission_callers(app_only=True):       # -> tuple[PermissionCallerGroup, ...]
     g.permission, g.protection_level                        # dangerous|signature|internal|normal|other

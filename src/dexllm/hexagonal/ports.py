@@ -91,7 +91,7 @@ class EnumerationPort(Protocol):
 
 @runtime_checkable
 class CrossReferencePort(Protocol):
-    """Caller / argument cross-reference for an API."""
+    """Caller / argument (method) + read/write (field) cross-reference."""
 
     def find_call_sites(self, api_descriptor: str) -> tuple[CallSite, ...]:
         """Every call site invoking the given API descriptor."""
@@ -99,6 +99,18 @@ class CrossReferencePort(Protocol):
 
     def resolve_call_args(self, api_descriptor: str) -> tuple[ResolvedCallSite, ...]:
         """Call sites of the API with each argument's resolved origin."""
+        ...
+
+    def find_field_readers(self, field_descriptor: str) -> tuple[str, ...]:
+        """Descriptors of methods that READ (iget*/sget*) the given field.
+
+        ``field_descriptor`` is the ``Lcls;->name:Type`` form; empty if the field
+        isn't declared in a loaded dex.
+        """
+        ...
+
+    def find_field_writers(self, field_descriptor: str) -> tuple[str, ...]:
+        """Descriptors of methods that WRITE (iput*/sput*) the given field."""
         ...
 
 

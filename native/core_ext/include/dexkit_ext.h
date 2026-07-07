@@ -232,6 +232,16 @@ public:
     [[nodiscard]] std::vector<ResolvedCallSite>
     ResolveCallArgs(std::string_view api_descriptor);
 
+    // L2.5 — field access-site xref. Which methods READ (iget*/sget*) or WRITE
+    // (iput*/sput*) the given field, from the core's field_get/put_method_ids
+    // reverse index (exact, instruction-faithful — distinguishes readers from
+    // writers). ``field_descriptor`` is the ``Lcls;->name:Type`` form; returns the
+    // accessing methods' full descriptors (empty if the field isn't located).
+    [[nodiscard]] std::vector<std::string>
+    FindFieldReadMethods(std::string_view field_descriptor);
+    [[nodiscard]] std::vector<std::string>
+    FindFieldWriteMethods(std::string_view field_descriptor);
+
     // L5 — baksmali-style text rendering. RenderMethod returns empty string
     // for unknown / native / abstract methods. RenderClass returns empty if
     // the class isn't declared in any loaded dex (external).

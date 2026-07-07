@@ -198,6 +198,32 @@ def test_typed_enumeration_and_xref(apk_path):
             assert isinstance(arg, ArgOrigin) and isinstance(arg.kind, str)
 
 
+def test_field_xref_readers_writers(apk_path):
+    """CrossReferencePort exposes field read/write xref (L2.5): the descriptors of
+    methods that iget*/sget* (read) or iput*/sput* (write) a field. The direction is
+    verified against the smali (via session.raw) so readers/writers can't be swapped.
+    """
+    session = open_apk(apk_path)
+    for cls in session.list_classes():
+        summary = session.raw.get_class_summary(cls)
+        for f in getattr(summary, "fields", []):
+            fd = f"{cls}->{f.name}:{f.type}"
+            readers = session.find_field_readers(fd)
+            writers = session.find_field_writers(fd)
+            assert all(isinstance(m, str) and "->" in m for m in readers + writers)
+            reader_only = [m for m in readers if m not in writers]
+            writer_only = [m for m in writers if m not in readers]
+            if reader_only:
+                sm = session.raw.render_method_smali(reader_only[0])
+                assert f.name in sm and ("iget" in sm or "sget" in sm)
+                return
+            if writer_only:
+                sm = session.raw.render_method_smali(writer_only[0])
+                assert f.name in sm and ("iput" in sm or "sput" in sm)
+                return
+    pytest.skip("no field with a direction-distinct read/write xref in the test APK")
+
+
 def test_typed_analysis_surface(apk_path):
     """Permission / IOC / capability returns are the typed models, not raw dicts."""
     session = open_apk(apk_path)

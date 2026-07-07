@@ -246,6 +246,14 @@ class DexKitAdapter:
             for s in self._dk.resolve_call_args(api_descriptor)
         )
 
+    def find_field_readers(self, field_descriptor: str) -> tuple[str, ...]:
+        """Return descriptors of methods that READ (iget*/sget*) the given field."""
+        return tuple(self._dk.find_field_read_methods(field_descriptor))
+
+    def find_field_writers(self, field_descriptor: str) -> tuple[str, ...]:
+        """Return descriptors of methods that WRITE (iput*/sput*) the given field."""
+        return tuple(self._dk.find_field_write_methods(field_descriptor))
+
     # -- PermissionAnalysisPort --
 
     def permission_callers(

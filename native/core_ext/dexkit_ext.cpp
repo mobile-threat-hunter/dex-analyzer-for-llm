@@ -1510,4 +1510,62 @@ DexKitExt::FindCallSitesToApi(std::string_view api_descriptor) {
     return out;
 }
 
+namespace {
+
+// Locate a field descriptor `Lcls;->name:Type` → (dex_id, field_idx), or (-1, 0).
+// Mirrors the WASM binding's LocateField: find the class's living dex (first-wins),
+// then match the field against BuildFieldSignature across the class's field_ids.
+std::pair<int, uint32_t> LocateField(DexKitExt& ext, std::string_view fd) {
+    const auto arrow = fd.find("->");
+    if (arrow == std::string_view::npos) return {-1, 0};
+    const std::string cls(fd.substr(0, arrow));
+    const int dex_id = ext.LocateClassDex(cls);
+    if (dex_id < 0) return {-1, 0};
+    auto* item = ext.core().GetDexItem(static_cast<uint16_t>(dex_id));
+    if (item == nullptr) return {-1, 0};
+    const auto& type_names = item->GetTypeNames();
+    for (uint32_t type_idx = 0; type_idx < type_names.size(); ++type_idx) {
+        if (type_names[type_idx] != cls) continue;
+        for (uint32_t fid : item->GetClassFieldIds(type_idx)) {
+            const std::string sig = BuildFieldSignature(*item, fid);
+            if (std::string_view(sig) == fd) return {dex_id, fid};
+        }
+        break;  // type descriptors are unique — only one class matches
+    }
+    return {-1, 0};
+}
+
+// Readers (FieldGetMethods, writers=false) / writers (FieldPutMethods) of a field.
+// THREAD-SAFETY PRECONDITION (same as the caller-analysis path): the exposed
+// entry points (find_field_read_methods / find_field_write_methods) are bound
+// WITHOUT py::gil_scoped_release, so the GIL serializes this lazy WarmAnalysisCaches
+// warmup and the lazy GetMethodDescriptor population it feeds. Do NOT add
+// gil_scoped_release to those bindings without adding a std::once_flag / mutex here.
+std::vector<std::string> FieldAccessMethods(DexKitExt& ext, std::string_view fd,
+                                            bool writers) {
+    const auto loc = LocateField(ext, fd);
+    if (loc.first < 0) return {};
+    ext.WarmAnalysisCaches();  // field_get/put_method_ids need the full cache
+    auto* item = ext.core().GetDexItem(static_cast<uint16_t>(loc.first));
+    if (item == nullptr) return {};
+    std::vector<std::string> out;
+    const auto beans = writers ? item->FieldPutMethods(loc.second)
+                               : item->FieldGetMethods(loc.second);
+    out.reserve(beans.size());
+    for (const auto& bean : beans) out.emplace_back(bean.dex_descriptor);
+    return out;
+}
+
+}  // namespace
+
+std::vector<std::string>
+DexKitExt::FindFieldReadMethods(std::string_view field_descriptor) {
+    return FieldAccessMethods(*this, field_descriptor, /*writers=*/false);
+}
+
+std::vector<std::string>
+DexKitExt::FindFieldWriteMethods(std::string_view field_descriptor) {
+    return FieldAccessMethods(*this, field_descriptor, /*writers=*/true);
+}
+
 }  // namespace dexkit::ext
