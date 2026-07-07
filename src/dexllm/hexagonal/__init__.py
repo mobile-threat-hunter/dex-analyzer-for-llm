@@ -27,6 +27,7 @@ from .model import (
     CapabilityHit,
     CapabilityReport,
     ClassInfo,
+    ClassMatch,
     ContainerInfo,
     ContentProviderUse,
     DecompiledClass,
@@ -39,6 +40,7 @@ from .model import (
     Indicator,
     IocReport,
     MethodAst,
+    MethodMatch,
     PermissionCallerGroup,
     PermissionCallerRow,
     ResolvedCallSite,
@@ -57,7 +59,9 @@ from .ports import (
     DexExtractionPort,
     EnumerationPort,
     IndicatorExtractionPort,
+    MatchType,
     PermissionAnalysisPort,
+    SearchPort,
 )
 
 __all__ = [
@@ -74,10 +78,15 @@ __all__ = [
     "DexExtractionPort",
     "ClassInspectionPort",
     "CrossReferencePort",
+    "SearchPort",
     "PermissionAnalysisPort",
     "IndicatorExtractionPort",
     "CapabilityPort",
     "ContentProviderPort",
+    # search
+    "MatchType",
+    "ClassMatch",
+    "MethodMatch",
     # models
     "ContainerInfo",
     "DexVerifyStatus",

@@ -14,6 +14,7 @@ import pytest
 from dexllm.hexagonal import (
     ArgOrigin,
     CapabilityReport,
+    ClassMatch,
     ContainerInfo,
     ContainerProbe,
     ContainerProbePort,
@@ -29,8 +30,10 @@ from dexllm.hexagonal import (
     IndicatorExtractionPort,
     IocReport,
     MethodAst,
+    MethodMatch,
     PermissionAnalysisPort,
     PermissionCallerGroup,
+    SearchPort,
     SourceLocation,
     StatementLocation,
     identify,
@@ -43,6 +46,7 @@ _PORTS = [
     EnumerationPort,
     DexExtractionPort,
     CrossReferencePort,
+    SearchPort,
     PermissionAnalysisPort,
     IndicatorExtractionPort,
 ]
@@ -59,6 +63,8 @@ _HASHABLE_MODELS = [
     ExternalMethodRef,
     ExternalFieldRef,
     ExternalTypeRef,
+    ClassMatch,
+    MethodMatch,
 ]
 # models carrying a Mapping — frozen but NOT hashable (documented)
 _MAPPING_MODELS = [CapabilityReport, MethodAst]
@@ -242,6 +248,99 @@ def test_typed_smali_rendering(apk_path):
     # unknown / external → empty string, never an exception
     assert session.render_method_smali("Lno/such/C;->x()V") == ""
     assert session.render_class_smali("Lno/such/C;") == ""
+
+
+def test_typed_search(apk_path):
+    """SearchPort — DexKit's L1–L7 search returns typed ClassMatch / MethodMatch.
+
+    Verifies each hit is the right typed model with a real descriptor + dex location,
+    that a hit round-trips (its descriptor is a decompilable/enumerable member), that
+    match_type is honoured, and that the batch form returns an immutable mapping keyed
+    by the query key with the same element type.
+    """
+    session = open_apk(apk_path)
+
+    # class search → ClassMatch; every hit descriptor is a real declared class
+    all_classes = set(session.list_classes())
+    cmatches = session.find_classes_by_name("a", match_type="contains")
+    assert cmatches and all(isinstance(c, ClassMatch) for c in cmatches)
+    c0 = cmatches[0]
+    assert c0.descriptor in all_classes and c0.dex_id >= 0 and "a" in c0.descriptor
+    # match_type is load-bearing: equals on a real descriptor returns exactly it,
+    # a bogus exact name returns nothing
+    exact = session.find_classes_by_name(c0.descriptor, match_type="equals")
+    assert c0.descriptor in {c.descriptor for c in exact}
+    assert session.find_classes_by_name("No/Such/Zzz;", match_type="equals") == ()
+
+    # method search → MethodMatch; body-string search hits are real methods
+    mmatches = session.find_methods_using_strings(["http"])
+    assert all(isinstance(m, MethodMatch) for m in mmatches)
+    for mm in mmatches:
+        assert mm.descriptor.startswith("L") and "->" in mm.descriptor
+
+    # int-literal search returns typed matches (may be empty on a tiny APK)
+    assert all(
+        isinstance(m, MethodMatch) for m in session.find_methods_using_int_literals([1])
+    )
+
+    # find_methods_by_name is the ONLY 4-positional-arg forwarder
+    # (name, match_type, declaring_class, ignore_case) — the most arg-swap-prone.
+    # Scope to a REAL declaring class and assert the results are confined to it
+    # (declaring_class, arg 3), then assert ignore_case (arg 4) is independently
+    # wired via a case-mismatch delta. A future declaring_class/ignore_case swap
+    # breaks one of these.
+    for cls in session.list_classes():
+        methods = session.list_class_methods(cls)
+        if not methods:
+            continue
+        mname = methods[0].split("->", 1)[1].split("(", 1)[0]
+        scoped = session.find_methods_by_name(
+            mname, match_type="equals", declaring_class=cls
+        )
+        assert scoped and all(m.descriptor.startswith(cls + "->") for m in scoped)
+        if mname.lower() != mname.upper():  # has case to flip
+            miscased = mname.swapcase()
+            off = session.find_methods_by_name(
+                miscased, match_type="equals", declaring_class=cls, ignore_case=False
+            )
+            on = session.find_methods_by_name(
+                miscased, match_type="equals", declaring_class=cls, ignore_case=True
+            )
+            assert not off and on  # case-insensitive finds it, case-sensitive doesn't
+        break
+
+    # the remaining class/method search families return the right typed tuple
+    # (possibly empty — smoke coverage so an arg/converter regression surfaces)
+    for hits, model in (
+        (session.find_classes_by_super("Ljava/lang/Object;"), ClassMatch),
+        (session.find_classes_implementing("Landroid/os/Parcelable;"), ClassMatch),
+        (session.find_classes_by_annotation("Lkotlin/Metadata;"), ClassMatch),
+        (session.find_classes_using_strings(["a"]), ClassMatch),
+        (session.find_methods_by_annotation("Lkotlin/Metadata;"), MethodMatch),
+        (session.find_methods_using_double_literals([1.0]), MethodMatch),
+    ):
+        assert isinstance(hits, tuple) and all(isinstance(h, model) for h in hits)
+
+    # batch (both sides) → immutable Mapping keyed by query key, same element type,
+    # and each per-key result equals the single-query result (shared-trie ≡ N calls)
+    batch = session.batch_find_methods_using_strings({"q": ["http"]})
+    assert isinstance(batch, MappingProxyType) and set(batch) == {"q"}
+    assert {m.descriptor for m in batch["q"]} == {m.descriptor for m in mmatches}
+    cbatch = session.batch_find_classes_using_strings({"q": ["a"]})
+    assert isinstance(cbatch, MappingProxyType) and set(cbatch) == {"q"}
+    assert all(isinstance(c, ClassMatch) for c in cbatch["q"])
+
+
+def test_search_rejects_bare_string(apk_path):
+    """A bare str where a Sequence[str] is expected is a footgun (per-char search) —
+    the adapter raises TypeError instead of silently ANDing single characters."""
+    session = open_apk(apk_path)
+    with pytest.raises(TypeError):
+        session.find_methods_using_strings("http")  # must be ["http"]
+    with pytest.raises(TypeError):
+        session.find_classes_using_strings("http")
+    with pytest.raises(TypeError):
+        session.batch_find_methods_using_strings({"q": "http"})  # bare value
 
 
 def test_enumeration_companions_typed(apk_path):

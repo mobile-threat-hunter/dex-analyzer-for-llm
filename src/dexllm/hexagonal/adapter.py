@@ -10,6 +10,8 @@ factory; :func:`identify` is the load-free container probe. The underlying
 from __future__ import annotations
 
 import os
+from collections.abc import Mapping, Sequence
+from types import MappingProxyType
 from typing import Union
 
 import dexllm
@@ -20,6 +22,7 @@ from .model import (
     CapabilityHit,
     CapabilityReport,
     ClassInfo,
+    ClassMatch,
     ContainerInfo,
     ContentProviderUse,
     DecompiledClass,
@@ -32,6 +35,7 @@ from .model import (
     Indicator,
     IocReport,
     MethodAst,
+    MethodMatch,
     PermissionCallerGroup,
     PermissionCallerRow,
     ResolvedCallSite,
@@ -39,6 +43,7 @@ from .model import (
     StatementLocation,
     TypeReferences,
 )
+from .ports import MatchType
 
 # A single apk/dex path or a sequence of them; each element accepts anything
 # os.fspath understands (str or os.PathLike, e.g. pathlib.Path).
@@ -106,6 +111,39 @@ def _to_ext_type_ref(r: object) -> ExternalTypeRef:
         descriptor=r.descriptor,  # type: ignore[attr-defined]
         java_name=r.java_name,  # type: ignore[attr-defined]
         referenced_in_dex_ids=tuple(r.referenced_in_dex_ids),  # type: ignore[attr-defined]
+    )
+
+
+def _str_seq(strings: Sequence[str]) -> list[str]:
+    """Coerce a sequence of strings to a list, rejecting a bare str / bytes.
+
+    A bare ``str`` IS a ``Sequence[str]`` (of characters), so ``list("http")`` would
+    silently become ``["h", "t", "t", "p"]`` and the search would AND four
+    single-character substrings — a plausibly-wrong result with no error. Guard it.
+    """
+    if isinstance(strings, (str, bytes)):
+        raise TypeError(
+            "expected a sequence of strings, got a bare "
+            f"{type(strings).__name__}; wrap it in a list, e.g. ['...']"
+        )
+    return list(strings)
+
+
+def _to_class_match(r: object) -> ClassMatch:
+    """Convert a pybind ClassMatch to the typed model."""
+    return ClassMatch(
+        class_id=r.class_id,  # type: ignore[attr-defined]
+        descriptor=r.descriptor,  # type: ignore[attr-defined]
+        dex_id=r.dex_id,  # type: ignore[attr-defined]
+    )
+
+
+def _to_method_match(r: object) -> MethodMatch:
+    """Convert a pybind MethodMatch to the typed model."""
+    return MethodMatch(
+        method_id=r.method_id,  # type: ignore[attr-defined]
+        descriptor=r.descriptor,  # type: ignore[attr-defined]
+        dex_id=r.dex_id,  # type: ignore[attr-defined]
     )
 
 
@@ -341,6 +379,151 @@ class DexKitAdapter:
             fields=tuple(r.fields),
             methods_returning=tuple(r.methods_returning),
             methods_with_param=tuple(r.methods_with_param),
+        )
+
+    # -- SearchPort --
+
+    def find_classes_by_name(
+        self,
+        name: str,
+        *,
+        match_type: MatchType = "contains",
+        ignore_case: bool = False,
+    ) -> tuple[ClassMatch, ...]:
+        """Find classes whose name matches ``name`` under ``match_type``."""
+        return tuple(
+            _to_class_match(m)
+            for m in self._dk.find_classes_by_name(name, match_type, ignore_case)
+        )
+
+    def find_classes_by_super(
+        self, super_class: str, *, match_type: MatchType = "equals"
+    ) -> tuple[ClassMatch, ...]:
+        """Find classes whose direct superclass matches ``super_class``."""
+        return tuple(
+            _to_class_match(m)
+            for m in self._dk.find_classes_by_super(super_class, match_type)
+        )
+
+    def find_classes_implementing(
+        self, interface_class: str, *, match_type: MatchType = "equals"
+    ) -> tuple[ClassMatch, ...]:
+        """Find classes that declare the given interface."""
+        return tuple(
+            _to_class_match(m)
+            for m in self._dk.find_classes_implementing(interface_class, match_type)
+        )
+
+    def find_classes_by_annotation(
+        self, annotation_class: str, *, match_type: MatchType = "equals"
+    ) -> tuple[ClassMatch, ...]:
+        """Find classes annotated with ``annotation_class``."""
+        return tuple(
+            _to_class_match(m)
+            for m in self._dk.find_classes_by_annotation(annotation_class, match_type)
+        )
+
+    def find_classes_using_strings(
+        self,
+        strings: Sequence[str],
+        *,
+        match_type: MatchType = "contains",
+        ignore_case: bool = False,
+    ) -> tuple[ClassMatch, ...]:
+        """Find classes whose bytecode references ALL of ``strings``."""
+        return tuple(
+            _to_class_match(m)
+            for m in self._dk.find_classes_using_strings(
+                _str_seq(strings), match_type, ignore_case
+            )
+        )
+
+    def find_methods_by_name(
+        self,
+        name: str,
+        *,
+        match_type: MatchType = "contains",
+        declaring_class: str = "",
+        ignore_case: bool = False,
+    ) -> tuple[MethodMatch, ...]:
+        """Find methods by name, optionally scoped to a declaring class."""
+        return tuple(
+            _to_method_match(m)
+            for m in self._dk.find_methods_by_name(
+                name, match_type, declaring_class, ignore_case
+            )
+        )
+
+    def find_methods_by_annotation(
+        self, annotation_class: str, *, match_type: MatchType = "equals"
+    ) -> tuple[MethodMatch, ...]:
+        """Find methods annotated with ``annotation_class``."""
+        return tuple(
+            _to_method_match(m)
+            for m in self._dk.find_methods_by_annotation(annotation_class, match_type)
+        )
+
+    def find_methods_using_strings(
+        self,
+        strings: Sequence[str],
+        *,
+        match_type: MatchType = "contains",
+        ignore_case: bool = False,
+    ) -> tuple[MethodMatch, ...]:
+        """Find methods whose body references ALL of ``strings``."""
+        return tuple(
+            _to_method_match(m)
+            for m in self._dk.find_methods_using_strings(
+                _str_seq(strings), match_type, ignore_case
+            )
+        )
+
+    def find_methods_using_int_literals(
+        self, values: Sequence[int]
+    ) -> tuple[MethodMatch, ...]:
+        """Find methods whose body contains ALL of the given int literals."""
+        return tuple(
+            _to_method_match(m)
+            for m in self._dk.find_methods_using_int_literals(list(values))
+        )
+
+    def find_methods_using_double_literals(
+        self, values: Sequence[float]
+    ) -> tuple[MethodMatch, ...]:
+        """Find methods whose body contains ALL of the given double literals."""
+        return tuple(
+            _to_method_match(m)
+            for m in self._dk.find_methods_using_double_literals(list(values))
+        )
+
+    def batch_find_classes_using_strings(
+        self,
+        query_map: Mapping[str, Sequence[str]],
+        *,
+        match_type: MatchType = "contains",
+        ignore_case: bool = False,
+    ) -> Mapping[str, tuple[ClassMatch, ...]]:
+        """Run many class-by-strings queries at once; result keyed by query key."""
+        raw = self._dk.batch_find_classes_using_strings(
+            {k: _str_seq(v) for k, v in query_map.items()}, match_type, ignore_case
+        )
+        return MappingProxyType(
+            {k: tuple(_to_class_match(m) for m in v) for k, v in raw.items()}
+        )
+
+    def batch_find_methods_using_strings(
+        self,
+        query_map: Mapping[str, Sequence[str]],
+        *,
+        match_type: MatchType = "contains",
+        ignore_case: bool = False,
+    ) -> Mapping[str, tuple[MethodMatch, ...]]:
+        """Run many method-by-strings queries at once; result keyed by query key."""
+        raw = self._dk.batch_find_methods_using_strings(
+            {k: _str_seq(v) for k, v in query_map.items()}, match_type, ignore_case
+        )
+        return MappingProxyType(
+            {k: tuple(_to_method_match(m) for m in v) for k, v in raw.items()}
         )
 
     # -- ClassInspectionPort --

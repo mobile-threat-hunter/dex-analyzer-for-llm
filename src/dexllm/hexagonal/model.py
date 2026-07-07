@@ -258,6 +258,43 @@ class ExternalTypeRef:
     referenced_in_dex_ids: tuple[int, ...]
 
 
+# ── search (L1–L7) ─────────────────────────────────────────────────────────────
+# DexKit's headline capability: fast static class/method search. A hit is a light
+# match record — the descriptor plus its dex location (the index id is stable within
+# the loaded session, e.g. for a follow-up decompile / xref).
+
+
+@dataclass(frozen=True)
+class ClassMatch:
+    """One class hit from a search query: descriptor + dex location.
+
+    Example (real, a2dp.Vol_137.apk)::
+
+        ClassMatch(class_id=6, descriptor='La2dp/Vol/ALauncher;', dex_id=0)
+    """
+
+    class_id: int
+    descriptor: str
+    dex_id: int
+
+
+@dataclass(frozen=True)
+class MethodMatch:
+    """One method hit from a search query: descriptor + dex location.
+
+    Example (real, a2dp.Vol_137.apk)::
+
+        MethodMatch(method_id=1,
+                    descriptor='La2dp/Vol/ALauncher;->onBind(Landroid/content/Intent;)'
+                               'Landroid/os/IBinder;',
+                    dex_id=0)
+    """
+
+    method_id: int
+    descriptor: str
+    dex_id: int
+
+
 # ── class inspection ─────────────────────────────────────────────────────────
 # Fine-grained decomposition of a class (the C++ get_class_summary bundles all of
 # these — class metadata + fields + methods — into one object; the hexagonal layer

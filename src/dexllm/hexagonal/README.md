@@ -88,6 +88,14 @@ fields are `tuple`s; `Mapping` fields are read-only views. See
   framework/library type the app references but does not declare (may be an array
   descriptor, e.g. `[Landroid/content/Intent;`).
 
+### Search (L1–L7)
+DexKit's headline capability — fast static class/method search (`SearchPort`). A hit
+is a light match record; `MatchType` is the name-match mode.
+- **`MatchType`** = `Literal["equals", "contains", "starts_with", "ends_with", "regex"]`.
+- **`ClassMatch`** `(class_id, descriptor, dex_id)` — one class hit.
+- **`MethodMatch`** `(method_id, descriptor, dex_id)` — one method hit. The `batch_*`
+  searches return `Mapping[str, tuple[Match, ...]]` keyed by the query key.
+
 ### Class inspection
 The C++ `get_class_summary` bundles class metadata + fields + methods into one
 object; the hexagonal layer splits it (ISP) so a consumer depends only on what it
@@ -157,12 +165,13 @@ so a consumer depends on just what it needs:
 | **`DexExtractionPort`** | `extract_dex_bytes` (raw per-dex byte extraction; packer/dump primitive) |
 | **`ClassInspectionPort`** | `class_info`, `class_fields` (metadata + fields split out; methods via `list_class_methods`) |
 | **`CrossReferencePort`** | `find_call_sites`, `resolve_call_args`, `find_field_readers`, `find_field_writers`, `find_type_references` |
+| **`SearchPort`** | `find_classes_by_name` / `by_super` / `implementing` / `by_annotation` / `using_strings`, `find_methods_by_name` / `by_annotation` / `using_strings` / `using_int_literals` / `using_double_literals`, `batch_find_{classes,methods}_using_strings` (DexKit's L1–L7 search; `match_type` ∈ `MatchType`) |
 | **`PermissionAnalysisPort`** | `permission_callers` (all protection levels) |
 | **`IndicatorExtractionPort`** | `extract_iocs` |
 | **`CapabilityPort`** | `summarize_capabilities` |
 | **`ContentProviderPort`** | `detect_content_providers` |
 
-**`DexAnalysisUseCase`** composes the nine session-bound ports (every port except
+**`DexAnalysisUseCase`** composes the ten session-bound ports (every port except
 `ContainerProbePort`, which is load-free) and adds `sources` / `dex_count()`. It is
 the single interface a consumer annotates against — the analogue of a top-level
 application use-case interface.

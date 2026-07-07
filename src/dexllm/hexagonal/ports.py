@@ -12,12 +12,14 @@ object at runtime (method presence only — Protocols don't check signatures).
 
 from __future__ import annotations
 
-from typing import Protocol, runtime_checkable
+from collections.abc import Mapping, Sequence
+from typing import Literal, Protocol, runtime_checkable
 
 from .model import (
     CallSite,
     CapabilityReport,
     ClassInfo,
+    ClassMatch,
     ContainerInfo,
     ContentProviderUse,
     DecompiledClass,
@@ -29,10 +31,14 @@ from .model import (
     FieldInfo,
     IocReport,
     MethodAst,
+    MethodMatch,
     PermissionCallerGroup,
     ResolvedCallSite,
     TypeReferences,
 )
+
+# The five name/descriptor match modes DexKit's search accepts.
+MatchType = Literal["equals", "contains", "starts_with", "ends_with", "regex"]
 
 
 @runtime_checkable
@@ -199,6 +205,115 @@ class CrossReferencePort(Protocol):
 
 
 @runtime_checkable
+class SearchPort(Protocol):
+    """DexKit's L1–L7 static search over classes and methods.
+
+    Find classes / methods by name, hierarchy, annotation, referenced strings, or
+    numeric literals. Each hit is a light :class:`ClassMatch` / :class:`MethodMatch`
+    (descriptor + dex location). ``match_type`` is one of :data:`MatchType`. The
+    ``batch_*`` forms run many string queries at once over a shared Aho-Corasick
+    trie (far faster than N single calls) and return a mapping keyed by query key.
+    """
+
+    def find_classes_by_name(
+        self,
+        name: str,
+        *,
+        match_type: MatchType = "contains",
+        ignore_case: bool = False,
+    ) -> tuple[ClassMatch, ...]:
+        """Find classes whose name matches ``name`` under ``match_type``."""
+        ...
+
+    def find_classes_by_super(
+        self, super_class: str, *, match_type: MatchType = "equals"
+    ) -> tuple[ClassMatch, ...]:
+        """Find classes whose direct superclass matches ``super_class``."""
+        ...
+
+    def find_classes_implementing(
+        self, interface_class: str, *, match_type: MatchType = "equals"
+    ) -> tuple[ClassMatch, ...]:
+        """Find classes that declare the given interface."""
+        ...
+
+    def find_classes_by_annotation(
+        self, annotation_class: str, *, match_type: MatchType = "equals"
+    ) -> tuple[ClassMatch, ...]:
+        """Find classes annotated with ``annotation_class`` (obfuscated name ok)."""
+        ...
+
+    def find_classes_using_strings(
+        self,
+        strings: Sequence[str],
+        *,
+        match_type: MatchType = "contains",
+        ignore_case: bool = False,
+    ) -> tuple[ClassMatch, ...]:
+        """Find classes whose bytecode references ALL of ``strings``."""
+        ...
+
+    def find_methods_by_name(
+        self,
+        name: str,
+        *,
+        match_type: MatchType = "contains",
+        declaring_class: str = "",
+        ignore_case: bool = False,
+    ) -> tuple[MethodMatch, ...]:
+        """Find methods by name, optionally scoped to a declaring class."""
+        ...
+
+    def find_methods_by_annotation(
+        self, annotation_class: str, *, match_type: MatchType = "equals"
+    ) -> tuple[MethodMatch, ...]:
+        """Find methods annotated with ``annotation_class``."""
+        ...
+
+    def find_methods_using_strings(
+        self,
+        strings: Sequence[str],
+        *,
+        match_type: MatchType = "contains",
+        ignore_case: bool = False,
+    ) -> tuple[MethodMatch, ...]:
+        """Find methods whose body references ALL of ``strings``."""
+        ...
+
+    def find_methods_using_int_literals(
+        self, values: Sequence[int]
+    ) -> tuple[MethodMatch, ...]:
+        """Find methods whose body contains ALL of the given int literals."""
+        ...
+
+    def find_methods_using_double_literals(
+        self, values: Sequence[float]
+    ) -> tuple[MethodMatch, ...]:
+        """Find methods whose body contains ALL of the given double literals."""
+        ...
+
+    def batch_find_classes_using_strings(
+        self,
+        query_map: Mapping[str, Sequence[str]],
+        *,
+        match_type: MatchType = "contains",
+        ignore_case: bool = False,
+    ) -> Mapping[str, tuple[ClassMatch, ...]]:
+        """Run many class-by-strings queries at once; result keyed by query key."""
+        ...
+
+    def batch_find_methods_using_strings(
+        self,
+        query_map: Mapping[str, Sequence[str]],
+        *,
+        match_type: MatchType = "contains",
+        ignore_case: bool = False,
+    ) -> Mapping[str, tuple[MethodMatch, ...]]:
+        """Run many method-by-strings queries at once; result keyed by query key."""
+        ...
+
+
+@runtime_checkable
 class ClassInspectionPort(Protocol):
     """Fine-grained per-class inspection (the decomposition of a class summary).
 
@@ -276,6 +391,7 @@ class DexAnalysisUseCase(
     DexExtractionPort,
     ClassInspectionPort,
     CrossReferencePort,
+    SearchPort,
     PermissionAnalysisPort,
     IndicatorExtractionPort,
     CapabilityPort,
