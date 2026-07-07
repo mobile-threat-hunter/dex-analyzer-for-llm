@@ -17,16 +17,19 @@ from typing import Protocol, runtime_checkable
 from .model import (
     CallSite,
     CapabilityReport,
+    ClassInfo,
     ContainerInfo,
     ContentProviderUse,
     DecompiledClass,
     DecompiledMethod,
     DexVerifyStatus,
     ExternalMethodRef,
+    FieldInfo,
     IocReport,
     MethodAst,
     PermissionCallerGroup,
     ResolvedCallSite,
+    TypeReferences,
 )
 
 
@@ -113,6 +116,32 @@ class CrossReferencePort(Protocol):
         """Descriptors of methods that WRITE (iput*/sput*) the given field."""
         ...
 
+    def find_type_references(self, type_descriptor: str) -> TypeReferences:
+        """Signature-position references to a ``Lpkg/Cls;`` type.
+
+        Fields of the type + methods returning it + methods taking it as a param
+        (NOT call/instruction xref). Empty lists if the type isn't referenced.
+        """
+        ...
+
+
+@runtime_checkable
+class ClassInspectionPort(Protocol):
+    """Fine-grained per-class inspection (the decomposition of a class summary).
+
+    Split by concern — metadata, fields, and methods
+    (:meth:`EnumerationPort.list_class_methods`) are separate queries, so a consumer
+    that only wants one does not pull the whole class blob.
+    """
+
+    def class_info(self, class_descriptor: str) -> ClassInfo:
+        """Class metadata (superclass, interfaces, access, source) — no members."""
+        ...
+
+    def class_fields(self, class_descriptor: str) -> tuple[FieldInfo, ...]:
+        """Return the class's declared fields (name, type, access flags)."""
+        ...
+
 
 @runtime_checkable
 class PermissionAnalysisPort(Protocol):
@@ -171,6 +200,7 @@ class ContentProviderPort(Protocol):
 class DexAnalysisUseCase(
     DecompilationPort,
     EnumerationPort,
+    ClassInspectionPort,
     CrossReferencePort,
     PermissionAnalysisPort,
     IndicatorExtractionPort,

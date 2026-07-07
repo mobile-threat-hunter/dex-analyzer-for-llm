@@ -187,6 +187,23 @@ public:
     find_field_write_methods(const std::string& field_descriptor) {
         return ext_.FindFieldWriteMethods(field_descriptor);
     }
+    dexkit::ext::TypeReferences
+    find_type_references(const std::string& type_descriptor) {
+        return ext_.FindTypeReferences(type_descriptor);
+    }
+    std::vector<std::string> list_classes_in_dex(int dex_id) const {
+        return ext_.ListClassesInDex(dex_id);
+    }
+    std::vector<std::string> list_all_field_descriptors() const {
+        return ext_.ListAllFieldDescriptors();
+    }
+    std::vector<std::string> list_all_method_descriptors() const {
+        return ext_.ListAllMethodDescriptors();
+    }
+    py::bytes extract_dex_bytes(int dex_id) const {
+        const auto v = ext_.GetDexBytes(dex_id);
+        return py::bytes(reinterpret_cast<const char*>(v.data()), v.size());
+    }
     void warm_analysis_caches() { ext_.WarmAnalysisCaches(); }
 
     // Issue #13 — engine-side permission→API→callers join (bundled data). Mirrors
@@ -582,6 +599,18 @@ PYBIND11_MODULE(_dexkit_core, m) {
             return "CallSite(" + c.caller_descriptor + " -> " + c.callee_descriptor + ")";
         });
 
+    py::class_<dexkit::ext::TypeReferences>(m, "TypeReferences")
+        .def_readonly("fields", &dexkit::ext::TypeReferences::fields)
+        .def_readonly("methods_returning",
+                      &dexkit::ext::TypeReferences::methods_returning)
+        .def_readonly("methods_with_param",
+                      &dexkit::ext::TypeReferences::methods_with_param)
+        .def("__repr__", [](const dexkit::ext::TypeReferences& t) {
+            return "TypeReferences(fields=" + std::to_string(t.fields.size()) +
+                   ", returning=" + std::to_string(t.methods_returning.size()) +
+                   ", param=" + std::to_string(t.methods_with_param.size()) + ")";
+        });
+
     py::class_<dexkit::ext::ExternalFieldRef>(m, "ExternalFieldRef")
         .def_readonly("class_descriptor",
                       &dexkit::ext::ExternalFieldRef::class_descriptor)
@@ -781,6 +810,24 @@ PYBIND11_MODULE(_dexkit_core, m) {
              py::arg("field_descriptor"),
              "L2.5: descriptors of every method that WRITES (iput*/sput*) the given "
              "field (\"Lpkg/Cls;->name:Type\"). Companion to find_field_read_methods.")
+        .def("find_type_references", &PyDexKit::find_type_references,
+             py::arg("type_descriptor"),
+             "L2.5: signature-position type xref for \"Lpkg/Cls;\" — a TypeReferences "
+             "with .fields (fields of this type), .methods_returning, and "
+             ".methods_with_param (methods taking it as a parameter). Scans all dexes.")
+        .def("list_classes_in_dex", &PyDexKit::list_classes_in_dex,
+             py::arg("dex_id"),
+             "Descriptors of every class DECLARED in the given loaded dex (0-based). "
+             "list_classes() is the union across all dexes; this is one dex.")
+        .def("list_all_field_descriptors", &PyDexKit::list_all_field_descriptors,
+             "Every field descriptor (\"Lcls;->name:Type\") across all loaded dexes "
+             "(referenced + declared).")
+        .def("list_all_method_descriptors", &PyDexKit::list_all_method_descriptors,
+             "Every method descriptor (\"Lcls;->name(proto)ret\") across all loaded "
+             "dexes (referenced + declared).")
+        .def("extract_dex_bytes", &PyDexKit::extract_dex_bytes, py::arg("dex_id"),
+             "Raw bytes of the given loaded dex image; empty bytes if dex_id is out "
+             "of range.")
         .def("warm_analysis_caches", &PyDexKit::warm_analysis_caches,
              "Eagerly warm upstream caches needed for L2/L4 (otherwise lazy).")
         .def("permission_callers", &PyDexKit::permission_callers,

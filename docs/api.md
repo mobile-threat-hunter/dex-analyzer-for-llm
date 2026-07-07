@@ -486,8 +486,9 @@ session.raw                                          # underlying DexKit (escape
 ```
 
 Ports: `DexAnalysisUseCase` (composite) + `DecompilationPort` / `EnumerationPort`
-/ `CrossReferencePort` / `PermissionAnalysisPort` / `IndicatorExtractionPort` /
-`CapabilityPort` / `ContentProviderPort` / `ContainerProbePort`. Full walkthrough
+/ `ClassInspectionPort` / `CrossReferencePort` / `PermissionAnalysisPort` /
+`IndicatorExtractionPort` / `CapabilityPort` / `ContentProviderPort` /
+`ContainerProbePort`. Full walkthrough
 in [usage.md](usage.md#typed-api--hexagonal-ports--adapters-dexllmhexagonal);
 source in `src/dexllm/hexagonal/`.
 

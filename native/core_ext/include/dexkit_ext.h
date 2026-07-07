@@ -51,6 +51,14 @@ struct DexVerifyStatus {
     std::string reason;         // empty when valid
 };
 
+// Type-reference xref: everywhere a type appears in a SIGNATURE position (not a
+// call/instruction). Each list holds full member descriptors.
+struct TypeReferences {
+    std::vector<std::string> fields;             // fields declared OF this type
+    std::vector<std::string> methods_returning;  // methods that RETURN this type
+    std::vector<std::string> methods_with_param; // methods that TAKE it as a param
+};
+
 class DexKitExt {
 public:
     // Content-based probe; performs no load. Safe on any path. Returns
@@ -241,6 +249,21 @@ public:
     FindFieldReadMethods(std::string_view field_descriptor);
     [[nodiscard]] std::vector<std::string>
     FindFieldWriteMethods(std::string_view field_descriptor);
+
+    // L2.5 — type-reference xref (signature positions): fields typed as the type +
+    // methods that return it + methods that take it as a parameter. Scans every dex
+    // (a type is referenced across dexes). ``type_descriptor`` is ``Lpkg/Cls;``.
+    [[nodiscard]] TypeReferences
+    FindTypeReferences(std::string_view type_descriptor);
+
+    // L8 enumeration companions (parity with the WASM binding).
+    // Declared classes of ONE loaded dex (ListClasses is all dexes).
+    [[nodiscard]] std::vector<std::string> ListClassesInDex(int dex_id) const;
+    // Every field / method descriptor across all loaded dexes (referenced + declared).
+    [[nodiscard]] std::vector<std::string> ListAllFieldDescriptors() const;
+    [[nodiscard]] std::vector<std::string> ListAllMethodDescriptors() const;
+    // Raw bytes of one loaded dex image (empty if dex_id is out of range).
+    [[nodiscard]] std::vector<uint8_t> GetDexBytes(int dex_id) const;
 
     // L5 — baksmali-style text rendering. RenderMethod returns empty string
     // for unknown / native / abstract methods. RenderClass returns empty if

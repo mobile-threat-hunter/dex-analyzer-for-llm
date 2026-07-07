@@ -192,6 +192,21 @@ dk.find_field_read_methods(fd)                  # -> [method descriptors that re
 dk.find_field_write_methods(fd)                 # -> [method descriptors that write it]
 ```
 
+Type xref (signature positions) — where a `Lpkg/Cls;` type appears as a field type,
+a method return type, or a method parameter:
+
+```python
+tr = dk.find_type_references("Landroid/location/Location;")
+tr.fields              # fields OF this type
+tr.methods_returning   # methods returning it
+tr.methods_with_param  # methods taking it as a param
+```
+
+Enumeration companions: `dk.list_classes_in_dex(dex_id)` (one dex's declared
+classes), `dk.list_all_field_descriptors()` / `dk.list_all_method_descriptors()`
+(every descriptor across dexes), `dk.extract_dex_bytes(dex_id)` (raw dex image
+bytes).
+
 ---
 
 ## L3 — what permissions / categories does this APK exercise?
@@ -585,6 +600,11 @@ for rc in session.resolve_call_args("...->getInstance(Ljava/lang/String;)..."):
     for arg in rc.args: arg.kind, arg.string_value          # -> ArgOrigin (only the kind's field set)
 session.find_field_readers("Lcom/x/Y;->token:Ljava/lang/String;")  # -> methods that iget/sget it
 session.find_field_writers("Lcom/x/Y;->token:Ljava/lang/String;")  # -> methods that iput/sput it
+session.find_type_references("Lcom/x/Y;")                 # -> TypeReferences(fields, methods_returning, methods_with_param)
+
+info = session.class_info("Lcom/x/Y;")                    # -> ClassInfo(superclass, interfaces, access_flags, ...)
+fields = session.class_fields("Lcom/x/Y;")                # -> tuple[FieldInfo(name, type, access_flags)]
+methods = session.list_class_methods("Lcom/x/Y;")         # class members are separate fine-grained queries
 
 for g in session.permission_callers(app_only=True):       # -> tuple[PermissionCallerGroup, ...]
     g.permission, g.protection_level                        # dangerous|signature|internal|normal|other

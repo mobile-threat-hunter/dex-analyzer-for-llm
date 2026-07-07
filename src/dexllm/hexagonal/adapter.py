@@ -19,12 +19,14 @@ from .model import (
     CallSite,
     CapabilityHit,
     CapabilityReport,
+    ClassInfo,
     ContainerInfo,
     ContentProviderUse,
     DecompiledClass,
     DecompiledMethod,
     DexVerifyStatus,
     ExternalMethodRef,
+    FieldInfo,
     Indicator,
     IocReport,
     MethodAst,
@@ -33,6 +35,7 @@ from .model import (
     ResolvedCallSite,
     SourceLocation,
     StatementLocation,
+    TypeReferences,
 )
 
 # A single apk/dex path or a sequence of them; each element accepts anything
@@ -253,6 +256,38 @@ class DexKitAdapter:
     def find_field_writers(self, field_descriptor: str) -> tuple[str, ...]:
         """Return descriptors of methods that WRITE (iput*/sput*) the given field."""
         return tuple(self._dk.find_field_write_methods(field_descriptor))
+
+    def find_type_references(self, type_descriptor: str) -> TypeReferences:
+        """Return signature-position references to the given type."""
+        r = self._dk.find_type_references(type_descriptor)
+        return TypeReferences(
+            fields=tuple(r.fields),
+            methods_returning=tuple(r.methods_returning),
+            methods_with_param=tuple(r.methods_with_param),
+        )
+
+    # -- ClassInspectionPort --
+
+    def class_info(self, class_descriptor: str) -> ClassInfo:
+        """Return the class's metadata (superclass, interfaces, access, source)."""
+        s = self._dk.get_class_summary(class_descriptor)
+        return ClassInfo(
+            descriptor=s.descriptor,
+            dex_id=s.dex_id,
+            is_internal=s.is_internal,
+            access_flags=s.access_flags,
+            superclass=s.superclass_descriptor,
+            interfaces=tuple(s.interface_descriptors),
+            source_file=s.source_file,
+        )
+
+    def class_fields(self, class_descriptor: str) -> tuple[FieldInfo, ...]:
+        """Return the class's declared fields (name, type, access flags)."""
+        s = self._dk.get_class_summary(class_descriptor)
+        return tuple(
+            FieldInfo(name=f.name, type=f.type, access_flags=f.access_flags)
+            for f in s.fields
+        )
 
     # -- PermissionAnalysisPort --
 

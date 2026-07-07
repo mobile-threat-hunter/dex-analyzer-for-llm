@@ -83,6 +83,15 @@ fields are `tuple`s; `Mapping` fields are read-only views. See
   is_static_initializer, referenced_in_dex_ids)` — a framework/library method the
   app references but does not define.
 
+### Class inspection
+The C++ `get_class_summary` bundles class metadata + fields + methods into one
+object; the hexagonal layer splits it (ISP) so a consumer depends only on what it
+needs (methods stay on `EnumerationPort.list_class_methods`).
+- **`ClassInfo`** `(descriptor, dex_id, is_internal, access_flags, superclass,
+  interfaces, source_file)` — class metadata, no members.
+- **`FieldInfo`** `(name, type, access_flags)` — one declared field; its descriptor
+  is `f"{cls}->{name}:{type}"`.
+
 ### Cross-reference
 - **`ArgOrigin`** `(kind, reg_num, string_value?, int_value?, class_descriptor?,
   field_signature?, method_signature?, parameter_index?)` — the provenance of one
@@ -95,6 +104,9 @@ fields are `tuple`s; `Mapping` fields are read-only views. See
 - Field read/write xref (`find_field_readers` / `find_field_writers`) returns plain
   method descriptors `tuple[str, ...]` — the methods that iget*/sget* (read) or
   iput*/sput* (write) a `Lcls;->name:Type` field (from dexkit's L2.5 reverse index).
+- **`TypeReferences`** `(fields, methods_returning, methods_with_param)` —
+  `find_type_references(Lpkg/Cls;)` signature-position xref: where a type appears as
+  a field type, a method return type, or a method parameter (each a `tuple[str]`).
 
 ### Permission analysis
 - **`PermissionCallerRow`** `(api, descriptors, callers)` — one gated API and the
@@ -137,13 +149,14 @@ so a consumer depends on just what it needs:
 | **`ContainerProbePort`** | `identify(path) -> ContainerInfo` |
 | **`DecompilationPort`** | `decompile_method`, `decompile_method_with_pc_map`, `decompile_class`, `decompile_method_ast` |
 | **`EnumerationPort`** | `list_classes`, `list_class_methods`, `list_value_strings`, `list_external_method_refs`, `verify_report` |
-| **`CrossReferencePort`** | `find_call_sites`, `resolve_call_args`, `find_field_readers`, `find_field_writers` |
+| **`ClassInspectionPort`** | `class_info`, `class_fields` (metadata + fields split out; methods via `list_class_methods`) |
+| **`CrossReferencePort`** | `find_call_sites`, `resolve_call_args`, `find_field_readers`, `find_field_writers`, `find_type_references` |
 | **`PermissionAnalysisPort`** | `permission_callers` (all protection levels) |
 | **`IndicatorExtractionPort`** | `extract_iocs` |
 | **`CapabilityPort`** | `summarize_capabilities` |
 | **`ContentProviderPort`** | `detect_content_providers` |
 
-**`DexAnalysisUseCase`** composes the seven session-bound ports (every port except
+**`DexAnalysisUseCase`** composes the eight session-bound ports (every port except
 `ContainerProbePort`, which is load-free) and adds `sources` / `dex_count()`. It is
 the single interface a consumer annotates against — the analogue of a top-level
 application use-case interface.

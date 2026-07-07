@@ -1568,4 +1568,111 @@ DexKitExt::FindFieldWriteMethods(std::string_view field_descriptor) {
     return FieldAccessMethods(*this, field_descriptor, /*writers=*/true);
 }
 
+TypeReferences DexKitExt::FindTypeReferences(std::string_view type_descriptor) {
+    // Mirrors the WASM binding's findTypeReferences: a signature-position type xref
+    // (fields OF the type, methods RETURNING it, methods TAKING it as a param). Scans
+    // every dex — a type is referenced from other dexes too. Uses the shared
+    // BuildFieldSignature / BuildMethodSignature so descriptors match every other API.
+    TypeReferences out;
+    const int dex_num = core_->GetDexNum();
+    for (int d = 0; d < dex_num; ++d) {
+        auto* item = core_->GetDexItem(static_cast<uint16_t>(d));
+        if (item == nullptr) continue;
+        const auto& type_names = item->GetTypeNames();
+        uint32_t type_idx = dex::kNoIndex;
+        for (uint32_t i = 0; i < type_names.size(); ++i) {
+            if (type_names[i] == type_descriptor) { type_idx = i; break; }
+        }
+        if (type_idx == dex::kNoIndex) continue;
+        const auto& reader = item->GetReader();
+        const auto field_ids = reader.FieldIds();
+        for (uint32_t fid = 0; fid < field_ids.size(); ++fid) {
+            if (field_ids[fid].type_idx == type_idx)
+                out.fields.push_back(BuildFieldSignature(*item, fid));
+        }
+        const auto method_ids = reader.MethodIds();
+        const auto proto_ids = reader.ProtoIds();
+        for (uint32_t mid = 0; mid < method_ids.size(); ++mid) {
+            const auto& pdef = proto_ids[method_ids[mid].proto_idx];
+            const bool returns = (pdef.return_type_idx == type_idx);
+            bool param = false;
+            if (pdef.parameters_off != 0) {
+                const auto* tl = reader.dataPtr<dex::TypeList>(pdef.parameters_off);
+                if (tl != nullptr)
+                    for (uint32_t k = 0; k < tl->size; ++k)
+                        if (tl->list[k].type_idx == type_idx) { param = true; break; }
+            }
+            if (!returns && !param) continue;
+            std::string sig = BuildMethodSignature(*item, mid);
+            if (returns) out.methods_returning.push_back(sig);
+            if (param) out.methods_with_param.push_back(std::move(sig));
+        }
+    }
+    return out;
+}
+
+std::vector<std::string> DexKitExt::ListClassesInDex(int dex_id) const {
+    std::vector<std::string> out;
+    if (dex_id < 0 || dex_id >= core_->GetDexNum()) return out;
+    auto* item = core_->GetDexItem(static_cast<uint16_t>(dex_id));
+    if (item == nullptr) return out;
+    const auto& type_names = item->GetTypeNames();
+    const auto& flags = item->GetTypeDefFlags();  // declared-in-this-dex types
+    out.reserve(flags.size());
+    for (std::size_t t = 0; t < flags.size(); ++t)
+        if (flags[t]) out.emplace_back(type_names[t]);
+    return out;
+}
+
+std::vector<std::string> DexKitExt::ListAllFieldDescriptors() const {
+    std::vector<std::string> out;
+    for (int d = 0; d < core_->GetDexNum(); ++d) {
+        auto* item = core_->GetDexItem(static_cast<uint16_t>(d));
+        if (item == nullptr) continue;
+        const auto field_ids = item->GetReader().FieldIds();
+        for (uint32_t fid = 0; fid < field_ids.size(); ++fid)
+            out.push_back(BuildFieldSignature(*item, fid));
+    }
+    return out;
+}
+
+std::vector<std::string> DexKitExt::ListAllMethodDescriptors() const {
+    std::vector<std::string> out;
+    for (int d = 0; d < core_->GetDexNum(); ++d) {
+        auto* item = core_->GetDexItem(static_cast<uint16_t>(d));
+        if (item == nullptr) continue;
+        const auto method_ids = item->GetReader().MethodIds();
+        for (uint32_t mid = 0; mid < method_ids.size(); ++mid)
+            out.push_back(BuildMethodSignature(*item, mid));
+    }
+    return out;
+}
+
+std::vector<uint8_t> DexKitExt::GetDexBytes(int dex_id) const {
+    if (dex_id < 0 || dex_id >= core_->GetDexNum()) return {};
+    auto* item = core_->GetDexItem(static_cast<uint16_t>(dex_id));
+    if (item == nullptr) return {};
+    auto* img = item->GetImage();
+    if (img == nullptr) return {};
+    // Return THIS logical dex's slice, not the whole mapped image: a concatenated /
+    // packer-dump container is split into logical dexes that SHARE one MemMap, each at
+    // its own header_off. The reader base (dataPtr<u1>(0) == image + header_off) is the
+    // dex start and header->file_size is its length; using img->data()/img->len()
+    // would over-return and mis-attribute sibling dexes. (The WASM extractDexBytes has
+    // this same omission — fix deferred to the web side.) Clamp to the mapped span as a
+    // defensive net (VerifyDex already bounds file_size).
+    const auto& reader = item->GetReader();
+    const auto* hdr = reader.Header();
+    if (hdr == nullptr) return {};
+    // Header() sits at the reader base (image + header_off) = this dex's first byte.
+    const auto* base = reinterpret_cast<const uint8_t*>(hdr);
+    const auto* map_base = reinterpret_cast<const uint8_t*>(img->data());
+    std::size_t n = hdr->file_size;
+    if (base >= map_base) {
+        const std::size_t avail = img->len() - static_cast<std::size_t>(base - map_base);
+        if (n > avail) n = avail;
+    }
+    return std::vector<uint8_t>(base, base + n);
+}
+
 }  // namespace dexkit::ext

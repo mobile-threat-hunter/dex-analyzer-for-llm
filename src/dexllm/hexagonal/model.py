@@ -209,6 +209,54 @@ class ExternalMethodRef:
     referenced_in_dex_ids: tuple[int, ...]
 
 
+# ── class inspection ─────────────────────────────────────────────────────────
+# Fine-grained decomposition of a class (the C++ get_class_summary bundles all of
+# these — class metadata + fields + methods — into one object; the hexagonal layer
+# splits it so a consumer depends only on what it needs). Methods stay on
+# EnumerationPort.list_class_methods.
+
+
+@dataclass(frozen=True)
+class FieldInfo:
+    """One declared field of a class: name, dex type descriptor, access flags.
+
+    Its full descriptor is ``f"{class_descriptor}->{name}:{type}"``.
+
+    Example (real, a2dp.Vol StoreLoc.DB)::
+
+        FieldInfo(name='DB', type='La2dp/Vol/DeviceDB;', access_flags=2)
+    """
+
+    name: str
+    type: str
+    access_flags: int
+
+
+@dataclass(frozen=True)
+class ClassInfo:
+    """A class's metadata (no field/method bodies — those are separate queries).
+
+    ``is_internal`` is False for a class only REFERENCED (not declared) in a loaded
+    dex — such an external class has ``dex_id=-1``, ``superclass=""`` and (via
+    ``class_fields``) fields deduped + sorted by (name, type) rather than in declared
+    order. ``source_file`` may be empty.
+
+    Example (real, a2dp.Vol StoreLoc)::
+
+        ClassInfo(descriptor='La2dp/Vol/StoreLoc;', dex_id=0, is_internal=True,
+                  access_flags=1, superclass='Landroid/app/Service;',
+                  interfaces=(), source_file='StoreLoc.java')
+    """
+
+    descriptor: str
+    dex_id: int
+    is_internal: bool
+    access_flags: int
+    superclass: str
+    interfaces: tuple[str, ...]
+    source_file: str
+
+
 # ── cross-reference ──────────────────────────────────────────────────────────
 
 
@@ -277,6 +325,29 @@ class ResolvedCallSite:
     bytecode_offset: int
     invoke_opcode: int
     args: tuple[ArgOrigin, ...]
+
+
+@dataclass(frozen=True)
+class TypeReferences:
+    """Signature-position references to a type (not call/instruction xref).
+
+    Where a ``Lpkg/Cls;`` type appears as a field type, a method return type, or a
+    method parameter — each a tuple of the member descriptors.
+
+    Example (real, a2dp.Vol — references to android.location.Location)::
+
+        TypeReferences(
+            fields=('La2dp/Vol/StoreLoc;->l:Landroid/location/Location;',),
+            methods_returning=('Landroid/location/LocationManager;->'
+                               'getLastKnownLocation(Ljava/lang/String;)'
+                               'Landroid/location/Location;',),
+            methods_with_param=('La2dp/Vol/StoreLoc$2;->onLocationChanged('
+                                'Landroid/location/Location;)V',))
+    """
+
+    fields: tuple[str, ...]
+    methods_returning: tuple[str, ...]
+    methods_with_param: tuple[str, ...]
 
 
 # ── permission analysis ──────────────────────────────────────────────────────

@@ -164,6 +164,55 @@ def test_call_sites_cross_dex_multidex():
 # ── external API enumeration ─────────────────────────────────────────────────
 
 
+def test_type_references(dk):
+    """L2.5 type xref — fields of / methods returning / methods taking a type."""
+    tr = dk.find_type_references("Ljava/lang/String;")
+    assert all(m.endswith(")Ljava/lang/String;") for m in tr.methods_returning)
+    assert all(":Ljava/lang/String;" in f for f in tr.fields)
+    assert dk.find_type_references("Lno/such/T;").fields == []
+
+
+def test_enumeration_companions(dk):
+    """list_classes_in_dex / list_all_* / extract_dex_bytes (WASM-parity bindings)."""
+    all_classes = set(dk.list_classes())
+    per_dex = set()
+    for d in range(dk.dex_count()):
+        per_dex |= set(dk.list_classes_in_dex(d))
+    assert per_dex == all_classes  # union of per-dex == all
+    assert dk.list_classes_in_dex(9999) == []
+    assert len(dk.list_all_field_descriptors()) > 0
+    assert len(dk.list_all_method_descriptors()) > 0
+    raw = dk.extract_dex_bytes(0)
+    assert isinstance(raw, bytes) and raw[:4] == b"dex\n"
+    # the slice is THIS dex only — length == the header's file_size, not the map len
+    assert len(raw) == int.from_bytes(raw[32:36], "little")
+    assert dk.extract_dex_bytes(9999) == b""
+
+
+def test_extract_dex_bytes_slices_concatenated_container(apk_path, tmp_path):
+    """extract_dex_bytes must return THIS logical dex's slice (header_off applied),
+    not the whole shared MemMap — the packer/concatenated-dex case. A single buffer
+    of two dexes splits into two logical dexes sharing one image; each extract must
+    yield its own dex (own magic, own file_size), NOT the full container."""
+    import zipfile
+
+    if not zipfile.is_zipfile(apk_path):
+        pytest.skip("fixture is not a zip apk")
+    with zipfile.ZipFile(apk_path) as z:
+        names = [n for n in z.namelist() if n.endswith(".dex")]
+        if not names:
+            pytest.skip("apk has no dex")
+        one = z.read(names[0])
+    cat = tmp_path / "concat.dex"
+    cat.write_bytes(one + one)  # two logical dexes in one buffer
+    dk = dexllm.DexKit(str(cat))
+    if dk.dex_count() < 2:
+        pytest.skip("core did not split the concatenated buffer")
+    a, b = dk.extract_dex_bytes(0), dk.extract_dex_bytes(1)
+    assert a[:4] == b"dex\n" and b[:4] == b"dex\n"  # each starts at its own magic
+    assert len(a) == len(one) and len(b) == len(one)  # each is one dex, not the pair
+
+
 def test_external_refs(dk):
     refs = dk.list_external_method_refs(framework_only=True)
     assert isinstance(refs, list)

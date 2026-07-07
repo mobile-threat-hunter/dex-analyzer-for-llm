@@ -224,6 +224,37 @@ def test_field_xref_readers_writers(apk_path):
     pytest.skip("no field with a direction-distinct read/write xref in the test APK")
 
 
+def test_class_inspection_decomposed(apk_path):
+    """ClassInspectionPort exposes class metadata + fields as SEPARATE fine-grained
+    queries (the decomposition of the C++ get_class_summary god-object); methods stay
+    on EnumerationPort.list_class_methods."""
+    from dexllm.hexagonal import ClassInfo, ClassInspectionPort, FieldInfo
+
+    session = open_apk(apk_path)
+    assert isinstance(session, ClassInspectionPort)
+    cls = next(c for c in session.list_classes() if session.raw.get_class_summary(c).is_internal)
+    info = session.class_info(cls)
+    assert isinstance(info, ClassInfo)
+    assert info.descriptor == cls and info.superclass.startswith("L")
+    fields = session.class_fields(cls)
+    assert all(isinstance(f, FieldInfo) for f in fields)
+    # methods are the separate list_class_methods query, not bundled here
+    assert isinstance(session.list_class_methods(cls), tuple)
+
+
+def test_type_references_xref(apk_path):
+    """CrossReferencePort.find_type_references — signature-position type xref."""
+    from dexllm.hexagonal import TypeReferences
+
+    session = open_apk(apk_path)
+    # a type sure to be referenced: java.lang.String
+    tr = session.find_type_references("Ljava/lang/String;")
+    assert isinstance(tr, TypeReferences)
+    assert all(isinstance(x, str) for x in tr.fields + tr.methods_returning)
+    # a method that returns String must have descriptor ending in the type
+    assert all(m.endswith(")Ljava/lang/String;") for m in tr.methods_returning)
+
+
 def test_typed_analysis_surface(apk_path):
     """Permission / IOC / capability returns are the typed models, not raw dicts."""
     session = open_apk(apk_path)
