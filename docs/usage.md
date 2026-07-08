@@ -176,10 +176,16 @@ for site in dk.find_call_sites_to_api(
     "Landroid/util/Log;->d(Ljava/lang/String;Ljava/lang/String;)I"
 ):
     print(f"[opcode {site.invoke_opcode:02x} @ off 0x{site.bytecode_offset:x}] "
-          f"{site.caller_descriptor}  dex={site.dex_id}")
+          f"{site.caller_descriptor}  dex={site.caller_dex_id}")
 ```
 
 Each site is a distinct invoke instruction — if the same caller invokes the API twice, you get two entries. `bytecode_offset` is the absolute byte offset within the method's code item.
+
+The **forward** direction — what a given method calls (its callees) — is
+`dk.find_call_sites_from_method(method)`: the same `CallSite` list, but the caller is
+fixed to the method and `callee_descriptor` varies. `find_call_sites_from_method(M)`
+and `find_call_sites_to_api(C)` are the forward and reverse of one invoke edge (if
+`M` invokes `C`, `M` is among `C`'s callers). `[]` for an external / bodyless method.
 
 ### L2.5 — field read/write xref
 
