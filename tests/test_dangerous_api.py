@@ -134,10 +134,14 @@ def test_signature_parsers():
     assert _parse_api(
         "android.location.LocationManager#getLastKnownLocation(String, "
         "android.location.LastLocationRequest)"
-    ) == ("android.location.LocationManager", "getLastKnownLocation", (
-        "String",
-        "LastLocationRequest",
-    ))
+    ) == (
+        "android.location.LocationManager",
+        "getLastKnownLocation",
+        (
+            "String",
+            "LastLocationRequest",
+        ),
+    )
     # wildcard generic `<? extends X>` has spaces but is NOT a param name (metalava
     # carries no names) — generics are erased before the name heuristic runs.
     assert _parse_api(
@@ -159,9 +163,9 @@ def test_signature_parsers():
         "Consumer",
     )
     assert _dalvik_param_types("(Lp/Outer$Inner;)V") == ("Inner",)
-    assert _dalvik_param_types(
-        "(Ljava/lang/String;)Landroid/location/Location;"
-    ) == ("String",)
+    assert _dalvik_param_types("(Ljava/lang/String;)Landroid/location/Location;") == (
+        "String",
+    )
 
 
 class _Ref:
@@ -386,7 +390,9 @@ def test_full_dataset_parses_without_crash():
         cls, method, types = _parse_api(e)  # must not raise
         assert cls and method
         if types is not None:
-            assert all(clean.match(t) for t in types), f"anomalous type in {e!r}: {types}"
+            assert all(
+                clean.match(t) for t in types
+            ), f"anomalous type in {e!r}: {types}"
         parsed += 1
     assert parsed > 1000  # sanity: the table really was exercised
 

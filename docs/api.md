@@ -229,10 +229,22 @@ dk.batch_find_classes_using_strings({...})   # dict[str, list[ClassMatch]]
 ```
 
 ### Call sites → `list[CallSite]`
-Every invoke of a specific API descriptor (internal or external).
+Every invoke of a specific API descriptor (internal or external) — the target's
+CALLERS.
 ```python
 dk.find_call_sites_to_api('Landroid/content/Context;->getSystemService(Ljava/lang/String;)Ljava/lang/Object;')
-# list[CallSite]  len 54
+# list[CallSite]  len 54; each .caller_descriptor calls the (fixed) .callee_descriptor
+```
+
+### Callees of a method → `list[CallSite]` (forward direction)
+The mirror of the above: every call site INSIDE a method — the methods it invokes.
+Each `CallSite` fixes `.caller_descriptor` (this method) and varies `.callee_descriptor`
+(+ `.bytecode_offset`, `.invoke_opcode`). `[]` for an external / bodyless / unresolved
+method. `find_call_sites_from_method(M)` and `find_call_sites_to_api(C)` are forward
+and reverse of the same edge: if `M` invokes `C`, `M` is among `C`'s callers.
+```python
+dk.find_call_sites_from_method('La2dp/Vol/ALauncher;->onCreate()V')
+# list[CallSite]  len 17; e.g. .callee_descriptor 'Ljava/io/FileInputStream;->read([B)I'
 ```
 
 ### Intra-method arg resolution → `list[ResolvedCallSite]`

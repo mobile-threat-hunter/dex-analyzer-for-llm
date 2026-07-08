@@ -130,7 +130,9 @@ def test_ipv4_rejects_version_string_slices():
 
 
 def test_version_string_is_not_an_ip_end_to_end():
-    iocs = dexllm.extract_iocs(_FakeDK(["lib version 1.0.0.0.5 release"]), with_xref=False)
+    iocs = dexllm.extract_iocs(
+        _FakeDK(["lib version 1.0.0.0.5 release"]), with_xref=False
+    )
     assert iocs["ips"] == []
 
 
@@ -186,7 +188,9 @@ def test_host_of_strips_userinfo_and_port():
 
 
 def test_userinfo_url_yields_real_host_in_domains():
-    iocs = dexllm.extract_iocs(_FakeDK(["http://admin:pw@evil.com/c2"]), with_xref=False)
+    iocs = dexllm.extract_iocs(
+        _FakeDK(["http://admin:pw@evil.com/c2"]), with_xref=False
+    )
     doms = {r["value"] for r in iocs["domains"]}
     assert "evil.com" in doms
     assert not any("@" in d for d in doms)
@@ -194,7 +198,9 @@ def test_userinfo_url_yields_real_host_in_domains():
 
 def test_identifier_path_is_not_a_domain():
     # a Java identifier path whose last label isn't a public suffix -> not a domain
-    iocs = dexllm.extract_iocs(_FakeDK(["com.google.util.Foo", "java.lang.String"]), with_xref=False)
+    iocs = dexllm.extract_iocs(
+        _FakeDK(["com.google.util.Foo", "java.lang.String"]), with_xref=False
+    )
     assert iocs["domains"] == []
 
 
@@ -205,9 +211,13 @@ def test_onion_not_double_listed_as_domain():
 
 
 def test_ip_url_host_not_double_categorized():
-    iocs = dexllm.extract_iocs(_FakeDK(["http://1.2.3.4:8080/gate.php"]), with_xref=False)
+    iocs = dexllm.extract_iocs(
+        _FakeDK(["http://1.2.3.4:8080/gate.php"]), with_xref=False
+    )
     assert any(v["value"].startswith("1.2.3.4") for v in iocs["ips"])
-    assert not any("1.2.3.4" in d["value"] for d in iocs["domains"])  # IP host != domain
+    assert not any(
+        "1.2.3.4" in d["value"] for d in iocs["domains"]
+    )  # IP host != domain
 
 
 # --- denoising ---------------------------------------------------------------
@@ -215,14 +225,18 @@ def test_ip_url_host_not_double_categorized():
 
 def test_denoise_drops_framework_packages(dk):
     iocs = dexllm.extract_iocs(dk, with_xref=False)
-    leaked = [r["value"] for r in iocs["domains"] if r["value"].lower().startswith(_FRAMEWORK)]
+    leaked = [
+        r["value"] for r in iocs["domains"] if r["value"].lower().startswith(_FRAMEWORK)
+    ]
     assert leaked == [], f"framework packages leaked into domains: {leaked}"
 
 
 def test_dex_package_denoise_helpers():
     from dexllm.ioc import _dex_package_prefixes, _is_package_like
 
-    pkgs = _dex_package_prefixes(["Landroid/app/Activity;", "Lcom/evil/Bot;", "[Lkotlin/io/X;"])
+    pkgs = _dex_package_prefixes(
+        ["Landroid/app/Activity;", "Lcom/evil/Bot;", "[Lkotlin/io/X;"]
+    )
     assert {"android", "android.app", "com.evil", "kotlin.io"} <= pkgs
     assert _is_package_like("android.app", pkgs)  # declared package
     assert _is_package_like("com.facebook.x", frozenset())  # reverse-DNS root
@@ -244,7 +258,9 @@ def test_namespace_uri_dropped_from_urls_and_domains():
 def test_extract_iocs_bounded_on_oversized_strings():
     # adversarial: huge blobs must not blow up wall-clock (per-string cap + bounded
     # regexes). Includes a defanged-IP-flavoured blob.
-    dk = _FakeDK(["a." * 200000 + "x", "1." * 200000, "x" * 1_000_000, "hxxp://" + "a" * 500000])
+    dk = _FakeDK(
+        ["a." * 200000 + "x", "1." * 200000, "x" * 1_000_000, "hxxp://" + "a" * 500000]
+    )
     t0 = time.time()
     dexllm.extract_iocs(dk, with_xref=False)
     assert time.time() - t0 < 5.0

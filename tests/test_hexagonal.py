@@ -565,6 +565,32 @@ def test_type_references_xref(apk_path):
     assert all(m.endswith(")Ljava/lang/String;") for m in tr.methods_returning)
 
 
+def test_call_sites_from_method_callees(apk_path):
+    """CrossReferencePort.find_call_sites_from_method — the CALLEE direction, typed.
+
+    The forward of find_call_sites: each CallSite fixes the caller (this method) and
+    varies callee. Verified symmetric — the method is a caller of its own callee — and
+    empty for an external/unresolved method."""
+    from dexllm.hexagonal import CallSite
+
+    session = open_apk(apk_path)
+    for cls in session.list_classes():
+        for m in session.list_class_methods(cls):
+            callees = session.find_call_sites_from_method(m)
+            if callees:
+                assert all(isinstance(c, CallSite) for c in callees)
+                assert all(c.caller_descriptor == m for c in callees)  # caller fixed
+                # forward ≡ reverse for EVERY distinct callee
+                for callee in {c.callee_descriptor for c in callees}:
+                    callers = {
+                        c.caller_descriptor for c in session.find_call_sites(callee)
+                    }
+                    assert m in callers
+                assert session.find_call_sites_from_method("Lno/x;->y()V") == ()
+                return
+    pytest.skip("no method with a callee in the test APK")
+
+
 def test_typed_analysis_surface(apk_path):
     """Permission / IOC / capability returns are the typed models, not raw dicts."""
     session = open_apk(apk_path)

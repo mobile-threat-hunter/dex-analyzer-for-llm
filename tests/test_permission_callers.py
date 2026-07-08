@@ -8,6 +8,7 @@ keeps every consumer (Python, WASM/web, future) in agreement. Adversarial review
 verified the internal helpers (Dalvik-proto parsing, overload disambiguation) with
 a 200k-proto differential; this is the end-to-end product gate over real APKs.
 """
+
 from __future__ import annotations
 
 import glob
@@ -88,7 +89,9 @@ def test_runtime_enforcement_apis_merged():
     from dexllm.dangerous_api import _ARITY_ONLY, _parse_api
 
     # arity-only parse → N sentinels (not one bogus param named "3args")
-    cls, name, types = _parse_api("android.telephony.SmsManager#copyMessageToIcc(3args)")
+    cls, name, types = _parse_api(
+        "android.telephony.SmsManager#copyMessageToIcc(3args)"
+    )
     assert (cls, name) == ("android.telephony.SmsManager", "copyMessageToIcc")
     assert types == (_ARITY_ONLY, _ARITY_ONLY, _ARITY_ONLY)
     assert _parse_api("a.B#m(0args)")[2] == ()  # 0-arity
@@ -125,11 +128,13 @@ def test_runtime_merge_is_additive_invariant():
             c, m, t = _parse_api(sig)
             if t is None:
                 continue
-            (arity_only_cm if t and all(x == _ARITY_ONLY for x in t) else metalava_cm).add(
-                (c, m)
-            )
+            (
+                arity_only_cm if t and all(x == _ARITY_ONLY for x in t) else metalava_cm
+            ).add((c, m))
     overlap = metalava_cm & arity_only_cm
-    assert not overlap, f"runtime merge perturbs metalava methods: {sorted(overlap)[:5]}"
+    assert (
+        not overlap
+    ), f"runtime merge perturbs metalava methods: {sorted(overlap)[:5]}"
 
 
 def test_roundtrip_records_reconstructs_fields():
@@ -138,11 +143,20 @@ def test_roundtrip_records_reconstructs_fields():
     gen = _load_codegen()
     FS, PS = gen.FS, gen.PS
     recs = [
-        FS.join(["android.permission.FOO", "dangerous", "com.x.Café", "m", "sig()", ""]),
+        FS.join(
+            ["android.permission.FOO", "dangerous", "com.x.Café", "m", "sig()", ""]
+        ),
         FS.join(["p", "normal", "C", "n", "s", PS.join(["int", "String"])]),
     ]
     got = gen._roundtrip_records(recs)
-    assert got[0] == ["android.permission.FOO", "dangerous", "com.x.Café", "m", "sig()", ""]
+    assert got[0] == [
+        "android.permission.FOO",
+        "dangerous",
+        "com.x.Café",
+        "m",
+        "sig()",
+        "",
+    ]
     assert got[1][5].split(PS) == ["int", "String"]
 
 
@@ -183,7 +197,9 @@ def test_cpp_join_matches_python(app_only):
     # equivalence check is vacuous. (Some APKs reference dangerous APIs but only
     # from framework callers, dropped under app_only, so the caller-level count is
     # smaller than the API-reference count.)
-    assert nonempty >= 2, f"expected ≥2 APKs with permission-API callers, got {nonempty}"
+    assert (
+        nonempty >= 2
+    ), f"expected ≥2 APKs with permission-API callers, got {nonempty}"
 
 
 def test_protection_levels_span_and_are_valid():

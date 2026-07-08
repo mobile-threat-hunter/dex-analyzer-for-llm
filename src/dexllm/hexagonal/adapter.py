@@ -341,7 +341,7 @@ class DexKitAdapter:
     # -- CrossReferencePort --
 
     def find_call_sites(self, api_descriptor: str) -> tuple[CallSite, ...]:
-        """Return every call site invoking the given API descriptor."""
+        """Return every call site invoking the given API descriptor (its callers)."""
         return tuple(
             CallSite(
                 caller_descriptor=s.caller_descriptor,
@@ -352,6 +352,22 @@ class DexKitAdapter:
                 invoke_opcode=s.invoke_opcode,
             )
             for s in self._dk.find_call_sites_to_api(api_descriptor)
+        )
+
+    def find_call_sites_from_method(
+        self, method_descriptor: str
+    ) -> tuple[CallSite, ...]:
+        """Return the call sites inside the method — the methods it invokes (callees)."""
+        return tuple(
+            CallSite(
+                caller_descriptor=s.caller_descriptor,
+                caller_dex_id=s.caller_dex_id,
+                caller_method_idx=s.caller_method_idx,
+                callee_descriptor=s.callee_descriptor,
+                bytecode_offset=s.bytecode_offset,
+                invoke_opcode=s.invoke_opcode,
+            )
+            for s in self._dk.find_call_sites_from_method(method_descriptor)
         )
 
     def resolve_call_args(self, api_descriptor: str) -> tuple[ResolvedCallSite, ...]:

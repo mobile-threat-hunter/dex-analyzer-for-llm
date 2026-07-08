@@ -179,6 +179,10 @@ public:
     find_call_sites_to_api(const std::string& api_descriptor) {
         return ext_.FindCallSitesToApi(api_descriptor);
     }
+    std::vector<dexkit::ext::CallSite>
+    find_call_sites_from_method(const std::string& method_descriptor) {
+        return ext_.FindCallSitesFromMethod(method_descriptor);
+    }
     std::vector<std::string>
     find_field_read_methods(const std::string& field_descriptor) {
         return ext_.FindFieldReadMethods(field_descriptor);
@@ -731,6 +735,11 @@ PYBIND11_MODULE(_dexkit_core, m) {
              py::arg("api_descriptor"),
              "L2: every call site invoking the given API (\"Lpkg/Cls;->name(args)Ret;\"). "
              "First call warms upstream analysis caches (may take a few seconds).")
+        .def("find_call_sites_from_method", &PyDexKit::find_call_sites_from_method,
+             py::arg("method_descriptor"),
+             "L2 (forward direction): every call site INSIDE the given method — the "
+             "methods it invokes (callees). Each CallSite fixes the caller and varies "
+             "callee_descriptor. Empty for an external / bodyless / unresolved method.")
         .def("find_field_read_methods", &PyDexKit::find_field_read_methods,
              py::arg("field_descriptor"),
              "L2.5: descriptors of every method that READS (iget*/sget*) the given "

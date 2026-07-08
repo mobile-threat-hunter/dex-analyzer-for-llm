@@ -1510,6 +1510,47 @@ DexKitExt::FindCallSitesToApi(std::string_view api_descriptor) {
     return out;
 }
 
+std::vector<CallSite>
+DexKitExt::FindCallSitesFromMethod(std::string_view method_descriptor) {
+    std::vector<CallSite> out;
+
+    std::string_view cls, name, proto;
+    if (!ParseApiDescriptor(method_descriptor, cls, name, proto)) return out;
+
+    // The method's body (and its invoke instructions) lives in the dex that DECLARES
+    // its class (first-wins). An external / bodyless method has no callees here.
+    const int dex_id = LocateClassDex(cls);
+    if (dex_id < 0) return out;
+    auto* item_ptr = core_->GetDexItem(static_cast<uint16_t>(dex_id));
+    if (item_ptr == nullptr) return out;
+    const auto& item = *item_ptr;
+
+    EnsureApiResolveIndex();  // FindTypeIdxIndexed / FindMethodIdxIndexed use it
+    if (static_cast<size_t>(dex_id) >= api_resolve_index_.size()) return out;
+    const auto& idx = api_resolve_index_[dex_id];
+
+    uint32_t cls_type_idx = FindTypeIdxIndexed(idx, cls);
+    if (cls_type_idx == dex::kNoIndex) return out;
+    uint32_t m_idx = FindMethodIdxIndexed(item, idx, cls_type_idx, name, proto);
+    if (m_idx == dex::kNoIndex) return out;
+
+    // Walk the method's own invoke sites (the forward index of FindCallSitesToApi):
+    // each site's method_idx is the callee IN THIS DEX. Per-invoke (not deduped),
+    // mirroring FindCallSitesToApi's per-site output.
+    std::string caller_sig = BuildMethodSignature(item, m_idx);
+    for (const auto& s : item.AnalyzeMethodInvokes(m_idx)) {
+        CallSite cs;
+        cs.caller_dex_id = item.GetDexId();
+        cs.caller_method_idx = m_idx;
+        cs.caller_descriptor = caller_sig;
+        cs.callee_descriptor = BuildMethodSignature(item, s.method_idx);
+        cs.bytecode_offset = static_cast<int32_t>(s.bytecode_offset);
+        cs.invoke_opcode = s.opcode;
+        out.push_back(std::move(cs));
+    }
+    return out;
+}
+
 namespace {
 
 // Locate a field descriptor `Lcls;->name:Type` → (dex_id, field_idx), or (-1, 0).

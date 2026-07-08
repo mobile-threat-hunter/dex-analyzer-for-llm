@@ -29,7 +29,9 @@ def dk():
 
 def test_get_class_summary_reports_real_superclass(dk):
     # a2dp.Vol/main extends android.app.Activity — the tool used to report null.
-    out = tools.execute("get_class_summary", {"class_descriptor": "La2dp/Vol/main;"}, dk)
+    out = tools.execute(
+        "get_class_summary", {"class_descriptor": "La2dp/Vol/main;"}, dk
+    )
     assert out["superclass"] == "Landroid/app/Activity;"
     assert isinstance(out["interfaces"], list)
     assert out["method_count"] > 0 and out["field_count"] >= 0

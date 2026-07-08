@@ -39,11 +39,14 @@ _THIS_SUPER = re.compile(r"^\s*this\s*=\s*super\.", re.M)
 # ThisParam type is corrupted to the last reuse's rhs during Construct; the fix
 # must restore the class type). Must be 0.
 _MISTYPED_MAT = re.compile(
-    r"^\s*(?:" + "|".join(_PRIMS) + r")\s+v\w+\s*=\s*this\s*;", re.M)
+    r"^\s*(?:" + "|".join(_PRIMS) + r")\s+v\w+\s*=\s*this\s*;", re.M
+)
 # `<Class> vN = this;` — a correct materialization seed (reference-typed).
 _GOOD_MAT = re.compile(
     r"^\s*(?!(?:" + "|".join(_PRIMS) + r")\b)"
-    r"[A-Za-z_][\w.$]*(?:\[\])*\s+v\w+\s*=\s*this\s*;", re.M)
+    r"[A-Za-z_][\w.$]*(?:\[\])*\s+v\w+\s*=\s*this\s*;",
+    re.M,
+)
 
 
 def _apks():
@@ -94,8 +97,12 @@ def scanned():
                     this_super += 1
                     if len(this_super_ex) < 5:
                         this_super_ex.append(m.group(0).strip())
-    return {"mistyped": mistyped, "good_mat": good_mat,
-            "this_super": this_super, "this_super_ex": this_super_ex}
+    return {
+        "mistyped": mistyped,
+        "good_mat": good_mat,
+        "this_super": this_super,
+        "this_super_ex": this_super_ex,
+    }
 
 
 def test_no_mistyped_this_materialization(scanned):
@@ -239,8 +246,9 @@ def test_def_anchor_throw_new():
             "def-anchor must NOT inject a `<X> vX = this;` seed (entry value "
             f"is dead):\n{out}"
         )
-        assert re.search(
-            r"throw new [\w.$]*UnsupportedOperationException\(", out), out[:400]
+        assert re.search(r"throw new [\w.$]*UnsupportedOperationException\(", out), out[
+            :400
+        ]
         return
     pytest.skip("no APK bundling ActionBar.setHideOffset")
 
@@ -274,8 +282,9 @@ def test_def_anchor_priority_over_return_sink():
         assert not _THIS_ASSIGN.search(out), out[:400]
         # the def-anchor injects no `<X> vX = this;` seed (entry value is dead)
         assert not _GOOD_MAT.search(out), out[:400]
-        assert re.search(
-            r"return\s+new\s+[\w.$]*ViewPager\$LayoutParams\(", out), out[:400]
+        assert re.search(r"return\s+new\s+[\w.$]*ViewPager\$LayoutParams\(", out), out[
+            :400
+        ]
         return
     pytest.skip("no APK bundling ViewPager.generateDefaultLayoutParams")
 

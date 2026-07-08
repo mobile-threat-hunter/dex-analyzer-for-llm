@@ -60,8 +60,7 @@ def scanned():
     if not apks:
         pytest.skip("no test APK (set $DEXLLM_TEST_APK or add one under test_apk/APK/)")
 
-    found = {"F": 0, "D": 0, "ref_null": 0, "Z_bool": 0, "nonfinite": 0,
-             "int_num": 0}
+    found = {"F": 0, "D": 0, "ref_null": 0, "Z_bool": 0, "nonfinite": 0, "int_num": 0}
     violations = []
     nonfinite_examples = []
     # Per-APK cap so every APK (incl. the one carrying the NaN/Inf returns) gets
@@ -130,8 +129,11 @@ def scanned():
                         if "true" in s or "false" in s or s == "return null;":
                             violations.append((f"{rt}-rewritten", ml, s))
                     # non-finite rendering (any type)
-                    if re.search(r"(Float|Double)\.(NaN|POSITIVE_INFINITY|"
-                                 r"NEGATIVE_INFINITY)", s):
+                    if re.search(
+                        r"(Float|Double)\.(NaN|POSITIVE_INFINITY|"
+                        r"NEGATIVE_INFINITY)",
+                        s,
+                    ):
                         found["nonfinite"] += 1
                         if len(nonfinite_examples) < 5:
                             nonfinite_examples.append((ml, s))
@@ -167,8 +169,9 @@ def test_nonfinite_returns_render_as_java_constants(scanned):
         pytest.skip("no non-finite F/D return in the scanned corpus slice")
     assert found["nonfinite"] > 0
     for _ml, s in examples:
-        assert re.search(r"(Float|Double)\.(NaN|POSITIVE_INFINITY|"
-                         r"NEGATIVE_INFINITY)", s), s
+        assert re.search(
+            r"(Float|Double)\.(NaN|POSITIVE_INFINITY|" r"NEGATIVE_INFINITY)", s
+        ), s
 
 
 # canonical IEEE-754 binary64 bit patterns of common double constants. A
@@ -186,7 +189,7 @@ _DOUBLE_BIT_PATTERNS = {
     "4636737291354636288",  # 100.0
     "4602678819172646912",  # 0.5
     "4599075939470750515",  # 0.1 (approx)
-    "-4616189618054758400", # -4.0 etc. (sign-flipped forms)
+    "-4616189618054758400",  # -4.0 etc. (sign-flipped forms)
 }
 
 
@@ -257,8 +260,10 @@ def test_text_and_ast_agree_on_corrected_returns():
                 break
             for ml in dk.list_class_methods(c):
                 m = _RET.search(ml)
-                if not m or m.group(1) not in ("Z", "F", "D") and not (
-                    m.group(1).startswith("L") or m.group(1).startswith("[")
+                if (
+                    not m
+                    or m.group(1) not in ("Z", "F", "D")
+                    and not (m.group(1).startswith("L") or m.group(1).startswith("["))
                 ):
                     continue
                 try:
@@ -266,8 +271,11 @@ def test_text_and_ast_agree_on_corrected_returns():
                 except Exception:
                     continue
                 checked += 1
-                rets = [l.strip() for l in txt.splitlines()
-                        if l.strip().startswith("return ")]
+                rets = [
+                    l.strip()
+                    for l in txt.splitlines()
+                    if l.strip().startswith("return ")
+                ]
                 # only methods whose return is a corrected literal
                 if not any(
                     r in ("return null;", "return true;", "return false;")
@@ -282,8 +290,9 @@ def test_text_and_ast_agree_on_corrected_returns():
                     continue
                 body = json.dumps(ast.get("ast", {}).get("body", ""))
                 # the AST must not carry the raw-int / lowercase-inf form
-                assert '"-inf"' not in body and '"inf"' not in body \
-                    and '"nan"' not in body, (ml, body[:160])
+                assert (
+                    '"-inf"' not in body and '"inf"' not in body and '"nan"' not in body
+                ), (ml, body[:160])
                 agreed += 1
                 if agreed >= 6:
                     break
@@ -328,8 +337,7 @@ def test_boolean_assign_literals():
             except Exception:
                 continue
             per += 1
-            bad += [(c.split("/")[-1][:24], m.strip())
-                    for m in bad_pat.findall(src)]
+            bad += [(c.split("/")[-1][:24], m.strip()) for m in bad_pat.findall(src)]
             good += len(good_pat.findall(src))
     assert len(bad) <= 5, (
         f"{len(bad)} `boolean v = <0|1>;` (uncompilable — must render false/true). "
@@ -353,7 +361,8 @@ def test_boolean_decl_text_ast_agree():
     # is text/AST-CONSISTENT, so it must NOT be flagged).
     bad_ast = re.compile(
         r'"Literal",\s*"[01]",\s*\[".int",[^]]*\]\],\s*'
-        r'\[\["TypeName",\s*\[".boolean"')
+        r'\[\["TypeName",\s*\[".boolean"'
+    )
     mism = 0
     checked = 0
     for apk in apks:

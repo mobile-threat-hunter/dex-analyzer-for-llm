@@ -97,6 +97,29 @@ def test_search_call_sites(dk):
     assert isinstance(sites, list)  # may be empty if the APK never logs
 
 
+def test_call_sites_from_method_is_forward_of_to_api(dk):
+    """find_call_sites_from_method (callees) is the exact FORWARD of
+    find_call_sites_to_api (callers): if M invokes C, then M appears among C's callers.
+    Verified structurally on a real method, plus the external/unresolved empty case."""
+    for cls in dk.list_classes():
+        for m in dk.list_class_methods(cls):
+            callees = dk.find_call_sites_from_method(m)
+            if len(callees) >= 1:
+                for s in callees:
+                    assert s.caller_descriptor == m  # caller is fixed to M
+                    assert "->" in s.callee_descriptor
+                # symmetry over EVERY distinct callee (not just the first): M must be
+                # among the callers of each method it invokes (forward ≡ reverse edge).
+                for callee in {c.callee_descriptor for c in callees}:
+                    callers = {
+                        x.caller_descriptor for x in dk.find_call_sites_to_api(callee)
+                    }
+                    assert m in callers, f"{m} invokes {callee} but is not its caller"
+                assert dk.find_call_sites_from_method("Lno/such/C;->x()V") == []
+                return
+    pytest.skip("no method with a callee in the test APK")
+
+
 def test_field_read_write_xref(dk):
     """L2.5 field xref — methods that iget/sget (read) vs iput/sput (write) a field.
 
@@ -161,6 +184,18 @@ def test_call_sites_cross_dex_multidex():
         assert keys == sorted(
             keys
         ), f"caller order not (dex, method_idx)-sorted: {keys}"
+
+    # CROSS-DEX callee direction: a Blafoo (dex 1) caller of Foobar.somemethod (dex 0)
+    # must, via find_call_sites_from_method, list that dex-0 method as a callee — the
+    # forward path resolving a cross-dex edge round-trips against the reverse index.
+    target = "Lcom/foobar/foo/Foobar;->somemethod(Ljava/lang/String;)V"
+    caller = next(
+        s.caller_descriptor
+        for s in dk.find_call_sites_to_api(target)
+        if "Lcom/blafoo/bar/Blafoo;" in s.caller_descriptor
+    )
+    callee_descs = {s.callee_descriptor for s in dk.find_call_sites_from_method(caller)}
+    assert target in callee_descs, f"cross-dex callee {target} lost from {caller}"
 
 
 # ── external API enumeration ─────────────────────────────────────────────────

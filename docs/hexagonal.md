@@ -112,7 +112,10 @@ needs (methods stay on `EnumerationPort.list_class_methods`).
   ConstInt / ConstWide / ConstClass / ConstNull / FieldRead / MethodReturn /
   Parameter / NewInstance / NewArray / Unknown.
 - **`CallSite`** `(caller_descriptor, caller_dex_id, caller_method_idx,
-  callee_descriptor, bytecode_offset, invoke_opcode)` — one call site of an API.
+  callee_descriptor, bytecode_offset, invoke_opcode)` — one invoke edge. Returned by
+  both `find_call_sites` (a target's CALLERS — callee fixed) and
+  `find_call_sites_from_method` (a method's CALLEES — caller fixed); the two are the
+  reverse and forward of the same edge.
 - **`ResolvedCallSite`** — a `CallSite` plus `args: tuple[ArgOrigin, ...]`.
 - Field read/write xref (`find_field_readers` / `find_field_writers`) returns plain
   method descriptors `tuple[str, ...]` — the methods that iget*/sget* (read) or
@@ -164,7 +167,7 @@ so a consumer depends on just what it needs:
 | **`EnumerationPort`** | `list_classes` / `list_classes_in_dex`, `list_class_methods`, `list_field_descriptors` / `list_field_descriptors_in_dex`, `list_method_descriptors` / `list_method_descriptors_in_dex`, `list_value_strings`, `list_external_method_refs` / `list_external_field_refs` / `list_external_type_refs`, `verify_report` (uniform scope axis: bare = all dexes, `…_in_dex(dex_id)` = one dex) |
 | **`DexExtractionPort`** | `extract_dex_bytes` (raw per-dex byte extraction; packer/dump primitive) |
 | **`ClassInspectionPort`** | `class_info`, `class_fields`, `locate_class_dex` (metadata + fields split out; methods via `list_class_methods`; `locate_class_dex` = cheap declaring-dex lookup, vs the heavy `class_info().dex_id`) |
-| **`CrossReferencePort`** | `find_call_sites`, `resolve_call_args`, `find_field_readers`, `find_field_writers`, `find_type_references` |
+| **`CrossReferencePort`** | `find_call_sites` (callers) / `find_call_sites_from_method` (callees — the forward edge), `resolve_call_args`, `find_field_readers`, `find_field_writers`, `find_type_references` |
 | **`SearchPort`** | `find_classes_by_name` / `by_super` / `implementing` / `by_annotation` / `using_strings`, `find_methods_by_name` / `by_annotation` / `using_strings` / `using_int_literals` / `using_double_literals`, `batch_find_{classes,methods}_using_strings` (DexKit's L1–L7 search; `match_type` ∈ `MatchType`) |
 | **`PermissionAnalysisPort`** | `permission_callers` (all protection levels) |
 | **`IndicatorExtractionPort`** | `extract_iocs` |

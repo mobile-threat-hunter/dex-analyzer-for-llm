@@ -173,10 +173,21 @@ class DexExtractionPort(Protocol):
 
 @runtime_checkable
 class CrossReferencePort(Protocol):
-    """Caller / argument (method) + read/write (field) cross-reference."""
+    """Caller ↔ callee (method) + read/write (field) cross-reference."""
 
     def find_call_sites(self, api_descriptor: str) -> tuple[CallSite, ...]:
-        """Every call site invoking the given API descriptor."""
+        """Every call site invoking the given API descriptor (its CALLERS)."""
+        ...
+
+    def find_call_sites_from_method(
+        self, method_descriptor: str
+    ) -> tuple[CallSite, ...]:
+        """Every call site INSIDE the given method — the methods it invokes (CALLEES).
+
+        The forward direction of :meth:`find_call_sites`: each :class:`CallSite` fixes
+        the caller (this method) and varies ``callee_descriptor``. Empty for an
+        external / bodyless / unresolved method.
+        """
         ...
 
     def resolve_call_args(self, api_descriptor: str) -> tuple[ResolvedCallSite, ...]:

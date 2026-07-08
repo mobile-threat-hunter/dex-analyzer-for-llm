@@ -106,7 +106,9 @@ def test_no_non_tail_return_dropped():
     total = 0
     unsafe = []
     undercount = 0
-    discriminating = 0  # methods where the oracle found a non-tail return (proves it bites)
+    discriminating = (
+        0  # methods where the oracle found a non-tail return (proves it bites)
+    )
     for apk in APKS:
         try:
             dk = dexllm.DexKit(apk)
@@ -128,10 +130,14 @@ def test_no_non_tail_return_dropped():
             kept = sum(1 for line in txt.split("\n") if line.strip() == "return;")
             if non_tail:
                 discriminating += 1
-            if kept < non_tail:  # Writer dropped a return the oracle says is NOT terminal
+            if (
+                kept < non_tail
+            ):  # Writer dropped a return the oracle says is NOT terminal
                 unsafe.append((m, non_tail, kept, len(marks)))
 
     assert total > 0, "no <clinit> exercised"
     assert undercount == 0, f"oracle under-counted return-voids in {undercount} methods"
-    assert discriminating > 0, "oracle never found a non-tail return — not discriminating"
+    assert (
+        discriminating > 0
+    ), "oracle never found a non-tail return — not discriminating"
     assert not unsafe, f"{len(unsafe)} <clinit> dropped a NON-tail return: {unsafe[:5]}"

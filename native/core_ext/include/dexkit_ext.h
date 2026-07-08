@@ -148,6 +148,14 @@ public:
     [[nodiscard]] std::vector<CallSite>
     FindCallSitesToApi(std::string_view api_descriptor);
 
+    // L2 (the FORWARD direction of FindCallSitesToApi) — every call site INSIDE the
+    // given method, i.e. the methods it invokes (callees). Each CallSite fixes the
+    // caller (the argument) and varies callee_descriptor. The method's body lives in
+    // its declaring dex (LocateClassDex); returns empty for an external / bodyless /
+    // unresolved method. Callee descriptors are resolved in the caller's dex.
+    [[nodiscard]] std::vector<CallSite>
+    FindCallSitesFromMethod(std::string_view method_descriptor);
+
     // L1.5 — produce a single-class summary suitable for Java-source-style
     // rendering. Works for both internal and external classes (see ClassSummary
     // docs). Returns a default-constructed ClassSummary with descriptor="" if

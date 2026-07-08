@@ -52,8 +52,7 @@ _PRIM_NEW = re.compile(
     re.M,
 )
 # a `<prim> v` declaration whose exact name is later used as an object receiver
-_PRIM_DECL = re.compile(
-    r"^\s*(?:" + "|".join(_PRIMS) + r")\s+(v\w+)\s*[=;]", re.M)
+_PRIM_DECL = re.compile(r"^\s*(?:" + "|".join(_PRIMS) + r")\s+(v\w+)\s*[=;]", re.M)
 # a variable ORDERED-compared to null (`v <= null`) — the low-false-positive
 # fingerprint of an INT mistyped as a reference (the prim→ref mirror's
 # regression: the const-0 renders `null` because the var is reference-typed, and
@@ -122,9 +121,9 @@ def scanned():
     #                      library method recurring across bundled APKs and a var
     #                      with several object uses each count once (avoids the
     #                      inflation + timing-fragility of a per-hit list).
-    ref_ord_null = 0     # `v <op> null` occurrences (mirror ref-used-as-int flood)
-    narrow_wide = 0      # `int v = <wide-returning method>` (narrowing, prim→wider)
-    ref_eq_nonzero = 0   # `RefType v; v == <nonzero>` (int mistyped ref; eq/ne pass)
+    ref_ord_null = 0  # `v <op> null` occurrences (mirror ref-used-as-int flood)
+    narrow_wide = 0  # `int v = <wide-returning method>` (narrowing, prim→wider)
+    ref_eq_nonzero = 0  # `RefType v; v == <nonzero>` (int mistyped ref; eq/ne pass)
     per_apk_cap = 6000
     for apk in apks:
         try:
@@ -162,14 +161,22 @@ def scanned():
                 refs = {m.group(1) for m in _REF_DECL.finditer(out)}
                 eqv = set()
                 for m in _EQ_NONZERO.finditer(out):
-                    v, lit = ((m.group(1), m.group(2)) if m.group(1)
-                              else (m.group(4), m.group(3)))
+                    v, lit = (
+                        (m.group(1), m.group(2))
+                        if m.group(1)
+                        else (m.group(4), m.group(3))
+                    )
                     if lit != "0":
                         eqv.add(v)
                 ref_eq_nonzero += len(refs & eqv)
-    return {"ref_int": ref_int, "prim_new": prim_new,
-            "prim_object": sorted(prim_object), "ref_ord_null": ref_ord_null,
-            "narrow_wide": narrow_wide, "ref_eq_nonzero": ref_eq_nonzero}
+    return {
+        "ref_int": ref_int,
+        "prim_new": prim_new,
+        "prim_object": sorted(prim_object),
+        "ref_ord_null": ref_ord_null,
+        "narrow_wide": narrow_wide,
+        "ref_eq_nonzero": ref_eq_nonzero,
+    }
 
 
 # The pass is SOUND-by-construction (it re-types a reference version to a
@@ -301,7 +308,8 @@ def test_prim_ref_mismatch_var_assign_bounded():
     prims = set(_PRIMS)
     decl = re.compile(r"^\s*([A-Za-z_][\w.$]*(?:\[\])*)\s+(v\w+)\s*[=;]", re.M)
     assign = re.compile(
-        r"^\s*([A-Za-z_][\w.$]*(?:\[\])*)\s+(v\w+)\s*=\s*(v\w+)\s*;", re.M)
+        r"^\s*([A-Za-z_][\w.$]*(?:\[\])*)\s+(v\w+)\s*=\s*(v\w+)\s*;", re.M
+    )
     mism = 0
     for apk in apks:
         try:
@@ -383,13 +391,13 @@ def test_use_bound_prim_to_ref_typing():
         "the use-bound prim→ref re-type appears disabled: v4 should be typed "
         f"`Function1` (the ref-arg param), not `int`.\n{out}"
     )
-    assert re.search(r"\bint v4\b", out) is None, (
-        f"v4 is still declared `int` — the use-bound typing did not fire.\n{out}"
-    )
+    assert (
+        re.search(r"\bint v4\b", out) is None
+    ), f"v4 is still declared `int` — the use-bound typing did not fire.\n{out}"
     # And its null default renders `= null`, not the uncompilable `= 0`.
-    assert re.search(r"\bv4\s*=\s*null\b", out), (
-        f"v4's reference default should render `= null`.\n{out}"
-    )
+    assert re.search(
+        r"\bv4\s*=\s*null\b", out
+    ), f"v4's reference default should render `= null`.\n{out}"
 
 
 def test_conflated_register_typed_object_with_casts():
@@ -433,9 +441,9 @@ def test_conflated_register_typed_object_with_casts():
         f"the conflated register should be typed `Object`, not a misleading "
         f"specific reference assigned an int.\n{src}"
     )
-    assert not re.search(r"FontCallback v8\s*=\s*-?\d", src), (
-        f"the misleading `FontCallback v8 = <int>` must be gone.\n{src}"
-    )
+    assert not re.search(
+        r"FontCallback v8\s*=\s*-?\d", src
+    ), f"the misleading `FontCallback v8 = <int>` must be gone.\n{src}"
     # No no-op `((Object) ...)` cast was introduced.
     assert "((Object) v8" not in src, f"no-op Object cast on v8.\n{src}"
 
@@ -469,7 +477,9 @@ def test_object_typed_use_gets_explicit_cast():
                 if is_timeout_marker(out) or not out:
                     continue
                 # a specific-type cast on a variable/param (the A behaviour)
-                casts += len(re.findall(r"\(\([A-Za-z][\w.$]*(?:\.[\w$]+)+\)\s+[vp]\w+\)", out))
+                casts += len(
+                    re.findall(r"\(\([A-Za-z][\w.$]*(?:\.[\w$]+)+\)\s+[vp]\w+\)", out)
+                )
                 noop += len(re.findall(r"\(\(Object\)\s+[vp]\w+\)\.\w", out))
     # The cast machinery fires broadly (Object-var uses made type-explicit).
     assert casts > 0, "no `(Type) v` casts emitted — the Object-cast pass is off"
@@ -492,8 +502,16 @@ def test_object_typed_field_access_gets_owner_cast():
     apks = _apks()
     if not apks:
         pytest.skip("no test APK")
-    _OBJM = {"toString", "hashCode", "equals", "getClass", "notify",
-             "notifyAll", "wait", "length"}
+    _OBJM = {
+        "toString",
+        "hashCode",
+        "equals",
+        "getClass",
+        "notify",
+        "notifyAll",
+        "wait",
+        "length",
+    }
     field_casts = uncast = 0
     for apk in apks:
         try:
@@ -516,23 +534,27 @@ def test_object_typed_field_access_gets_owner_cast():
                 if is_timeout_marker(out) or not out:
                     continue
                 # `((Owner) v).field` — a cast immediately owning a field access
-                field_casts += len(re.findall(
-                    r"\(\([A-Za-z][\w.$]*\)\s+[vp]\w+\)\.[A-Za-z]", out))
+                field_casts += len(
+                    re.findall(r"\(\([A-Za-z][\w.$]*\)\s+[vp]\w+\)\.[A-Za-z]", out)
+                )
                 # residual: `Object v` whose name is a bare field/method owner
                 for v in set(re.findall(r"\bObject (v\w+)\s*[;=]", out)):
                     for mm in re.finditer(
-                            r"(?<![\w.])" + re.escape(v) + r"\.(\w+)", out):
+                        r"(?<![\w.])" + re.escape(v) + r"\.(\w+)", out
+                    ):
                         if mm.group(1) not in _OBJM:
                             uncast += 1
     # the owner-cast machinery fires (field-access + receiver casts)
-    assert field_casts > 0, (
-        "no `((Owner) v).field/method` casts — the owner-cast pass is off")
+    assert (
+        field_casts > 0
+    ), "no `((Owner) v).field/method` casts — the owner-cast pass is off"
     # bundled residual `Object v; v.member` is small (field-owner unknown /
     # array positions not yet covered — a later cut). Was ~12 before the field
     # cast; the receiver + field casts cut it to ~1.
     assert uncast <= 5, (
         f"{uncast} `Object v; v.member` uncast receivers — the owner-cast "
-        f"regressed (was ~1 after the field-access cast).")
+        f"regressed (was ~1 after the field-access cast)."
+    )
 
 
 def test_array_used_variable_typed_as_array():
@@ -550,13 +572,14 @@ def test_array_used_variable_typed_as_array():
     if is_timeout_marker(src) or not src:
         pytest.skip("clearSpans did not decompile")
     # the array-used local is declared an array type, not bare Object.
-    assert re.search(r"\bObject\[\] v\w+\s*=", src) or \
-        re.search(r"[A-Za-z][\w.$]*\[\] v\w+\s*=.*getSpans", src), (
-        f"the getSpans() array result should be an array-typed local.\n{src}")
+    assert re.search(r"\bObject\[\] v\w+\s*=", src) or re.search(
+        r"[A-Za-z][\w.$]*\[\] v\w+\s*=.*getSpans", src
+    ), f"the getSpans() array result should be an array-typed local.\n{src}"
     # no `Object v; v.length` (array length on a bare Object) survives here.
     for v in set(re.findall(r"\bObject (v\w+)\s*[;=]", src)):
-        assert not re.search(r"(?<![\w.])" + re.escape(v) + r"\.length\b", src), (
-            f"{v} is array-length-used but typed bare Object.\n{src}")
+        assert not re.search(
+            r"(?<![\w.])" + re.escape(v) + r"\.length\b", src
+        ), f"{v} is array-length-used but typed bare Object.\n{src}"
 
 
 def test_array_used_not_typed_object_bounded():
@@ -593,7 +616,8 @@ def test_array_used_not_typed_object_bounded():
                         bad += 1
     assert bad <= 4, (
         f"{bad} `Object v; v[i]` array-index-on-Object (was ~2; a jump means "
-        f"the array-use-driven typing regressed).")
+        f"the array-use-driven typing regressed)."
+    )
 
 
 def test_reftype_eq_nonzero_int_bounded_mixed_version():
@@ -605,11 +629,23 @@ def test_reftype_eq_nonzero_int_bounded_mixed_version():
     apks = _apks()
     if not apks:
         pytest.skip("no test APK")
-    _P = ("int", "boolean", "byte", "short", "char", "long", "float",
-          "double", "void", "Object")
+    _P = (
+        "int",
+        "boolean",
+        "byte",
+        "short",
+        "char",
+        "long",
+        "float",
+        "double",
+        "void",
+        "Object",
+    )
     _RX = re.compile(
         r"^\s*(?!(?:" + "|".join(_P) + r")\b)(?:\[+)?[A-Za-z_][\w.$]*"
-        r"(?:\[\])*\s+v\w+\s*=\s*-?[1-9]\d*\s*;", re.M)
+        r"(?:\[\])*\s+v\w+\s*=\s*-?[1-9]\d*\s*;",
+        re.M,
+    )
     bad = 0
     for apk in apks:
         try:
@@ -637,4 +673,5 @@ def test_reftype_eq_nonzero_int_bounded_mixed_version():
     # typing regressed.
     assert bad <= 6, (
         f"{bad} `RefType v = <nonzero int>` misleading conflations (was ~3 "
-        f"after the mixed-version Object typing).")
+        f"after the mixed-version Object typing)."
+    )
