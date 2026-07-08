@@ -24,9 +24,9 @@ Three components, three files:
 
 | Component | File | What it is |
 |---|---|---|
-| **Domain models** | [`model.py`](model.py) | 25 frozen dataclasses — the typed values every port returns/accepts. |
-| **Ports** | [`ports.py`](ports.py) | 12 `@runtime_checkable` Protocol use cases + the composite `DexAnalysisUseCase`. |
-| **Adapter** | [`adapter.py`](adapter.py) | `DexKitAdapter` (implements the ports over `DexKit`) + `ContainerProbe` + `open_apk` / `identify` factories. |
+| **Domain models** | [`model.py`](../src/dexllm/hexagonal/model.py) | 25 frozen dataclasses — the typed values every port returns/accepts. |
+| **Ports** | [`ports.py`](../src/dexllm/hexagonal/ports.py) | 12 `@runtime_checkable` Protocol use cases + the composite `DexAnalysisUseCase`. |
+| **Adapter** | [`adapter.py`](../src/dexllm/hexagonal/adapter.py) | `DexKitAdapter` (implements the ports over `DexKit`) + `ContainerProbe` + `open_apk` / `identify` factories. |
 
 ---
 
@@ -247,5 +247,5 @@ reference-level `dexllm.dangerous_permission_apis(dk)` is still reachable via
 
 ---
 
-Full narrative walkthrough: [`docs/usage.md`](../../../docs/usage.md#typed-api--hexagonal-ports--adapters-dexllmhexagonal).
-API reference: [`docs/api.md`](../../../docs/api.md#typed-hexagonal-api-dexllmhexagonal).
+Full narrative walkthrough: [`docs/usage.md`](usage.md#typed-api--hexagonal-ports--adapters-dexllmhexagonal).
+API reference: [`docs/api.md`](api.md#typed-hexagonal-api-dexllmhexagonal).
