@@ -95,6 +95,29 @@ dk.list_value_strings()    # len 4939
 # ['An entry modification is not supported', '=', ...]
 ```
 
+### Per-dex enumeration (uniform scope axis)
+The bare form is all loaded dexes; the `…_in_dex(dex_id)` form is one dex (empty for
+an out-of-range id), and the all-dexes form is exactly the per-dex concatenation.
+Classes are DECLARED (union == all); field/method descriptors are the dex id-table
+references (declared + referenced), so a cross-dex reference recurs once per dex.
+```python
+dk.list_classes_in_dex(0)                 # classes DECLARED in dex 0        (len 4135)
+dk.list_field_descriptors()               # every 'Lcls;->name:Type'         (len 32824)
+dk.list_field_descriptors_in_dex(0)       # …of one dex
+dk.list_method_descriptors()              # every 'Lcls;->name(proto)ret'    (len 36876)
+dk.list_method_descriptors_in_dex(0)      # …of one dex
+dk.locate_class_dex('La2dp/Vol/ALauncher;')   # 0  (declaring dex id, -1 if external; cheaper than get_class_summary().dex_id)
+```
+
+### `dk.extract_dex_bytes(dex_id: int) -> bytes`
+Raw bytes of one loaded dex — its own `file_size` slice (`header_off` applied, so a
+concatenated/packer container yields THIS dex, not the shared image). `b""` for an
+out-of-range id. The packer/dump-analysis primitive (feed a runtime-decrypted dex
+back via `dexllm.add_dumped_dexes`).
+```python
+raw = dk.extract_dex_bytes(0)   # len 5472720, raw[:4] == b'dex\n'
+```
+
 ---
 
 ## 3. Decompilation (DAD-aligned Java)
@@ -217,6 +240,27 @@ Same as call sites, plus the resolved origin of each argument (L4 dataflow).
 ```python
 dk.resolve_call_args('Landroid/content/Context;->getSystemService(Ljava/lang/String;)Ljava/lang/Object;')
 # list[ResolvedCallSite]  len 54; each has .args -> list[ArgOrigin]
+```
+
+### Field read/write xref → `list[str]`
+Which methods READ (`iget*`/`sget*`) vs WRITE (`iput*`/`sput*`) a specific field
+(L2.5 reverse index). `field_descriptor` is the `Lcls;->name:Type` form; each returns
+plain method descriptors (`[]` if the field isn't declared in a loaded dex).
+```python
+fd = 'La2dp/Vol/AppChooser$1;->this$0:La2dp/Vol/AppChooser;'
+dk.find_field_read_methods(fd)   # ['La2dp/Vol/AppChooser$1;->onClick(Landroid/view/View;)V']   (readers)
+dk.find_field_write_methods(fd)  # ['La2dp/Vol/AppChooser$1;-><init>(La2dp/Vol/AppChooser;)V']  (writers)
+```
+
+### Type references → `TypeReferences`
+Signature-position uses of a `Lpkg/Cls;` type — where it appears as a field type, a
+method return type, or a method parameter (NOT call/instruction xref). Empty lists if
+the type isn't referenced.
+```python
+tr = dk.find_type_references('Landroid/content/Intent;')
+tr.fields              # fields OF this type          len 4    e.g. '…ShareCompat$IntentBuilder;->mIntent:Landroid/content/Intent;'
+tr.methods_returning   # methods returning it          len 62   e.g. 'La2dp/Vol/EditDevice;->getIntent()Landroid/content/Intent;'
+tr.methods_with_param  # methods taking it as a param  len 153  e.g. 'La2dp/Vol/ALauncher;->onBind(Landroid/content/Intent;)…'
 ```
 
 ---
