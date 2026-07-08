@@ -297,6 +297,9 @@ em.referenced_in_dex_ids      # [0]      (list[int])
 
 Python-side filter helpers: `dexllm.filter_method_refs(refs, ...)`,
 `filter_field_refs`, `filter_type_refs` (e.g. keep only `android.content.*`).
+`dexllm.find_call_sites_to_ref(dk, ref)` → the `list[CallSite]` for an
+`ExternalMethodRef` (the convenience that resolves `ref.signature` and calls
+`find_call_sites_to_api`).
 
 ---
 
@@ -315,6 +318,11 @@ s.interface_descriptors   # []                          (list[str])
 s.source_file             # 'Utils.java'
 s.fields                  # []                          (list[ClassMemberField])
 s.methods                 # [ClassMemberMethod(<init>()V), ClassMemberMethod(convertDpToPixel(...)I), ...]
+```
+Render a summary as Java-source-style text (header + static→instance fields + methods):
+```python
+dexllm.format_class(dk, 'Lcom/example/android/tvleanback/Utils;')   # str — fetch + format
+dexllm.format_class_summary(s, indent='    ')                       # str — format an already-fetched ClassSummary
 ```
 
 ### `dexllm.summarize_capabilities(dk) -> CapabilityReport`
@@ -408,6 +416,8 @@ dexllm.descriptor_to_java('Lcom/foo/Bar;')     # 'com.foo.Bar'
 dexllm.java_to_descriptor('com.foo.Bar')       # 'Lcom/foo/Bar;'
 dexllm.is_framework_descriptor('Landroid/app/Activity;')   # True
 dexllm.method_ref_java('Lcom/foo/Bar;->baz(I)V')           # human-readable form
+dexllm.parse_proto('(ILjava/lang/String;)Z')  # (['I', 'Ljava/lang/String;'], 'Z')  — (param descriptors, return)
+dexllm.pretty_proto('(ILjava/lang/String;)Z') # '(int, java.lang.String) -> boolean'
 ```
 
 ### Safe (hang-guarded) decompile wrappers
