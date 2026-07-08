@@ -24,8 +24,8 @@ Three components, three files:
 
 | Component | File | What it is |
 |---|---|---|
-| **Domain models** | [`model.py`](model.py) | 19 frozen dataclasses — the typed values every port returns/accepts. |
-| **Ports** | [`ports.py`](ports.py) | 8 `@runtime_checkable` Protocol use cases + the composite `DexAnalysisUseCase`. |
+| **Domain models** | [`model.py`](model.py) | 25 frozen dataclasses — the typed values every port returns/accepts. |
+| **Ports** | [`ports.py`](ports.py) | 12 `@runtime_checkable` Protocol use cases + the composite `DexAnalysisUseCase`. |
 | **Adapter** | [`adapter.py`](adapter.py) | `DexKitAdapter` (implements the ports over `DexKit`) + `ContainerProbe` + `open_apk` / `identify` factories. |
 
 ---
