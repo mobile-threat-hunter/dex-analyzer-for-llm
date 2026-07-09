@@ -162,7 +162,9 @@ class MethodAst:
     proto: str
     return_type: str
     param_types: tuple[str, ...]
-    access_flags: int
+    access_flags: tuple[
+        str, ...
+    ]  # decoded modifier names, e.g. ("public", "constructor")
     source: str
     ast: Optional[Mapping[str, Any]]
     pc_map: tuple[StatementLocation, ...]

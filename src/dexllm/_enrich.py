@@ -40,20 +40,20 @@ def _patch_method_ref() -> None:
         return self.name == "<clinit>"
 
     # pybind11 types support setting attributes through __dict__ on the metaclass
-    cls.java_class = property(java_class)
-    cls.parameters = property(parameters)
-    cls.return_type = property(return_type)
-    cls.java_signature = property(java_signature)
-    cls.is_constructor = property(is_constructor)
-    cls.is_static_initializer = property(is_static_initializer)
+    cls.java_class = property(java_class)  # type: ignore[method-assign, assignment]
+    cls.parameters = property(parameters)  # type: ignore[method-assign, assignment]
+    cls.return_type = property(return_type)  # type: ignore[method-assign, assignment]
+    cls.java_signature = property(java_signature)  # type: ignore[method-assign, assignment]
+    cls.is_constructor = property(is_constructor)  # type: ignore[method-assign, assignment]
+    cls.is_static_initializer = property(is_static_initializer)  # type: ignore[method-assign, assignment]
 
 
 def _patch_field_ref() -> None:
     cls = ExternalFieldRef
-    cls.java_class = property(lambda s: _d.descriptor_to_java(s.class_descriptor))
-    cls.java_type = property(lambda s: _d.descriptor_to_java(s.type))
-    cls.signature = property(lambda s: f"{s.class_descriptor}->{s.name}:{s.type}")
-    cls.java_signature = property(
+    cls.java_class = property(lambda s: _d.descriptor_to_java(s.class_descriptor))  # type: ignore[method-assign, assignment]
+    cls.java_type = property(lambda s: _d.descriptor_to_java(s.type))  # type: ignore[method-assign, assignment]
+    cls.signature = property(lambda s: f"{s.class_descriptor}->{s.name}:{s.type}")  # type: ignore[method-assign, assignment]
+    cls.java_signature = property(  # type: ignore[method-assign, assignment]
         lambda s: f"{_d.descriptor_to_java(s.class_descriptor)}.{s.name} : "
         f"{_d.descriptor_to_java(s.type)}"
     )
@@ -61,7 +61,7 @@ def _patch_field_ref() -> None:
 
 def _patch_type_ref() -> None:
     cls = ExternalTypeRef
-    cls.java_name = property(lambda s: _d.descriptor_to_java(s.descriptor))
+    cls.java_name = property(lambda s: _d.descriptor_to_java(s.descriptor))  # type: ignore[method-assign, assignment]
 
 
 _patch_method_ref()

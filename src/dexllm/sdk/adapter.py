@@ -243,7 +243,7 @@ class DexKitAdapter:
             proto=r["proto"],
             return_type=r["ret_type"],
             param_types=tuple(r["params_type"]),
-            access_flags=r["access"],
+            access_flags=tuple(r["access"]),
             source=r["source"],
             ast=r["ast"],
             pc_map=tuple(

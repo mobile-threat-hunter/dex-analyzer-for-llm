@@ -13,11 +13,7 @@ here. Do not advertise names the runtime does not export.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from typing import Any, Literal, TypedDict, overload
-
-# Accepted ``match_type`` strings (canonical forms; dexkit_ext.cpp also takes the
-# aliases equal / startswith / endswith / similar_regex).
-_MatchType = Literal["equals", "contains", "starts_with", "ends_with", "regex"]
+from typing import Any, TypedDict, overload
 
 # ── dict-returning shapes (structural contracts) ─────────────────────────────
 
@@ -288,51 +284,51 @@ class DexKit:
     def find_classes_by_name(
         self,
         name: str,
-        match_type: _MatchType = "contains",
+        match_type: str = "contains",
         ignore_case: bool = False,
     ) -> list[ClassMatch]: ...
     def find_classes_using_strings(
         self,
         strings: Sequence[str],
-        match_type: _MatchType = "contains",
+        match_type: str = "contains",
         ignore_case: bool = False,
     ) -> list[ClassMatch]: ...
     def find_methods_using_strings(
         self,
         strings: Sequence[str],
-        match_type: _MatchType = "contains",
+        match_type: str = "contains",
         ignore_case: bool = False,
     ) -> list[MethodMatch]: ...
     def batch_find_classes_using_strings(
         self,
         query_map: Mapping[str, Sequence[str]],
-        match_type: _MatchType = "contains",
+        match_type: str = "contains",
         ignore_case: bool = False,
     ) -> dict[str, list[ClassMatch]]: ...
     def batch_find_methods_using_strings(
         self,
         query_map: Mapping[str, Sequence[str]],
-        match_type: _MatchType = "contains",
+        match_type: str = "contains",
         ignore_case: bool = False,
     ) -> dict[str, list[MethodMatch]]: ...
     def find_methods_by_name(
         self,
         name: str,
-        match_type: _MatchType = "contains",
+        match_type: str = "contains",
         declaring_class: str = "",
         ignore_case: bool = False,
     ) -> list[MethodMatch]: ...
     def find_classes_by_annotation(
-        self, annotation_class: str, match_type: _MatchType = "equals"
+        self, annotation_class: str, match_type: str = "equals"
     ) -> list[ClassMatch]: ...
     def find_methods_by_annotation(
-        self, annotation_class: str, match_type: _MatchType = "equals"
+        self, annotation_class: str, match_type: str = "equals"
     ) -> list[MethodMatch]: ...
     def find_classes_by_super(
-        self, super_class: str, match_type: _MatchType = "equals"
+        self, super_class: str, match_type: str = "equals"
     ) -> list[ClassMatch]: ...
     def find_classes_implementing(
-        self, interface_class: str, match_type: _MatchType = "equals"
+        self, interface_class: str, match_type: str = "equals"
     ) -> list[ClassMatch]: ...
     def find_methods_using_int_literals(
         self, values: Sequence[int]
