@@ -126,7 +126,7 @@ def test_mapping_backed_models_are_immutable_but_not_hashable():
         proto="()V",
         return_type="void",
         param_types=(),
-        access_flags=0,
+        access_flags=("public",),
         source="",
         ast={"body": []},
         pc_map=(),
@@ -143,7 +143,7 @@ def test_mapping_backed_models_are_immutable_but_not_hashable():
             proto="",
             return_type="",
             param_types=(),
-            access_flags=0,
+            access_flags=(),
             source="",
             ast=None,
             pc_map=(),
@@ -199,6 +199,10 @@ def test_typed_decompile_and_pc_map(apk_path, sample_method):
     ast = session.decompile_method_ast(sample_method)
     assert ast.found and isinstance(ast.ast, MappingProxyType)
     assert all(isinstance(e, StatementLocation) for e in ast.pc_map)
+    # access_flags is the decoded modifier-name tuple[str, ...] (NOT an int bitmask);
+    # guards against a revert of adapter.py's tuple(r["access"]) back to a list.
+    assert isinstance(ast.access_flags, tuple)
+    assert all(isinstance(a, str) for a in ast.access_flags)
 
 
 def test_external_ref_decompiles_to_not_found(apk_path):
