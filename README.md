@@ -304,6 +304,8 @@ session.permission_callers(app_only=True)      # -> tuple[PermissionCallerGroup]
 
 See [docs/usage.md](docs/usage.md#typed-sdk--ports--adapters-dexllmsdk).
 
+**Typed out of the box** — the wheel ships [PEP 561](https://peps.python.org/pep-0561/) type stubs (`py.typed` + `.pyi`), so the native `DexKit` methods, the return objects (`CallSite`, `ClassSummary`, …), and the module helpers (`identify`, `extract_iocs`, …) autocomplete and type-check under mypy / pyright with no extra setup.
+
 LLM backends (need the `[all]` extra):
 
 ```bash

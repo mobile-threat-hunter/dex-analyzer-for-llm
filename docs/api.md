@@ -7,6 +7,10 @@ type, and a real example output captured from
 For a task-oriented walkthrough (the L1–L7 analysis levels), see
 [usage.md](usage.md). This document is the flat reference.
 
+The package is **[PEP 561](https://peps.python.org/pep-0561/) typed** — it ships
+`py.typed` + `.pyi` stubs (`_dexkit_core.pyi` / `__init__.pyi`), so every method
+and return type below is available to editors and type-checkers (mypy / pyright).
+
 Conventions:
 - **Descriptor** = a Dalvik type/method descriptor, e.g. class `Lcom/foo/Bar;`,
   method `Lcom/foo/Bar;->baz(I)V`, field `Lcom/foo/Bar;->f:I`.
