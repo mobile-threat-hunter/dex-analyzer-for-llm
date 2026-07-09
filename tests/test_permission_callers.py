@@ -176,6 +176,9 @@ def _norm(groups):
     ]
 
 
+@pytest.mark.skipif(
+    not _APKS, reason="no test APK corpus (e.g. CI without a bundled corpus)"
+)
 @pytest.mark.parametrize("app_only", [True, False])
 def test_cpp_join_matches_python(app_only):
     """C++ permission_callers == Python permission_api_callers (all levels), per APK."""
@@ -202,6 +205,9 @@ def test_cpp_join_matches_python(app_only):
     ), f"expected ≥2 APKs with permission-API callers, got {nonempty}"
 
 
+@pytest.mark.skipif(
+    not _APKS, reason="no test APK corpus (e.g. CI without a bundled corpus)"
+)
 def test_protection_levels_span_and_are_valid():
     """Groups carry a valid level bucket, and the corpus spans beyond dangerous."""
     from dexllm.dangerous_api import PERM_LEVELS
