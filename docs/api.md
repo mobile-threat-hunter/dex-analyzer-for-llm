@@ -516,14 +516,14 @@ Where one argument came from (intra-method).
 
 ---
 
-## Typed hexagonal API (`dexllm.hexagonal`)
+## Typed SDK API (`dexllm.sdk`)
 
-For embedding, `dexllm.hexagonal` wraps this surface in ports & adapters:
+For embedding, `dexllm.sdk` wraps this surface in ports & adapters:
 `@runtime_checkable` Protocol ports + frozen-dataclass models with an accurate
 type on every argument/return.
 
 ```python
-from dexllm.hexagonal import open_apk, identify, DexAnalysisUseCase
+from dexllm.sdk import open_apk, identify, DexAnalysisUseCase
 
 session: DexAnalysisUseCase = open_apk("app.apk")   # or open_apk([dump, apk], lenient=True)
 session.decompile_method("Lcom/x/Y;->m(I)V")        # -> DecompiledMethod
@@ -536,8 +536,8 @@ Ports: `DexAnalysisUseCase` (composite) + `DecompilationPort` / `EnumerationPort
 / `DexExtractionPort` / `ClassInspectionPort` / `CrossReferencePort` / `SearchPort`
 / `PermissionAnalysisPort` / `IndicatorExtractionPort` / `CapabilityPort` /
 `ContentProviderPort` / `CacheControlPort` / `ContainerProbePort`. Full walkthrough
-in [usage.md](usage.md#typed-api--hexagonal-ports--adapters-dexllmhexagonal);
-source in `src/dexllm/hexagonal/`.
+in [usage.md](usage.md#typed-sdk--ports--adapters-dexllmsdk);
+source in `src/dexllm/sdk/`.
 
 ---
 

@@ -317,7 +317,7 @@ public:
         return ext_.RenderClassSmali(descriptor);
     }
     // Java text decompile via the dad_cpp Decompiler facade. The `_java` suffix
-    // is the stable public name (sweep script, /dexkit-* skills, hexagonal, tests);
+    // is the stable public name (sweep script, /dexkit-* skills, the SDK layer, tests);
     // GIL is released at the binding site for true parallel decompilation.
     std::string decompile_method_java(const std::string& descriptor) const {
         return decompiler_->DecompileMethod(descriptor);

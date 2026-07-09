@@ -1,7 +1,8 @@
-"""Hexagonal (ports & adapters) API for dexllm.
+"""Typed SDK for embedding dexllm as a domain service.
 
-A typed, structural interface so other code consumes dexllm as a domain service,
-not as a bag of dict/struct returns:
+A structural interface so other code consumes dexllm through stable typed
+contracts, not as a bag of dict/struct returns. Built internally with a
+hexagonal (ports & adapters) layout:
 
   - :mod:`.model` — frozen dataclasses for every value crossing a boundary.
   - :mod:`.ports` — ``@runtime_checkable`` Protocol use cases (the inbound ports).
@@ -9,7 +10,7 @@ not as a bag of dict/struct returns:
 
 Typical use::
 
-    from dexllm.hexagonal import open_apk, identify, DexAnalysisUseCase
+    from dexllm.sdk import open_apk, identify, DexAnalysisUseCase
 
     session: DexAnalysisUseCase = open_apk("app.apk")
     for group in session.permission_callers(app_only=True):

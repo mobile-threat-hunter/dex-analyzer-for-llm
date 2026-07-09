@@ -1,10 +1,10 @@
-"""Inbound ports (use-case interfaces) for the dexllm hexagonal API.
+"""Inbound ports (use-case interfaces) for the dexllm SDK.
 
 Each is a ``@runtime_checkable`` :class:`typing.Protocol` — a structural contract
 a consumer programs against without importing the concrete adapter. Ports are
 split by concern; :class:`DexAnalysisUseCase` is the full session-bound surface a
 loaded APK/dex source exposes (the adapter implements it). Argument and return
-types are the typed domain models in :mod:`dexllm.hexagonal.model`.
+types are the typed domain models in :mod:`dexllm.sdk.model`.
 
 ``@runtime_checkable`` lets ``isinstance(x, DecompilationPort)`` verify a duck-typed
 object at runtime (method presence only — Protocols don't check signatures).
@@ -451,7 +451,7 @@ class DexAnalysisUseCase(
 ):
     """The full inbound use-case surface of one loaded APK / dex source.
 
-    Composes every session-bound port; the adapter (:class:`~dexllm.hexagonal.adapter.DexKitAdapter`)
+    Composes every session-bound port; the adapter (:class:`~dexllm.sdk.adapter.DexKitAdapter`)
     implements it over a ``dexllm.DexKit``. Also exposes the construction sources,
     the primary source ``apk_path`` (= ``sources[0]``), and the loaded dex count.
     """

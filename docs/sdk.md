@@ -1,4 +1,4 @@
-# `dexllm.hexagonal` — typed ports & adapters
+# `dexllm.sdk` — typed SDK (ports & adapters)
 
 A **hexagonal (ports & adapters)** interface over `dexllm.DexKit`. It exists so
 other code consumes dexllm as a **typed domain service** — programming against
@@ -24,16 +24,16 @@ Three components, three files:
 
 | Component | File | What it is |
 |---|---|---|
-| **Domain models** | [`model.py`](../src/dexllm/hexagonal/model.py) | 25 frozen dataclasses — the typed values every port returns/accepts. |
-| **Ports** | [`ports.py`](../src/dexllm/hexagonal/ports.py) | 12 `@runtime_checkable` Protocol use cases + the composite `DexAnalysisUseCase`. |
-| **Adapter** | [`adapter.py`](../src/dexllm/hexagonal/adapter.py) | `DexKitAdapter` (implements the ports over `DexKit`) + `ContainerProbe` + `open_apk` / `identify` factories. |
+| **Domain models** | [`model.py`](../src/dexllm/sdk/model.py) | 25 frozen dataclasses — the typed values every port returns/accepts. |
+| **Ports** | [`ports.py`](../src/dexllm/sdk/ports.py) | 12 `@runtime_checkable` Protocol use cases + the composite `DexAnalysisUseCase`. |
+| **Adapter** | [`adapter.py`](../src/dexllm/sdk/adapter.py) | `DexKitAdapter` (implements the ports over `DexKit`) + `ContainerProbe` + `open_apk` / `identify` factories. |
 
 ---
 
 ## Quick start
 
 ```python
-from dexllm.hexagonal import open_apk, identify, DexAnalysisUseCase
+from dexllm.sdk import open_apk, identify, DexAnalysisUseCase
 
 info = identify("app.apk")                       # ContainerInfo (no load)
 session: DexAnalysisUseCase = open_apk("app.apk")  # or open_apk([dump, apk], lenient=True)
@@ -98,7 +98,7 @@ is a light match record; `MatchType` is the name-match mode.
 
 ### Class inspection
 The C++ `get_class_summary` bundles class metadata + fields + methods into one
-object; the hexagonal layer splits it (ISP) so a consumer depends only on what it
+object; the SDK layer splits it (ISP) so a consumer depends only on what it
 needs (methods stay on `EnumerationPort.list_class_methods`).
 - **`ClassInfo`** `(descriptor, dex_id, is_internal, access_flags, superclass,
   interfaces, source_file)` — class metadata, no members.
@@ -250,5 +250,5 @@ reference-level `dexllm.dangerous_permission_apis(dk)` is still reachable via
 
 ---
 
-Full narrative walkthrough: [`docs/usage.md`](usage.md#typed-api--hexagonal-ports--adapters-dexllmhexagonal).
-API reference: [`docs/api.md`](api.md#typed-hexagonal-api-dexllmhexagonal).
+Full narrative walkthrough: [`docs/usage.md`](usage.md#typed-sdk--ports--adapters-dexllmsdk).
+API reference: [`docs/api.md`](api.md#typed-sdk-api-dexllmsdk).

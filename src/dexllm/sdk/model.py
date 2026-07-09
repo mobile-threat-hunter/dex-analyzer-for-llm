@@ -1,4 +1,4 @@
-"""Typed domain models for the dexllm hexagonal API.
+"""Typed domain models for the dexllm SDK.
 
 The value objects that cross every port boundary. Each is a frozen dataclass with
 an accurate type on every field, mirroring the raw dexllm return shapes 1:1. The
@@ -297,7 +297,7 @@ class MethodMatch:
 
 # ── class inspection ─────────────────────────────────────────────────────────
 # Fine-grained decomposition of a class (the C++ get_class_summary bundles all of
-# these — class metadata + fields + methods — into one object; the hexagonal layer
+# these — class metadata + fields + methods — into one object; the SDK layer
 # splits it so a consumer depends only on what it needs). Methods stay on
 # EnumerationPort.list_class_methods.
 

@@ -1,4 +1,4 @@
-"""Tests for the dexllm hexagonal (ports & adapters) API.
+"""Tests for the dexllm SDK (typed ports & adapters) API.
 
 Self-contained tests (imports, Protocol runtime-checkability, frozen/immutable
 models) always run; the end-to-end conformance tests use the ``apk_path`` fixture
@@ -11,7 +11,7 @@ from types import MappingProxyType
 
 import pytest
 
-from dexllm.hexagonal import (
+from dexllm.sdk import (
     ArgOrigin,
     CacheControlPort,
     CapabilityPort,
@@ -530,7 +530,7 @@ def test_class_inspection_decomposed(apk_path):
     """ClassInspectionPort exposes class metadata + fields as SEPARATE fine-grained
     queries (the decomposition of the C++ get_class_summary god-object); methods stay
     on EnumerationPort.list_class_methods."""
-    from dexllm.hexagonal import ClassInfo, ClassInspectionPort, FieldInfo
+    from dexllm.sdk import ClassInfo, ClassInspectionPort, FieldInfo
 
     session = open_apk(apk_path)
     assert isinstance(session, ClassInspectionPort)
@@ -554,7 +554,7 @@ def test_class_inspection_decomposed(apk_path):
 
 def test_type_references_xref(apk_path):
     """CrossReferencePort.find_type_references — signature-position type xref."""
-    from dexllm.hexagonal import TypeReferences
+    from dexllm.sdk import TypeReferences
 
     session = open_apk(apk_path)
     # a type sure to be referenced: java.lang.String
@@ -571,7 +571,7 @@ def test_call_sites_from_method_callees(apk_path):
     The forward of find_call_sites: each CallSite fixes the caller (this method) and
     varies callee. Verified symmetric — the method is a caller of its own callee — and
     empty for an external/unresolved method."""
-    from dexllm.hexagonal import CallSite
+    from dexllm.sdk import CallSite
 
     session = open_apk(apk_path)
     for cls in session.list_classes():

@@ -422,7 +422,7 @@ for hit in dexllm.detect_content_providers(dk):
 `permission_api_callers` has a byte-identical **C++ engine port**,
 `dk.permission_callers()` (all protection levels), so the WASM (embind) binding and
 pybind run **one implementation over the engine-bundled AOSP dataset** (issue #14).
-The pybind/hexagonal permission surface uses this C++ join directly.
+The pybind/SDK permission surface uses this C++ join directly.
 
 The IoC / content-provider / capability analyses are **pure Python**
 (`dexllm.extract_iocs` / `detect_content_providers` / `summarize_capabilities`) —
@@ -581,16 +581,16 @@ print(dk.decompile_method_java(
 
 ---
 
-## Typed API — hexagonal ports & adapters (`dexllm.hexagonal`)
+## Typed SDK — ports & adapters (`dexllm.sdk`)
 
 The calls above return a mix of `str`, `list`, `dict`, and pybind objects. For
-embedding dexllm in a larger system, `dexllm.hexagonal` wraps the same engine in a
+embedding dexllm in a larger system, `dexllm.sdk` wraps the same engine in a
 **ports-and-adapters** layer: `@runtime_checkable` Protocol *ports* (the use-case
 interfaces) and frozen-dataclass *domain models* with an accurate type on every
 argument and return value — so callers program against types, not dict keys.
 
 ```python
-from dexllm.hexagonal import open_apk, identify, DexAnalysisUseCase
+from dexllm.sdk import open_apk, identify, DexAnalysisUseCase
 
 # identify is load-free; open_apk returns a session satisfying DexAnalysisUseCase
 info = identify("app.apk")                      # -> ContainerInfo(format, is_apk, has_manifest, dex_count)
@@ -636,8 +636,8 @@ satisfies the contract (test doubles need no base class). Split ports —
 `DecompilationPort`, `EnumerationPort`, `DexExtractionPort`, `ClassInspectionPort`,
 `CrossReferencePort`, `SearchPort`, `PermissionAnalysisPort`,
 `IndicatorExtractionPort`, `CapabilityPort`, `ContentProviderPort`,
-`CacheControlPort`, `ContainerProbePort` — let a consumer depend on just the concern it needs. See the [component reference](hexagonal.md) and the source
-[`src/dexllm/hexagonal/`](../src/dexllm/hexagonal/) (`model.py` / `ports.py` / `adapter.py`).
+`CacheControlPort`, `ContainerProbePort` — let a consumer depend on just the concern it needs. See the [component reference](sdk.md) and the source
+[`src/dexllm/sdk/`](../src/dexllm/sdk/) (`model.py` / `ports.py` / `adapter.py`).
 
 ---
 

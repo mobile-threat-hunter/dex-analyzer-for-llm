@@ -1,8 +1,8 @@
-"""Outbound adapter: implement the hexagonal ports over ``dexllm.DexKit``.
+"""Outbound adapter: implement the SDK ports over ``dexllm.DexKit``.
 
 :class:`DexKitAdapter` wraps one loaded ``DexKit`` and converts every raw return
 (pybind objects, plain dicts) into the typed domain models, so it satisfies
-:class:`~dexllm.hexagonal.ports.DexAnalysisUseCase`. :func:`open_apk` is the
+:class:`~dexllm.sdk.ports.DexAnalysisUseCase`. :func:`open_apk` is the
 factory; :func:`identify` is the load-free container probe. The underlying
 ``DexKit`` is reachable via :pyattr:`DexKitAdapter.raw` as an escape hatch.
 """
@@ -684,7 +684,7 @@ def _to_container_info(path: SourceLike) -> ContainerInfo:
 
 
 class ContainerProbe:
-    """Adapter implementing :class:`~dexllm.hexagonal.ports.ContainerProbePort`.
+    """Adapter implementing :class:`~dexllm.sdk.ports.ContainerProbePort`.
 
     A stateless probe (no load); the module-level :func:`identify` is the
     convenience function over the same logic.
@@ -699,10 +699,10 @@ class ContainerProbe:
 
 
 def open_apk(sources: Sources, *, lenient: bool = False) -> DexKitAdapter:
-    """Open an apk / dex source (or list of sources) as a hexagonal analysis session.
+    """Open an apk / dex source (or list of sources) as a typed analysis session.
 
     Returns a :class:`DexKitAdapter`, which satisfies
-    :class:`~dexllm.hexagonal.ports.DexAnalysisUseCase`.
+    :class:`~dexllm.sdk.ports.DexAnalysisUseCase`.
     """
     return DexKitAdapter(sources, lenient=lenient)
 
