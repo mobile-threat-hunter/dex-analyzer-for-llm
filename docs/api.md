@@ -197,6 +197,13 @@ Whole-class smali.
 The `find_*` methods return **typed match objects** (not strings). Their common
 fields are listed in [§13](#13-return-type-object-reference).
 
+**`match_type`** (the name/string finders) is one of `equals` / `contains`
+(default) / `starts_with` / `ends_with` / `regex`; `ignore_case=False` by default.
+**`regex` is DexKit's *SimilarRegex* — only the `^` (prefix) and `$` (suffix)
+anchors, NOT full regex** (`"^com/foo"`, `"Activity$"`); an unrecognised
+`match_type` falls back to `contains`. (The typed `dexllm.sdk` layer narrows this
+to a `Literal` of the five canonical values — see [sdk.md](sdk.md).)
+
 ### Name search → `list[ClassMatch]` / `list[MethodMatch]`
 ```python
 dk.find_classes_by_name('Utils')      # list[ClassMatch]  len 19

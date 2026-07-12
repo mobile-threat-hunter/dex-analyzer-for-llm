@@ -341,6 +341,7 @@ dk.batch_find_classes_using_strings({
     "REFLECTION": ["java.lang.reflect.Method"],
     "DEBUG": ["isDebuggerConnected"],
 })
+dk.batch_find_methods_using_strings({"NET": ["http://", "https://"]})  # same, at method granularity
 
 # Numeric literals (useful for magic constants, ports, opcodes)
 dk.find_methods_using_int_literals([0xDEADBEEF, 0xCAFEBABE])
@@ -354,6 +355,12 @@ dk.find_classes_implementing("Landroid/os/Parcelable;")
 dk.find_classes_by_annotation("Lkotlin/Metadata;")
 dk.find_methods_by_annotation("Landroidx/annotation/RequiresApi;")
 ```
+
+**`match_type`** (the name/string finders) is one of `equals` / `contains`
+(default) / `starts_with` / `ends_with` / `regex`, with `ignore_case=False` by
+default. **`regex` is DexKit's *SimilarRegex* — it supports only the `^` (prefix)
+and `$` (suffix) anchors, not full regex** (e.g. `"^com/foo"`, `"Activity$"`); an
+unrecognised `match_type` string silently falls back to `contains`.
 
 ---
 

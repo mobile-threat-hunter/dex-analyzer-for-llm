@@ -91,7 +91,7 @@ fields are `tuple`s; `Mapping` fields are read-only views. See
 ### Search (L1–L7)
 DexKit's headline capability — fast static class/method search (`SearchPort`). A hit
 is a light match record; `MatchType` is the name-match mode.
-- **`MatchType`** = `Literal["equals", "contains", "starts_with", "ends_with", "regex"]`.
+- **`MatchType`** = `Literal["equals", "contains", "starts_with", "ends_with", "regex"]` — note `regex` is DexKit's *SimilarRegex* (`^`/`$` anchors only, not full regex).
 - **`ClassMatch`** `(class_id, descriptor, dex_id)` — one class hit.
 - **`MethodMatch`** `(method_id, descriptor, dex_id)` — one method hit. The `batch_*`
   searches return `Mapping[str, tuple[Match, ...]]` keyed by the query key.
