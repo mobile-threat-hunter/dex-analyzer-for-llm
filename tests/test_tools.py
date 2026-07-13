@@ -395,6 +395,24 @@ def test_descriptor_validators_unit():
     assert not is_type_descriptor("java.lang.String")  # dotted
     assert not is_type_descriptor("java/lang/String")  # smali (no L;)
     assert not is_type_descriptor("")  # empty must not IndexError
+    # structural masquerades the C++ core would silently-empty on — now rejected
+    assert not is_type_descriptor("Ljava.lang.String;")  # dotted interior
+    assert not is_type_descriptor("L;")  # empty class name
+    assert not is_type_descriptor("[garbage") and not is_type_descriptor(
+        "["
+    )  # bad array
+    # a crafted deep-array must return False / raise ValueError, never RecursionError
+    assert not is_type_descriptor("[" * 5000)
+    assert is_type_descriptor("[" * 255 + "I")  # legal max array nesting still accepted
+    with pytest.raises(ValueError, match="descriptor"):
+        require_type_descriptor("[" * 5000)
+    # a legal DEX-040 interior space (Kotlin backtick / obfuscated name) is NOT rejected
+    # (VerifyDex accepts it; the call-site/field paths resolve it verbatim) — but a space
+    # in the leading / arrow region still fails on the L.../; structure.
+    assert is_type_descriptor("Lcom/foo/My Class;")
+    assert is_member_descriptor("Lc;->f:Lcom/My Class;")  # space-named field type
+    assert not is_member_descriptor(" Lc;->m()V")  # leading space
+    assert not is_member_descriptor("Lc; ->m()V")  # space before arrow
 
     # members: method (has '(') and field (name:type); field TYPE must be a descriptor
     assert is_member_descriptor("Landroid/util/Log;->d(Ljava/lang/String;)I")

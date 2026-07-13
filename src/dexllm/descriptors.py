@@ -141,24 +141,37 @@ def signature(class_descriptor: str, name: str, proto: str) -> str:
 # clear error instead. Structural check only (does NOT verify the entity exists — a
 # valid-but-external descriptor still passes and yields an empty result as intended).
 #
-# Whitespace is intentionally rejected in the class/arrow region. One C++ identity
-# path (LocateMethod, the decompile route) strips ALL whitespace before parsing
-# (androguard's proto form has spaces), but the call-site / field paths
-# (ParseApiDescriptor, LocateField) do NOT — so a leading-space class would silently
-# resolve on decompile yet silently-empty on find_call_sites. Rejecting whitespace in
-# the class/arrow region here keeps every identity surface consistent; the canonical
-# spaceless form the validators point to (list_* / find_* output) always works.
+# Whitespace in the class/arrow region is rejected by the L.../; STRUCTURE alone (the
+# first char must be 'L'/'['/prim and an L-form must end ';', so ' Lc;' and 'Lc; ' both
+# fail) — no explicit space check is needed, and none is used: an INTERIOR space is a
+# legal DEX-040 SimpleName character (Kotlin backtick / obfuscator identifiers), which
+# this project's own VerifyDex accepts and the call-site / field paths resolve verbatim,
+# so 'Lcom/foo/My Class;' must NOT be false-rejected. A '.' by contrast never appears in
+# a valid descriptor (VerifyDex rejects it), so a dotted interior IS rejected.
 
 _PRIM_DESCS = frozenset("VZBSCIJFD")
 
 
 def is_type_descriptor(t: str) -> bool:
-    """Return True if ``t`` is a Dalvik type descriptor (``Lcls;``, ``[...``, primitive)."""
-    return bool(t) and (
-        (t[0] == "L" and t[-1] == ";")
-        or t[0] == "["
-        or (len(t) == 1 and t in _PRIM_DESCS)
-    )
+    """Return True if ``t`` is a Dalvik type descriptor (``Lcls;``, ``[...``, primitive).
+
+    Rejects the shapes that structurally masquerade as a descriptor but silently-empty
+    in the C++ core: a dotted interior (``Ljava.lang.String;`` — a `.` never appears in a
+    valid type descriptor), an empty class name (``L;``), and a bare / invalid array
+    element (``[`` / ``[garbage``). Array dimensions are stripped iteratively (a crafted
+    ``'[' * N`` can never blow the stack), then the element type is validated.
+    """
+    if not t:
+        return False
+    i = 0  # strip array dimensions iteratively (no recursion — a crafted '[' * N is safe)
+    while i < len(t) and t[i] == "[":
+        i += 1
+    el = t[i:]  # the element type after any leading '['
+    if not el:  # bare '[' / all-brackets — no element
+        return False
+    if el[0] == "L":
+        return len(el) >= 3 and el[-1] == ";" and "." not in el
+    return len(el) == 1 and el in _PRIM_DESCS
 
 
 def is_member_descriptor(desc: str) -> bool:
