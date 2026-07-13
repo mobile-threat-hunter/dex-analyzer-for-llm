@@ -173,3 +173,30 @@ def test_type_references_paging_is_recoverable(dk):
             assert nxt["items"] and nxt["items"] != page["items"]  # advanced
             return
     pytest.skip("String has <=1 reference in every category in this fixture")
+
+
+def test_xref_tools_accept_dotted_and_smali_like_search_family(dk):
+    """The descriptor-taking xref tools normalise dotted/smali class forms to the
+    Dalvik descriptor — so an LLM that learned leniency from find_classes_by_name
+    doesn't get a SILENT empty (a false 'no usages') on a dotted input."""
+    # a type referenced heavily (String): dotted / smali / descriptor must agree
+    ldesc = tools.execute(
+        "find_type_references", {"type_descriptor": "Ljava/lang/String;"}, dk
+    )["fields"]["total"]
+    assert ldesc > 0, "fixture has no String field references"
+    for form in ("java.lang.String", "java/lang/String"):
+        got = tools.execute("find_type_references", {"type_descriptor": form}, dk)[
+            "fields"
+        ]["total"]
+        assert got == ldesc, f"{form!r} normalised to {got}, expected {ldesc}"
+    # a called API: dotted/smali CLASS resolves the same as the L-form
+    api_l = "Landroid/util/Log;->d(Ljava/lang/String;Ljava/lang/String;)I"
+    base = tools.execute("resolve_call_args", {"api_descriptor": api_l}, dk)["total"]
+    for form in (
+        "android.util.Log->d(Ljava/lang/String;Ljava/lang/String;)I",
+        "android/util/Log->d(Ljava/lang/String;Ljava/lang/String;)I",
+    ):
+        assert (
+            tools.execute("resolve_call_args", {"api_descriptor": form}, dk)["total"]
+            == base
+        ), f"{form!r} did not normalise to the descriptor form"
