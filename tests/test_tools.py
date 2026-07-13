@@ -175,31 +175,63 @@ def test_type_references_paging_is_recoverable(dk):
     pytest.skip("String has <=1 reference in every category in this fixture")
 
 
-def test_xref_tools_accept_dotted_and_smali_like_search_family(dk):
-    """The descriptor-taking xref tools normalise dotted/smali class forms to the
-    Dalvik descriptor — so an LLM that learned leniency from find_classes_by_name
-    doesn't get a SILENT empty (a false 'no usages') on a dotted input."""
-    # a type referenced heavily (String): dotted / smali / descriptor must agree
+def test_identity_xref_tools_reject_non_descriptor_input(dk):
+    """Identity (descriptor) tools demand the exact Dalvik form and return a clear
+    error — NOT a silent empty — on a dotted/Java name, so an LLM that learned
+    leniency from the name-search family gets a guiding message instead of a false
+    'no usages'. This is DexKit's own split: name-query is lenient, identity is strict.
+    """
+    # L-form works
     ldesc = tools.execute(
         "find_type_references", {"type_descriptor": "Ljava/lang/String;"}, dk
     )["fields"]["total"]
     assert ldesc > 0, "fixture has no String field references"
+    # dotted / smali → a structured ValueError, not a 0-count result
     for form in ("java.lang.String", "java/lang/String"):
-        got = tools.execute("find_type_references", {"type_descriptor": form}, dk)[
-            "fields"
-        ]["total"]
-        assert got == ldesc, f"{form!r} normalised to {got}, expected {ldesc}"
-    # a called API: dotted/smali CLASS resolves the same as the L-form
+        r = tools.execute("find_type_references", {"type_descriptor": form}, dk)
+        assert r.get("error", "").startswith(
+            "ValueError"
+        ), f"{form!r} not rejected: {r}"
+        assert "descriptor" in r["error"]
+    # a called API in L-form works; the dotted member form errors
     api_l = "Landroid/util/Log;->d(Ljava/lang/String;Ljava/lang/String;)I"
-    base = tools.execute("resolve_call_args", {"api_descriptor": api_l}, dk)["total"]
+    assert "error" not in tools.execute(
+        "resolve_call_args", {"api_descriptor": api_l}, dk
+    )
     for form in (
         "android.util.Log->d(Ljava/lang/String;Ljava/lang/String;)I",
         "android/util/Log->d(Ljava/lang/String;Ljava/lang/String;)I",
     ):
-        assert (
-            tools.execute("resolve_call_args", {"api_descriptor": form}, dk)["total"]
-            == base
-        ), f"{form!r} did not normalise to the descriptor form"
+        r = tools.execute("resolve_call_args", {"api_descriptor": form}, dk)
+        assert r.get("error", "").startswith(
+            "ValueError"
+        ), f"{form!r} not rejected: {r}"
+
+
+def test_name_search_tools_stay_lenient(dk):
+    """The name-query family keeps DexKit's upstream leniency: the dotted, smali, and
+    L-form of the SAME declared class all resolve to the same match (find_classes_by_name
+    uses NameToDescriptor). Only identity APIs are strict — the two concepts must not be
+    conflated, and the search family must NOT have gained validation."""
+    # a class actually declared in the fixture (so an `equals` query has a real target)
+    cls = next(c for c in dk.list_classes() if "/" in c)  # e.g. La2dp/Vol/main;
+    ldesc = cls  # 'La2dp/Vol/main;'
+    smali = cls[1:-1]  # 'a2dp/Vol/main'
+    dotted = smali.replace("/", ".")  # 'a2dp.Vol.main'
+    counts = {
+        form: tools.execute(
+            "find_classes_by_name", {"name": form, "match_type": "equals"}, dk
+        )["total"]
+        for form in (ldesc, smali, dotted)
+    }
+    # leniency: all three spellings normalise to the same query → same non-zero match
+    assert counts[dotted] == counts[smali] == counts[ldesc] >= 1, counts
+    # and none of them errored (no identity validation leaked into the search family)
+    for form in (ldesc, smali, dotted):
+        r = tools.execute(
+            "find_classes_by_name", {"name": form, "match_type": "equals"}, dk
+        )
+        assert "error" not in r, f"search family gained validation on {form!r}: {r}"
 
 
 def test_list_value_strings_tool(dk):
@@ -213,7 +245,7 @@ def test_list_value_strings_tool(dk):
 
 
 def test_render_class_smali_tool(dk):
-    """render_class_smali truncates, and a dotted class normalises to the same class."""
+    """render_class_smali truncates on the descriptor form and rejects a dotted class."""
     cls = dk.list_classes()[0]
     full = tools.execute("render_class_smali", {"class_descriptor": cls}, dk)
     assert full["full_chars"] > 0 and full["truncated"] is False
@@ -226,7 +258,7 @@ def test_render_class_smali_tool(dk):
     dotted = tools.execute(
         "render_class_smali", {"class_descriptor": descriptor_to_java(cls)}, dk
     )
-    assert dotted["full_chars"] == full["full_chars"]  # dotted → same class
+    assert dotted.get("error", "").startswith("ValueError")  # dotted → clear error
 
 
 def test_detect_content_providers_tool(dk):
@@ -344,3 +376,60 @@ def test_batch_find_methods_bounded_and_bad_shapes(dk):
         "query_map"
     ]["additionalProperties"]
     assert ap.get("minItems") == 1
+
+
+def test_descriptor_validators_unit():
+    """The shared validators recognise Dalvik descriptor forms and reject Java names."""
+    from dexllm.descriptors import (
+        is_member_descriptor,
+        is_type_descriptor,
+        require_member_descriptor,
+        require_type_descriptor,
+    )
+
+    # types: L-form, arrays (incl. nested), every primitive
+    assert is_type_descriptor("Ljava/lang/String;")
+    assert is_type_descriptor("La2dp/Vol/main$Inner;")  # '$' inner
+    assert is_type_descriptor("[I") and is_type_descriptor("[[Ljava/lang/Object;")
+    assert all(is_type_descriptor(p) for p in "VZBSCIJFD")
+    assert not is_type_descriptor("java.lang.String")  # dotted
+    assert not is_type_descriptor("java/lang/String")  # smali (no L;)
+    assert not is_type_descriptor("")  # empty must not IndexError
+
+    # members: method (has '(') and field (name:type); field TYPE must be a descriptor
+    assert is_member_descriptor("Landroid/util/Log;->d(Ljava/lang/String;)I")
+    assert is_member_descriptor("Lc;->m([ILjava/lang/String;)[Ljava/lang/Object;")
+    assert is_member_descriptor("Lc;-><init>()V")  # <init> name
+    assert is_member_descriptor("Lcom/foo/Bar;->f:I")  # field
+    assert is_member_descriptor("Lcom/foo/Bar;->f:[Ljava/lang/Object;")  # array field
+    assert not is_member_descriptor("android.util.Log->d()V")  # dotted class
+    assert not is_member_descriptor("Ljava/lang/String;")  # no '->'
+    assert not is_member_descriptor("Lc;->f:int")  # dotted field type
+    assert not is_member_descriptor("Lc;->f:")  # empty field type
+    # method-vs-field routing: '(' wins over ':' (a proto never contains ':')
+    assert is_member_descriptor("Lc;->m()V")
+
+    assert require_type_descriptor("Ljava/lang/String;") == "Ljava/lang/String;"
+    with pytest.raises(ValueError, match="descriptor"):
+        require_type_descriptor("java.lang.String")
+    with pytest.raises(ValueError, match="descriptor"):
+        require_member_descriptor("android.util.Log->d()V")
+    with pytest.raises(ValueError, match="descriptor"):
+        require_member_descriptor("Lc;->f:int")  # dotted field type also rejected
+
+
+def test_sdk_identity_apis_reject_non_descriptor(dk):
+    """SDK identity methods raise ValueError on a dotted/Java name (strict, like MCP)."""
+    from dexllm.sdk import open_apk
+
+    apks = sorted(glob.glob(str(REPO / "test_apk" / "APK" / "*.apk")))
+    pref = [p for p in apks if "a2dp.Vol" in p] + apks
+    session = open_apk(pref[0])
+    with pytest.raises(ValueError):
+        session.find_type_references("java.lang.String")
+    with pytest.raises(ValueError):
+        session.decompile_method("android.util.Log->d()V")
+    with pytest.raises(ValueError):
+        session.list_class_methods("java.lang.String")
+    # L-form still works
+    assert session.find_type_references("Ljava/lang/String;") is not None

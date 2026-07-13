@@ -323,7 +323,15 @@ The decompiler is a strict, function-by-function port of androguard's `decompile
 
 ## L7 — find / match operations (Aho-Corasick + matcher engine from upstream)
 
-All operations auto-normalise their inputs — pass descriptor (`Landroid/app/Activity;`), smali path (`android/app/Activity`), or Java dotted (`android.app.Activity`).
+**Two input concepts (DexKit's own split).** The name-SEARCH family below takes a fuzzy
+name query and is lenient — all operations here auto-normalise their inputs, so you may
+pass a descriptor (`Landroid/app/Activity;`), a smali path (`android/app/Activity`), or a
+Java dotted name (`android.app.Activity`). By contrast the IDENTITY APIs (decompile,
+`find_call_sites_to_api` / `resolve_call_args`, `find_type_references`, `find_field_*`,
+`render_*_smali`, `get_class_summary`, `list_class_methods`, `locate_class_dex`) address one
+EXACT entity and require the canonical Dalvik descriptor (the L-form emitted by `list_*` /
+`find_*` output). Passing a dotted/smali name to an identity API is a clear error, not a
+silent empty result — copy the descriptor straight from a search or list result.
 
 ```python
 # Name patterns

@@ -16,6 +16,7 @@ from typing import Union
 
 import dexllm
 
+from ..descriptors import require_member_descriptor, require_type_descriptor
 from .model import (
     ArgOrigin,
     CallSite,
@@ -205,6 +206,7 @@ class DexKitAdapter:
 
     def decompile_method(self, method_descriptor: str) -> DecompiledMethod:
         """Decompile one method to Java text."""
+        require_member_descriptor(method_descriptor)
         src = self._dk.decompile_method_java(method_descriptor)
         return DecompiledMethod(
             descriptor=method_descriptor, source=src, found=bool(src)
@@ -212,6 +214,7 @@ class DexKitAdapter:
 
     def decompile_method_with_pc_map(self, method_descriptor: str) -> DecompiledMethod:
         """Decompile one method plus a source-line ↔ bytecode-offset map."""
+        require_member_descriptor(method_descriptor)
         r = self._dk.decompile_method_java_with_pc(method_descriptor)
         return DecompiledMethod(
             descriptor=method_descriptor,
@@ -224,6 +227,7 @@ class DexKitAdapter:
 
     def decompile_class(self, class_descriptor: str) -> DecompiledClass:
         """Decompile a whole class to Java text."""
+        require_type_descriptor(class_descriptor)
         return DecompiledClass(
             descriptor=class_descriptor,
             source=self._dk.decompile_class_java(class_descriptor),
@@ -233,6 +237,7 @@ class DexKitAdapter:
         self, method_descriptor: str, *, include_source: bool = True
     ) -> MethodAst:
         """Return a method's structured AST (+ source unless disabled)."""
+        require_member_descriptor(method_descriptor)
         r = self._dk.decompile_method_ast(
             method_descriptor, include_source=include_source
         )
@@ -254,10 +259,12 @@ class DexKitAdapter:
 
     def render_method_smali(self, method_descriptor: str) -> str:
         """Render one method as baksmali-style smali (empty if unknown/external)."""
+        require_member_descriptor(method_descriptor)
         return self._dk.render_method_smali(method_descriptor)
 
     def render_class_smali(self, class_descriptor: str) -> str:
         """Render a whole class as baksmali-style smali (empty if external)."""
+        require_type_descriptor(class_descriptor)
         return self._dk.render_class_smali(class_descriptor)
 
     # -- EnumerationPort --
@@ -272,6 +279,7 @@ class DexKitAdapter:
 
     def list_class_methods(self, class_descriptor: str) -> tuple[str, ...]:
         """Return every declared method descriptor of the given class."""
+        require_type_descriptor(class_descriptor)
         return tuple(self._dk.list_class_methods(class_descriptor))
 
     def list_field_descriptors(self) -> tuple[str, ...]:
@@ -342,6 +350,7 @@ class DexKitAdapter:
 
     def find_call_sites(self, api_descriptor: str) -> tuple[CallSite, ...]:
         """Return every call site invoking the given API descriptor (its callers)."""
+        require_member_descriptor(api_descriptor)
         return tuple(
             CallSite(
                 caller_descriptor=s.caller_descriptor,
@@ -358,6 +367,7 @@ class DexKitAdapter:
         self, method_descriptor: str
     ) -> tuple[CallSite, ...]:
         """Return the call sites inside the method — the methods it invokes (callees)."""
+        require_member_descriptor(method_descriptor)
         return tuple(
             CallSite(
                 caller_descriptor=s.caller_descriptor,
@@ -372,6 +382,7 @@ class DexKitAdapter:
 
     def resolve_call_args(self, api_descriptor: str) -> tuple[ResolvedCallSite, ...]:
         """Return call sites of the API with each argument's resolved origin."""
+        require_member_descriptor(api_descriptor)
         return tuple(
             ResolvedCallSite(
                 caller_descriptor=s.caller_descriptor,
@@ -387,14 +398,17 @@ class DexKitAdapter:
 
     def find_field_readers(self, field_descriptor: str) -> tuple[str, ...]:
         """Return descriptors of methods that READ (iget*/sget*) the given field."""
+        require_member_descriptor(field_descriptor)
         return tuple(self._dk.find_field_read_methods(field_descriptor))
 
     def find_field_writers(self, field_descriptor: str) -> tuple[str, ...]:
         """Return descriptors of methods that WRITE (iput*/sput*) the given field."""
+        require_member_descriptor(field_descriptor)
         return tuple(self._dk.find_field_write_methods(field_descriptor))
 
     def find_type_references(self, type_descriptor: str) -> TypeReferences:
         """Return signature-position references to the given type."""
+        require_type_descriptor(type_descriptor)
         r = self._dk.find_type_references(type_descriptor)
         return TypeReferences(
             fields=tuple(r.fields),
@@ -551,6 +565,7 @@ class DexKitAdapter:
 
     def class_info(self, class_descriptor: str) -> ClassInfo:
         """Return the class's metadata (superclass, interfaces, access, source)."""
+        require_type_descriptor(class_descriptor)
         s = self._dk.get_class_summary(class_descriptor)
         return ClassInfo(
             descriptor=s.descriptor,
@@ -564,6 +579,7 @@ class DexKitAdapter:
 
     def class_fields(self, class_descriptor: str) -> tuple[FieldInfo, ...]:
         """Return the class's declared fields (name, type, access flags)."""
+        require_type_descriptor(class_descriptor)
         s = self._dk.get_class_summary(class_descriptor)
         return tuple(
             FieldInfo(name=f.name, type=f.type, access_flags=f.access_flags)
@@ -572,6 +588,7 @@ class DexKitAdapter:
 
     def locate_class_dex(self, class_descriptor: str) -> int:
         """Return the id of the dex that declares the class, or -1 if external."""
+        require_type_descriptor(class_descriptor)
         return self._dk.locate_class_dex(class_descriptor)
 
     # -- PermissionAnalysisPort --

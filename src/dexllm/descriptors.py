@@ -130,3 +130,72 @@ def method_ref_java(class_descriptor: str, name: str, proto: str) -> str:
 def signature(class_descriptor: str, name: str, proto: str) -> str:
     """Build the wire-form API signature accepted by find_call_sites_to_api."""
     return f"{class_descriptor}->{name}{proto}"
+
+
+# ── descriptor-identity validation ───────────────────────────────────────────
+# The xref / decompile / inspect APIs consume a Dalvik descriptor IDENTITY (the
+# canonical L-form emitted by list_* / find_* output), unlike the name-SEARCH
+# family which takes a fuzzy name query (DexKit's own two concepts). A non-descriptor
+# input (a dotted 'java.lang.String' or a bare name) doesn't resolve — the C++ returns
+# a SILENT empty, an LLM misreads as "no usages". These validators turn that into a
+# clear error instead. Structural check only (does NOT verify the entity exists — a
+# valid-but-external descriptor still passes and yields an empty result as intended).
+#
+# Whitespace is intentionally rejected in the class/arrow region. One C++ identity
+# path (LocateMethod, the decompile route) strips ALL whitespace before parsing
+# (androguard's proto form has spaces), but the call-site / field paths
+# (ParseApiDescriptor, LocateField) do NOT — so a leading-space class would silently
+# resolve on decompile yet silently-empty on find_call_sites. Rejecting whitespace in
+# the class/arrow region here keeps every identity surface consistent; the canonical
+# spaceless form the validators point to (list_* / find_* output) always works.
+
+_PRIM_DESCS = frozenset("VZBSCIJFD")
+
+
+def is_type_descriptor(t: str) -> bool:
+    """Return True if ``t`` is a Dalvik type descriptor (``Lcls;``, ``[...``, primitive)."""
+    return bool(t) and (
+        (t[0] == "L" and t[-1] == ";")
+        or t[0] == "["
+        or (len(t) == 1 and t in _PRIM_DESCS)
+    )
+
+
+def is_member_descriptor(desc: str) -> bool:
+    """Return True if ``desc`` is a Dalvik member descriptor.
+
+    ``Lcls;->name(proto)ret`` (method) or ``Lcls;->name:type`` (field).
+    """
+    if "->" not in desc:
+        return False
+    cls, rest = desc.split("->", 1)
+    if not is_type_descriptor(cls):
+        return False
+    if "(" in rest:  # a method: name(proto)ret — proto/ret trusted (copied verbatim)
+        return True
+    if ":" in rest:  # a field: name:type — the type must itself be a descriptor
+        return is_type_descriptor(rest.rsplit(":", 1)[1])
+    return False
+
+
+def require_type_descriptor(t: str) -> str:
+    """Return ``t`` if it is a type descriptor, else raise a guiding ValueError."""
+    if not is_type_descriptor(t):
+        raise ValueError(
+            f"expected a Dalvik type descriptor like 'Ljava/lang/String;' "
+            f"(or '[I' / 'I'), got {t!r} — use the descriptor form from "
+            f"list_classes / find_* output, not a dotted/Java name"
+        )
+    return t
+
+
+def require_member_descriptor(desc: str) -> str:
+    """Return ``desc`` if it is a member descriptor, else raise a guiding ValueError."""
+    if not is_member_descriptor(desc):
+        raise ValueError(
+            f"expected a Dalvik member descriptor like "
+            f"'Lcom/foo/Bar;->m(Ljava/lang/String;)V' or 'Lcom/foo/Bar;->f:I', "
+            f"got {desc!r} — use the descriptor form from list_class_methods / "
+            f"find_* output, not a dotted/Java name"
+        )
+    return desc
