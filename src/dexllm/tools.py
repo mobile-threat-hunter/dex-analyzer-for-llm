@@ -31,6 +31,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Callable
 
+from .descriptors import require_member_descriptor, require_type_descriptor
 from .safe import (
     DEFAULT_TIMEOUT_S,
     is_timeout_marker,
@@ -118,45 +119,6 @@ def _filter_pattern(items: list[str], pattern: str | None) -> list[str]:
     return [x for x in items if core in x]
 
 
-_PRIM_DESCS = set("VZBSCIJFD")
-
-
-def _norm_type(t: str) -> str:
-    """Convert a dotted/smali type to a Dalvik descriptor, IDEMPOTENTLY.
-
-    'java.lang.String' / 'java/lang/String' → 'Ljava/lang/String;'; an
-    already-descriptor form ('Lx;', '[I', a primitive 'I') is returned unchanged.
-    So the descriptor-taking tools accept the same lenient forms the search family
-    does, instead of silently returning empty on a dotted input.
-    """
-    if not t or t[0] in "L[" or (len(t) == 1 and t in _PRIM_DESCS):
-        return t
-    from .descriptors import java_to_descriptor
-
-    try:
-        return java_to_descriptor(t)
-    except Exception:
-        return t  # leave malformed input for the C++ layer to reject/empty
-
-
-def _norm_member_desc(desc: str) -> str:
-    """Normalise the CLASS (and, for a field, the type) of a member descriptor.
-
-    'android.util.Log->d(...)I' → 'Landroid/util/Log;->d(...)I';
-    'java.lang.Foo->x:int' → 'Ljava/lang/Foo;->x:I'. A method's `(proto)ret` is left
-    as-is (callers copy it in descriptor form from list_class_methods / find_* output);
-    a bare class/type with no '->' is normalised whole.
-    """
-    if "->" not in desc:
-        return _norm_type(desc)
-    cls, rest = desc.split("->", 1)
-    cls = _norm_type(cls)
-    if "(" not in rest and ":" in rest:  # a field: name:type (not a method proto)
-        name, typ = rest.rsplit(":", 1)
-        rest = f"{name}:{_norm_type(typ)}"
-    return f"{cls}->{rest}"
-
-
 # ─── Tool implementations ─────────────────────────────────────────────────
 # Each impl takes (dk: DexKit, **args) and returns a JSON-serialisable dict.
 
@@ -172,6 +134,7 @@ def _t_list_classes(
 
 
 def _t_list_class_methods(dk: DexKit, class_descriptor: str) -> dict:
+    require_type_descriptor(class_descriptor)
     return {
         "class": class_descriptor,
         "methods": dk.list_class_methods(class_descriptor),
@@ -181,6 +144,7 @@ def _t_list_class_methods(dk: DexKit, class_descriptor: str) -> dict:
 def _t_decompile_method(
     dk: DexKit, method_descriptor: str, max_chars: int = DEFAULT_DECOMPILE_CHARS
 ) -> dict:
+    require_member_descriptor(method_descriptor)
     out = safe_decompile_method_java(dk, method_descriptor, timeout=DEFAULT_TIMEOUT_S)
     if is_timeout_marker(out):
         return {"descriptor": method_descriptor, "error": "timeout", "text": out}
@@ -190,6 +154,7 @@ def _t_decompile_method(
 def _t_decompile_class(
     dk: DexKit, class_descriptor: str, max_chars: int = DEFAULT_CLASS_CHARS
 ) -> dict:
+    require_type_descriptor(class_descriptor)
     out = safe_decompile_class_java(dk, class_descriptor, timeout=DEFAULT_TIMEOUT_S)
     if is_timeout_marker(out):
         return {"descriptor": class_descriptor, "error": "timeout", "text": out}
@@ -291,7 +256,7 @@ def _t_find_methods_using_strings(
 def _t_find_call_sites_to_api(
     dk: DexKit, api_descriptor: str, limit: int = 50, offset: int = 0
 ) -> dict:
-    api_descriptor = _norm_member_desc(api_descriptor)
+    require_member_descriptor(api_descriptor)
     sites = dk.find_call_sites_to_api(api_descriptor)
     items = []
     for s in sites:
@@ -306,6 +271,7 @@ def _t_find_call_sites_to_api(
 
 
 def _t_get_class_summary(dk: DexKit, class_descriptor: str) -> dict:
+    require_type_descriptor(class_descriptor)
     s = dk.get_class_summary(class_descriptor)
     return {
         "descriptor": class_descriptor,
@@ -320,6 +286,7 @@ def _t_get_class_summary(dk: DexKit, class_descriptor: str) -> dict:
 def _t_render_method_smali(
     dk: DexKit, method_descriptor: str, max_chars: int = DEFAULT_DECOMPILE_CHARS
 ) -> dict:
+    require_member_descriptor(method_descriptor)
     out = dk.render_method_smali(method_descriptor)
     return {"descriptor": method_descriptor, **_truncate(out, max_chars)}
 
@@ -448,7 +415,7 @@ def _arg_to_compact(index: int, a: Any) -> dict:
 def _t_resolve_call_args(
     dk: DexKit, api_descriptor: str, limit: int = 50, offset: int = 0
 ) -> dict:
-    api_descriptor = _norm_member_desc(api_descriptor)
+    require_member_descriptor(api_descriptor)
     sites = dk.resolve_call_args(api_descriptor)
     items = [
         {
@@ -465,7 +432,7 @@ def _t_resolve_call_args(
 def _t_find_call_sites_from_method(
     dk: DexKit, method_descriptor: str, limit: int = 50, offset: int = 0
 ) -> dict:
-    method_descriptor = _norm_member_desc(method_descriptor)
+    require_member_descriptor(method_descriptor)
     sites = dk.find_call_sites_from_method(method_descriptor)
     items = [
         {
@@ -481,21 +448,21 @@ def _t_find_call_sites_from_method(
 def _t_find_field_read_methods(
     dk: DexKit, field_descriptor: str, limit: int = 50, offset: int = 0
 ) -> dict:
-    field_descriptor = _norm_member_desc(field_descriptor)
+    require_member_descriptor(field_descriptor)
     return _paginate(dk.find_field_read_methods(field_descriptor), offset, limit)
 
 
 def _t_find_field_write_methods(
     dk: DexKit, field_descriptor: str, limit: int = 50, offset: int = 0
 ) -> dict:
-    field_descriptor = _norm_member_desc(field_descriptor)
+    require_member_descriptor(field_descriptor)
     return _paginate(dk.find_field_write_methods(field_descriptor), offset, limit)
 
 
 def _t_find_type_references(
     dk: DexKit, type_descriptor: str, limit: int = 50, offset: int = 0
 ) -> dict:
-    type_descriptor = _norm_type(type_descriptor)
+    require_type_descriptor(type_descriptor)
     tr = dk.find_type_references(type_descriptor)
     limit = max(1, int(limit))
     offset = max(0, int(offset))
@@ -560,7 +527,8 @@ def _t_list_value_strings(
 def _t_render_class_smali(
     dk: DexKit, class_descriptor: str, max_chars: int = DEFAULT_CLASS_CHARS
 ) -> dict:
-    out = dk.render_class_smali(_norm_type(class_descriptor))
+    require_type_descriptor(class_descriptor)
+    out = dk.render_class_smali(class_descriptor)
     return {"descriptor": class_descriptor, **_truncate(out, max_chars)}
 
 
@@ -615,6 +583,7 @@ def _t_decompile_method_ast(
     """
     import json
 
+    require_member_descriptor(method_descriptor)
     res = dict(
         dk.decompile_method_ast(method_descriptor, include_source=include_source)
     )
