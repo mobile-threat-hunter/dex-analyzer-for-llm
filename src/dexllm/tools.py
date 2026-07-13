@@ -29,7 +29,6 @@ Design notes
 
 from __future__ import annotations
 
-import re
 from typing import TYPE_CHECKING, Any, Callable
 
 from .safe import (
@@ -93,28 +92,30 @@ def _match_to_desc(m: Any) -> str:
     return str(m)
 
 
-# A nested unbounded quantifier — an unbounded quantifier (* + or {n,}, ending in
-# * + or }) closing a group, immediately re-quantified by * + or { — is the classic
-# catastrophic-backtracking (ReDoS) shape: '(a+)+', '(.*)*', '(a*)+', '(a+){2,}'.
-# Python `re` holds the GIL while matching, so a thread/deadline can't interrupt a
-# spin (unlike the GIL-releasing C++ decompile that safe.py guards); reject the
-# pattern structurally up front instead. Escaped literals ('\+\)\+') don't match
-# (the quantifier chars aren't adjacent to the ')'). Not a complete ReDoS solver
-# (overlapping-alternation like '(a|a)*' slips through), but it blocks the
-# reliably-triggerable, content-agnostic patterns; a rejected pattern → clean error.
-_NESTED_QUANTIFIER = re.compile(r"[*+}]\)[*+{]")
-
-
 def _filter_pattern(items: list[str], pattern: str | None) -> list[str]:
+    """Filter `items` by DexKit-style SimilarRegex, not a full regex engine.
+
+    The SAME semantics as the tool surface's ``match_type='regex'``.
+    Mirrors the core's ``ConvertSimilarRegex`` (dex_item_matcher.cpp): only the
+    ``^`` (prefix) and ``$`` (suffix) anchors are meaningful, the rest of the
+    pattern is a LITERAL substring — ``^X`` startswith, ``X$`` endswith, ``^X$``
+    equals, else ``X`` contains. There is no backtracking engine, so a
+    catastrophic pattern like ``(.*)*Z`` is just a literal substring search
+    (finds nothing, no match) — ReDoS is impossible by construction, and the
+    filter behaves consistently with `find_classes_by_name(match_type='regex')`.
+    """
     if not pattern:
         return items
-    if _NESTED_QUANTIFIER.search(pattern):
-        raise ValueError(
-            "pattern rejected: a nested unbounded quantifier (e.g. '(a+)+', '(.*)*') "
-            "risks catastrophic backtracking (ReDoS) — simplify `pattern`"
-        )
-    rx = re.compile(pattern)  # an invalid regex raises re.error → caught by execute()
-    return [x for x in items if rx.search(x)]
+    anchor_start = pattern.startswith("^")
+    anchor_end = pattern.endswith("$")
+    core = pattern[1 if anchor_start else 0 : len(pattern) - 1 if anchor_end else None]
+    if anchor_start and anchor_end:
+        return [x for x in items if x == core]
+    if anchor_start:
+        return [x for x in items if x.startswith(core)]
+    if anchor_end:
+        return [x for x in items if x.endswith(core)]
+    return [x for x in items if core in x]
 
 
 _PRIM_DESCS = set("VZBSCIJFD")
@@ -550,7 +551,7 @@ def _t_list_value_strings(
 ) -> dict:
     """List the app's value-strings (const-string + static VALUE_STRING; the IOC feed).
 
-    Regex `pattern` filters the list; paginated.
+    ``pattern`` is DexKit SimilarRegex (^prefix / suffix$ / substring); paginated.
     """
     items = _filter_pattern(dk.list_value_strings(), pattern)
     return _paginate(items, offset, limit)
@@ -622,7 +623,7 @@ TOOL_DEFINITIONS: list[dict] = [
             "properties": {
                 "pattern": {
                     "type": "string",
-                    "description": "optional regex to filter descriptors",
+                    "description": "optional SimilarRegex filter (^prefix / suffix$ / else substring)",
                 },
                 "offset": {"type": "integer", "default": 0},
                 "limit": {
@@ -1047,7 +1048,7 @@ TOOL_DEFINITIONS: list[dict] = [
             "Every distinct string the app LOADS as a value (const-string + static "
             "VALUE_STRING initializers), MUTF-8 decoded, deduplicated — the IOC feed "
             "and the place to eyeball hardcoded URLs, keys, commands, class names for "
-            "reflection, etc. Optional regex `pattern` filters; paginated. Excludes "
+            "reflection, etc. Optional SimilarRegex `pattern` filter (^/$ + substring); paginated. Excludes "
             "identifier/metadata pool entries (type/method/field names)."
         ),
         "input_schema": {
@@ -1055,7 +1056,7 @@ TOOL_DEFINITIONS: list[dict] = [
             "properties": {
                 "pattern": {
                     "type": "string",
-                    "description": "optional regex to filter the strings",
+                    "description": "optional SimilarRegex filter (^prefix / suffix$ / else substring)",
                 },
                 "offset": {"type": "integer", "default": 0},
                 "limit": {

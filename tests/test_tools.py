@@ -237,18 +237,27 @@ def test_detect_content_providers_tool(dk):
     json.dumps(out)
 
 
-def test_pattern_filter_rejects_redos(dk):
-    """A nested-unbounded-quantifier (ReDoS) pattern is rejected fast with a clean
-    error (never a hang — `re` holds the GIL so a thread deadline can't interrupt a
-    spin); escaped literals and legit regexes still work."""
-    for bad in ("(.*)*Z", "(a+)+$", "([a-z]+)+", "(a*)+"):
-        out = tools.execute("list_value_strings", {"pattern": bad}, dk)
-        assert (
-            "error" in out and "ReDoS" in out["error"]
-        ), f"{bad!r} not rejected: {out}"
-    # the guard lives in the shared _filter_pattern → list_classes is protected too
-    assert "error" in tools.execute("list_classes", {"pattern": "(a+)+"}, dk)
-    # legit patterns unaffected, incl. an escaped literal that LOOKS nested
-    for ok in ("://", r"(\d+)\.(\d+)", r"\+\)\+", "(abc)+", "https?://"):
-        out = tools.execute("list_value_strings", {"pattern": ok, "limit": 3}, dk)
-        assert "error" not in out, f"{ok!r} wrongly rejected: {out}"
+def test_pattern_filter_is_similarregex_and_redos_impossible(dk):
+    """`pattern` is DexKit SimilarRegex (^/$ anchors + literal substring), NOT a full
+    regex engine — so a catastrophic-backtracking pattern is just a literal substring
+    search: it cannot hang (no engine to backtrack), returns fast, never errors."""
+    import time
+
+    # ReDoS-shaped inputs are treated as LITERAL substrings → fast, no error, no hang.
+    for redos in ("(.*)*Z", "(a|a)*Z", "((a+))+Z", "(a+?)+Z"):
+        t = time.time()
+        out = tools.execute("list_value_strings", {"pattern": redos}, dk)
+        assert time.time() - t < 2.0, f"{redos!r} was slow — engine still present?"
+        assert "error" not in out
+        assert out["total"] == 0  # no value-string contains that literal substring
+    # SimilarRegex semantics, verified against list_classes descriptors.
+    classes = dk.list_classes()
+    pfx = classes[0][:6]  # e.g. 'Landro'
+    starts = tools.execute("list_classes", {"pattern": f"^{pfx}", "limit": 1000}, dk)
+    assert starts["total"] > 0 and all(c.startswith(pfx) for c in starts["items"])
+    ends = tools.execute("list_classes", {"pattern": ";$", "limit": 1000}, dk)
+    assert ends["total"] > 0 and all(c.endswith(";") for c in ends["items"])
+    exact = tools.execute("list_classes", {"pattern": f"^{classes[0]}$"}, dk)
+    assert exact["total"] == 1 and exact["items"] == [classes[0]]
+    contains = tools.execute("list_classes", {"pattern": "/", "limit": 1000}, dk)
+    assert all("/" in c for c in contains["items"])
