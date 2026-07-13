@@ -93,10 +93,27 @@ def _match_to_desc(m: Any) -> str:
     return str(m)
 
 
+# A nested unbounded quantifier — an unbounded quantifier (* + or {n,}, ending in
+# * + or }) closing a group, immediately re-quantified by * + or { — is the classic
+# catastrophic-backtracking (ReDoS) shape: '(a+)+', '(.*)*', '(a*)+', '(a+){2,}'.
+# Python `re` holds the GIL while matching, so a thread/deadline can't interrupt a
+# spin (unlike the GIL-releasing C++ decompile that safe.py guards); reject the
+# pattern structurally up front instead. Escaped literals ('\+\)\+') don't match
+# (the quantifier chars aren't adjacent to the ')'). Not a complete ReDoS solver
+# (overlapping-alternation like '(a|a)*' slips through), but it blocks the
+# reliably-triggerable, content-agnostic patterns; a rejected pattern → clean error.
+_NESTED_QUANTIFIER = re.compile(r"[*+}]\)[*+{]")
+
+
 def _filter_pattern(items: list[str], pattern: str | None) -> list[str]:
     if not pattern:
         return items
-    rx = re.compile(pattern)
+    if _NESTED_QUANTIFIER.search(pattern):
+        raise ValueError(
+            "pattern rejected: a nested unbounded quantifier (e.g. '(a+)+', '(.*)*') "
+            "risks catastrophic backtracking (ReDoS) — simplify `pattern`"
+        )
+    rx = re.compile(pattern)  # an invalid regex raises re.error → caught by execute()
     return [x for x in items if rx.search(x)]
 
 
@@ -522,6 +539,41 @@ def _t_find_methods_using_double_literals(
     return _paginate([_match_to_desc(h) for h in hits], offset, limit)
 
 
+# ─── strings / smali / providers ──────────────────────────────────────────
+
+
+def _t_list_value_strings(
+    dk: DexKit,
+    pattern: str | None = None,
+    offset: int = 0,
+    limit: int = DEFAULT_LIST_LIMIT,
+) -> dict:
+    """List the app's value-strings (const-string + static VALUE_STRING; the IOC feed).
+
+    Regex `pattern` filters the list; paginated.
+    """
+    items = _filter_pattern(dk.list_value_strings(), pattern)
+    return _paginate(items, offset, limit)
+
+
+def _t_render_class_smali(
+    dk: DexKit, class_descriptor: str, max_chars: int = DEFAULT_CLASS_CHARS
+) -> dict:
+    out = dk.render_class_smali(_norm_type(class_descriptor))
+    return {"descriptor": class_descriptor, **_truncate(out, max_chars)}
+
+
+def _t_detect_content_providers(
+    dk: DexKit, with_xref: bool = True, xref_limit: int = 300
+) -> dict:
+    from .providers import detect_content_providers
+
+    provs = detect_content_providers(
+        dk, with_xref=with_xref, xref_limit=int(xref_limit)
+    )
+    return {"providers": provs, "count": len(provs)}
+
+
 # ─── Tool catalog (Anthropic API / MCP JSON-Schema) ───────────────────────
 
 TOOL_IMPLS: dict[str, Callable] = {
@@ -530,8 +582,11 @@ TOOL_IMPLS: dict[str, Callable] = {
     "dangerous_permission_api_callers": _t_dangerous_permission_api_callers,
     "list_classes": _t_list_classes,
     "list_class_methods": _t_list_class_methods,
+    "list_value_strings": _t_list_value_strings,
     "decompile_method": _t_decompile_method,
     "decompile_class": _t_decompile_class,
+    "render_class_smali": _t_render_class_smali,
+    "detect_content_providers": _t_detect_content_providers,
     "find_classes_by_name": _t_find_classes_by_name,
     "find_classes_by_super": _t_find_classes_by_super,
     "find_classes_implementing": _t_find_classes_implementing,
@@ -983,6 +1038,70 @@ TOOL_DEFINITIONS: list[dict] = [
                     "default": True,
                     "description": "drop framework/official-library callers (androidx, kotlin, …)",
                 }
+            },
+        },
+    },
+    {
+        "name": "list_value_strings",
+        "description": (
+            "Every distinct string the app LOADS as a value (const-string + static "
+            "VALUE_STRING initializers), MUTF-8 decoded, deduplicated — the IOC feed "
+            "and the place to eyeball hardcoded URLs, keys, commands, class names for "
+            "reflection, etc. Optional regex `pattern` filters; paginated. Excludes "
+            "identifier/metadata pool entries (type/method/field names)."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "pattern": {
+                    "type": "string",
+                    "description": "optional regex to filter the strings",
+                },
+                "offset": {"type": "integer", "default": 0},
+                "limit": {
+                    "type": "integer",
+                    "default": DEFAULT_LIST_LIMIT,
+                    "maximum": 1000,
+                },
+            },
+        },
+    },
+    {
+        "name": "render_class_smali",
+        "description": (
+            "baksmali-style raw bytecode for a WHOLE class (the class counterpart of "
+            "render_method_smali). Truncated to `max_chars`."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "class_descriptor": {"type": "string"},
+                "max_chars": {"type": "integer", "default": DEFAULT_CLASS_CHARS},
+            },
+            "required": ["class_descriptor"],
+        },
+    },
+    {
+        "name": "detect_content_providers",
+        "description": (
+            "Bundled `content://` provider URIs the app references (from its "
+            "value-strings), each tied to the referencing method (with_xref). Surfaces "
+            "provider access — contacts, SMS, call log, calendar, downloads — a common "
+            "data-exfiltration / recon signal in triage."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "with_xref": {
+                    "type": "boolean",
+                    "default": True,
+                    "description": "attach the referencing method to each provider",
+                },
+                "xref_limit": {
+                    "type": "integer",
+                    "default": 300,
+                    "description": "cap on providers cross-referenced (cost bound)",
+                },
             },
         },
     },

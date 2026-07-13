@@ -200,3 +200,55 @@ def test_xref_tools_accept_dotted_and_smali_like_search_family(dk):
             tools.execute("resolve_call_args", {"api_descriptor": form}, dk)["total"]
             == base
         ), f"{form!r} did not normalise to the descriptor form"
+
+
+def test_list_value_strings_tool(dk):
+    """list_value_strings pages the value-string feed and the regex pattern filters."""
+    allv = tools.execute("list_value_strings", {"limit": 5}, dk)
+    assert allv["total"] > 0 and all(isinstance(s, str) for s in allv["items"])
+    filt = tools.execute("list_value_strings", {"pattern": "://", "limit": 5}, dk)
+    assert filt["total"] <= allv["total"]  # a filter never grows the set
+    assert all("://" in s for s in filt["items"])
+    json.dumps(allv)
+
+
+def test_render_class_smali_tool(dk):
+    """render_class_smali truncates, and a dotted class normalises to the same class."""
+    cls = dk.list_classes()[0]
+    full = tools.execute("render_class_smali", {"class_descriptor": cls}, dk)
+    assert full["full_chars"] > 0 and full["truncated"] is False
+    cut = tools.execute(
+        "render_class_smali", {"class_descriptor": cls, "max_chars": 20}, dk
+    )
+    assert cut["truncated"] is True and cut["full_chars"] == full["full_chars"]
+    from dexllm.descriptors import descriptor_to_java
+
+    dotted = tools.execute(
+        "render_class_smali", {"class_descriptor": descriptor_to_java(cls)}, dk
+    )
+    assert dotted["full_chars"] == full["full_chars"]  # dotted → same class
+
+
+def test_detect_content_providers_tool(dk):
+    """detect_content_providers returns a JSON-safe {providers, count} shape."""
+    out = tools.execute("detect_content_providers", {"with_xref": True}, dk)
+    assert "providers" in out and out["count"] == len(out["providers"])
+    assert isinstance(out["providers"], list)
+    json.dumps(out)
+
+
+def test_pattern_filter_rejects_redos(dk):
+    """A nested-unbounded-quantifier (ReDoS) pattern is rejected fast with a clean
+    error (never a hang — `re` holds the GIL so a thread deadline can't interrupt a
+    spin); escaped literals and legit regexes still work."""
+    for bad in ("(.*)*Z", "(a+)+$", "([a-z]+)+", "(a*)+"):
+        out = tools.execute("list_value_strings", {"pattern": bad}, dk)
+        assert (
+            "error" in out and "ReDoS" in out["error"]
+        ), f"{bad!r} not rejected: {out}"
+    # the guard lives in the shared _filter_pattern → list_classes is protected too
+    assert "error" in tools.execute("list_classes", {"pattern": "(a+)+"}, dk)
+    # legit patterns unaffected, incl. an escaped literal that LOOKS nested
+    for ok in ("://", r"(\d+)\.(\d+)", r"\+\)\+", "(abc)+", "https?://"):
+        out = tools.execute("list_value_strings", {"pattern": ok, "limit": 3}, dk)
+        assert "error" not in out, f"{ok!r} wrongly rejected: {out}"
