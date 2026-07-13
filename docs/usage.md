@@ -274,7 +274,7 @@ ciphers = sorted({
 # → ['AES/CBC/PKCS5Padding', 'AES/ECB/NoPadding', ...]
 ```
 
-`ArgOrigin.kind` values: `ConstString`, `ConstClass`, `ConstInt`, `NewInstance`, `NewArray`, `IGet`, `SGet`, `MoveResult`, `Register`, `Unknown`. Available fields depend on kind (`string_value`, `int_value`, `class_descriptor`, …).
+`ArgOrigin.kind` values: `ConstString`, `ConstInt`, `ConstWide`, `ConstClass`, `ConstNull`, `FieldRead`, `MethodReturn`, `Parameter`, `NewInstance`, `NewArray`, `Unknown`. Available fields depend on kind (`string_value`, `int_value`, `class_descriptor`, …).
 
 ---
 

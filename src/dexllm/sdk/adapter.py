@@ -185,7 +185,15 @@ class DexKitAdapter:
 
     @property
     def raw(self) -> "dexllm.DexKit":
-        """Return the underlying ``dexllm.DexKit`` (advanced / L7 search access)."""
+        """Return the underlying ``dexllm.DexKit`` (advanced / L7 search access).
+
+        This is the low-level primitive and is NOT descriptor-validated: an identity
+        call made through it (e.g. ``adapter.raw.find_call_sites_to_api("android.util.Log->d")``
+        with a dotted name) bypasses the ``require_*`` guards and returns the raw
+        silent-empty instead of a guiding error. Use the adapter's own methods for the
+        validated contract; reach for ``.raw`` only when you intentionally want the
+        unguarded binding.
+        """
         return self._dk
 
     @property
