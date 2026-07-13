@@ -261,3 +261,86 @@ def test_pattern_filter_is_similarregex_and_redos_impossible(dk):
     assert exact["total"] == 1 and exact["items"] == [classes[0]]
     contains = tools.execute("list_classes", {"pattern": "/", "limit": 1000}, dk)
     assert all("/" in c for c in contains["items"])
+
+
+def test_container_verify_ast_batch_tools(dk):
+    """The 4 completeness tools (identify / verify_report / decompile_method_ast /
+    batch_find_methods_using_strings) return clean JSON-safe shapes."""
+    idf = tools.execute("identify", {}, dk)
+    # dex_count reflects the LOADED total (== dk.dex_count()), not just the primary probe
+    assert idf["dex_count"] == dk.dex_count() and idf["format"] in ("dex", "zip")
+    assert idf["source_count"] == len(dk.sources())
+    json.dumps(idf)
+
+    vr = tools.execute("verify_report", {}, dk)
+    assert isinstance(vr["dexes"], list) and vr["dexes"]
+    assert set(vr["dexes"][0]) >= {"dex_id", "name", "valid", "reason"}
+
+    # a known-decompilable method (non-abstract, has a body) so found is really True
+    m = next(
+        mm
+        for c in dk.list_classes()
+        for mm in dk.list_class_methods(c)
+        if tools.execute("decompile_method_ast", {"method_descriptor": mm}, dk)["found"]
+    )
+    ast = tools.execute("decompile_method_ast", {"method_descriptor": m}, dk)
+    assert ast["found"] is True and ast["ast"] is not None
+    assert ast["source"] == ""  # include_source defaults to False
+    json.dumps(ast)
+    with_src = tools.execute(
+        "decompile_method_ast", {"method_descriptor": m, "include_source": True}, dk
+    )
+    assert isinstance(with_src["source"], str)
+    # max_chars bounds the AST: a tiny cap drops the tree with an explanation
+    tiny = tools.execute(
+        "decompile_method_ast", {"method_descriptor": m, "max_chars": 5}, dk
+    )
+    assert tiny["ast"] is None and "ast_omitted" in tiny
+
+    b = tools.execute(
+        "batch_find_methods_using_strings",
+        {"query_map": {"g1": ["http"], "g2": ["reflect"]}},
+        dk,
+    )
+    assert set(b) == {"g1", "g2"}
+    for grp in b.values():  # each group is {total, items, truncated}
+        assert set(grp) == {"total", "items", "truncated"}
+        assert all(isinstance(x, str) and "->" in x for x in grp["items"])
+    json.dumps(b)
+
+
+def test_batch_find_methods_bounded_and_bad_shapes(dk):
+    """batch CAPS every group at `limit` ({total, items, truncated}) so a broad query
+    — or an empty group (C++ vacuous match-all, like the single find tool) — can't
+    dump the whole method table while `total` stays honest; a bare-string value is a
+    clean error; a `['']` edge query is a real query (not silently stripped)."""
+    tot = len(dk.list_method_descriptors())
+    # empty group = match-all but BOUNDED by limit (not a 3-9 MB dump), total honest
+    out = tools.execute(
+        "batch_find_methods_using_strings",
+        {"query_map": {"all": [], "real": ["http"]}, "limit": 5},
+        dk,
+    )
+    assert len(out["all"]["items"]) <= 5 and out["all"]["total"] <= tot
+    assert out["all"]["truncated"] is (out["all"]["total"] > 5)
+    assert out["real"]["total"] < tot
+    # a broad common substring is capped, not dumped whole
+    broad = tools.execute(
+        "batch_find_methods_using_strings", {"query_map": {"g": ["a"]}, "limit": 5}, dk
+    )["g"]
+    if broad["total"] > 5:
+        assert len(broad["items"]) == 5 and broad["truncated"] is True
+    # [''] is a real query passed through (not silently stripped away) — valid shape
+    es = tools.execute(
+        "batch_find_methods_using_strings", {"query_map": {"g": [""]}}, dk
+    )["g"]
+    assert set(es) == {"total", "items", "truncated"}
+    # a bare-string value → clean error (the binding rejects str where list[str] is required)
+    assert "error" in tools.execute(
+        "batch_find_methods_using_strings", {"query_map": {"g": "http"}}, dk
+    )
+    defs = {d["name"]: d for d in tools.tool_definitions()}
+    ap = defs["batch_find_methods_using_strings"]["input_schema"]["properties"][
+        "query_map"
+    ]["additionalProperties"]
+    assert ap.get("minItems") == 1

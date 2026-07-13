@@ -456,7 +456,7 @@ dexllm.DEFAULT_TIMEOUT_S    # 10.0
 
 ### MCP tool definitions
 ```python
-dexllm.tools.tool_definitions()    # list of 28 MCP tool schemas
+dexllm.tools.tool_definitions()    # list of 32 MCP tool schemas
 ```
 
 ---

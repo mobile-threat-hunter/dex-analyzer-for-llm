@@ -575,19 +575,107 @@ def _t_detect_content_providers(
     return {"providers": provs, "count": len(provs)}
 
 
+# ─── container / verification / AST / batch ───────────────────────────────
+
+
+def _t_identify(dk: DexKit) -> dict:
+    """Container probe of the loaded APK + its LOADED dex/source counts.
+
+    `format` / `is_apk` / `has_manifest` come from a content probe of the primary
+    source; `dex_count` / `source_count` reflect the ACTUAL loaded state across ALL
+    sources (a multi-source / packer-unpack load carries more than the primary
+    source alone — see verify_report for the per-dex list).
+    """
+    from ._dexkit_core import identify
+
+    info = dict(identify(dk.apk_path()))
+    info["dex_count"] = dk.dex_count()  # loaded total, not just the primary source
+    info["source_count"] = len(dk.sources())
+    return info
+
+
+def _t_verify_report(dk: DexKit) -> dict:
+    """Per-dex structural-verification verdict (the load-time VerifyDex results)."""
+    return {"dexes": dk.verify_report()}
+
+
+def _t_decompile_method_ast(
+    dk: DexKit,
+    method_descriptor: str,
+    include_source: bool = False,
+    max_chars: int = 20000,
+) -> dict:
+    """Return the DAD nested-list AST + signature for a method (structural).
+
+    For programmatic consumers — prefer decompile_method for reading (the Java TEXT
+    is more compact). `include_source=False` (default) omits the Java text. The AST
+    tree is bounded like the decompile tools: if it serialises beyond `max_chars`,
+    `ast` is dropped and `ast_omitted` explains (raise `max_chars` or use
+    decompile_method) — the signature/pc_map stay.
+    """
+    import json
+
+    res = dict(
+        dk.decompile_method_ast(method_descriptor, include_source=include_source)
+    )
+    ast_chars = len(json.dumps(res.get("ast")))
+    if ast_chars > max(0, int(max_chars)):
+        res["ast"] = None
+        res["ast_omitted"] = (
+            f"AST too large ({ast_chars} chars > max_chars={max_chars}); "
+            "raise max_chars, or use decompile_method for the Java text"
+        )
+    return res
+
+
+def _t_batch_find_methods_using_strings(
+    dk: DexKit,
+    query_map: dict,
+    match_type: str = "contains",
+    ignore_case: bool = False,
+    limit: int = 50,
+) -> dict:
+    """Batch string search: {group: [strings]} -> {group: {total, items, truncated}}.
+
+    One Aho-Corasick scan (cheaper than N separate find_methods_using_strings calls).
+    Each group's hits are capped at `limit` (with total/truncated) so a broad query —
+    or an empty group (C++ empty-set = vacuous match-all, exactly as the single find
+    tool) — can't dump the whole method table while `total` stays honest. A non-list
+    value is rejected by the binding as a clean {error}. Mirrors the single find
+    tool's tool-layer bounding (pagination), so behaviour is consistent.
+    """
+    limit = max(1, int(limit))
+    res = dk.batch_find_methods_using_strings(
+        query_map, match_type=match_type, ignore_case=ignore_case
+    )
+    out: dict = {g: {"total": 0, "items": [], "truncated": False} for g in query_map}
+    for g, hits in res.items():
+        descs = [_match_to_desc(h) for h in hits]
+        out[g] = {
+            "total": len(descs),
+            "items": descs[:limit],
+            "truncated": len(descs) > limit,
+        }
+    return out
+
+
 # ─── Tool catalog (Anthropic API / MCP JSON-Schema) ───────────────────────
 
 TOOL_IMPLS: dict[str, Callable] = {
     "extract_iocs": _t_extract_iocs,
     "dangerous_permission_apis": _t_dangerous_permission_apis,
     "dangerous_permission_api_callers": _t_dangerous_permission_api_callers,
+    "identify": _t_identify,
+    "verify_report": _t_verify_report,
     "list_classes": _t_list_classes,
     "list_class_methods": _t_list_class_methods,
     "list_value_strings": _t_list_value_strings,
     "decompile_method": _t_decompile_method,
+    "decompile_method_ast": _t_decompile_method_ast,
     "decompile_class": _t_decompile_class,
     "render_class_smali": _t_render_class_smali,
     "detect_content_providers": _t_detect_content_providers,
+    "batch_find_methods_using_strings": _t_batch_find_methods_using_strings,
     "find_classes_by_name": _t_find_classes_by_name,
     "find_classes_by_super": _t_find_classes_by_super,
     "find_classes_implementing": _t_find_classes_implementing,
@@ -1104,6 +1192,73 @@ TOOL_DEFINITIONS: list[dict] = [
                     "description": "cap on providers cross-referenced (cost bound)",
                 },
             },
+        },
+    },
+    {
+        "name": "identify",
+        "description": (
+            "Content-based container probe of the loaded APK: "
+            "{format, is_apk, has_manifest, dex_count}. Quick orientation on what "
+            "kind of file is loaded and how many dexes it carries."
+        ),
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "verify_report",
+        "description": (
+            "Per-dex structural-verification verdict from the load-time gate: a list "
+            "of {dex_id, name, valid, reason}. All valid on a cleanly-loaded APK; a "
+            "reason string appears for a dex that failed structural checks."
+        ),
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "decompile_method_ast",
+        "description": (
+            "The DAD nested-list AST (+ signature) for one method — structural data "
+            "for programmatic use. Prefer decompile_method for READING (Java text is "
+            "more compact); use this when you need the tree. include_source=false "
+            "(default) omits the Java text. Can be large for a big method."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "method_descriptor": {"type": "string"},
+                "include_source": {"type": "boolean", "default": False},
+                "max_chars": {"type": "integer", "default": 20000},
+            },
+            "required": ["method_descriptor"],
+        },
+    },
+    {
+        "name": "batch_find_methods_using_strings",
+        "description": (
+            "Batch string search in one Aho-Corasick scan — pass "
+            "{group_name: [strings]} and get {group_name: [method descriptors]}. "
+            "Cheaper than N separate find_methods_using_strings calls when probing "
+            "several string sets (e.g. ROOT_CHECK / REFLECTION / DEBUG buckets)."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query_map": {
+                    "type": "object",
+                    "additionalProperties": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "minItems": 1,
+                    },
+                    "description": "{group: [strings]}",
+                },
+                "match_type": {
+                    "type": "string",
+                    "enum": ["equals", "contains", "starts_with", "ends_with", "regex"],
+                    "default": "contains",
+                },
+                "ignore_case": {"type": "boolean", "default": False},
+                "limit": {"type": "integer", "default": 50},
+            },
+            "required": ["query_map"],
         },
     },
 ]
