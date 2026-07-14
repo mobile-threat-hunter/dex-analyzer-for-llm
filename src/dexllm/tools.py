@@ -270,11 +270,24 @@ def _t_find_call_sites_to_api(
     return _paginate(items, offset, limit)
 
 
+def _dex_name_map(dk: DexKit) -> dict[int, str]:
+    """Map each LOADED dex_id to its file name (``classes.dex`` / …) via verify_report.
+
+    A dex that failed structural verification is reported by verify_report with
+    ``dex_id == -1`` — the SAME sentinel an external (referenced-but-not-declared) class
+    carries. So the map excludes ``dex_id < 0`` entries; a lookup for an external class
+    then correctly misses (→ None / "") instead of picking up a rejected dex's name.
+    """
+    return {r["dex_id"]: r["name"] for r in dk.verify_report() if r["dex_id"] >= 0}
+
+
 def _t_get_class_summary(dk: DexKit, class_descriptor: str) -> dict:
     require_type_descriptor(class_descriptor)
     s = dk.get_class_summary(class_descriptor)
     return {
         "descriptor": class_descriptor,
+        "dex_id": s.dex_id,
+        "dex_name": _dex_name_map(dk).get(s.dex_id) or None,
         "superclass": s.superclass_descriptor or None,
         "interfaces": list(s.interface_descriptors),
         "method_count": len(list(s.methods)),
@@ -1000,7 +1013,7 @@ TOOL_DEFINITIONS: list[dict] = [
     },
     {
         "name": "get_class_summary",
-        "description": "Class header info: superclass, interfaces, method count, field count, access flags. Cheaper than decompile_class when you only need structure.",
+        "description": "Class header info: the declaring dex (dex_id + dex_name, e.g. 'classes2.dex'), superclass, interfaces, method count, field count, access flags. Cheaper than decompile_class when you only need structure.",
         "input_schema": {
             "type": "object",
             "properties": {

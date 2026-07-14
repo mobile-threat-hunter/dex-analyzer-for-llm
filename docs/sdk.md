@@ -101,7 +101,9 @@ The C++ `get_class_summary` bundles class metadata + fields + methods into one
 object; the SDK layer splits it (ISP) so a consumer depends only on what it
 needs (methods stay on `EnumerationPort.list_class_methods`).
 - **`ClassInfo`** `(descriptor, dex_id, is_internal, access_flags, superclass,
-  interfaces, source_file)` — class metadata, no members.
+  interfaces, source_file, dex_name)` — class metadata, no members. `dex_name` is the
+  declaring dex's file name (`classes.dex` / `classes2.dex` / …); `""` for an external
+  class (`dex_id == -1`).
 - **`FieldInfo`** `(name, type, access_flags)` — one declared field; its descriptor
   is `f"{cls}->{name}:{type}"`.
 

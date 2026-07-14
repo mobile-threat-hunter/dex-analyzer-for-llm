@@ -325,14 +325,16 @@ class ClassInfo:
     """A class's metadata (no field/method bodies — those are separate queries).
 
     ``is_internal`` is False for a class only REFERENCED (not declared) in a loaded
-    dex — such an external class has ``dex_id=-1``, ``superclass=""`` and (via
-    ``class_fields``) fields deduped + sorted by (name, type) rather than in declared
-    order. ``source_file`` may be empty.
+    dex — such an external class has ``dex_id=-1``, ``dex_name=""``, ``superclass=""``
+    and (via ``class_fields``) fields deduped + sorted by (name, type) rather than in
+    declared order. ``source_file`` may be empty. ``dex_name`` is the declaring dex's
+    file name (``classes.dex`` / ``classes2.dex`` / …, from ``verify_report``); ``""``
+    for an external class.
 
     Example (real, a2dp.Vol StoreLoc)::
 
-        ClassInfo(descriptor='La2dp/Vol/StoreLoc;', dex_id=0, is_internal=True,
-                  access_flags=1, superclass='Landroid/app/Service;',
+        ClassInfo(descriptor='La2dp/Vol/StoreLoc;', dex_id=0, dex_name='classes.dex',
+                  is_internal=True, access_flags=1, superclass='Landroid/app/Service;',
                   interfaces=(), source_file='StoreLoc.java')
     """
 
@@ -343,6 +345,7 @@ class ClassInfo:
     superclass: str
     interfaces: tuple[str, ...]
     source_file: str
+    dex_name: str = ""
 
 
 # ── cross-reference ──────────────────────────────────────────────────────────

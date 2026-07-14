@@ -35,7 +35,66 @@ def test_get_class_summary_reports_real_superclass(dk):
     assert out["superclass"] == "Landroid/app/Activity;"
     assert isinstance(out["interfaces"], list)
     assert out["method_count"] > 0 and out["field_count"] >= 0
+    # the declaring dex is reported by id AND file name (a2dp.Vol is single-dex)
+    assert out["dex_id"] == 0 and out["dex_name"] == "classes.dex"
     json.dumps(out)
+
+
+def test_get_class_summary_reports_origin_dex_name_multidex():
+    """On a multidex APK, dex_name distinguishes classes.dex vs classes2.dex per class."""
+    apks = sorted(glob.glob(str(REPO / "test_apk" / "APK" / "*.apk")))
+    md = None
+    for a in apks:
+        try:
+            if dexllm.DexKit(a).dex_count() > 1:
+                md = a
+                break
+        except Exception:  # noqa: BLE001 — skip resource-only / bad containers
+            continue
+    if md is None:
+        pytest.skip("no multidex APK in the corpus")
+    d = dexllm.DexKit(md)
+    names = {r["dex_id"]: r["name"] for r in d.verify_report() if r["dex_id"] >= 0}
+    seen = {}
+    for c in d.list_classes():
+        did = d.locate_class_dex(c)
+        seen.setdefault(did, c)
+        if len(seen) >= 2:
+            break
+    if len(seen) < 2:
+        pytest.skip("fixture did not spread declared classes across ≥2 dexes")
+    for did, c in seen.items():
+        out = tools.execute("get_class_summary", {"class_descriptor": c}, d)
+        assert out["dex_id"] == did
+        assert out["dex_name"] == names[did]  # e.g. 'classes.dex' / 'classes2.dex'
+
+
+def test_dex_name_map_excludes_rejected_dex():
+    """A rejected dex (verify_report dex_id=-1) must not leak its name to external
+    classes — the -1 sentinel is shared with external classes, so the map excludes it.
+    """
+
+    class _FakeDK:
+        def verify_report(self):
+            return [
+                {"dex_id": 0, "name": "classes.dex", "valid": True, "reason": ""},
+                {"dex_id": -1, "name": "classes2.dex", "valid": False, "reason": "bad"},
+            ]
+
+    m = tools._dex_name_map(_FakeDK())
+    assert m == {0: "classes.dex"} and -1 not in m
+    # so get_class_summary's `_dex_name_map(dk).get(dex_id) or None` yields None for an
+    # external class (dex_id=-1), not the rejected dex's file name.
+    assert (m.get(-1) or None) is None
+
+
+def test_get_class_summary_external_class_has_no_dex_name(dk):
+    """An external (referenced-not-declared) class reports dex_id=-1 and dex_name=None."""
+    # a2dp.Vol/main extends android.app.Activity, which is external here
+    out = tools.execute(
+        "get_class_summary", {"class_descriptor": "Landroid/app/Activity;"}, dk
+    )
+    assert out["dex_id"] == -1 and out["dex_name"] is None
 
 
 def test_find_call_sites_returns_clean_caller_descriptor(dk):

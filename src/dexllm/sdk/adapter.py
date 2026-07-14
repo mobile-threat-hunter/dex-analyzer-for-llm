@@ -180,6 +180,22 @@ class DexKitAdapter:
             self._dk = dexllm.DexKit(src_list[0])
         else:
             self._dk = dexllm.DexKit(src_list, lenient=lenient)
+        self._dex_names: dict[int, str] | None = None  # lazy dex_id → file-name map
+
+    def _dex_name(self, dex_id: int) -> str:
+        """Map a dex_id to its file name (``classes.dex`` / …); ``""`` if unknown.
+
+        Excludes ``dex_id < 0``: verify_report tags a REJECTED (unverifiable) dex with
+        ``dex_id == -1``, the same sentinel an external class uses — filtering it keeps
+        an external class's dex_name empty instead of a rejected dex's file name.
+        """
+        if self._dex_names is None:
+            self._dex_names = {
+                r["dex_id"]: r["name"]
+                for r in self._dk.verify_report()
+                if r["dex_id"] >= 0
+            }
+        return self._dex_names.get(dex_id, "")
 
     # -- escape hatch / session metadata --
 
@@ -583,6 +599,7 @@ class DexKitAdapter:
             superclass=s.superclass_descriptor,
             interfaces=tuple(s.interface_descriptors),
             source_file=s.source_file,
+            dex_name=self._dex_name(s.dex_id),
         )
 
     def class_fields(self, class_descriptor: str) -> tuple[FieldInfo, ...]:

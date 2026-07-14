@@ -546,6 +546,11 @@ def test_class_inspection_decomposed(apk_path):
     info = session.class_info(cls)
     assert isinstance(info, ClassInfo)
     assert info.descriptor == cls and info.superclass.startswith("L")
+    # the declaring dex's file name is reported directly (an internal class → non-empty,
+    # and it agrees with verify_report's name for that dex_id)
+    dex_names = {v.dex_id: v.name for v in session.verify_report()}
+    assert info.dex_name == dex_names[info.dex_id]
+    assert info.dex_name.endswith(".dex")
     fields = session.class_fields(cls)
     assert all(isinstance(f, FieldInfo) for f in fields)
     # methods are the separate list_class_methods query, not bundled here
@@ -554,6 +559,26 @@ def test_class_inspection_decomposed(apk_path):
     # (same result, cheaper path) and -1 for a class no dex declares
     assert session.locate_class_dex(cls) == info.dex_id
     assert session.locate_class_dex("Lno/such/Class;") == -1
+
+
+def test_dex_name_excludes_rejected_dex(apk_path):
+    """A rejected dex (verify_report dex_id=-1) must NOT leak its name onto the shared
+    -1 sentinel that external classes use — the map excludes dex_id < 0."""
+    import types
+
+    session = open_apk(apk_path)
+    # inject a verify_report with a rejected (dex_id=-1) dex, then re-read the lazy map
+    session._dk = types.SimpleNamespace(  # type: ignore[assignment]
+        verify_report=lambda: [
+            {"dex_id": 0, "name": "classes.dex"},
+            {"dex_id": -1, "name": "classes2.dex"},  # rejected / unverifiable dex
+        ]
+    )
+    session._dex_names = None
+    assert session._dex_name(0) == "classes.dex"
+    assert (
+        session._dex_name(-1) == ""
+    )  # external / rejected → empty, not 'classes2.dex'
 
 
 def test_type_references_xref(apk_path):
