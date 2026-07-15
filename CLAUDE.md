@@ -460,9 +460,27 @@ for m in dx.find_methods(classname='Lcom/example/android/tvleanback/Utils;', met
 - `/dexkit-sweep` — full-corpus regression sweep (crash/error/empty counts + throughput); primary success gate
 - `/dexkit-decompile` — decompile one method or class via the DAD-aligned pipeline
 - `/dexkit-diff` — side-by-side parity diff: androguard DAD (Python) vs DexKit-DAD (C++ port)
+- `/jadx-diff` — side-by-side vs **jadx** (reference oracle) + the jadx-parity convergence gate (for porting jadx algorithms, Phase C onward)
 - `/dexkit-bench` — head-to-head perf benchmark + output parity rate
 - `/dexkit-trace` — reproduce + bisect + capture stack trace for crashes / hangs (gdb / py-spy)
 - `/karpathy-guidelines` — four behavioral principles (re-read when needed)
+
+### jadx-parity gate — MANDATORY when porting a jadx algorithm (Phase C onward)
+
+Porting a jadx algorithm to C++ (the type-inference / structuring work the framework-classpath
+oracle branch is the foundation for) must **validate against jadx as a test-time reference
+oracle** — the exact pattern the DAD port uses with androguard. **jadx runtime stays forbidden
+in the product** (embedded-only, no JVM/subprocess — [[feedback_decompiler_choice]]); jadx runs
+ONLY in the dev/CI harness. Reimplementing jadx algorithms requires the **Apache-2.0 NOTICE**
+attribution. Tooling: `scripts/jadx_ref.py` (jadx CLI reference oracle, availability-gated),
+`scripts/jadx_parity.py` (the convergence metric: `type_jaccard` + `ours_invalid_java`), and the
+`/jadx-diff` skill. The gate (ON TOP of the standard a/b 0-regression + parity 28/28 + 0-crash
+sweep + ≥2-reviewer adversarial + HACK self-check): measure `jadx_parity.py` **before and after**
+with the SAME command — the **ported axis must converge toward jadx** (its signal rises / the
+targeted methods now match jadx in `/jadx-diff`) **and no other axis may regress** — then **pin
+jadx-sourced fixtures** for the specific decisions ported (jadx-availability-gated, so CI without
+jadx skips them). See [.claude/skills/jadx-diff/SKILL.md](.claude/skills/jadx-diff/SKILL.md) and
+[[feedback-jadx-parity-gate]].
 
 ## Known structural patterns (don't re-derive)
 
