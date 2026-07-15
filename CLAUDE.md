@@ -472,15 +472,23 @@ oracle branch is the foundation for) must **validate against jadx as a test-time
 oracle** — the exact pattern the DAD port uses with androguard. **jadx runtime stays forbidden
 in the product** (embedded-only, no JVM/subprocess — [[feedback_decompiler_choice]]); jadx runs
 ONLY in the dev/CI harness. Reimplementing jadx algorithms requires the **Apache-2.0 NOTICE**
-attribution. Tooling: `scripts/jadx_ref.py` (jadx CLI reference oracle, availability-gated),
-`scripts/jadx_parity.py` (the convergence metric: `type_jaccard` + `ours_invalid_java`), and the
-`/jadx-diff` skill. The gate (ON TOP of the standard a/b 0-regression + parity 28/28 + 0-crash
-sweep + ≥2-reviewer adversarial + HACK self-check): measure `jadx_parity.py` **before and after**
-with the SAME command — the **ported axis must converge toward jadx** (its signal rises / the
-targeted methods now match jadx in `/jadx-diff`) **and no other axis may regress** — then **pin
-jadx-sourced fixtures** for the specific decisions ported (jadx-availability-gated, so CI without
-jadx skips them). See [.claude/skills/jadx-diff/SKILL.md](.claude/skills/jadx-diff/SKILL.md) and
-[[feedback-jadx-parity-gate]].
+attribution. Convergence is enforced **automatically** by a ratchet test, not a manual step:
+- **`tests/test_jadx_parity.py`** — the AUTOMATIC gate. Runs the convergence metric (ours vs
+  jadx) against the committed `tests/jadx_parity_baseline.json` and **FAILS on a regression**
+  (`type_jaccard` drops below the floor, or `ours_invalid_java` rises above the ceiling). Runs as
+  part of `pytest tests/`; jadx-availability + jadx-version gated (SKIPS in CI without jadx / on a
+  version mismatch, like the AOSP-dataset-gated tests — never a false fail). A jadx-algorithm port
+  that IMPROVES convergence raises `type_jaccard`; **ratchet the floor up in the baseline in the
+  same change** (coverage-ratchet). Baseline pin: jadx 1.5.0, DAD-vs-jadx `type_jaccard ≈ 0.316`.
+- Manual companions: `scripts/jadx_parity.py` (the metric, run ad-hoc), the `/jadx-diff` skill
+  (per-method side-by-side while porting), and `scripts/jadx_ref.py` (the jadx CLI oracle).
+
+So the gate (ON TOP of the standard a/b 0-regression + parity 28/28 + 0-crash sweep + ≥2-reviewer
+adversarial + HACK self-check): the ratchet test must pass (**ported axis converged toward jadx,
+no other axis regressed**), the targeted methods now match jadx in `/jadx-diff`, and you **pin
+jadx-sourced fixtures** for the specific decisions ported. jadx is a test-time reference oracle
+only — `IsAssignable`-style; it never enters a product path (embedded-only). See
+[.claude/skills/jadx-diff/SKILL.md](.claude/skills/jadx-diff/SKILL.md) and [[feedback-jadx-parity-gate]].
 
 ## Known structural patterns (don't re-derive)
 

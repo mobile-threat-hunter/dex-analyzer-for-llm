@@ -64,6 +64,19 @@ python scripts/jadx_parity.py --limit 150            # DAD-vs-jadx today; jadx-b
 convergence proxy (absolute value is noisy; the BEFORE→AFTER delta is the signal).
 `ours_invalid_java` = our clearly-invalid-Java count (jadx's ≈ 0).
 
+### The AUTOMATIC gate (ratchet test)
+
+Convergence is enforced by a test, not by remembering to run a script:
+
+```bash
+pytest tests/test_jadx_parity.py    # part of `pytest tests/`; FAILS on a convergence regression
+```
+
+`tests/test_jadx_parity.py` runs the metric vs the committed `tests/jadx_parity_baseline.json`
+and fails if `type_jaccard` drops below the floor or `ours_invalid_java` rises above the ceiling.
+jadx-availability + jadx-version gated → SKIPS in CI without jadx / on a version mismatch (never a
+false fail). When a port RAISES convergence, ratchet the floor up in the baseline in the same PR.
+
 ## The gate (run for EVERY ported jadx feature)
 
 Porting a jadx algorithm is a production C++ change, so it already goes through a/b

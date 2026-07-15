@@ -1,0 +1,9 @@
+{
+  "_comment": "jadx-parity RATCHET baseline. The automatic convergence gate: a decompiler change must not drop type_jaccard below the floor or push ours_invalid_java above the ceiling (regression). A port that IMPROVES convergence raises type_jaccard — then RATCHET the floor up to the new value here (a coverage-ratchet). jadx-version-pinned: measured with the pinned jadx; a different jadx yields a different reference, so the test SKIPS on a version mismatch instead of false-failing.",
+  "jadx_version": "1.5.0",
+  "apk_match": "a2dp.Vol",
+  "limit": 80,
+  "backend": "dad",
+  "type_jaccard_floor": 0.3159,
+  "invalid_ceiling": 0
+}
