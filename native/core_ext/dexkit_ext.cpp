@@ -337,6 +337,67 @@ ContainerInfo DexKitExt::Identify(const std::string& path) {
     return info;
 }
 
+std::vector<DexVerifyStatus> DexKitExt::Verify(const std::string& path,
+                                               bool check_insns) {
+    // Load-free: mirror CollectSource's probe + per-dex VerifyDex, but COLLECT
+    // every verdict (never throw, never retain the mmap, never AddImage). The
+    // running dex_id (`accepted`) reproduces CollectSource's out.size() so a
+    // loadable path's verdicts are byte-identical to VerifyReport() after load.
+    std::vector<DexVerifyStatus> report;
+    Probe p = ProbeContainer(path);
+    int accepted = 0;  // running 0-based dex_id for verified dexes
+
+    if (p.format == "unknown") {
+        // Not openable, or neither a raw .dex nor a zip/apk. One never-throwing
+        // verdict — where DexKit(path) would throw, verify(path) reports.
+        report.push_back(
+            {-1, path, false,
+             p.map->ok()
+                 ? std::string("neither a .dex (no 'dex\\n' magic) nor a "
+                               "zip/apk container (no PK signature / invalid "
+                               "central directory)")
+                 : std::string("cannot open (file not found or empty)")});
+        return report;
+    }
+
+    if (p.format == "dex") {
+        auto vr = VerifyDex(reinterpret_cast<const uint8_t*>(p.map->data()),
+                            p.map->len(), check_insns);
+        report.push_back({vr.ok ? accepted : -1, path, vr.ok, vr.reason});
+        return report;
+    }
+
+    // p.format == "zip": verify each classes*.dex at the load boundary. A
+    // rejected dex is recorded and the walk continues (per-dex rejection), the
+    // same as the zip branch of CollectSource.
+    if (p.dex_count == 0) {
+        report.push_back(
+            {-1, path, false,
+             std::string("zip container has no classes*.dex (AndroidManifest.xml ") +
+                 (p.has_manifest ? "present" : "absent") + ")"});
+        return report;
+    }
+    for (int idx = 1; idx <= p.dex_count; ++idx) {
+        auto name =
+            "classes" + (idx == 1 ? std::string() : std::to_string(idx)) + ".dex";
+        const auto* entry = p.za->Find(name);
+        if (entry == nullptr) continue;  // counted by ProbeContainer; defensive
+        auto mm = p.za->GetUncompressData(*entry);
+        if (!mm.ok()) {
+            report.push_back({-1, name, false, "decompression failed"});
+            continue;
+        }
+        auto vr = VerifyDex(reinterpret_cast<const uint8_t*>(mm.data()), mm.len(),
+                            check_insns);
+        if (vr.ok) {
+            report.push_back({accepted++, name, true, {}});
+        } else {
+            report.push_back({-1, name, false, vr.reason});
+        }
+    }
+    return report;
+}
+
 void DexKitExt::CollectSource(const std::string& path, bool check_insns,
                              std::vector<std::unique_ptr<dexkit::MemMap>>& out) {
     Probe p = ProbeContainer(path);  // one content-based classification

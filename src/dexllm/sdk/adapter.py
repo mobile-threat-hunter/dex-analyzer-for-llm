@@ -12,7 +12,7 @@ from __future__ import annotations
 import os
 from collections.abc import Mapping, Sequence
 from types import MappingProxyType
-from typing import Union
+from typing import Any, Union
 
 import dexllm
 
@@ -354,15 +354,7 @@ class DexKitAdapter:
 
     def verify_report(self) -> tuple[DexVerifyStatus, ...]:
         """Return per-loaded-dex structural-verification verdicts."""
-        return tuple(
-            DexVerifyStatus(
-                dex_id=x["dex_id"],
-                name=x["name"],
-                valid=x["valid"],
-                reason=x["reason"],
-            )
-            for x in self._dk.verify_report()
-        )
+        return _to_verify_statuses(self._dk.verify_report())
 
     # -- DexExtractionPort --
 
@@ -714,6 +706,21 @@ class DexKitAdapter:
         self._dk.warm_analysis_caches()
 
 
+def _to_verify_statuses(
+    rows: Sequence[Mapping[str, Any]],
+) -> tuple[DexVerifyStatus, ...]:
+    """Convert raw {dex_id, name, valid, reason} rows to the typed model."""
+    return tuple(
+        DexVerifyStatus(
+            dex_id=x["dex_id"],
+            name=x["name"],
+            valid=x["valid"],
+            reason=x["reason"],
+        )
+        for x in rows
+    )
+
+
 def _to_container_info(path: SourceLike) -> ContainerInfo:
     """Probe a file by content (no load) and convert to the typed model."""
     r = dexllm.identify(os.fspath(path))
@@ -736,6 +743,12 @@ class ContainerProbe:
         """Probe a file by content (dex magic / zip central directory)."""
         return _to_container_info(path)
 
+    def verify(
+        self, path: str, *, lenient: bool = False
+    ) -> tuple[DexVerifyStatus, ...]:
+        """Structurally verify a path's dex(es) without loading (no raise)."""
+        return _to_verify_statuses(dexllm.verify(os.fspath(path), lenient))
+
 
 # ── factories ─────────────────────────────────────────────────────────────────
 
@@ -752,3 +765,12 @@ def open_apk(sources: Sources, *, lenient: bool = False) -> DexKitAdapter:
 def identify(path: SourceLike) -> ContainerInfo:
     """Probe a file by content (no load); the functional form of ``ContainerProbe``."""
     return _to_container_info(path)
+
+
+def verify(path: SourceLike, *, lenient: bool = False) -> tuple[DexVerifyStatus, ...]:
+    """Structurally verify a path's dex(es) without loading (no raise).
+
+    The functional form of :meth:`ContainerProbe.verify`. One verdict per dex,
+    byte-identical to loading the source and reading ``verify_report``.
+    """
+    return _to_verify_statuses(dexllm.verify(os.fspath(path), lenient))

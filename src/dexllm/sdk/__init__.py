@@ -21,7 +21,7 @@ Typical use::
 
 from __future__ import annotations
 
-from .adapter import ContainerProbe, DexKitAdapter, identify, open_apk
+from .adapter import ContainerProbe, DexKitAdapter, identify, open_apk, verify
 from .model import (
     ArgOrigin,
     CallSite,
@@ -70,6 +70,7 @@ __all__ = [
     # factories / adapters
     "open_apk",
     "identify",
+    "verify",
     "DexKitAdapter",
     "ContainerProbe",
     # ports

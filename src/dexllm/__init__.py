@@ -35,6 +35,7 @@ from ._dexkit_core import (
     ResolvedCallSite,
     identify,
     is_framework_descriptor,
+    verify,
 )
 from .capability import (
     ApiHit,
@@ -110,5 +111,6 @@ __all__ = [
     "safe_decompile_method_java",
     "signature",
     "summarize_capabilities",
+    "verify",
 ]
 __version__ = "0.5.0"

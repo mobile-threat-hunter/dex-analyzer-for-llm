@@ -223,6 +223,22 @@ public:
     }
 
     [[nodiscard]] MemMap GetUncompressData(const Entry& e) const {
+        // Bound the stored data region against the file: parse_cd_block only
+        // validated lfh_offset+header+name+extra, NOT data_offset+comp_size, so a
+        // crafted central-directory comp_size overreads the mmap here (STORE
+        // memcpy / DEFLATE avail_in) → OOB → SIGSEGV/SIGBUS. Mirror the
+        // GetCompressedSlice guard, overflow-safe (comp_size is an untrusted
+        // ZIP64 u64). No-op on valid input.
+        if (e.comp_size > mm_.len() || e.data_offset > mm_.len() - e.comp_size)
+            return {};
+        // MemMap's buffer length is uint32_t, so a >4 GiB uncomp_size would
+        // TRUNCATE the output buffer while the STORE memcpy below copies the full
+        // 64-bit length → OOB WRITE. Such an entry is unrepresentable here anyway
+        // (and only reachable with a >4 GiB mmap, since STORE forces
+        // uncomp_size==comp_size<=len), so reject it. No-op on valid input.
+        if (e.uncomp_size > 0xFFFFFFFFull)
+            return {};
+
         MemMap out(e.uncomp_size);
         if (!out.ok()) return {};
 

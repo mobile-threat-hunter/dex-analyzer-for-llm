@@ -66,6 +66,20 @@ public:
     // .dex nor a valid zip/apk container.
     static ContainerInfo Identify(const std::string& path);
 
+    // Load-free structural verification — the verify() sibling of Identify().
+    // Runs the DexVerifier over a path's dex(es) WITHOUT constructing/loading a
+    // DexKit, returning one DexVerifyStatus per dex (a bare .dex → one entry; a
+    // zip/apk → one per classes*.dex, in order). NEVER throws: a verification
+    // failure, an unopenable path, or a non-dex/non-container file is reported
+    // as a valid==false verdict with a reason (the identify() non-throwing
+    // posture). For a loadable source the verdicts are byte-identical to what
+    // VerifyReport() records after construction of DexKit(path) — same VerifyDex
+    // call, same dex_id assignment (accepted dexes get a running 0-based id,
+    // rejected/undecompressible get -1). `check_insns` as in the constructor's
+    // !lenient (false = ART-structural-equivalent, VerifyInsns skipped).
+    static std::vector<DexVerifyStatus> Verify(const std::string& path,
+                                               bool check_insns = true);
+
     // `lenient` runs the load-time verifier in ART-structural-equivalent mode
     // (VerifyInsns off) so a runtime-dumped, partially-decrypted dex with garbage
     // method bodies but valid structure still loads — see VerifyDex's `check_insns`.

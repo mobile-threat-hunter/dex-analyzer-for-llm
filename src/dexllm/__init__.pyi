@@ -36,6 +36,9 @@ from ._dexkit_core import (
 from ._dexkit_core import (
     is_framework_descriptor as is_framework_descriptor,
 )
+from ._dexkit_core import (
+    verify as verify,
+)
 from .capability import (
     ApiHit as ApiHit,
 )
@@ -154,4 +157,5 @@ __all__ = [
     "safe_decompile_method_java",
     "signature",
     "summarize_capabilities",
+    "verify",
 ]

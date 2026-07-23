@@ -26,7 +26,7 @@ Three components, three files:
 |---|---|---|
 | **Domain models** | [`model.py`](../src/dexllm/sdk/model.py) | 25 frozen dataclasses — the typed values every port returns/accepts. |
 | **Ports** | [`ports.py`](../src/dexllm/sdk/ports.py) | 12 `@runtime_checkable` Protocol use cases + the composite `DexAnalysisUseCase`. |
-| **Adapter** | [`adapter.py`](../src/dexllm/sdk/adapter.py) | `DexKitAdapter` (implements the ports over `DexKit`) + `ContainerProbe` + `open_apk` / `identify` factories. |
+| **Adapter** | [`adapter.py`](../src/dexllm/sdk/adapter.py) | `DexKitAdapter` (implements the ports over `DexKit`) + `ContainerProbe` + `open_apk` / `identify` / `verify` factories. |
 
 ---
 
@@ -164,7 +164,7 @@ so a consumer depends on just what it needs:
 
 | Port | Methods |
 |---|---|
-| **`ContainerProbePort`** | `identify(path) -> ContainerInfo` |
+| **`ContainerProbePort`** | `identify(path) -> ContainerInfo`, `verify(path, *, lenient=False) -> tuple[DexVerifyStatus, …]` (load-free) |
 | **`DecompilationPort`** | `decompile_method`, `decompile_method_with_pc_map`, `decompile_class`, `decompile_method_ast`, `render_method_smali`, `render_class_smali` |
 | **`EnumerationPort`** | `list_classes` / `list_classes_in_dex`, `list_class_methods`, `list_field_descriptors` / `list_field_descriptors_in_dex`, `list_method_descriptors` / `list_method_descriptors_in_dex`, `list_value_strings`, `list_external_method_refs` / `list_external_field_refs` / `list_external_type_refs`, `verify_report` (uniform scope axis: bare = all dexes, `…_in_dex(dex_id)` = one dex) |
 | **`DexExtractionPort`** | `extract_dex_bytes` (raw per-dex byte extraction; packer/dump primitive) |
@@ -202,6 +202,11 @@ application use-case interface.
   a `DexAnalysisUseCase`.
 - **`identify(path) -> ContainerInfo`** — the load-free probe (functional form of
   `ContainerProbe`).
+- **`verify(path, *, lenient=False) -> tuple[DexVerifyStatus, ...]`** — load-free
+  structural verification (functional form of `ContainerProbe.verify`). One
+  verdict per dex, byte-identical to loading the source and reading
+  `verify_report`; never raises (a malformed/unopenable path is a `valid=False`
+  verdict).
 
 The adapter is the ONLY component that imports `dexllm.DexKit`; models and ports
 have no engine dependency, so a consumer (or a test) can depend on the contract

@@ -271,6 +271,9 @@ import dexllm
 # Probe a file by content without loading it (handles disguised/extension-less APKs)
 dexllm.identify("/path/to/suspect")   # → {format, is_apk, has_manifest, dex_count}
 
+# Structurally verify a dex/apk without loading — never raises (the verify() sibling of identify())
+dexllm.verify("/path/to/suspect")     # → [{dex_id, name, valid, reason}, …] (per dex)
+
 dk = dexllm.DexKit("/path/to/app.apk")   # .apk/.jar/.zip, a bare .dex, or a disguised container
 
 # What framework APIs does it touch? (capability / threat triage)

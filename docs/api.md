@@ -35,6 +35,25 @@ dexllm.identify('app.apk')
 | `has_manifest` | `bool` | manifest present in the container |
 | `dex_count` | `int` | number of sequential `classes*.dex` |
 
+### `dexllm.verify(path: str, lenient: bool = False) -> list[dict]`
+Structural verification **without loading** — the `verify()` sibling of
+`identify()`. Runs the `VerifyDex` gate over a path's dex(es) and returns one
+verdict per dex (a bare `.dex` → one entry; a zip/apk → one per `classes*.dex`).
+**Never raises**: a malformed / unopenable / non-dex path is reported as a
+`valid=False` verdict with a `reason` (where `DexKit(path)` would throw). For a
+loadable source the result is byte-identical to `DexKit(path).verify_report()`
+(same `VerifyDex` call, same `dex_id` assignment — accepted dexes get a running
+0-based id, rejected/undecompressible get `-1`). `lenient=True` skips
+`VerifyInsns` (ART-structural-equivalent mode), as in the constructor.
+```python
+dexllm.verify('app.apk')
+# [{'dex_id': 0, 'name': 'classes.dex', 'valid': True, 'reason': ''}]
+dexllm.verify('broken.dex')
+# [{'dex_id': -1, 'name': 'broken.dex', 'valid': False, 'reason': 'Empty or truncated file'}]
+```
+Entry shape matches `dk.verify_report()` (below). Use it to screen an unknown
+file (dumped/decrypted dex, disguised container) before committing to a load.
+
 ### `dexllm.DexKit(apk_path: str)` / `DexKit(sources: list[str], lenient=False)`
 Constructs the analyzer. Identifies the file **by content, not extension** (a
 disguised `.apk` still loads). Multiple sources load in order — earlier sources

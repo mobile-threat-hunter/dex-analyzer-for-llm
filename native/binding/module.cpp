@@ -402,6 +402,34 @@ PYBIND11_MODULE(_dexkit_core, m) {
         "Probe a file by content (dex magic / PK zip signature + AndroidManifest.xml) "
         "without loading it. Returns {format, is_apk, has_manifest, dex_count}.");
 
+    // Load-free structural verification (the verify() sibling of identify()).
+    // Runs the DexVerifier over a path's dex(es) without constructing a DexKit.
+    // Never throws — a bad/unopenable/non-dex file is reported as a valid=False
+    // verdict with a reason. For a loadable source the verdicts are byte-
+    // identical to DexKit(path).verify_report(). lenient=True runs the ART-
+    // structural-equivalent mode (VerifyInsns skipped).
+    m.def(
+        "verify",
+        [](const std::string& path, bool lenient) {
+            auto report = dexkit::ext::DexKitExt::Verify(path, /*check_insns=*/!lenient);
+            py::list out;
+            for (const auto& s : report) {
+                py::dict d;
+                d["dex_id"] = s.dex_id;
+                d["name"] = s.name;
+                d["valid"] = s.valid;
+                d["reason"] = s.reason;
+                out.append(std::move(d));
+            }
+            return out;
+        },
+        py::arg("path"), py::arg("lenient") = false,
+        "Structurally verify a .dex / apk's dex(es) without loading (the verify() "
+        "sibling of identify()). Returns a list of {dex_id, name, valid, reason} — "
+        "one per dex — byte-identical to DexKit(path).verify_report() for a loadable "
+        "source. Never throws: a malformed / unopenable / non-dex path is reported as "
+        "a valid=False verdict. lenient=True skips VerifyInsns (ART-structural mode).");
+
     py::class_<dexkit::ext::ExternalTypeRef>(m, "ExternalTypeRef")
         .def_readonly("descriptor", &dexkit::ext::ExternalTypeRef::descriptor)
         .def_readonly("referenced_in_dex_ids",

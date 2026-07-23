@@ -64,14 +64,27 @@ dexllm.identify("/path/to/suspect")
 Every loaded dex is **structurally verified at load** (a port of ART's
 `DexFileVerifier`) before the core parses it — malformed or crafted input is
 rejected with a byte-level reason instead of crashing the analyzer. Inspect the
-per-dex verdicts with `dk.verify_report()`:
+per-dex verdicts of a **loaded** container with `dk.verify_report()`:
 
 ```python
 for r in dk.verify_report():
     print(r)   # → {'dex_id': 0, 'name': 'classes.dex', 'valid': True, 'reason': ''}
 ```
 
-A container whose every dex fails verification raises at construction. See the
+To verify **without loading** — the `verify()` sibling of `identify()` — use
+`dexllm.verify(path)`. It runs the same gate over a path's dex(es) and returns
+one verdict per dex, but **never raises**: a malformed / unopenable / non-dex
+path is reported as a `valid=False` verdict (where construction would throw).
+For a loadable source the result is byte-identical to `dk.verify_report()`.
+
+```python
+dexllm.verify("/path/to/suspect")     # per-dex, no load, no raise
+# → [{'dex_id': 0, 'name': 'classes.dex', 'valid': True, 'reason': ''}]
+dexllm.verify("broken.dex", lenient=True)   # lenient = ART-structural mode (skip VerifyInsns)
+```
+
+A container whose every dex fails verification raises at construction (but
+`dexllm.verify` reports it instead). See the
 [DEX-handling comparison](dexkit-vs-art-dex-handling.md) §1 for exactly what's checked.
 
 In a multidex APK, a class declared in more than one `classes*.dex` resolves **first-wins by lowest dex_id** (classes.dex before classes2.dex), deterministically — matching ART/AOSP, so packer collisions decompile to the body that actually runs (see [DEX-handling comparison](dexkit-vs-art-dex-handling.md)).

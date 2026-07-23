@@ -49,6 +49,17 @@ class ContainerProbePort(Protocol):
         """Probe a file by content (dex magic / zip central directory)."""
         ...
 
+    def verify(
+        self, path: str, *, lenient: bool = False
+    ) -> tuple[DexVerifyStatus, ...]:
+        """Structurally verify a path's dex(es) without loading.
+
+        One verdict per dex; byte-identical to ``verify_report`` after loading
+        the same source. Never raises — a malformed / unopenable / non-dex path
+        is reported as a ``valid=False`` verdict.
+        """
+        ...
+
 
 @runtime_checkable
 class DecompilationPort(Protocol):
