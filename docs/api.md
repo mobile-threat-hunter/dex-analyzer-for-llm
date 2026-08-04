@@ -326,6 +326,33 @@ Same as call sites, plus the resolved origin of each argument (L4 dataflow).
 dk.resolve_call_args('Landroid/content/Context;->getSystemService(Ljava/lang/String;)Ljava/lang/Object;')
 # list[ResolvedCallSite]  len 54; each has .args -> list[ArgOrigin]
 ```
+**What it does and does not prove (dexllm#16).** A forward register simulation with a
+**meet at every control-flow join**: a definition is reported only when it reaches the
+call on *every* path, so a reported value is never one path's value presented as
+unconditional. It is deliberately not a fixed point (two passes, no iteration to convergence): a
+value defined **before** a loop and not re-established inside it does not survive the
+loop header, and a **catch handler** starts from an unknown register file; both yield
+`Unknown`. (A value the loop re-establishes identically *does* survive — the second
+pass meets in what the backward edge carries.) `ArgOrigin.crossed_branch` separates
+the two flavours of `Unknown`:
+
+| `kind` | `crossed_branch` | meaning |
+|---|---|---|
+| a value kind | `False` | this **origin** reaches the call on every path. Exact for the `Const*` kinds; for `MethodReturn` / `FieldRead` / `NewInstance` it is the origin that is invariant ("the result of `X()`", "a read of field `F`", "a fresh `X`") — the runtime object may still differ per path |
+| `Unknown` | `True` | a tracked definition was **discarded at a merge** — the paths disagree (a genuinely conditional argument), or the analyzer gave up wholesale at a loop header / catch handler (which also discards registers that happen to agree). **Do not read it as a proven "two values"; read it as "not proven".** |
+| `Unknown` | `False` | no tracked definition at that point — never tracked (arithmetic, array load, …), or cleared by a later untracked write |
+
+Reading `int_value` / `string_value` without checking `kind` yields a silent `0` / `""`
+for both `Unknown` flavours — check `kind` first. For an argument whose value depends
+on a branch, decompile the caller (`decompile_method_java` / `decompile_method_ast`),
+which carries the real control flow.
+```python
+for s in dk.resolve_call_args(API):
+    a = s.args[1]
+    if a.kind == "ConstString":      trust(a.string_value)   # holds on every path
+    elif a.crossed_branch:           conditional(s)          # ≥2 possible values
+    else:                            untracked(s)
+```
 
 ### Field read/write xref → `list[str]`
 Which methods READ (`iget*`/`sget*`) vs WRITE (`iput*`/`sput*`) a specific field

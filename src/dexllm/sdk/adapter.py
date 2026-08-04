@@ -72,7 +72,12 @@ def _to_arg(a: object) -> ArgOrigin:
     """Convert a pybind ArgOrigin to the typed model (only the kind's field set)."""
     field = _ARG_FIELD_BY_KIND.get(a.kind)  # type: ignore[attr-defined]
     kw = {field: getattr(a, field)} if field else {}
-    return ArgOrigin(kind=a.kind, reg_num=a.reg_num, **kw)  # type: ignore[attr-defined]
+    return ArgOrigin(
+        kind=a.kind,  # type: ignore[attr-defined]
+        reg_num=a.reg_num,  # type: ignore[attr-defined]
+        crossed_branch=a.crossed_branch,  # type: ignore[attr-defined]
+        **kw,
+    )
 
 
 def _to_ext_ref(r: object) -> ExternalMethodRef:

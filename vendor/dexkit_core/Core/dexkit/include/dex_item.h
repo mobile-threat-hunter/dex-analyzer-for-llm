@@ -141,14 +141,30 @@ public:
 
     // dexllm L4 extension hook — for each invoke-* site in this method,
     // capture the argument registers' last-known definitions via a forward
-    // basic-block-scoped register simulation. The walker recognises:
+    // register simulation. The walker recognises:
     //   const-string/const-string-jumbo, const-class, const/const-4/16/wide,
     //   move/move-*, move-result/move-result-*, iget*/sget*, invoke-* + move-result.
-    // Anything else clears the affected register's tracked origin, and any
-    // branch/return/throw clears the whole register file (BB boundary).
+    // Anything else clears the affected register's tracked origin.
     // Result vector is one entry per invoke-* instruction.
+    //
+    // JOIN-AWARE (dexllm#16). The pass is path-INSENSITIVE but merge-correct: a
+    // definition survives a branch only if EVERY control-flow edge reaching the use
+    // carries the same definition. Concretely, one pre-pass collects the code item's
+    // branch targets (if / goto / packed+sparse-switch payload tables) and catch
+    // handlers; the linear scan then MEETS the register file at every target —
+    // intersecting the fall-through state with each forward predecessor's state, and
+    // keeping only entries that agree exactly. A register whose value differs per path
+    // becomes Unknown with `crossed_branch = true` (a genuinely conditional value is
+    // never reported as unconditional), while a definition that dominates the site
+    // survives the branch (it used to be dropped). A target with a BACKWARD edge is
+    // resolved by a second pass that meets in what the backward edge carries, so a
+    // value that is re-established identically inside a loop survives its header; a
+    // value defined only BEFORE the loop does not (pass 1 tombstones the header, so
+    // the back edge carries that tombstone). Catch handlers are reachable from any
+    // instruction of the try with an unknown register file and always clear.
+    // Still NOT a fixed point — two passes, no iteration to convergence.
     enum class ArgKind : uint8_t {
-        Unknown = 0,        // not tracked / BB boundary crossed
+        Unknown = 0,        // not tracked — see InvokeArg::crossed_branch
         ConstString = 1,    // string literal, value at string_idx
         ConstInt = 2,       // const/const-4/16 (32-bit), value at int_value
         ConstWide = 3,      // const-wide* (64-bit), value at int_value
@@ -169,6 +185,15 @@ public:
         uint32_t field_idx = 0;
         uint32_t method_idx = 0;
         int16_t parameter_index = -1;
+        // Only meaningful when kind == Unknown: this register HAD a tracked
+        // definition that a control-flow merge discarded — either the paths carry
+        // different values (a genuinely conditional argument) or the analyzer gave
+        // up wholesale (loop header in pass 1 / catch handler), which also tombstones
+        // registers that happen to agree. So `true` means "a definition was discarded
+        // here", NOT "two values provably reach". The complement (`false` on an
+        // Unknown) means the register carried no tracked definition at that point —
+        // never tracked (arithmetic, aget, …), or cleared by a later untracked write.
+        bool crossed_branch = false;
     };
     struct InvokeSiteWithArgs {
         uint32_t method_idx;        // callee method_idx

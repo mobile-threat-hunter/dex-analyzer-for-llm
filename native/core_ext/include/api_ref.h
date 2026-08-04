@@ -105,6 +105,12 @@ struct ArgOrigin {
     std::string field_signature;    // FieldRead — "Lcls;->name:Type"
     std::string method_signature;   // MethodReturn — "Lcls;->name(args)Ret"
     int16_t parameter_index = -1;   // Parameter
+    // Unknown only (dexllm#16): the register HAD a tracked definition that a
+    // control-flow merge discarded — the paths carry different values (a genuinely
+    // conditional argument) or the analyzer gave up (loop header / catch handler).
+    // Distinguishes that from "never tracked" (arithmetic, aget, …), which is
+    // Unknown with crossed_branch == false.
+    bool crossed_branch = false;
 };
 
 // CallSite + per-argument origins. Inherits the L2/L2.5 fields and adds the

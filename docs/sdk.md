@@ -109,10 +109,14 @@ needs (methods stay on `EnumerationPort.list_class_methods`).
 
 ### Cross-reference
 - **`ArgOrigin`** `(kind, reg_num, string_value?, int_value?, class_descriptor?,
-  field_signature?, method_signature?, parameter_index?)` — the provenance of one
-  invoke argument. Only the field its `kind` carries is set; `kind` ∈ ConstString /
-  ConstInt / ConstWide / ConstClass / ConstNull / FieldRead / MethodReturn /
-  Parameter / NewInstance / NewArray / Unknown.
+  field_signature?, method_signature?, parameter_index?, crossed_branch)` — the
+  provenance of one invoke argument. Only the field its `kind` carries is set; `kind`
+  ∈ ConstString / ConstInt / ConstWide / ConstClass / ConstNull / FieldRead /
+  MethodReturn / Parameter / NewInstance / NewArray / Unknown. A reported origin holds
+  on **every** path to the call; `crossed_branch` (Unknown only) means a tracked
+  definition was **discarded at a control-flow merge** — the paths disagree, or the
+  analyzer stopped at a loop header / catch handler. Treat it as *not proven*, not as
+  *absent* (see docs/api.md §"Intra-method arg resolution").
 - **`CallSite`** `(caller_descriptor, caller_dex_id, caller_method_idx,
   callee_descriptor, bytecode_offset, invoke_opcode)` — one invoke edge. Returned by
   both `find_call_sites` (a target's CALLERS — callee fixed) and

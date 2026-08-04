@@ -408,6 +408,11 @@ def _arg_to_compact(index: int, a: Any) -> dict:
     `value` is the literal for a const kind; the field/method signature for a
     FieldRead/MethodReturn (the value is NOT followed — that is a separate hop);
     `pN` for a Parameter; None for ConstNull/Unknown.
+
+    An Unknown that a control-flow merge produced (the argument's value depends on
+    which path reached the call, or the analyzer stopped at a loop / catch handler)
+    carries ``"varies_by_path": True`` — do NOT read it as "no value"; it means the
+    site has more than one possible value and none can be asserted.
     """
     field = _ARG_VALUE_FIELD.get(a.kind)
     try:
@@ -422,7 +427,10 @@ def _arg_to_compact(index: int, a: Any) -> dict:
             value = None
     except UnicodeDecodeError:
         value = "<undecodable MUTF-8>"
-    return {"index": index, "kind": a.kind, "value": value}
+    out = {"index": index, "kind": a.kind, "value": value}
+    if getattr(a, "crossed_branch", False):
+        out["varies_by_path"] = True
+    return out
 
 
 def _t_resolve_call_args(

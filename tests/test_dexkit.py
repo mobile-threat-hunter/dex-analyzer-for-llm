@@ -192,6 +192,180 @@ def test_forward_strings_empty_for_bodyless_and_unknown(dk):
     assert bodyless > 0, "no interface (abstract) method in the corpus"
 
 
+# ── L4 arg resolution: join-aware dataflow (dexllm#16) ───────────────────────
+
+
+def _dk_with(loadable_apks, class_descriptor):
+    """First loadable APK that declares `class_descriptor` → its DexKit, else skip.
+
+    These L4 tests are PINNED to concrete bytecode shapes (verified by hand against
+    the smali), which is what makes them fail on the pre-fix implementation — a
+    corpus-wide "did anything resolve" count does not.
+    """
+    for apk in loadable_apks:
+        try:
+            d = dexllm.DexKit(apk)
+        except Exception:
+            continue
+        if class_descriptor in set(d.list_classes()):
+            return d
+    pytest.skip(f"{class_descriptor} not in the corpus")
+
+
+# ActivityCompat.setEnterSharedElementCallback is the canonical shape for BOTH
+# defects, verified against its smali:
+#     0x0  const/4 v0, #0                 <- v0 = null on the branch-taken path
+#     0xa  if-lt  v1, v2, +13
+#     0xe  if-eqz v4, +7                  -> 0x1c   (v0 still null here)
+#     0x12 new-instance v0, …23Impl       <- v0 = a fresh object on the fall-through
+#     0x1c invoke-virtual {v3, v0}, Activity;->setEnterSharedElementCallback(…)
+# v3 (a parameter) DOMINATES the site — defect 1: it must resolve.
+# v0 is genuinely conditional — defect 2: it must NOT be reported as NewInstance.
+_SEC_CLASS = "Landroid/support/v4/app/ActivityCompat;"
+_SEC_API = (
+    "Landroid/app/Activity;->setEnterSharedElementCallback"
+    "(Landroid/app/SharedElementCallback;)V"
+)
+
+
+def _sec_site(loadable_apks):
+    """The pinned site itself (not merely the class) — several corpus APKs ship
+    different support-library versions, so search until the exact shape is found."""
+    for apk in loadable_apks:
+        try:
+            d = dexllm.DexKit(apk)
+        except Exception:
+            continue
+        for s in d.resolve_call_args(_SEC_API):
+            if s.caller_descriptor.startswith(_SEC_CLASS) and s.bytecode_offset == 0x1C:
+                return s
+    pytest.skip("pinned setEnterSharedElementCallback site not in the corpus")
+
+
+def test_dominating_definition_survives_a_branch(loadable_apks):
+    """dexllm#16 defect 1: a definition that reaches the call on EVERY path must be
+    reported even though branches sit between it and the site.
+
+    Pre-fix the register file was wiped at each branch, so this argument was Unknown.
+    """
+    args = _sec_site(loadable_apks).args
+    assert args[0].kind == "Parameter", args[0].kind  # v3, the receiver parameter
+    assert args[0].parameter_index == 0
+    assert args[0].crossed_branch is False
+
+
+def test_conditional_argument_is_not_reported_as_unconditional(loadable_apks):
+    """dexllm#16 defect 2: a value that holds on only ONE path must degrade to
+    Unknown + crossed_branch.
+
+    Pre-fix this argument was reported as `NewInstance …SharedElementCallback23Impl`,
+    which is false whenever the `if-eqz v4` branch is taken (v0 is still null).
+    """
+    args = _sec_site(loadable_apks).args
+    assert args[1].kind == "Unknown", f"one-path value reported as {args[1].kind}"
+    assert args[1].crossed_branch is True
+
+
+def test_switch_case_targets_are_join_points(loadable_apks):
+    """A packed-switch case target is a join like any other: a parameter defined
+    before the switch must survive into the case bodies (pre-fix: Unknown)."""
+    cls = "Landroid/arch/lifecycle/ClassesInfoCache$MethodReference;"
+    dk = _dk_with(loadable_apks, cls)
+    seen = 0
+    for s in dk.resolve_call_args(
+        "Ljava/lang/reflect/Method;->invoke(Ljava/lang/Object;[Ljava/lang/Object;)"
+        "Ljava/lang/Object;"
+    ):
+        if not s.caller_descriptor.startswith(cls):
+            continue
+        assert s.args[1].kind == "Parameter", s.args[1].kind
+        seen += 1
+    assert seen >= 2, "expected several switch-case call sites"
+
+
+def test_lit8_lit16_kill_their_real_destination(loadable_apks):
+    """Regression for the swapped `*-int/lit8` / `*-int/lit16` destination decoding.
+
+    `add-int/lit16 v1, v9, #4096` (format k22s) writes the 4-bit A, not AA. Decoding
+    it as AA erased an unrelated register, so v1 kept a stale pre-branch `const/16
+    v1, #16384` and the join then agreed on it — a one-path value reported as
+    unconditional (exactly the defect this change removes).
+    """
+    cls = "Lcom/bumptech/glide/gifdecoder/StandardGifDecoder;"
+    dk = _dk_with(loadable_apks, cls)
+    checked = 0
+    for s in dk.resolve_call_args("Ljava/io/ByteArrayOutputStream;-><init>(I)V"):
+        if not s.caller_descriptor.startswith(cls):
+            continue
+        assert s.args[1].kind != "ConstInt", "stale value survived an arithmetic write"
+        checked += 1
+    assert checked > 0, "pinned StandardGifDecoder site not present"
+
+
+def test_wide_value_high_half_has_no_stale_origin(loadable_apks):
+    """A 64-bit value occupies vN and vN+1; the high half must not keep an unrelated
+    tracked origin (invoke-* lists one arg entry per register, so it IS surfaced).
+
+    `PagingIndicator.createDotAlphaAnimator` builds `[F` in v3, then a const-wide into
+    v2/v3 clobbers it; the `setDuration(J)` site must not report v3 as `NewArray [F`.
+    """
+    cls = "Landroid/support/v17/leanback/widget/PagingIndicator;"
+    dk = _dk_with(loadable_apks, cls)
+    checked = 0
+    for s in dk.resolve_call_args(
+        "Landroid/animation/ObjectAnimator;->setDuration(J)"
+        "Landroid/animation/ObjectAnimator;"
+    ):
+        if not s.caller_descriptor.startswith(cls):
+            continue
+        assert s.args[1].kind == "ConstWide"  # the wide value itself
+        assert s.args[2].kind == "Unknown", s.args[2].kind  # its high half
+        checked += 1
+    assert checked > 0, "pinned PagingIndicator site not present"
+
+
+def test_catch_handler_starts_from_an_unknown_register_file(loadable_apks):
+    """A catch handler is reachable from any instruction of its try region, so no
+    tracked definition may be carried into it.
+
+    Anchored on the instruction FOLLOWING a `move-exception` (the handler's first real
+    instruction is the move-exception itself, so a call site there is inside it), and
+    it asserts that it checked something — the earlier version compared the invoke's
+    offset with the move-exception's own offset, which can never match, so its
+    assertion never ran.
+    """
+    checked = 0
+    for apk in loadable_apks:
+        try:
+            dk = dexllm.DexKit(apk)
+        except Exception:
+            continue
+        for api in (
+            "Landroid/util/Log;->e(Ljava/lang/String;Ljava/lang/String;)I",
+            "Ljava/lang/StringBuilder;->append(Ljava/lang/String;)"
+            "Ljava/lang/StringBuilder;",
+        ):
+            for s in dk.resolve_call_args(api):
+                try:
+                    smali = dk.render_method_smali(s.caller_descriptor)
+                except UnicodeDecodeError:
+                    continue
+                offs = [
+                    int(m.group(1), 16)
+                    for line in smali.splitlines()
+                    if "move-exception" in line
+                    and (m := re.match(r"^\s*0x([0-9a-f]+):", line))
+                ]
+                # the invoke immediately after a move-exception: register file is unknown
+                for off in offs:
+                    if 0 < s.bytecode_offset - off <= 4:
+                        for a in s.args:
+                            assert a.kind == "Unknown", (s.caller_descriptor, a.kind)
+                        checked += 1
+    if checked == 0:
+        pytest.skip("no call site directly inside a catch handler in this corpus")
+
+
 # ── decompile: Java ──────────────────────────────────────────────────────────
 
 

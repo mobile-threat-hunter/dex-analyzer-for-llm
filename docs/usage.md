@@ -289,6 +289,33 @@ ciphers = sorted({
 
 `ArgOrigin.kind` values: `ConstString`, `ConstInt`, `ConstWide`, `ConstClass`, `ConstNull`, `FieldRead`, `MethodReturn`, `Parameter`, `NewInstance`, `NewArray`, `Unknown`. Available fields depend on kind (`string_value`, `int_value`, `class_descriptor`, …).
 
+**How much this proves (dexllm#16).** The simulation MEETS the register file at every
+control-flow join, so a reported value is one that reaches the call on **every** path —
+a value that is only valid on one branch is never presented as unconditional. It is not
+a fixed point (two passes, no iteration): a value defined *before* a loop and not
+re-established inside it does not survive the loop header, and a *catch handler*
+starts from an unknown register file. Both give `Unknown` with
+**`crossed_branch = True`**, which means "a tracked definition was discarded here" —
+the paths may disagree, or the analyzer gave up at a loop/catch. Treat it as
+*not proven*, not as a proven pair of values. `Unknown` with `crossed_branch = False`
+means no definition was tracked at all (arithmetic, array load, …). A rule that requires an exact argument value should treat a
+`crossed_branch` argument as *unproven*, not as *absent*:
+
+```python
+for s in dk.resolve_call_args(
+        "Landroid/content/pm/PackageManager;->setComponentEnabledSetting"
+        "(Landroid/content/ComponentName;II)V"):
+    state, flags = s.args[2], s.args[3]
+    if state.kind == "ConstInt" and state.int_value == 2 \
+            and flags.kind == "ConstInt" and flags.int_value == 1:
+        print("hides its launcher icon:", s.caller_descriptor)   # proven on all paths
+    elif state.crossed_branch:
+        print("conditional — decompile to see which branch:", s.caller_descriptor)
+```
+
+When the value genuinely depends on a branch, decompile the caller
+(`decompile_method_java` / `decompile_method_ast`) — that path carries the real CFG.
+
 ---
 
 ## L5 — smali rendering (baksmali-style, no JVM)
@@ -702,10 +729,17 @@ For the ports & adapters boundary see [architecture.md](architecture.md); for th
 | L1 external refs | 20–60 ms | same |
 | L2 call sites (153 k hits) | 80–110 ms | same |
 | L3 capability summary | 90–120 ms | same |
-| L4 resolve_call_args (2.4 k sites) | 23 ms | same |
+| L4 resolve_call_args (2.4 k sites) | 23 ms¹ | same |
 | L5 render_class_smali (77 methods) | 0.5 ms | same |
 | L6 decompile_method_java | ~0.06 ms / method (warm) | cached |
 | L7 find_classes_by_name | 1–3 ms | same |
+
+¹ Measured before `resolve_call_args` became join-aware (dexllm#16). That change runs
+the register simulation twice and copies the register file at each forward branch, and
+costs **2.6–3.3×** the previous scan — measured on the bundled corpus at 2,407 sites
+2.1 ms → 6.3 ms and 3,534 sites 3.1 ms → 10.2 ms. Absolute cost stays in the
+single-digit-milliseconds range; the row above has not been re-measured on the
+original 50-dex APK.
 
 Python ↔ C++ marshalling overhead stays under 1 ms per call.
 

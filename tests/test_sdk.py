@@ -231,12 +231,37 @@ def test_typed_enumeration_and_xref(apk_path):
     # external types are reference (L…;) or array ([…) descriptors, never primitives
     assert all(t.descriptor and t.descriptor[0] in "L[" for t in trefs)
     # find_call_sites / resolve_call_args → typed, with per-kind ArgOrigin
+    crossed = 0
     for rc in session.resolve_call_args(
         "Landroid/util/Log;->d(Ljava/lang/String;Ljava/lang/String;)I"
     ):
         assert rc.callee_descriptor.endswith(")I")
         for arg in rc.args:
             assert isinstance(arg, ArgOrigin) and isinstance(arg.kind, str)
+            # dexllm#16: the merge marker is typed through and only ever set on
+            # Unknown (a resolved value holds on every path, so it cannot "vary").
+            assert isinstance(arg.crossed_branch, bool)
+            assert not (arg.crossed_branch and arg.kind != "Unknown")
+            crossed += int(arg.crossed_branch)
+
+
+def test_crossed_branch_reaches_the_typed_model(apk_path):
+    """dexllm#16: `crossed_branch` must survive the raw→typed conversion.
+
+    The invariant assertions alone pass when the flag is always False (the pre-fix
+    behaviour, and what a dropped kwarg in `_to_arg` would produce), so pin that at
+    least one True arrives.
+    """
+    session = open_apk(apk_path)
+    for api in (
+        "Ljava/lang/StringBuilder;->append(Ljava/lang/String;)Ljava/lang/StringBuilder;",
+        "Ljava/util/ArrayList;->add(Ljava/lang/Object;)Z",
+        "Landroid/util/Log;->d(Ljava/lang/String;Ljava/lang/String;)I",
+    ):
+        for rc in session.resolve_call_args(api):
+            if any(a.crossed_branch for a in rc.args):
+                return
+    pytest.skip("no conditional argument in this fixture APK")
 
 
 def test_typed_smali_rendering(apk_path):

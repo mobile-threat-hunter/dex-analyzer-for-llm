@@ -142,6 +142,30 @@ def test_resolve_call_args_shapes_compact_args(dk):
                 assert isinstance(a["value"], str)
             elif a["kind"] in ("ConstNull", "Unknown"):
                 assert a["value"] is None
+            # dexllm#16: a merge-produced Unknown is flagged so the LLM does not read
+            # "no value" where the truth is "more than one value can reach here".
+            if a.get("varies_by_path"):
+                assert a["kind"] == "Unknown"
+
+
+def test_varies_by_path_reaches_the_tool_output(dk):
+    """dexllm#16: the compact tool dict must carry `varies_by_path` for a
+    merge-produced Unknown — otherwise an LLM reads "no value" where the truth is
+    "more than one value can reach here". A dropped key would still satisfy the
+    conditional assertion in the shape test, so pin that one actually arrives."""
+    for api in (
+        "Ljava/lang/StringBuilder;->append(Ljava/lang/String;)Ljava/lang/StringBuilder;",
+        "Ljava/util/ArrayList;->add(Ljava/lang/Object;)Z",
+        "Landroid/util/Log;->d(Ljava/lang/String;Ljava/lang/String;)I",
+    ):
+        out = tools.execute(
+            "resolve_call_args", {"api_descriptor": api, "limit": 500}, dk
+        )
+        for site in out.get("items", []):
+            if any(a.get("varies_by_path") for a in site["args"]):
+                json.dumps(out)
+                return
+    pytest.skip("no conditional argument in this fixture APK")
 
 
 def test_new_xref_tools_execute_without_error(dk):

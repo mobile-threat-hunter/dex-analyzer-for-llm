@@ -20,6 +20,8 @@
 
 #include "dex_item.h"
 
+#include <unordered_set>
+
 #include "utils/byte_code_util.h"
 #include "utils/opcode_util.h"
 #include "utils/dex_descriptor_util.h"
@@ -1710,15 +1712,176 @@ std::string DexItem::RenderClassSmali(uint32_t type_idx) const {
 }
 
 
+namespace {
+
+// dexllm#16 — the control-flow join points of one code item, from a single linear
+// pre-pass. `targets` are offsets reached by a FORWARD branch (mergeable: every
+// predecessor's state is known by the time the scan arrives). `barriers` are offsets
+// the linear scan cannot meet — a loop header (some predecessor is a BACKWARD edge,
+// not yet seen) or a catch handler (reachable from any instruction of the try, with
+// the register file in an unknown state) — and clear the file instead.
+struct JoinPoints {
+    std::unordered_set<uint32_t> targets;   // forward-only: merge on arrival
+    std::unordered_set<uint32_t> back;      // has a backward edge: needs pass 2
+    std::unordered_set<uint32_t> barriers;  // catch handlers: never mergeable
+};
+
+// Bounded uleb128 (the encoded_catch_handler list is verified at load, but this
+// read is bounded anyway — same posture as the snapshot builder's ParseExceptions).
+uint32_t ReadUlebBounded(const dex::u1*& p, const dex::u1* end) {
+    uint32_t result = 0;
+    int shift = 0;
+    while (p < end && shift < 32) {
+        dex::u1 b = *p++;
+        result |= static_cast<uint32_t>(b & 0x7f) << shift;
+        if ((b & 0x80) == 0) break;
+        shift += 7;
+    }
+    return result;
+}
+int32_t ReadSlebBounded(const dex::u1*& p, const dex::u1* end) {
+    int32_t result = 0;
+    int shift = 0;
+    dex::u1 b = 0;
+    while (p < end && shift < 32) {
+        b = *p++;
+        result |= static_cast<int32_t>(b & 0x7f) << shift;
+        shift += 7;
+        if ((b & 0x80) == 0) break;
+    }
+    if (shift < 32 && (b & 0x40)) result |= -(1 << shift);
+    return result;
+}
+
+JoinPoints CollectJoinPoints(const dex::Code* code, const dex::u1* img_end) {
+    JoinPoints jp;
+    const dex::u2* base = code->insns;
+    const dex::u2* p = base;
+    const dex::u2* end_p = base + code->insns_size;
+
+    auto note = [&](int64_t from_byte, int64_t target_byte) {
+        if (target_byte < 0 ||
+            target_byte >= static_cast<int64_t>(code->insns_size) * 2) return;
+        uint32_t t = static_cast<uint32_t>(target_byte);
+        // A BACKWARD edge reaches its target from later in the scan (a loop, or
+        // just a compiler-emitted shared tail). Its contribution is only known
+        // after one full pass, so those targets are resolved on the second pass.
+        if (target_byte <= from_byte) jp.back.insert(t);
+        else jp.targets.insert(t);
+    };
+
+    while (p < end_p) {
+        uint8_t op = static_cast<uint8_t>(*p);
+        size_t width = GetBytecodeWidth(p);
+        if (width == 0) break;
+        int64_t off = (p - base) * 2;  // byte offset of this instruction
+        switch (op) {
+            case 0x28:  // goto +AA
+                note(off, off + 2 * static_cast<int8_t>((*p >> 8) & 0xFF));
+                break;
+            case 0x29:  // goto/16 +AAAA
+                note(off, off + 2 * static_cast<int16_t>(*(p + 1)));
+                break;
+            case 0x2A:  // goto/32 +AAAAAAAA
+                note(off, off + 2 * static_cast<int64_t>(
+                                    static_cast<int32_t>(ReadInt(p + 1))));
+                break;
+            case 0x32: case 0x33: case 0x34: case 0x35: case 0x36: case 0x37:
+            case 0x38: case 0x39: case 0x3A: case 0x3B: case 0x3C: case 0x3D:
+                // if-eq..le +CCCC / if-*z +BBBB — the offset is the last unit
+                note(off, off + 2 * static_cast<int16_t>(*(p + width - 1)));
+                break;
+            case 0x2B: case 0x2C: {  // packed-/sparse-switch +BBBBBBBB → payload
+                int64_t pay = off + 2 * static_cast<int64_t>(
+                                        static_cast<int32_t>(ReadInt(p + 1)));
+                if (pay < 0 || pay + 4 > static_cast<int64_t>(code->insns_size) * 2)
+                    break;
+                const dex::u2* t = base + pay / 2;
+                uint16_t ident = *t;
+                uint16_t size = *(t + 1);
+                // packed-switch payload: ident 0x0100, [size][first_key][size targets]
+                // sparse-switch payload: ident 0x0200, [size][size keys][size targets]
+                const dex::u2* tbl = nullptr;
+                if (op == 0x2B && ident == 0x0100) tbl = t + 4;          // skip first_key
+                else if (op == 0x2C && ident == 0x0200) tbl = t + 2 + size * 2;
+                if (tbl == nullptr) break;
+                // Each target is a 32-bit offset RELATIVE TO THE SWITCH instruction.
+                if (tbl + static_cast<size_t>(size) * 2 > end_p) break;  // malformed
+                for (uint16_t i = 0; i < size; ++i)
+                    note(off, off + 2 * static_cast<int64_t>(
+                                      static_cast<int32_t>(ReadInt(tbl + i * 2))));
+                break;
+            }
+            default:
+                break;
+        }
+        p += width;
+    }
+
+    // Catch handlers: reachable from anywhere inside the try region, so the register
+    // file at entry is unknown → barrier. (Mirrors ParseExceptions in the snapshot
+    // builder; bounded against the mapped image.)
+    if (code->tries_size != 0) {
+        const dex::u2* after = code->insns + code->insns_size;
+        size_t aligned = (reinterpret_cast<size_t>(after) + 3) & ~size_t(3);
+        const auto* tries = reinterpret_cast<const dex::TryBlock*>(aligned);
+        const auto* handlers_base =
+            reinterpret_cast<const dex::u1*>(tries + code->tries_size);
+        const dex::u1* end = img_end ? img_end : handlers_base + (1u << 16);
+        if (handlers_base <= end) {
+            for (uint16_t i = 0; i < code->tries_size; ++i) {
+                const dex::u1* hp = handlers_base + tries[i].handler_off;
+                if (hp < handlers_base || hp >= end) continue;
+                int32_t size = ReadSlebBounded(hp, end);
+                bool catch_all = (size <= 0);
+                int64_t typed = std::abs(static_cast<int64_t>(size));
+                for (int64_t j = 0; j < typed && hp < end; ++j) {
+                    ReadUlebBounded(hp, end);  // type_idx
+                    jp.barriers.insert(ReadUlebBounded(hp, end) * 2);
+                }
+                if (catch_all && hp < end)
+                    jp.barriers.insert(ReadUlebBounded(hp, end) * 2);
+            }
+        }
+    }
+    // Precedence: a catch handler is never mergeable; a target with any backward
+    // edge is resolved by the second pass even if it also has forward edges.
+    for (uint32_t b : jp.back) jp.targets.erase(b);
+    for (uint32_t b : jp.barriers) { jp.targets.erase(b); jp.back.erase(b); }
+    return jp;
+}
+
+// Two tracked definitions are the same value iff kind and the kind-relevant payload
+// agree. Used as the meet operator at a join: disagreement drops the register.
+bool SameOrigin(const DexItem::InvokeArg& a, const DexItem::InvokeArg& b) {
+    using K = DexItem::ArgKind;
+    if (a.kind != b.kind) return false;
+    switch (a.kind) {
+        case K::ConstString:  return a.string_idx == b.string_idx;
+        case K::ConstInt:
+        case K::ConstWide:    return a.int_value == b.int_value;
+        case K::ConstClass:
+        case K::NewInstance:
+        case K::NewArray:     return a.type_idx == b.type_idx;
+        case K::FieldRead:    return a.field_idx == b.field_idx;
+        case K::MethodReturn: return a.method_idx == b.method_idx;
+        case K::Parameter:    return a.parameter_index == b.parameter_index;
+        case K::ConstNull:    return true;
+        case K::Unknown:      return a.crossed_branch == b.crossed_branch;
+    }
+    return false;
+}
+
+}  // namespace
+
 // dexllm L4 extension — see header for contract.
 //
-// Light-weight forward register simulation, basic-block-scoped. Tracks the
-// last definition of each register; clears the whole map at any branch/
-// return/throw/switch (BB boundary). At each invoke-* instruction, captures
-// the argument registers' tracked origins. Anything we don't decode (most
-// arithmetic etc.) is left as-is — this can leak stale state through a
-// modified register, but the L4 contract is "best-effort", so callers see
-// stale info rarely and only for arithmetic-heavy methods.
+// Light-weight forward register simulation with a MEET at control-flow joins
+// (dexllm#16). Tracks the last definition of each register; at a branch target the
+// fall-through state is intersected with every forward predecessor's state, so a
+// definition survives only if it reaches the site on every path, and a per-path value
+// degrades to Unknown+crossed_branch instead of being reported as unconditional.
+// Anything we don't decode (most arithmetic etc.) clears the destination register.
 std::vector<DexItem::InvokeSiteWithArgs>
 DexItem::AnalyzeMethodInvokes(uint32_t method_idx) const {
     std::vector<InvokeSiteWithArgs> out;
@@ -1736,13 +1899,18 @@ DexItem::AnalyzeMethodInvokes(uint32_t method_idx) const {
     uint16_t first_param = total_regs > param_regs
                               ? static_cast<uint16_t>(total_regs - param_regs)
                               : 0;
-    for (uint16_t i = 0; i < param_regs; ++i) {
-        InvokeArg a;
-        a.kind = ArgKind::Parameter;
-        a.reg_num = static_cast<uint16_t>(first_param + i);
-        a.parameter_index = static_cast<int16_t>(i);
-        reg_state[a.reg_num] = a;
-    }
+    auto entry_state = [&]() {
+        std::unordered_map<uint16_t, InvokeArg> s;
+        for (uint16_t i = 0; i < param_regs; ++i) {
+            InvokeArg a;
+            a.kind = ArgKind::Parameter;
+            a.reg_num = static_cast<uint16_t>(first_param + i);
+            a.parameter_index = static_cast<int16_t>(i);
+            s[a.reg_num] = a;
+        }
+        return s;
+    };
+    reg_state = entry_state();
 
     const dex::u2* base = code->insns;
     const dex::u2* p = base;
@@ -1751,14 +1919,177 @@ DexItem::AnalyzeMethodInvokes(uint32_t method_idx) const {
     uint32_t last_invoke_callee = 0;
     bool has_last_invoke = false;
 
-    auto set_reg = [&](uint16_t r, InvokeArg a) {
+    // A 64-bit value occupies vN AND vN+1. The high half must lose any tracked origin
+    // too, or a stale one is reported for it (invoke-*/range lists one arg entry per
+    // register, so the high half IS surfaced). Table-driven off slicer's own
+    // VerifyFlags rather than a hand-kept opcode list.
+    auto is_wide_dest = [](uint8_t opcode) {
+        return (dex::GetVerifyFlagsFromOpcode(static_cast<dex::Opcode>(opcode)) &
+                dex::kVerifyRegAWide) != 0;
+    };
+    auto set_reg_op = [&](uint16_t r, InvokeArg a, uint8_t opcode) {
         a.reg_num = r;
         reg_state[r] = a;
+        if (is_wide_dest(opcode)) reg_state.erase(static_cast<uint16_t>(r + 1));
+    };
+    auto erase_reg_op = [&](uint16_t r, uint8_t opcode) {
+        reg_state.erase(r);
+        if (is_wide_dest(opcode)) reg_state.erase(static_cast<uint16_t>(r + 1));
+    };
+    uint8_t cur_op = 0;  // opcode being processed (for the wide-dest check above)
+    auto set_reg = [&](uint16_t r, InvokeArg a) { set_reg_op(r, a, cur_op); };
+
+    // dexllm#16 — join handling. `pending[T]` accumulates the MEET of every forward
+    // predecessor of T seen so far (intersect-on-arrival, so one state per pending
+    // target, not one per edge). `fall_through_live` is false right after an
+    // unconditional transfer, where the next instruction is reachable only by branch.
+    const dex::u1* img_end = nullptr;
+    if (_image != nullptr)
+        img_end = reinterpret_cast<const dex::u1*>(_image->data()) + _image->len();
+    const JoinPoints jp = CollectJoinPoints(code, img_end);
+    std::unordered_map<uint32_t, std::unordered_map<uint16_t, InvokeArg>> pending;
+    bool fall_through_live = true;
+
+    // A register that HAD a definition which a merge discarded is tombstoned rather
+    // than erased, so a consumer can tell "conditional / gave up" from "never tracked".
+    auto tombstone = [](uint16_t r) {
+        InvokeArg a;
+        a.kind = ArgKind::Unknown;
+        a.reg_num = r;
+        a.crossed_branch = true;
+        return a;
+    };
+    auto meet_into = [&](std::unordered_map<uint16_t, InvokeArg>& dst,
+                         const std::unordered_map<uint16_t, InvokeArg>& src) {
+        for (auto it = dst.begin(); it != dst.end();) {
+            auto s = src.find(it->first);
+            if (s != src.end() && SameOrigin(it->second, s->second)) {
+                ++it;
+            } else {
+                it->second = tombstone(it->first);  // differs / absent on one path
+                ++it;
+            }
+        }
+        for (const auto& kv : src)
+            if (dst.find(kv.first) == dst.end()) dst[kv.first] = tombstone(kv.first);
+    };
+    // Crafted-input backstop: a method with a pathological number of live forward
+    // branches would otherwise hold one register-file copy per pending target. Far
+    // above any real method (max observed on the corpus is double digits).
+    // Resource budget. `kMaxPending` bounds how many join targets may be in flight;
+    // `kMaxStateEntries` bounds the TOTAL number of saved register entries, because
+    // each saved state is a full copy of the register file and `registers_size` goes
+    // up to 65535 — bounding only the map COUNT let a 142 KB crafted dex allocate
+    // gigabytes (adversarial review). Both are far above any real method (corpus max
+    // is 3 orders of magnitude below), so they bite only on crafted input.
+    constexpr size_t kMaxPending = 4096;
+    constexpr size_t kMaxStateEntries = 1u << 16;
+    size_t saved_entries = 0;
+    // A target whose predecessor state could NOT be recorded (budget exhausted). It
+    // must be tombstoned wholesale at arrival: dropping an edge silently would let the
+    // meet run with an INCOMPLETE predecessor set and report a one-path value as
+    // unconditional — the exact defect this change removes. `pending` entries are
+    // erased as the scan consumes them, so the table drains and a later edge to the
+    // same target would otherwise resurrect it with only that later predecessor
+    // (adversarial review: reproducible at exactly 4096 live targets). Fail CLOSED.
+    std::unordered_set<uint32_t> poisoned;
+    // Contribution of every BACKWARD edge, collected in pass 1 and consumed in pass 2
+    // (see the two-pass loop below).
+    std::unordered_map<uint32_t, std::unordered_map<uint16_t, InvokeArg>> back_in;
+    std::unordered_map<uint32_t, std::unordered_map<uint16_t, InvokeArg>> back_out;
+    bool collecting = true;  // pass 1 fills back_out; pass 2 reads back_in
+    auto record_branch = [&](int64_t from_byte, int64_t target_byte) {
+        if (target_byte < 0 ||
+            target_byte >= static_cast<int64_t>(code->insns_size) * 2) return;
+        uint32_t t = static_cast<uint32_t>(target_byte);
+        // A forward edge into a target that ALSO has a backward edge is resolved
+        // through back_out/back_in like the backward ones, so it goes to that table.
+        const bool to_back = (target_byte <= from_byte) || jp.back.count(t);
+        if (!to_back && !jp.targets.count(t)) return;  // catch-handler barrier
+        if (to_back && !jp.back.count(t)) return;      // ditto
+        auto& tbl = to_back ? back_out : pending;
+        auto it = tbl.find(t);
+        if (it != tbl.end()) {
+            meet_into(it->second, reg_state);
+            return;
+        }
+        if (tbl.size() >= kMaxPending ||
+            saved_entries + reg_state.size() > kMaxStateEntries) {
+            poisoned.insert(t);  // cannot record this predecessor → tombstone at T
+            return;
+        }
+        saved_entries += reg_state.size();
+        tbl.emplace(t, reg_state);
     };
 
+    // dexllm#16 — TWO passes. Pass 1 resolves forward-only joins and records what each
+    // backward edge carries; pass 2 replays the scan and meets that recorded state in
+    // at the backward-edge targets, so a value that survives a compiler-emitted shared
+    // tail (a backward `goto` that is not a loop) is recovered instead of dropped.
+    // Sound by monotonicity: pass 1's states are ⊑ the true fixed point (barriers only
+    // remove entries), and meeting with a ⊑ state can only remove more — never invent
+    // a value. Only pass 2 emits sites. Two passes, not a fixed point: a value defined
+    // only BEFORE a genuine loop does not survive its header (pass 1 tombstoned the
+    // header, so the back edge carries that tombstone); a value the loop re-establishes
+    // identically does survive.
+  for (int pass = 0; pass < 2; ++pass) {
+    collecting = (pass == 0);
+    if (pass == 1) {
+        back_in = std::move(back_out);
+        back_out.clear();
+        out.clear();
+        reg_state = entry_state();
+        pending.clear();
+        saved_entries = 0;  // `poisoned` is NOT reset — poisoning is monotone (safe)
+        fall_through_live = true;
+        has_last_invoke = false;
+        p = base;
+    }
+
     while (p < end_p) {
+        const uint32_t cur_off = static_cast<uint32_t>((p - base) * 2);
+        if (jp.barriers.count(cur_off)) {
+            // Catch handler: reachable from any point of the try with the register
+            // file in an unknown state → drop everything, tombstoned so the reason
+            // stays visible.
+            for (auto& kv : reg_state) kv.second = tombstone(kv.first);
+            has_last_invoke = false;
+            fall_through_live = true;
+        } else if (jp.back.count(cur_off)) {
+            // Target of a backward edge. Pass 1 has no information about it yet; pass 2
+            // meets in everything recorded for it (both its backward and forward edges).
+            auto it = back_in.find(cur_off);
+            if (collecting || poisoned.count(cur_off) || it == back_in.end()) {
+                for (auto& kv : reg_state) kv.second = tombstone(kv.first);
+            } else if (fall_through_live) {
+                meet_into(reg_state, it->second);
+            } else {
+                reg_state = it->second;
+            }
+            has_last_invoke = false;
+            fall_through_live = true;
+        } else if (jp.targets.count(cur_off)) {
+            auto it = pending.find(cur_off);
+            const size_t freed = (it == pending.end()) ? 0 : it->second.size();
+            if (poisoned.count(cur_off) || it == pending.end()) {
+                // An unrecorded predecessor exists (budget) — nothing may be asserted.
+                for (auto& kv : reg_state) kv.second = tombstone(kv.first);
+            } else if (fall_through_live) {
+                meet_into(reg_state, it->second);
+            } else {
+                reg_state = std::move(it->second);
+            }
+            if (it != pending.end()) {
+                saved_entries -= std::min(saved_entries, freed);
+                pending.erase(it);
+            }
+            has_last_invoke = false;  // move-result must follow its invoke directly
+            fall_through_live = true;
+        }
+
         uint16_t insn = *p;
         uint8_t op = static_cast<uint8_t>(insn);
+        cur_op = op;
         size_t width = GetBytecodeWidth(p);
         if (width == 0) break;
 
@@ -1767,22 +2098,71 @@ DexItem::AnalyzeMethodInvokes(uint32_t method_idx) const {
         const uint8_t B = (insn >> 12) & 0x0F;
 
         switch (op) {
-            // ---- BB boundary: clear all tracked state ----
+            // ---- transfers of control (dexllm#16) ----
+            // The state is no longer wiped here: a definition made BEFORE a branch
+            // still reaches uses that the branch dominates. It is published to the
+            // target's pending meet, and the meet happens AT the target (above).
             case 0x0E: case 0x0F: case 0x10: case 0x11:  // return*
             case 0x27:                                    // throw
-            case 0x28: case 0x29: case 0x2A:              // goto*
-            case 0x2B: case 0x2C:                         // packed/sparse-switch
-            case 0x32: case 0x33: case 0x34: case 0x35: case 0x36: case 0x37:  // if-eq..le
-            case 0x38: case 0x39: case 0x3A: case 0x3B: case 0x3C: case 0x3D:  // if-*z
+                reg_state.clear();          // nothing falls through
+                has_last_invoke = false;
+                fall_through_live = false;
+                break;
+            case 0x28:                                    // goto +AA
+                record_branch(cur_off, cur_off + 2 * static_cast<int8_t>(AA));
                 reg_state.clear();
                 has_last_invoke = false;
+                fall_through_live = false;
+                break;
+            case 0x29:                                    // goto/16 +AAAA
+                record_branch(cur_off, cur_off + 2 * static_cast<int16_t>(*(p + 1)));
+                reg_state.clear();
+                has_last_invoke = false;
+                fall_through_live = false;
+                break;
+            case 0x2A:                                    // goto/32 +AAAAAAAA
+                record_branch(cur_off,
+                              cur_off + 2 * static_cast<int64_t>(
+                                              static_cast<int32_t>(ReadInt(p + 1))));
+                reg_state.clear();
+                has_last_invoke = false;
+                fall_through_live = false;
+                break;
+            case 0x2B: case 0x2C: {                       // packed/sparse-switch
+                // Case targets come from the payload table; the switch itself falls
+                // through when no case matches (that is the default edge).
+                int64_t pay = cur_off + 2 * static_cast<int64_t>(
+                                            static_cast<int32_t>(ReadInt(p + 1)));
+                if (pay >= 0 && pay + 4 <= static_cast<int64_t>(code->insns_size) * 2) {
+                    const dex::u2* t = base + pay / 2;
+                    uint16_t ident = *t, size = *(t + 1);
+                    const dex::u2* tbl = nullptr;
+                    if (op == 0x2B && ident == 0x0100) tbl = t + 4;
+                    else if (op == 0x2C && ident == 0x0200) tbl = t + 2 + size * 2;
+                    if (tbl != nullptr &&
+                        tbl + static_cast<size_t>(size) * 2 <= end_p) {
+                        for (uint16_t i = 0; i < size; ++i)
+                            record_branch(cur_off,
+                                          cur_off + 2 * static_cast<int64_t>(
+                                                        static_cast<int32_t>(
+                                                            ReadInt(tbl + i * 2))));
+                    }
+                }
+                has_last_invoke = false;
+                break;
+            }
+            case 0x32: case 0x33: case 0x34: case 0x35: case 0x36: case 0x37:  // if-eq..le
+            case 0x38: case 0x39: case 0x3A: case 0x3B: case 0x3C: case 0x3D:  // if-*z
+                record_branch(cur_off,
+                              cur_off + 2 * static_cast<int16_t>(*(p + width - 1)));
+                has_last_invoke = false;  // fall-through keeps the register file
                 break;
 
             // ---- move family: propagate state from src register ----
             case 0x01: case 0x04: case 0x07: {  // move{,-wide,-object} vA, vB
                 auto it = reg_state.find(B);
                 if (it != reg_state.end()) set_reg(A, it->second);
-                else reg_state.erase(A);
+                else erase_reg_op(A, op);
                 has_last_invoke = false;
                 break;
             }
@@ -1790,7 +2170,7 @@ DexItem::AnalyzeMethodInvokes(uint32_t method_idx) const {
                 uint16_t src = *(p + 1);
                 auto it = reg_state.find(src);
                 if (it != reg_state.end()) set_reg(AA, it->second);
-                else reg_state.erase(AA);
+                else erase_reg_op(AA, op);
                 has_last_invoke = false;
                 break;
             }
@@ -1799,7 +2179,7 @@ DexItem::AnalyzeMethodInvokes(uint32_t method_idx) const {
                 uint16_t src = *(p + 2);
                 auto it = reg_state.find(src);
                 if (it != reg_state.end()) set_reg(dst, it->second);
-                else reg_state.erase(dst);
+                else erase_reg_op(dst, op);
                 has_last_invoke = false;
                 break;
             }
@@ -1812,7 +2192,7 @@ DexItem::AnalyzeMethodInvokes(uint32_t method_idx) const {
                     a.method_idx = last_invoke_callee;
                     set_reg(AA, a);
                 } else {
-                    reg_state.erase(AA);
+                    erase_reg_op(AA, op);
                 }
                 break;
             }
@@ -1993,7 +2373,8 @@ DexItem::AnalyzeMethodInvokes(uint32_t method_idx) const {
 
             // ---- Untracked writers to vAA (clear dest to avoid stale state) ----
             // move-exception (0x0D), cmp-* (0x2D-0x31), aget* (0x44-0x4A),
-            // binary 23x (0x90-0xAF), binary/lit/16 (0xD0-0xD7)
+            // binary 23x (0x90-0xAF), binary/lit/8 (0xD8-0xE2, format k22b = `vAA, vBB, #+CC`),
+            // const-method-handle/type (0xFE/0xFF, format 21c = `vAA, …`).
             case 0x0D:
             case 0x2D: case 0x2E: case 0x2F: case 0x30: case 0x31:
             case 0x44: case 0x45: case 0x46: case 0x47: case 0x48: case 0x49: case 0x4A:
@@ -2001,14 +2382,16 @@ DexItem::AnalyzeMethodInvokes(uint32_t method_idx) const {
             case 0x98: case 0x99: case 0x9A: case 0x9B: case 0x9C: case 0x9D: case 0x9E: case 0x9F:
             case 0xA0: case 0xA1: case 0xA2: case 0xA3: case 0xA4: case 0xA5: case 0xA6: case 0xA7:
             case 0xA8: case 0xA9: case 0xAA: case 0xAB: case 0xAC: case 0xAD: case 0xAE: case 0xAF:
-            case 0xD0: case 0xD1: case 0xD2: case 0xD3: case 0xD4: case 0xD5: case 0xD6: case 0xD7:
-                reg_state.erase(AA);
+            case 0xD8: case 0xD9: case 0xDA: case 0xDB: case 0xDC: case 0xDD: case 0xDE: case 0xDF:
+            case 0xE0: case 0xE1: case 0xE2:
+            case 0xFE: case 0xFF:
+                erase_reg_op(AA, op);
                 has_last_invoke = false;
                 break;
 
             // ---- Untracked writers to vA (clear dest) ----
-            // instance-of (0x20), array-length (0x21),
-            // unary 12x (0x7B-0x8F), binary/2addr (0xB0-0xCF), binary/lit/8 (0xD8-0xE2)
+            // instance-of (0x20), array-length (0x21), unary 12x (0x7B-0x8F),
+            // binary/2addr (0xB0-0xCF), binary/lit/16 (0xD0-0xD7, format k22s = `vA, vB, #+CCCC`).
             case 0x20: case 0x21:
             case 0x7B: case 0x7C: case 0x7D: case 0x7E: case 0x7F:
             case 0x80: case 0x81: case 0x82: case 0x83: case 0x84: case 0x85: case 0x86: case 0x87:
@@ -2017,9 +2400,8 @@ DexItem::AnalyzeMethodInvokes(uint32_t method_idx) const {
             case 0xB8: case 0xB9: case 0xBA: case 0xBB: case 0xBC: case 0xBD: case 0xBE: case 0xBF:
             case 0xC0: case 0xC1: case 0xC2: case 0xC3: case 0xC4: case 0xC5: case 0xC6: case 0xC7:
             case 0xC8: case 0xC9: case 0xCA: case 0xCB: case 0xCC: case 0xCD: case 0xCE: case 0xCF:
-            case 0xD8: case 0xD9: case 0xDA: case 0xDB: case 0xDC: case 0xDD: case 0xDE: case 0xDF:
-            case 0xE0: case 0xE1: case 0xE2:
-                reg_state.erase(A);
+            case 0xD0: case 0xD1: case 0xD2: case 0xD3: case 0xD4: case 0xD5: case 0xD6: case 0xD7:
+                erase_reg_op(A, op);
                 has_last_invoke = false;
                 break;
 
@@ -2029,6 +2411,9 @@ DexItem::AnalyzeMethodInvokes(uint32_t method_idx) const {
         }
         p += width;
     }
+    // Nothing carries a backward edge → pass 2 would replay identically.
+    if (pass == 0 && back_out.empty() && jp.back.empty()) break;
+  }
 
     return out;
 }

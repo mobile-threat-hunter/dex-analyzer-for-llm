@@ -373,6 +373,12 @@ class ArgOrigin:
     field_signature: Optional[str] = None
     method_signature: Optional[str] = None
     parameter_index: Optional[int] = None
+    #: ``Unknown`` only: a control-flow merge discarded this register's definition —
+    #: the value depends on which path reached the call, or the analyzer stopped at a
+    #: loop header / catch handler. ``Unknown`` with this False means "never tracked"
+    #: (arithmetic, array load, …). Never treat a ``varies-by-path`` argument as a
+    #: constant: the site has more than one possible value.
+    crossed_branch: bool = False
 
 
 @dataclass(frozen=True)

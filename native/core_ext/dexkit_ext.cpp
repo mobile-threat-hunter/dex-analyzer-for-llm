@@ -1350,6 +1350,7 @@ ArgOrigin ConvertArg(const dexkit::DexItem& item,
     ArgOrigin o;
     o.kind = ArgKindName(src.kind);
     o.reg_num = src.reg_num;
+    o.crossed_branch = src.crossed_branch;
     const auto& reader = item.GetReader();
     const auto& strings = item.GetStrings();
     const auto& type_names = item.GetTypeNames();

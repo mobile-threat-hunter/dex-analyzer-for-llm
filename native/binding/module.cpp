@@ -543,6 +543,7 @@ PYBIND11_MODULE(_dexkit_core, m) {
         .def_readonly("field_signature",  &dexkit::ext::ArgOrigin::field_signature)
         .def_readonly("method_signature", &dexkit::ext::ArgOrigin::method_signature)
         .def_readonly("parameter_index",  &dexkit::ext::ArgOrigin::parameter_index)
+        .def_readonly("crossed_branch",   &dexkit::ext::ArgOrigin::crossed_branch)
         .def("__repr__", [](const dexkit::ext::ArgOrigin& a) {
             std::string body;
             if      (a.kind == "ConstString") body = "\"" + a.string_value + "\"";
@@ -552,6 +553,7 @@ PYBIND11_MODULE(_dexkit_core, m) {
             else if (a.kind == "FieldRead")    body = a.field_signature;
             else if (a.kind == "MethodReturn") body = a.method_signature;
             else if (a.kind == "Parameter")    body = "#" + std::to_string(a.parameter_index);
+            else if (a.crossed_branch)         body = "(varies per path)";
             return "ArgOrigin(" + a.kind + (body.empty() ? "" : " " + body) + ")";
         });
 
