@@ -197,6 +197,12 @@ def test_lenient_oob_operand_does_not_crash(kind, _base_classes_dex, tmp_path_fa
     for m in methods:
         dk.resolve_call_args(m)
         dk.find_call_sites_from_method(m)
+    # the forward string accessors read the same const-string index (an out-of-range
+    # `const-string` operand must be dropped at collection, not indexed into the pool).
+    for c in dk.list_classes():
+        dk.list_class_strings(c)
+    for m in methods:
+        dk.list_method_strings(m)
     assert dexllm.extract_iocs(dk, with_xref=True, xref_limit=10) is not None
 
 

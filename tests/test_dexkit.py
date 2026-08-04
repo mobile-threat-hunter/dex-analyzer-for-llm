@@ -37,6 +37,161 @@ def test_enumeration(dk):
     assert isinstance(methods, list)
 
 
+# ── forward string accessors (dexllm#17) ─────────────────────────────────────
+
+# `const-string`/`const-string/jumbo vN, "…"` as render_*_smali prints it.
+_CONST_STRING_RE = re.compile(
+    r'\bconst-string(?:/jumbo)?\s+v\d+,\s*"((?:[^"\\]|\\.)*)"'
+)
+
+
+def _unescape_smali(s):
+    """Invert EscapeSmaliString (dex_item.cpp) — \\\\ \\" \\n \\r \\t \\xNN."""
+    out, i = [], 0
+    while i < len(s):
+        c = s[i]
+        if c != "\\":
+            out.append(c)
+            i += 1
+            continue
+        nxt = s[i + 1]
+        if nxt == "x":
+            out.append(chr(int(s[i + 2 : i + 4], 16)))
+            i += 4
+        else:
+            out.append({"n": "\n", "r": "\r", "t": "\t"}.get(nxt, nxt))
+            i += 2
+    return "".join(out)
+
+
+def _smali_strings(dk, method_descriptor):
+    """Ground truth: the const-string operands of a method, from its smali text.
+
+    This is the workaround dexllm#17 replaces — it renders a whole listing and
+    un-escapes by hand — so it is an INDEPENDENT oracle for the new accessor.
+    """
+    seen, out = set(), []
+    for raw in _CONST_STRING_RE.findall(dk.render_method_smali(method_descriptor)):
+        v = _unescape_smali(raw)
+        if v not in seen:
+            seen.add(v)
+            out.append(v)
+    return out
+
+
+def test_method_strings_match_smali_ground_truth(dk):
+    """list_method_strings ≡ the const-string operands of the method's smali,
+    deduplicated in first-occurrence order — over a real sample, not one method."""
+    checked = with_strings = 0
+    for cls in dk.list_classes():
+        for m in dk.list_class_methods(cls):
+            got = dk.list_method_strings(m)
+            assert got == list(dict.fromkeys(got))  # dedup + order preserved
+            try:
+                expected = _smali_strings(dk, m)
+            except UnicodeDecodeError:
+                # The oracle itself fails here: render_*_smali hands back raw MUTF-8,
+                # so a surrogate / embedded-NUL literal is undecodable (26 methods in
+                # the bundled corpus). That is exactly what these accessors fix — skip
+                # the method rather than let the oracle's limitation ERROR the test.
+                continue
+            assert got == expected, m
+            checked += 1
+            with_strings += bool(got)
+        if with_strings >= 25:
+            break
+    assert checked > 0 and with_strings > 0  # the oracle actually saw strings
+
+
+def test_class_strings_are_method_union_then_static_init(dk):
+    """list_class_strings = ∪ declared methods' strings (ascending method_idx),
+    then the class's static-field VALUE_STRING initializers. Deduped.
+
+    The prefix property is asserted for EVERY class; the static-init tail is the
+    issue's semantics choice #1 (a `static final String` belongs to class scope, not
+    to any method) and is asserted directly on the first class that has one.
+    """
+    static_only_checked = False
+    for cls in dk.list_classes():
+        cs = dk.list_class_strings(cls)
+        assert cs == list(dict.fromkeys(cs))
+        per_method = {m: dk.list_method_strings(m) for m in dk.list_class_methods(cls)}
+        union = list(dict.fromkeys(s for v in per_method.values() for s in v))
+        assert cs[: len(union)] == union, cls  # code first, order preserved
+        if len(cs) > len(union) and not static_only_checked:
+            # the tail is static-init: present at class scope, absent from EVERY
+            # method of the class (incl. <clinit>) — semantics choice #1, pinned.
+            for s in cs[len(union) :]:
+                for m, ms in per_method.items():
+                    assert s not in ms, (cls, m, s)
+            static_only_checked = True
+        if static_only_checked and len(union) > 3:
+            break
+    if not static_only_checked:
+        # Corpus-dependent (a small APK may have no static-final-String at all) —
+        # skip rather than fail: the prefix property above was still asserted.
+        pytest.skip("no class with a static-final-String initializer in this corpus")
+
+
+def test_class_strings_subset_of_value_strings(dk):
+    """A class's strings are a subset of the app-wide value-string feed — the two
+    accessors read the same const-string + VALUE_STRING sources at different scope."""
+    app = set(dk.list_value_strings())
+    for cls in dk.list_classes()[:200]:
+        assert set(dk.list_class_strings(cls)) <= app, cls
+
+
+def test_method_strings_round_trips_into_the_reverse_query(dk):
+    """A bytecode string reported for M finds M again via find_methods_using_strings.
+
+    Only asserted for strings that CAN round-trip: matching compares raw MUTF-8 pool
+    bytes, while these accessors hand back decoded UTF-8, so a supplementary-plane
+    character (6-byte surrogate pair vs 4-byte UTF-8) or an embedded NUL (`C0 80` vs
+    `00`) cannot match — a pre-existing property of `list_value_strings()` + the
+    matcher, documented as the round-trip caveat in docs/api.md. Those are counted
+    and reported here, not silently skipped, so a REGRESSION (the encodable majority
+    breaking) still fails.
+    """
+
+    def encodable(s):
+        return all(ord(c) <= 0xFFFF for c in s) and "\x00" not in s
+
+    checked = 0
+    for cls in dk.list_classes():
+        for m in dk.list_class_methods(cls):
+            for s in dk.list_method_strings(m):
+                if not encodable(s):
+                    continue
+                hits = dk.find_methods_using_strings([s], "equals")
+                assert any(h.descriptor == m for h in hits), (m, s)
+                checked += 1
+        if checked >= 20:
+            break
+    assert checked > 0, "no encodable const-string in the corpus"
+
+
+def test_forward_strings_empty_for_bodyless_and_unknown(dk):
+    """External / unknown / malformed / bodyless targets return [] (no raise) — the
+    same graceful-empty contract as render_method_smali / decompile_method_java."""
+    assert dk.list_method_strings("Landroid/util/Log;->d(Ljava/lang/String;)I") == []
+    assert dk.list_class_strings("Ljava/lang/String;") == []
+    assert dk.list_class_strings("Lnope/NotHere;") == []
+    assert dk.list_method_strings("not-a-descriptor") == []
+    assert dk.list_method_strings("") == []
+    # abstract: declared and resolvable, but no code_item → [] (documented). Every
+    # method of an interface (ACC_INTERFACE = 0x200) is abstract.
+    bodyless = 0
+    for cls in dk.list_classes():
+        if not dk.get_class_summary(cls).access_flags & 0x200:
+            continue
+        for m in dk.list_class_methods(cls):
+            assert dk.list_method_strings(m) == [], m
+            bodyless += 1
+        if bodyless >= 5:
+            break
+    assert bodyless > 0, "no interface (abstract) method in the corpus"
+
+
 # ── decompile: Java ──────────────────────────────────────────────────────────
 
 

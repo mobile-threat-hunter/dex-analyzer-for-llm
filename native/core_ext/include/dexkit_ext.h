@@ -143,6 +143,28 @@ public:
     [[nodiscard]] std::vector<std::string>
     ListClassMethods(std::string_view class_descriptor) const;
 
+    // The FORWARD direction of FindMethodsUsingStrings / FindClassesUsingStrings
+    // ("which strings does THIS code load", vs "which code uses string S"), and the
+    // code-scoped counterpart of the app-wide ListValueStrings.
+    //
+    // ListMethodStrings: the `const-string` / `const-string/jumbo` (0x1a/0x1b)
+    // operands of ONE method's body, first-occurrence order, deduplicated. Raw
+    // MUTF-8 (the caller decodes). Bytecode only — a `static final String` lives in
+    // the class's EncodedValue array, not in any method body, so it is reported by
+    // ListClassStrings instead. Empty for an external / abstract / native /
+    // unresolved method (no body), mirroring RenderMethodSmali's "".
+    [[nodiscard]] std::vector<std::string>
+    ListMethodStrings(std::string_view method_descriptor);
+
+    // ListClassStrings: the union of ListMethodStrings over the class's DECLARED
+    // methods (ascending method_idx — the dex's per-class order, same as
+    // ListClassMethods; no superclass walk), FOLLOWED BY this class's EncodedValue
+    // static-field VALUE_STRING (0x17) initializers. Deduped, first-occurrence. Code
+    // then static init mirrors ListValueStrings' (a)/(b) ordering. Empty if the class
+    // is not declared in any loaded dex.
+    [[nodiscard]] std::vector<std::string>
+    ListClassStrings(std::string_view class_descriptor);
+
     // L1 — external reference enumeration. "External" means the descriptor's
     // class is not declared in any loaded dex. When framework_only is true,
     // results are further filtered to standard framework prefixes (android.*,

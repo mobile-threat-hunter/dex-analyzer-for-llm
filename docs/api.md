@@ -118,6 +118,49 @@ dk.list_value_strings()    # len 4939
 # ['An entry modification is not supported', '=', ...]
 ```
 
+### `dk.list_class_strings(cls_desc: str) -> list[str]` / `dk.list_method_strings(method_desc: str) -> list[str]`
+The **forward** direction of `find_classes_using_strings` / `find_methods_using_strings`
+("which strings does *this* code load", vs "which code uses string S"), and the
+code-scoped counterpart of `list_value_strings()`. MUTF-8→UTF-8, deduplicated,
+first-occurrence order. Answers "what literals does this method carry" without
+rendering a whole smali listing or decompiling.
+```python
+dk.list_method_strings('Lcom/example/android/tvleanback/Utils;'
+                       '->getDisplaySize(Landroid/content/Context;)Landroid/graphics/Point;')
+# ['window']
+dk.list_class_strings('Lcom/example/android/tvleanback/Utils;')
+# ['window']
+```
+- `list_method_strings` is **bytecode only** — the method's `const-string`/`jumbo`
+  (0x1a/0x1b) operands. A **compile-time-constant** `static final String` is a
+  class-level `EncodedValue`, not part of any method body, so it appears in
+  `list_class_strings` instead. (A non-constant initializer — `static final String X
+  = "a" + f();` — is compiled into `<clinit>`, so it *does* show up under
+  `list_method_strings("…-><clinit>()V")`.)
+- `list_class_strings` = the union over the class's **declared** methods (ascending
+  `method_idx` — the dex's per-class order, the same order `list_class_methods`
+  returns; no superclass walk) **then** the class's static-field `VALUE_STRING`
+  initializers — the same (a) code / (b) static-init order `list_value_strings()` uses
+  app-wide. It is always a subset of `list_value_strings()`.
+- Both return `[]` (never raise) for an external / abstract / native / unknown target,
+  the same graceful-empty contract as `render_method_smali`.
+- They also decode strings the smali workaround cannot: `render_*_smali` returns raw
+  MUTF-8, so a literal carrying a surrogate (a supplementary-plane character, `ED …`)
+  or an embedded NUL (`C0 80`) makes the text API raise `UnicodeDecodeError` — **26 of
+  the 188,065 methods** in the bundled corpus. These accessors decode MUTF-8 → UTF-8
+  like `list_value_strings()`, so those literals are readable.
+- **Round-trip caveat — "forward direction" is a scope statement, not an exact
+  inverse.** Feeding a returned string back into `find_*_using_strings` finds the
+  origin in the common case, but not always: of 29,588 distinct value-strings in the
+  bundled corpus, 1,299 do not round-trip — **1,236** because the reverse index covers
+  only `const-string` *bytecode* (a static-field `VALUE_STRING` initializer is not in
+  it, so a string only ever seen as a static init is unfindable by the reverse query),
+  and **63** because matching compares raw MUTF-8 pool bytes while these accessors
+  hand back decoded UTF-8 (a supplementary-plane character is a 6-byte surrogate pair
+  in the pool but 4 bytes in UTF-8; NUL is `C0 80` vs `00`). The second cause is a
+  pre-existing property of `list_value_strings()` + the matcher, not of these
+  accessors. Both directions are individually correct — do not assume set equality.
+
 ### Per-dex enumeration (uniform scope axis)
 The bare form is all loaded dexes; the `…_in_dex(dex_id)` form is one dex (empty for
 an out-of-range id), and the all-dexes form is exactly the per-dex concatenation.

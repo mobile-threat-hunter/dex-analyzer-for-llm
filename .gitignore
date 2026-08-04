@@ -12,6 +12,7 @@ local.properties
 
 # Python / pybind11 build artifacts
 /build/
+/.venv/
 *.egg-info/
 __pycache__/
 *.pyc

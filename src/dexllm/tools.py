@@ -537,6 +537,39 @@ def _t_list_value_strings(
     return _paginate(items, offset, limit)
 
 
+def _t_list_class_strings(
+    dk: DexKit,
+    class_descriptor: str,
+    offset: int = 0,
+    limit: int = DEFAULT_LIST_LIMIT,
+) -> dict:
+    """List the value-strings one class carries (code const-strings + static init).
+
+    Paginated like every other list tool — a resource-heavy `<clinit>` can carry
+    tens of KB of literals, which would otherwise blow past the context budget the
+    tool exists to protect.
+    """
+    require_type_descriptor(class_descriptor)
+    return {
+        "class": class_descriptor,
+        **_paginate(dk.list_class_strings(class_descriptor), offset, limit),
+    }
+
+
+def _t_list_method_strings(
+    dk: DexKit,
+    method_descriptor: str,
+    offset: int = 0,
+    limit: int = DEFAULT_LIST_LIMIT,
+) -> dict:
+    """List the value-strings one method loads (its const-string operands)."""
+    require_member_descriptor(method_descriptor)
+    return {
+        "method": method_descriptor,
+        **_paginate(dk.list_method_strings(method_descriptor), offset, limit),
+    }
+
+
 def _t_render_class_smali(
     dk: DexKit, class_descriptor: str, max_chars: int = DEFAULT_CLASS_CHARS
 ) -> dict:
@@ -652,6 +685,8 @@ TOOL_IMPLS: dict[str, Callable] = {
     "list_classes": _t_list_classes,
     "list_class_methods": _t_list_class_methods,
     "list_value_strings": _t_list_value_strings,
+    "list_class_strings": _t_list_class_strings,
+    "list_method_strings": _t_list_method_strings,
     "decompile_method": _t_decompile_method,
     "decompile_method_ast": _t_decompile_method_ast,
     "decompile_class": _t_decompile_class,
@@ -1135,6 +1170,64 @@ TOOL_DEFINITIONS: list[dict] = [
                     "maximum": 1000,
                 },
             },
+        },
+    },
+    {
+        "name": "list_class_strings",
+        "description": (
+            "The value-strings ONE class carries — the const-string operands of its "
+            "declared methods plus its static-field VALUE_STRING initializers, "
+            "deduplicated and paginated. The forward direction of "
+            "find_classes_using_strings, and the cheap way to see a class's literals "
+            "(C2 host, provider URI, key, MIME type) without pulling a whole smali "
+            "listing or decompile into context. Declared-only: no superclass walk. "
+            "Note: a static-init string is NOT in the reverse index, so feeding it "
+            "back to find_classes_using_strings can return nothing — that is expected, "
+            "not a missing class."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "class_descriptor": {
+                    "type": "string",
+                    "description": "e.g. 'Lcom/foo/Bar;'",
+                },
+                "offset": {"type": "integer", "default": 0},
+                "limit": {
+                    "type": "integer",
+                    "default": DEFAULT_LIST_LIMIT,
+                    "maximum": 1000,
+                },
+            },
+            "required": ["class_descriptor"],
+        },
+    },
+    {
+        "name": "list_method_strings",
+        "description": (
+            "The value-strings ONE method loads — its const-string/jumbo operands, "
+            "deduplicated and paginated. The forward direction of "
+            "find_methods_using_strings: use "
+            "it after find_call_sites_to_api / permission_callers to see what "
+            "literals a suspicious method carries, without decompiling it. Bytecode "
+            "only — a `static final String` shows up in list_class_strings instead. "
+            "Empty for an external / abstract / native method."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "method_descriptor": {
+                    "type": "string",
+                    "description": "e.g. 'Lcom/foo/Bar;->doIt(Ljava/lang/String;)V'",
+                },
+                "offset": {"type": "integer", "default": 0},
+                "limit": {
+                    "type": "integer",
+                    "default": DEFAULT_LIST_LIMIT,
+                    "maximum": 1000,
+                },
+            },
+            "required": ["method_descriptor"],
         },
     },
     {

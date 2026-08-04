@@ -140,6 +140,29 @@ class EnumerationPort(Protocol):
         """Every distinct string the app loads as a value (the IOC feed)."""
         ...
 
+    def list_class_strings(self, class_descriptor: str) -> tuple[str, ...]:
+        """Every value-string one class carries (the class-scoped forward accessor).
+
+        The union over the class's DECLARED methods' ``const-string`` operands
+        (ascending ``method_idx``, no superclass walk) followed by its static-field
+        ``VALUE_STRING`` initializers. Deduplicated, first-occurrence order.
+        Empty if the class is not declared in any loaded dex.
+
+        A static-init string is not in the reverse (const-string) index, so it may
+        not be findable via ``find_classes_using_strings`` — see docs/api.md's
+        round-trip caveat.
+        """
+        ...
+
+    def list_method_strings(self, method_descriptor: str) -> tuple[str, ...]:
+        """Every value-string one method loads (its ``const-string`` operands).
+
+        Bytecode only: a ``static final String`` is a class-level EncodedValue, so
+        it is reported by :meth:`list_class_strings` instead. Deduplicated,
+        first-occurrence order. Empty for an external / abstract / native method.
+        """
+        ...
+
     def list_external_method_refs(
         self, *, framework_only: bool = True
     ) -> tuple[ExternalMethodRef, ...]:

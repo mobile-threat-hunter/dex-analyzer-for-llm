@@ -341,7 +341,8 @@ name query and is lenient — all operations here auto-normalise their inputs, s
 pass a descriptor (`Landroid/app/Activity;`), a smali path (`android/app/Activity`), or a
 Java dotted name (`android.app.Activity`). By contrast the IDENTITY APIs (decompile,
 `find_call_sites_to_api` / `resolve_call_args`, `find_type_references`, `find_field_*`,
-`render_*_smali`, `get_class_summary`, `list_class_methods`, `locate_class_dex`) address one
+`render_*_smali`, `get_class_summary`, `list_class_methods`, `list_class_strings` /
+`list_method_strings`, `locate_class_dex`) address one
 EXACT entity and require the canonical Dalvik descriptor (the L-form emitted by `list_*` /
 `find_*` output). Passing a dotted/smali name to an identity API is a clear error, not a
 silent empty result — copy the descriptor straight from a search or list result.
@@ -355,6 +356,12 @@ dk.find_methods_by_name("onCreate", "equals",
 # String literal usage
 dk.find_classes_using_strings(["android.permission.READ_CONTACTS"])
 dk.find_methods_using_strings(["AES/CBC/PKCS5Padding"])
+
+# The FORWARD direction — which strings does THIS code load? (identity APIs:
+# exact descriptors). Answers "what literals does this method carry" without
+# rendering smali or decompiling; class scope adds static `VALUE_STRING` inits.
+dk.list_method_strings("Lcom/x/Net;->beacon()V")   # its const-string operands
+dk.list_class_strings("Lcom/x/Net;")               # declared methods ∪ static init
 
 # Batch (Aho-Corasick) — multiple keys at once, much faster than N separate scans
 dk.batch_find_classes_using_strings({

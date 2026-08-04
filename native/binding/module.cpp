@@ -103,6 +103,22 @@ py::object AstToPy(const dexkit::dad::AstValue& v) {
     return py::none();
 }
 
+// MUTF-8 → UTF-8 decode a raw string list, preserving order and dropping
+// duplicates of the DECODED text (two byte sequences that decode alike — e.g.
+// both → U+FFFD via the lone-surrogate fallback — collapse). Shared by every
+// string-listing accessor so they honour one "deduplicated" contract.
+py::list decoded_unique(const std::vector<std::string>& raw) {
+    py::list out;
+    std::unordered_set<std::string> seen;
+    for (const auto& s : raw) {
+        std::string decoded = DecodeMutf8ForPy(s);
+        if (seen.insert(decoded).second) {
+            out.append(py::str(decoded));
+        }
+    }
+    return out;
+}
+
 class PyDexKit {
 public:
     explicit PyDexKit(const std::string& apk_path, bool lenient = false)
@@ -135,15 +151,7 @@ public:
     // via the lone-surrogate fallback) collapse — honouring the "deduplicated"
     // contract.
     py::list list_value_strings() const {
-        py::list out;
-        std::unordered_set<std::string> seen;
-        for (const auto& s : ext_.ListValueStrings()) {
-            std::string decoded = DecodeMutf8ForPy(s);
-            if (seen.insert(decoded).second) {
-                out.append(py::str(decoded));
-            }
-        }
-        return out;
+        return decoded_unique(ext_.ListValueStrings());
     }
     py::list verify_report() const {
         py::list out;
@@ -160,6 +168,16 @@ public:
     std::vector<std::string>
     list_class_methods(const std::string& class_descriptor) const {
         return ext_.ListClassMethods(class_descriptor);
+    }
+
+    // Forward string accessors (the code→strings direction). Same MUTF-8 decode +
+    // dedup-on-DECODED-text contract as list_value_strings, so two raw byte
+    // sequences that decode alike collapse to one entry.
+    py::list list_method_strings(const std::string& method_descriptor) {
+        return decoded_unique(ext_.ListMethodStrings(method_descriptor));
+    }
+    py::list list_class_strings(const std::string& class_descriptor) {
+        return decoded_unique(ext_.ListClassStrings(class_descriptor));
     }
 
     std::vector<dexkit::ext::ExternalTypeRef>
@@ -635,6 +653,21 @@ PYBIND11_MODULE(_dexkit_core, m) {
              "L8: Return full Dalvik method descriptors "
              "(`Lcls;->name(proto)ret`) for every method declared on the "
              "given class. Empty if the class isn't declared in any loaded dex.")
+        .def("list_method_strings", &PyDexKit::list_method_strings,
+             py::arg("method_descriptor"),
+             "L8 (forward of find_methods_using_strings): the value-strings THIS "
+             "method loads — its `const-string`/`jumbo` operands, MUTF-8 → UTF-8 "
+             "decoded, deduplicated, first-occurrence order. Bytecode only: a "
+             "`static final String` is a class-level EncodedValue, so it shows up "
+             "in list_class_strings instead. Empty for an external / abstract / "
+             "native / unknown method (no body).")
+        .def("list_class_strings", &PyDexKit::list_class_strings,
+             py::arg("class_descriptor"),
+             "L8 (forward of find_classes_using_strings): the value-strings THIS "
+             "class carries — the union over its DECLARED methods' const-strings "
+             "(ascending method_idx, no superclass walk) followed by its static-field "
+             "VALUE_STRING (0x17) initializers. MUTF-8 → UTF-8 decoded, "
+             "deduplicated. Empty if the class isn't declared in any loaded dex.")
         .def("list_external_type_refs", &PyDexKit::list_external_type_refs,
              py::arg("framework_only") = true,
              "L1: enumerate type references not defined in any loaded dex.")

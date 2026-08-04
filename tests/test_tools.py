@@ -303,6 +303,39 @@ def test_list_value_strings_tool(dk):
     json.dumps(allv)
 
 
+def test_forward_string_tools(dk):
+    """list_class_strings / list_method_strings expose the forward accessors, paginate
+    like every other list tool, and reject a dotted (non-descriptor) target."""
+    for cls in dk.list_classes():
+        out = tools.execute("list_class_strings", {"class_descriptor": cls}, dk)
+        assert out["class"] == cls and isinstance(out["items"], list)
+        if out["items"]:
+            per_method = [
+                s
+                for m in dk.list_class_methods(cls)
+                for s in tools.execute(
+                    "list_method_strings", {"method_descriptor": m}, dk
+                )["items"]
+            ]
+            assert set(per_method) <= set(dk.list_class_strings(cls))  # methods ⊆ class
+            # pagination is real: a limit truncates and hands back a next_offset
+            page = tools.execute(
+                "list_class_strings", {"class_descriptor": cls, "limit": 1}, dk
+            )
+            assert len(page["items"]) == 1 and page["total"] == out["total"]
+            assert page["next_offset"] == (1 if out["total"] > 1 else None)
+            json.dumps(out)
+            break
+    from dexllm.descriptors import descriptor_to_java
+
+    dotted = tools.execute(
+        "list_class_strings",
+        {"class_descriptor": descriptor_to_java(dk.list_classes()[0])},
+        dk,
+    )
+    assert dotted.get("error", "").startswith("ValueError")
+
+
 def test_render_class_smali_tool(dk):
     """render_class_smali truncates on the descriptor form and rejects a dotted class."""
     cls = dk.list_classes()[0]

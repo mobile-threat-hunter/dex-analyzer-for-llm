@@ -286,9 +286,11 @@ print(dk.decompile_class_java("Lcom/example/Foo;"))
 ast = dk.decompile_method_ast("Lcom/example/Foo;->bar()V")   # nested AST + Java text
 pc = dk.decompile_method_java_with_pc("Lcom/example/Foo;->bar()V")  # {"source", "pc_map": [(line, byte_off), …]}
 
-# Search
+# Search — and its forward direction (which strings does THIS code load?)
 for m in dk.find_methods_using_strings(["http"]):
     print(m)
+print(dk.list_method_strings("Lcom/example/Foo;->bar()V"))   # its const-string operands
+print(dk.list_class_strings("Lcom/example/Foo;"))            # + static VALUE_STRING inits
 for site in dk.find_call_sites_to_api("Landroid/util/Log;->d(Ljava/lang/String;Ljava/lang/String;)I"):
     print(site)
 ```

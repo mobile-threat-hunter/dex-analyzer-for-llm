@@ -401,6 +401,28 @@ def test_cache_is_per_session_and_lru_bounded(apk_path):
         assert a.decompiler_cache_size() <= 1
 
 
+def test_forward_string_accessors_typed(apk_path):
+    """EnumerationPort forward string accessors return tuples and stay consistent:
+    a class's strings contain its methods' strings and are a subset of the app feed;
+    a dotted (non-descriptor) target raises the guiding ValueError."""
+    session = open_apk(apk_path)
+    app = set(session.list_value_strings())
+    for cls in session.list_classes():
+        cs = session.list_class_strings(cls)
+        assert isinstance(cs, tuple)
+        assert set(cs) <= app
+        for m in session.list_class_methods(cls):
+            ms = session.list_method_strings(m)
+            assert isinstance(ms, tuple)
+            assert set(ms) <= set(cs)
+        if cs:
+            break
+    with pytest.raises(ValueError):
+        session.list_class_strings("com.foo.Bar")
+    with pytest.raises(ValueError):
+        session.list_method_strings("com.foo.Bar.doIt")
+
+
 def test_enumeration_companions_typed(apk_path):
     """EnumerationPort companions: per-dex classes, flat member descriptors, raw dex.
 

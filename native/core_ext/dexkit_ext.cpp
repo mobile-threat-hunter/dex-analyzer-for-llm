@@ -583,6 +583,29 @@ void ScanEncodedValueStrings(const uint8_t*& p, const uint8_t* end,
     }
 }
 
+// Collect the static-field EncodedValue VALUE_STRING (0x17) string ids of ONE
+// class_def. Bounded by the mapped image tail (the encoded_array is an unbounded
+// leb stream; VerifyEncodedArrayAt caps the nesting depth at load).
+// ONE copy shared by ListValueStrings (app-wide) and ListClassStrings (one class)
+// — the documented "class strings ⊆ value strings" invariant requires the two
+// scans to be identical, so they must not be two drifting copies.
+void ScanClassDefStaticStrings(const dexkit::DexItem& item,
+                               const dex::ClassDef& cdef,
+                               std::vector<uint32_t>& ids) {
+    if (cdef.static_values_off == 0) return;
+    const auto& reader = item.GetReader();
+    const uint8_t* p = reader.dataPtr<uint8_t>(cdef.static_values_off);
+    if (p == nullptr) return;
+    const uint8_t* mmap_end = nullptr;
+    if (auto* img = item.GetImage())
+        mmap_end = reinterpret_cast<const uint8_t*>(img->data()) + img->len();
+    const uint8_t* end = mmap_end ? mmap_end : p + (1u << 20);
+    if (p >= end) return;
+    uint64_t count = ScanUleb(p, end);
+    for (uint64_t k = 0; k < count && p < end; ++k)
+        ScanEncodedValueStrings(p, end, ids);
+}
+
 }  // namespace
 
 std::vector<std::string> DexKitExt::ListValueStrings() const {
@@ -607,19 +630,9 @@ std::vector<std::string> DexKitExt::ListValueStrings() const {
             for (std::string_view s : item->GetUsingStrings(m))
                 if (seen.insert(s).second) out.emplace_back(s);
         // (b) static-field-initializer EncodedValue VALUE_STRING (0x17).
-        const uint8_t* mmap_end = nullptr;
-        if (auto* img = item->GetImage())
-            mmap_end = reinterpret_cast<const uint8_t*>(img->data()) + img->len();
         for (const auto& cdef : reader.ClassDefs()) {
-            if (cdef.static_values_off == 0) continue;
-            const uint8_t* p = reader.dataPtr<uint8_t>(cdef.static_values_off);
-            if (!p) continue;
-            const uint8_t* end = mmap_end ? mmap_end : p + (1u << 20);
-            if (p >= end) continue;
-            uint64_t count = ScanUleb(p, end);
             std::vector<uint32_t> ids;
-            for (uint64_t k = 0; k < count && p < end; ++k)
-                ScanEncodedValueStrings(p, end, ids);
+            ScanClassDefStaticStrings(*item, cdef, ids);
             for (uint32_t sid : ids) add(sid);
         }
     }
@@ -1260,7 +1273,8 @@ void DexKitExt::WarmAnalysisCaches() {
 void DexKitExt::EnsureApiResolveIndex() {
     // Lazy one-shot build guarded by a plain bool (no mutex), matching the sibling
     // WarmAnalysisCaches. THREAD-SAFETY PRECONDITION: every caller-analysis entry
-    // point (find_call_sites_to_api / resolve_call_args / permission_callers) is
+    // point (find_call_sites_to_api / find_call_sites_from_method / resolve_call_args /
+    // permission_callers / list_method_strings) is
     // bound WITHOUT py::gil_scoped_release, so the GIL serializes them and this
     // build runs exactly once with no data race. The
     // decompile paths that DO release the GIL never touch api_resolve_index_. If any
@@ -1609,6 +1623,68 @@ DexKitExt::FindCallSitesFromMethod(std::string_view method_descriptor) {
         cs.invoke_opcode = s.opcode;
         out.push_back(std::move(cs));
     }
+    return out;
+}
+
+std::vector<std::string>
+DexKitExt::ListMethodStrings(std::string_view method_descriptor) {
+    std::vector<std::string> out;
+
+    std::string_view cls, name, proto;
+    if (!ParseApiDescriptor(method_descriptor, cls, name, proto)) return out;
+
+    // The body lives in the dex that DECLARES the class (first-wins); an external
+    // method has none. Same resolution path as FindCallSitesFromMethod.
+    const int dex_id = LocateClassDex(cls);
+    if (dex_id < 0) return out;
+    auto* item = core_->GetDexItem(static_cast<uint16_t>(dex_id));
+    if (item == nullptr) return out;
+
+    EnsureApiResolveIndex();
+    if (static_cast<size_t>(dex_id) >= api_resolve_index_.size()) return out;
+    const auto& idx = api_resolve_index_[static_cast<size_t>(dex_id)];
+    uint32_t cls_type_idx = FindTypeIdxIndexed(idx, cls);
+    if (cls_type_idx == dex::kNoIndex) return out;
+    uint32_t m_idx = FindMethodIdxIndexed(*item, idx, cls_type_idx, name, proto);
+    if (m_idx == dex::kNoIndex) return out;
+
+    // GetUsingStrings is the public const-string index accessor (lazy-builds per
+    // method); an abstract / native method has no code_item → empty list.
+    std::unordered_set<std::string_view> seen;
+    for (std::string_view s : item->GetUsingStrings(m_idx))
+        if (seen.insert(s).second) out.emplace_back(s);
+    return out;
+}
+
+std::vector<std::string>
+DexKitExt::ListClassStrings(std::string_view class_descriptor) {
+    std::vector<std::string> out;
+    auto [item, type_idx] = core_->GetClassDeclaredPair(class_descriptor);
+    if (item == nullptr) return out;
+
+    std::unordered_set<std::string_view> seen;
+    // (a) const-string / jumbo over the class's DECLARED methods, in ascending
+    // method_idx order (class_method_ids is sorted — dex_item.cpp:237 — so this is
+    // the dex's per-class method order, NOT source declaration order).
+    for (uint32_t m_idx : item->GetClassMethodIds(type_idx))
+        for (std::string_view s : item->GetUsingStrings(m_idx))
+            if (seen.insert(s).second) out.emplace_back(s);
+
+    // (b) this class's static-field EncodedValue VALUE_STRING (0x17) initializers —
+    // the same scan ListValueStrings runs app-wide, scoped to one class_def.
+    // Gate on type_def_flag, not on GetTypeDefIdx()==kNoIndex: type_def_idx is
+    // value-initialised to 0, so a type with no class_def in this dex would read
+    // ClassDefs()[0] — a DIFFERENT class's static values (RenderClassSmali /
+    // dex_item.cpp:1650 gate the same way). GetClassDeclaredPair already implies
+    // the flag today; this keeps the read correct if that ever loosens.
+    if (!item->GetTypeDefFlags()[type_idx]) return out;
+    const auto& cdef = item->GetReader().ClassDefs()[item->GetTypeDefIdx(type_idx)];
+    std::vector<uint32_t> ids;
+    ScanClassDefStaticStrings(*item, cdef, ids);
+    const auto& strings = item->GetStrings();
+    for (uint32_t sid : ids)
+        if (sid < strings.size() && seen.insert(strings[sid]).second)
+            out.emplace_back(strings[sid]);
     return out;
 }
 

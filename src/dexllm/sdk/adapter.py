@@ -326,6 +326,16 @@ class DexKitAdapter:
         """Return every distinct string the app loads as a value."""
         return tuple(self._dk.list_value_strings())
 
+    def list_class_strings(self, class_descriptor: str) -> tuple[str, ...]:
+        """Return the value-strings the given class carries."""
+        require_type_descriptor(class_descriptor)
+        return tuple(self._dk.list_class_strings(class_descriptor))
+
+    def list_method_strings(self, method_descriptor: str) -> tuple[str, ...]:
+        """Return the value-strings the given method loads."""
+        require_member_descriptor(method_descriptor)
+        return tuple(self._dk.list_method_strings(method_descriptor))
+
     def list_external_method_refs(
         self, *, framework_only: bool = True
     ) -> tuple[ExternalMethodRef, ...]:
