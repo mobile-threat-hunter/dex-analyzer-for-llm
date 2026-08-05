@@ -2,7 +2,7 @@
 
 Mirrors the EncodedValue IEEE754 smoke check (which verifies static-field
 float/double initializers decompile to valid Java literals) but for the method
-RETURN path. Drives the actual package API (decompile_method_java /
+RETURN path. Drives the actual package API (decompile_method /
 decompile_method_ast) over the bundled test_apk/APK corpus and asserts:
 
   - boolean ()Z  returns  true / false      (never `return 0;` / `return 1;`)
@@ -90,7 +90,7 @@ def scanned():
                     continue
                 rt = m.group(1)
                 try:
-                    o = dk.decompile_method_java(ml)
+                    o = dk.decompile_method(ml)
                 except Exception:
                     continue
                 checked += 1
@@ -221,7 +221,7 @@ def test_double_bit_patterns_largely_eliminated():
             if per >= 3000:
                 break
             try:
-                src = dk.decompile_class_java(c)
+                src = dk.decompile_class(c)
             except Exception:
                 continue
             per += 1
@@ -240,7 +240,7 @@ def test_double_bit_patterns_largely_eliminated():
 
 def test_text_and_ast_agree_on_corrected_returns():
     """For a handful of corrected returns, decompile_method_ast must not emit a
-    raw int / lowercase -inf where decompile_method_java emits the literal."""
+    raw int / lowercase -inf where decompile_method emits the literal."""
     apks = _apks()
     if not apks:
         pytest.skip("no test APK")
@@ -267,7 +267,7 @@ def test_text_and_ast_agree_on_corrected_returns():
                 ):
                     continue
                 try:
-                    txt = dk.decompile_method_java(ml)
+                    txt = dk.decompile_method(ml)
                 except Exception:
                     continue
                 checked += 1
@@ -333,7 +333,7 @@ def test_boolean_assign_literals():
             if per >= 3000:
                 break
             try:
-                src = dk.decompile_class_java(c)
+                src = dk.decompile_class(c)
             except Exception:
                 continue
             per += 1

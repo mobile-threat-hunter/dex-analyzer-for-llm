@@ -1,6 +1,6 @@
 """End-to-end test for the D-3 source-line ↔ bytecode-offset map (dexllm#1).
 
-Drives the binding API `decompile_method_java_with_pc` over the bundled
+Drives the binding API `decompile_method_with_pc_map` over the bundled
 test_apk/APK corpus and asserts:
 
   - every Java line that mentions an anchor op (invoke / iget / sget /
@@ -53,7 +53,7 @@ def test_known_method_pc_map(dk):
         "Lcom/example/android/tvleanback/Utils;->"
         "getDisplaySize(Landroid/content/Context;)Landroid/graphics/Point;"
     )
-    r = dk.decompile_method_java_with_pc(desc)
+    r = dk.decompile_method_with_pc_map(desc)
     if not r["source"] or r["source"].startswith("// DECOMPILE ERROR"):
         pytest.skip("target method not in this build of the corpus")
     pcm = dict(r["pc_map"])
@@ -84,7 +84,7 @@ def test_text_and_ast_offsets_agree(dk):
         "Lcom/example/android/tvleanback/Utils;->"
         "getDisplaySize(Landroid/content/Context;)Landroid/graphics/Point;"
     )
-    r = dk.decompile_method_java_with_pc(desc)
+    r = dk.decompile_method_with_pc_map(desc)
     if not r["source"] or r["source"].startswith("// DECOMPILE ERROR"):
         pytest.skip("target method not in this build of the corpus")
     d = dk.decompile_method_ast(desc, include_source=False)
@@ -104,7 +104,7 @@ def test_elided_super_not_mapped_to_zero(dk):
     the super's offset (0). Text and AST must agree.
     """
     desc = "Landroid/support/v4/app/ActivityCompat;-><init>()V"
-    r = dk.decompile_method_java_with_pc(desc)
+    r = dk.decompile_method_with_pc_map(desc)
     if not r["source"] or r["source"].startswith("// DECOMPILE ERROR"):
         pytest.skip("target constructor not in this build of the corpus")
     valid = smali_offsets(dk, desc)

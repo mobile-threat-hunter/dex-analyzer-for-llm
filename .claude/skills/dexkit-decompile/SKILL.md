@@ -25,7 +25,7 @@ APK = "<resolved_apk_path>"
 DESC = "<method_descriptor>"
 dk = dexllm.DexKit(APK)
 try:
-    src = dk.decompile_method_java(DESC)
+    src = dk.decompile_method(DESC)
     print(src if src else "(empty — likely external method ref, no code in this dex)")
 except RuntimeError as e:
     print(f"ERROR: {e}")
@@ -37,7 +37,7 @@ Whole class:
 python << 'EOF'
 import dexllm
 dk = dexllm.DexKit("<resolved_apk_path>")
-print(dk.decompile_class_java("<class_descriptor>"))
+print(dk.decompile_class("<class_descriptor>"))
 EOF
 ```
 

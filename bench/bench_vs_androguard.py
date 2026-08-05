@@ -99,7 +99,7 @@ dk_out = {}
 for m in sample:
     em = m.get_method()
     desc = f"{em.get_class_name()}->{em.get_name()}{em.get_descriptor()}"
-    dk_out[desc] = dk.decompile_method_java(desc)
+    dk_out[desc] = dk.decompile_method(desc)
 dk_dec = time.time() - t
 
 t = time.time()
@@ -138,7 +138,7 @@ random.shuffle(cls_sample)
 cls_sample = cls_sample[:M]
 
 t = time.time()
-dk_cls = {c: dk.decompile_class_java(c) for c in cls_sample}
+dk_cls = {c: dk.decompile_class(c) for c in cls_sample}
 dk_cdec = time.time() - t
 
 t = time.time()
@@ -204,13 +204,13 @@ workers = min(32, (os.cpu_count() or 8))
 dk.decompiler_clear_cache()
 t = time.time()
 for c in all_cls:
-    dk.decompile_class_java(c)
+    dk.decompile_class(c)
 seq_full = time.time() - t
 
 dk.decompiler_clear_cache()
 t = time.time()
 with ThreadPoolExecutor(max_workers=workers) as ex:
-    list(ex.map(dk.decompile_class_java, all_cls, chunksize=32))
+    list(ex.map(dk.decompile_class, all_cls, chunksize=32))
 par_full = time.time() - t
 
 # ── EACH TOOL AT ITS MAX: dexllm parallel vs androguard single (full APK) ──────

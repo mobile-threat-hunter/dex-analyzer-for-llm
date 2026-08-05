@@ -190,7 +190,7 @@ def test_lenient_oob_operand_does_not_crash(kind, _base_classes_dex, tmp_path_fa
     dk.find_methods_using_strings(["http"], match_type="contains")
     methods = [m for c in dk.list_classes() for m in dk.list_class_methods(c)]
     for c in dk.list_classes():
-        dk.decompile_class_java(c)  # load-time cross-ref + decompile
+        dk.decompile_class(c)  # load-time cross-ref + decompile
     # resolve_call_args + find_call_sites_from both walk AnalyzeMethodInvokes →
     # BuildMethodSignature on the raw invoke operand — the same lenient OOB surface (an
     # out-of-range callee method_idx must yield a bounded "" descriptor, never a crash).

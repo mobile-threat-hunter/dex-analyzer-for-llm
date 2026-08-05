@@ -193,10 +193,22 @@ raw = dk.extract_dex_bytes(0)   # len 5472720, raw[:4] == b'dex\n'
 
 ## 3. Decompilation (DAD-aligned Java)
 
-### `dk.decompile_method_java(desc: str) -> str`
+**Naming.** The `decompile_*` family always produces **Java**; the suffix says how
+much structure comes back for that *same* decompilation — bare = text,
+`_with_pc_map` = text + offset map, `_ast` = text + structured tree (at the default
+`include_source=True` the AST call carries the identical Java in its `source`). A genuinely different output form is a
+different verb: `render_*_smali`. The former `_java`-suffixed spellings
+(`decompile_method_java`, `decompile_class_java`, `decompile_method_java_with_pc`,
+plus `dexllm.safe_decompile_method_java` / `safe_decompile_class_java`) advertised a
+parallelism with `_ast` that does not exist; they still work as **deprecated
+aliases** but new code should use the names below — the ones the typed
+[`dexllm.sdk`](sdk.md) layer already used (all three) and the MCP tool catalog
+already used (`decompile_method` / `decompile_class`; it exposes no pc-map tool).
+
+### `dk.decompile_method(desc: str) -> str`
 Java text for a single method. GIL released. Empty string for external refs.
 ```python
-dk.decompile_method_java('Lcom/example/android/tvleanback/Utils;->convertDpToPixel(Landroid/content/Context;I)I')
+dk.decompile_method('Lcom/example/android/tvleanback/Utils;->convertDpToPixel(Landroid/content/Context;I)I')
 ```
 ```java
 
@@ -206,19 +218,19 @@ public static int convertDpToPixel(android.content.Context p2, int p3)
 }
 ```
 
-### `dk.decompile_method_java_with_pc(desc: str) -> dict`
+### `dk.decompile_method_with_pc_map(desc: str) -> dict`
 **D-3** — Java text + a source-line ↔ dex bytecode-offset map for smali sync.
 ```python
-dk.decompile_method_java_with_pc(M)
+dk.decompile_method_with_pc_map(M)
 # {'source': '\npublic static int convertDpToPixel(...)...',
 #  'pc_map': [(4, 32)]}
 ```
 | key | type | meaning |
 |---|---|---|
-| `source` | `str` | same bytes as `decompile_method_java` |
+| `source` | `str` | same bytes as `decompile_method` |
 | `pc_map` | `list[tuple[int, int]]` | `(line_1based, byte_off)`; one entry per emitted line that maps to a dex op; `line` = 1-based index into `source.split("\n")` (**use `\n`, not `splitlines()`**) |
 
-### `dk.decompile_class_java(cls_desc: str) -> str`
+### `dk.decompile_class(cls_desc: str) -> str`
 Full Java class text — `package`, class header (access + extends + implements),
 static→instance field declarations with decoded EncodedValue initializers, then
 method bodies. The header+fields region is byte-identical to androguard
@@ -390,7 +402,7 @@ the two flavours of `Unknown`:
 
 Reading `int_value` / `string_value` without checking `kind` yields a silent `0` / `""`
 for both `Unknown` flavours — check `kind` first. For an argument whose value depends
-on a branch, decompile the caller (`decompile_method_java` / `decompile_method_ast`),
+on a branch, decompile the caller (`decompile_method` / `decompile_method_ast`),
 which carries the real control flow.
 ```python
 for s in dk.resolve_call_args(API):
@@ -591,8 +603,8 @@ dexllm.pretty_proto('(ILjava/lang/String;)Z') # '(int, java.lang.String) -> bool
 Run the decompile on a daemon thread with a wall-clock deadline. **Use in
 batch/CI/automation** (belt-and-suspenders vs the IR-level cap).
 ```python
-out = dexllm.safe_decompile_method_java(dk, desc, timeout=10.0)   # -> str
-out = dexllm.safe_decompile_class_java(dk, cls, timeout=10.0)     # -> str
+out = dexllm.safe_decompile_method(dk, desc, timeout=10.0)   # -> str
+out = dexllm.safe_decompile_class(dk, cls, timeout=10.0)     # -> str
 if dexllm.is_timeout_marker(out):
     ...   # hit the deadline
 dexllm.DEFAULT_TIMEOUT_S    # 10.0

@@ -30,7 +30,7 @@ def test_offsets_land_on_real_instructions(loadable_apks):
                 if checked >= cap:
                     break
                 try:
-                    r = dk.decompile_method_java_with_pc(m)
+                    r = dk.decompile_method_with_pc_map(m)
                 except Exception:
                     continue
                 if not r["source"] or r["source"].startswith("// DECOMPILE ERROR"):

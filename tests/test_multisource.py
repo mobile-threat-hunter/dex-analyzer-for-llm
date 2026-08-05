@@ -75,7 +75,7 @@ def test_first_source_wins_collision(two_dexes):
     target = ja = jb = None
     for c in shared:
         try:
-            x, y = dka.decompile_class_java(c), dkb.decompile_class_java(c)
+            x, y = dka.decompile_class(c), dkb.decompile_class(c)
         except Exception:
             continue
         if x and y and x != y:
@@ -84,8 +84,8 @@ def test_first_source_wins_collision(two_dexes):
     if target is None:
         pytest.skip("no shared class with differing bodies")
 
-    assert dexllm.DexKit([a, b]).decompile_class_java(target) == ja  # a wins
-    assert dexllm.DexKit([b, a]).decompile_class_java(target) == jb  # b wins
+    assert dexllm.DexKit([a, b]).decompile_class(target) == ja  # a wins
+    assert dexllm.DexKit([b, a]).decompile_class(target) == jb  # b wins
 
 
 def test_empty_sources_rejected():

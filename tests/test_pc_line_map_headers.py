@@ -71,7 +71,7 @@ def header_coverage(loadable_apks):
                 continue
             for m in methods:
                 try:
-                    r = dk.decompile_method_java_with_pc(m)
+                    r = dk.decompile_method_with_pc_map(m)
                 except Exception:
                     continue
                 src = r["source"]

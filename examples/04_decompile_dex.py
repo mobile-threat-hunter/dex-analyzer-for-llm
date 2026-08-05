@@ -52,4 +52,4 @@ if not classes:
 # Decompile the first class that actually has methods.
 target = next((c for c in classes if dk.list_class_methods(c)), classes[0])
 print(f"\n=== Java (whole class: {target}) ===\n")
-print(dexllm.safe_decompile_class_java(dk, target, timeout=10.0))
+print(dexllm.safe_decompile_class(dk, target, timeout=10.0))

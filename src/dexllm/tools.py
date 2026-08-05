@@ -35,8 +35,8 @@ from .descriptors import require_member_descriptor, require_type_descriptor
 from .safe import (
     DEFAULT_TIMEOUT_S,
     is_timeout_marker,
-    safe_decompile_class_java,
-    safe_decompile_method_java,
+    safe_decompile_class,
+    safe_decompile_method,
 )
 
 if TYPE_CHECKING:
@@ -145,7 +145,7 @@ def _t_decompile_method(
     dk: DexKit, method_descriptor: str, max_chars: int = DEFAULT_DECOMPILE_CHARS
 ) -> dict:
     require_member_descriptor(method_descriptor)
-    out = safe_decompile_method_java(dk, method_descriptor, timeout=DEFAULT_TIMEOUT_S)
+    out = safe_decompile_method(dk, method_descriptor, timeout=DEFAULT_TIMEOUT_S)
     if is_timeout_marker(out):
         return {"descriptor": method_descriptor, "error": "timeout", "text": out}
     return {"descriptor": method_descriptor, **_truncate(out, max_chars)}
@@ -155,7 +155,7 @@ def _t_decompile_class(
     dk: DexKit, class_descriptor: str, max_chars: int = DEFAULT_CLASS_CHARS
 ) -> dict:
     require_type_descriptor(class_descriptor)
-    out = safe_decompile_class_java(dk, class_descriptor, timeout=DEFAULT_TIMEOUT_S)
+    out = safe_decompile_class(dk, class_descriptor, timeout=DEFAULT_TIMEOUT_S)
     if is_timeout_marker(out):
         return {"descriptor": class_descriptor, "error": "timeout", "text": out}
     return {"descriptor": class_descriptor, **_truncate(out, max_chars)}

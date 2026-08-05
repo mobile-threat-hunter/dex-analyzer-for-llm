@@ -9,7 +9,7 @@ description: |
 ## What this measures
 
 For every method in every loadable APK:
-- **class_crash**: `decompile_class_java()` raised a Python exception (segfault, runtime_error, etc.)
+- **class_crash**: `decompile_class()` raised a Python exception (segfault, runtime_error, etc.)
 - **method_decompile_error / method_method_error**: output starts with `// DECOMPILE ERROR:` or
   `// METHOD ERROR:` (caught in C++ via `try{...}catch(std::exception&)`)
 - **method_empty**: empty output — usually external method ref (no ClassData in this dex),
@@ -36,7 +36,7 @@ If `/tmp/full_sweep.py` is missing, recreate it. It must:
   loading and checking `dex_count()`
 - For each APK, enumerate classes via `androguard.misc.AnalyzeAPK` (DexKit has no class
   enumeration API)
-- Call `dk.decompile_class_java(class_descriptor)` for each class
+- Call `dk.decompile_class(class_descriptor)` for each class
 - Categorize each method block by marker (`// DECOMPILE ERROR`, `// METHOD ERROR`) or empty
 - For APKs >5MB, cap class processing at 200 to keep total time bounded; for true full
   coverage on the cap'd APK, run a focused sweep instead (see below)
@@ -61,7 +61,7 @@ classes = [c.get_name() for dex in d_list for c in dex.get_classes()]
 print(f"{len(classes)} classes", flush=True)
 crashes = 0; t = time.time()
 for c in classes:
-    try: dk.decompile_class_java(c)
+    try: dk.decompile_class(c)
     except Exception as e:
         crashes += 1
         print(f"CRASH {c}: {type(e).__name__}: {str(e)[:80]}", flush=True)

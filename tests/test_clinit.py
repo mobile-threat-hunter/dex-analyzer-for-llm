@@ -37,7 +37,7 @@ def _iter_clinit_sources():
                 if "<clinit>" not in m:
                     continue
                 try:
-                    src = dk.decompile_method_java(m)
+                    src = dk.decompile_method(m)
                 except Exception:
                     continue
                 if src:
@@ -74,7 +74,7 @@ def test_outermost_return_void_dropped():
         for m in dk.list_class_methods(cls):
             if "<clinit>" not in m:
                 continue
-            src = dk.decompile_method_java(m)
+            src = dk.decompile_method(m)
             if not src:
                 continue
             if not any(
@@ -122,7 +122,7 @@ def test_constructor_still_named():
         for m in dk.list_class_methods(cls):
             if "-><init>()V" not in m:
                 continue
-            src = dk.decompile_method_java(m)
+            src = dk.decompile_method(m)
             if not src:
                 continue
             simple = cls.split("/")[-1][:-1].split("$")[-1]

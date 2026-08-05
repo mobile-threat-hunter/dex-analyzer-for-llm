@@ -2,7 +2,7 @@
 """DvClass header+fields parity check vs androguard DAD.
 
 For each loadable APK in test_apk/APK, sample N classes and assert that
-DexKit's `decompile_class_java(cls)` produces a header+fields region
+DexKit's `decompile_class(cls)` produces a header+fields region
 byte-identical to androguard `DvClass(cls, dx).get_source()`.
 
 The method-body region is excluded from comparison — that's covered by
@@ -31,7 +31,7 @@ from androguard.decompiler.decompile import DvClass
 from androguard.misc import AnalyzeAPK
 
 import dexllm
-from dexllm import is_timeout_marker, safe_decompile_class_java
+from dexllm import is_timeout_marker, safe_decompile_class
 
 # Per CLAUDE.md "Known critical hang", the DAD pipeline can hang on
 # specific classes. dvclass_parity is a batch check, so we MUST use the
@@ -92,7 +92,7 @@ def parity_for_apk(apk: str, n: int) -> tuple[int, int, int, list[tuple[str, str
     for d, cls in sample:
         cls_name = cls.get_name()
         try:
-            dk_out = safe_decompile_class_java(
+            dk_out = safe_decompile_class(
                 dk, cls_name, timeout=DECOMPILE_TIMEOUT_S
             )
         except Exception:

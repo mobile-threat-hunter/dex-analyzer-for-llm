@@ -14,7 +14,7 @@ description: |
 
 ## When to use
 
-When `dk.decompile_method_java(desc)` produces output that looks wrong, the first question is
+When `dk.decompile_method(desc)` produces output that looks wrong, the first question is
 "does DAD produce the same wrong output?" Three outcomes:
 
 1. **DAD matches DexKit (both wrong the same way)** — DAD bug we haven't tackled yet. Check
@@ -37,7 +37,7 @@ python << EOF > /tmp/dexkit.txt 2>&1
 from loguru import logger; logger.remove()
 import dexllm
 dk = dexllm.DexKit("$APK")
-print(dk.decompile_method_java("$DESC"))
+print(dk.decompile_method("$DESC"))
 EOF
 
 # androguard DAD reference output

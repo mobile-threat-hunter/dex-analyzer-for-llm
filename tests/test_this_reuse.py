@@ -24,7 +24,7 @@ from pathlib import Path
 import pytest
 
 import dexllm
-from dexllm import is_timeout_marker, safe_decompile_method_java
+from dexllm import is_timeout_marker, safe_decompile_method
 
 REPO = Path(__file__).resolve().parents[1]
 _PRIMS = ("int", "boolean", "byte", "short", "char", "long", "float", "double", "void")
@@ -87,7 +87,7 @@ def scanned():
             except Exception:
                 continue
             for desc in methods:
-                out = safe_decompile_method_java(dk, desc, timeout=10.0)
+                out = safe_decompile_method(dk, desc, timeout=10.0)
                 if is_timeout_marker(out) or not out:
                     continue
                 for m in _MISTYPED_MAT.finditer(out):
@@ -147,7 +147,7 @@ def test_fragment_reuse_is_valid():
                 break
         if desc is None:
             continue
-        out = dk.decompile_method_java(desc)
+        out = dk.decompile_method(desc)
         assert not _THIS_ASSIGN.search(out), f"still emits `this =`:\n{out}"
         assert _GOOD_MAT.search(out), f"no `<Class> v = this;` seed:\n{out}"
         assert re.search(r"return\s+v\w+\s*;", out), f"no `return v`:\n{out}"
@@ -185,7 +185,7 @@ def test_void_super_renders_call_only():
                 break
         if desc is None:
             continue
-        out = dk.decompile_method_java(desc)
+        out = dk.decompile_method(desc)
         assert "this = super.onListItemClick" not in out, out[:400]
         assert re.search(r"^\s*super\.onListItemClick\(", out, re.M), out[:400]
         return
@@ -212,7 +212,7 @@ def test_arg_sink_materialization_valid():
                 break
         if desc is None:
             continue
-        out = dk.decompile_method_java(desc)
+        out = dk.decompile_method(desc)
         assert not _THIS_ASSIGN.search(out), out[:400]
         # the materialised local is typed as the arg's param type (a reference)
         assert _GOOD_MAT.search(out), out[:400]
@@ -240,7 +240,7 @@ def test_def_anchor_throw_new():
                 break
         if desc is None:
             continue
-        out = dk.decompile_method_java(desc)
+        out = dk.decompile_method(desc)
         assert not _THIS_ASSIGN.search(out), out[:400]
         assert not _GOOD_MAT.search(out), (
             "def-anchor must NOT inject a `<X> vX = this;` seed (entry value "
@@ -278,7 +278,7 @@ def test_def_anchor_priority_over_return_sink():
                 break
         if desc is None:
             continue
-        out = dk.decompile_method_java(desc)
+        out = dk.decompile_method(desc)
         assert not _THIS_ASSIGN.search(out), out[:400]
         # the def-anchor injects no `<X> vX = this;` seed (entry value is dead)
         assert not _GOOD_MAT.search(out), out[:400]

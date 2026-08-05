@@ -13,9 +13,9 @@ ported DAD-aligned Java decompiler (C++ port of androguard's DAD in
   (``python -m dexllm.mcp_server``) and the FastAPI/SSE backend
   (``uvicorn dexllm.server:app``).
 
-The decompiler is complete: ``decompile_method_java`` / ``decompile_class_java``
-return DAD-quality Java, and ``decompile_method_ast`` returns the full DAD
-``dast.py`` nested AST. Install LLM extras with ``pip install -e .[all]``.
+The decompiler is complete: ``decompile_method`` / ``decompile_class`` return
+DAD-quality Java, and ``decompile_method_ast`` returns the full DAD ``dast.py``
+nested AST (carrying that same Java text in its ``source``). Install LLM extras with ``pip install -e .[all]``.
 """
 
 # Import side-effect: attach .java_class/.parameters/.return_type/etc.
@@ -69,7 +69,9 @@ from .providers import detect_content_providers
 from .safe import (
     DEFAULT_TIMEOUT_S,
     is_timeout_marker,
+    safe_decompile_class,
     safe_decompile_class_java,
+    safe_decompile_method,
     safe_decompile_method_java,
 )
 
@@ -107,7 +109,9 @@ __all__ = [
     "method_ref_java",
     "parse_proto",
     "pretty_proto",
+    "safe_decompile_class",
     "safe_decompile_class_java",
+    "safe_decompile_method",
     "safe_decompile_method_java",
     "signature",
     "summarize_capabilities",

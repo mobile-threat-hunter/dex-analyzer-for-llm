@@ -374,6 +374,14 @@ class DexKit:
     ) -> list[MethodMatch]: ...
 
     # decompile / smali
+    def decompile_method(self, method_descriptor: str) -> str:
+        """Java text. The suffixed variants add structure to the SAME output."""
+
+    def decompile_method_with_pc_map(
+        self, method_descriptor: str
+    ) -> _DecompiledMethodWithPc: ...
+    def decompile_class(self, class_descriptor: str) -> str: ...
+    # deprecated aliases of the three above (pre-rename names)
     def decompile_method_java(self, method_descriptor: str) -> str: ...
     def decompile_method_java_with_pc(
         self, method_descriptor: str

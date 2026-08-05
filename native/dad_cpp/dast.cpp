@@ -170,7 +170,7 @@ AV LiteralBool(bool b)    { return Literal(AV::Str(b ? "true" : "false"), Tuple2
 // (a F/D method returning the raw IEEE bits). PyFloatRepr renders NaN/Inf as
 // "nan"/"-inf" (invalid Java, and inconsistent with the text Writer's
 // Float.NaN / Double.NEGATIVE_INFINITY); emit the same Java tokens the text
-// path uses so decompile_method_ast agrees with decompile_method_java.
+// path uses so decompile_method_ast agrees with decompile_method.
 AV LiteralFloatChecked(float f) {
     if (std::isnan(f)) return Literal(AV::Str("Float.NaN"), Tuple2(".float", 0));
     if (std::isinf(f)) {

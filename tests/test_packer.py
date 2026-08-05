@@ -63,9 +63,7 @@ def test_dump_wins_collision_with_prefer(apk_and_dump):
     target = None
     for c in shared:
         try:
-            a, b = dexllm.DexKit(apk).decompile_class_java(
-                c
-            ), dk_dump.decompile_class_java(c)
+            a, b = dexllm.DexKit(apk).decompile_class(c), dk_dump.decompile_class(c)
         except Exception:
             continue
         if a and b and a != b:
@@ -74,12 +72,12 @@ def test_dump_wins_collision_with_prefer(apk_and_dump):
     if target is None:
         pytest.skip("no shared class with differing bodies")
     # prefer=True (default): dump wins; prefer=False: original apk wins
-    assert dexllm.add_dumped_dexes(dk, dump).decompile_class_java(
+    assert dexllm.add_dumped_dexes(dk, dump).decompile_class(
         target
-    ) == dk_dump.decompile_class_java(target)
-    assert dexllm.add_dumped_dexes(dk, dump, prefer=False).decompile_class_java(
+    ) == dk_dump.decompile_class(target)
+    assert dexllm.add_dumped_dexes(dk, dump, prefer=False).decompile_class(
         target
-    ) == dexllm.DexKit(apk).decompile_class_java(target)
+    ) == dexllm.DexKit(apk).decompile_class(target)
 
 
 def test_accepts_str_or_list(apk_and_dump):

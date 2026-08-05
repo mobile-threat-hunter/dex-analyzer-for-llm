@@ -9,7 +9,7 @@ Adds capabilities that upstream DexKit doesn't expose, oriented for **security a
 - **Capability / permission summary** — API → category aggregation (LOCATION, CRYPTO, REFLECTION, …)
 - **Intra-method dataflow** — track ConstString / NewInstance / argument origin per call site
 - **Smali rendering** — baksmali-style, no JVM needed
-- **Java decompiler** — full DAD-aligned C++ port in `dad_cpp/`: `decompile_method_java`, `decompile_class_java`, and `decompile_method_ast` (the complete androguard `dast.py` nested AST). ~92% byte / ~98% line parity vs androguard DAD, 0-crash on a 22-APK / 443k-method corpus, and ~4.5× faster per method than androguard (see [comparison](#performance)).
+- **Java decompiler** — full DAD-aligned C++ port in `dad_cpp/`: `decompile_method`, `decompile_class`, and `decompile_method_ast` (the complete androguard `dast.py` nested AST). ~92% byte / ~98% line parity vs androguard DAD, 0-crash on a 22-APK / 443k-method corpus, and ~4.5× faster per method than androguard (see [comparison](#performance)).
 - **LLM backends** — a shared tool catalog (`dexllm.tools`) exposed via an MCP stdio server and a FastAPI/SSE web backend.
 
 > **Looking for the flat reference?** [docs/api.md](api.md) lists every method
@@ -50,7 +50,7 @@ dk.warm_analysis_caches()
 ```python
 dk = dexllm.DexKit("classes2.dex")            # raw secondary dex (dex\n magic), loaded directly
 dk = dexllm.DexKit("/tmp/evil.png")           # disguised APK — loaded by its PK content
-print(dk.decompile_class_java("Lcom/blafoo/bar/Blafoo;"))
+print(dk.decompile_class("Lcom/blafoo/bar/Blafoo;"))
 ```
 
 Probe a file **without loading it** with `dexllm.identify(path)` — handy for triaging a directory of unknown blobs:
@@ -100,7 +100,7 @@ collision**:
 # original (stub) classes. List it FIRST so first-wins prefers it — the same
 # order the packer arranges at runtime (ART consults the decrypted dex first).
 dk = dexllm.DexKit(["/tmp/dumped_real.dex", "app.apk"])   # dumped wins collisions
-dk.decompile_class_java("Lcom/evil/RealC2;")              # the unpacked body
+dk.decompile_class("Lcom/evil/RealC2;")              # the unpacked body
 
 dk = dexllm.DexKit(["dump1.dex", "dump2.dex", "app.apk"]) # several dumps + apk
 ```
@@ -118,7 +118,7 @@ step — it rebuilds from the dump(s) **plus** the current sources:
 dk = dexllm.DexKit("app.apk")
 # ... detect packing, dump the decrypted dex to /tmp/dump.dex with a dynamic tool ...
 dk = dexllm.add_dumped_dexes(dk, "/tmp/dump.dex")   # dump prepended → unpacked wins
-dk.decompile_class_java("Lcom/evil/RealC2;")        # the real body
+dk.decompile_class("Lcom/evil/RealC2;")        # the real body
 ```
 
 Defaults: `prefer=True` (dumps loaded first → win collisions) and `lenient=True`
@@ -314,7 +314,7 @@ for s in dk.resolve_call_args(
 ```
 
 When the value genuinely depends on a branch, decompile the caller
-(`decompile_method_java` / `decompile_method_ast`) — that path carries the real CFG.
+(`decompile_method` / `decompile_method_ast`) — that path carries the real CFG.
 
 ---
 
@@ -338,10 +338,10 @@ Returns `""` for external / missing classes.
 
 ```python
 # Single method → DAD-quality Java (GIL released → parallel-safe)
-print(dk.decompile_method_java("Lcom/example/Utils;->getDisplaySize(Landroid/content/Context;)Landroid/graphics/Point;"))
+print(dk.decompile_method("Lcom/example/Utils;->getDisplaySize(Landroid/content/Context;)Landroid/graphics/Point;"))
 
 # Whole class → package + header + fields + methods
-print(dk.decompile_class_java("Lcom/example/Utils;"))
+print(dk.decompile_class("Lcom/example/Utils;"))
 
 # Structured AST — the full androguard dast.py nested form
 ast = dk.decompile_method_ast("Lcom/example/Utils;->getDisplaySize(Landroid/content/Context;)Landroid/graphics/Point;")
@@ -350,11 +350,11 @@ print(ast["ast"]["body"])      # {triple, flags, ret, params, comments, body}
 ast_only = dk.decompile_method_ast(desc, include_source=False)
 
 # Java text + source-line ↔ bytecode-offset map (smali ↔ Java cursor sync):
-pc = dk.decompile_method_java_with_pc("Lcom/example/Utils;->getDisplaySize(Landroid/content/Context;)Landroid/graphics/Point;")
+pc = dk.decompile_method_with_pc_map("Lcom/example/Utils;->getDisplaySize(Landroid/content/Context;)Landroid/graphics/Point;")
 print(pc["source"], pc["pc_map"])   # pc_map: [(line_1based, byte_off), …], headers included
 ```
 
-API surface: `decompile_method_java` / `decompile_method_java_with_pc` / `decompile_class_java` / `decompile_method_ast` / `render_method_smali`, plus cache control
+API surface: `decompile_method` / `decompile_method_with_pc_map` / `decompile_class` / `decompile_method_ast` / `render_method_smali`, plus cache control
 (`decompiler_clear_cache`, `decompiler_cache_size`, `decompiler_set_cache_capacity`). External / native / abstract methods return `""` (graceful — androguard crashes on these).
 
 The decompiler is a strict, function-by-function port of androguard's `decompiler/*.py` (graph → dataflow → control_flow → writer/dast) under `dad_cpp/`, validated by 25 DAD parity suites (`ninja parity_tests && ctest`) and an end-to-end diff vs androguard. A few spec-correctness divergences are intentional (valid `null`/`true`/`false` where androguard leaks `None`/`True`/`False`; IEEE754 floats) — see [CLAUDE.md](../CLAUDE.md) "Upstream DAD bug fixes".
@@ -643,7 +643,7 @@ for s in sites[:20]:
 
 # 5. Drill into one suspicious method
 print("\n--- decompiled ---")
-print(dk.decompile_method_java(
+print(dk.decompile_method(
     "Lcom/example/SuspiciousReceiver;->onReceive(Landroid/content/Context;Landroid/content/Intent;)V"
 ))
 ```
@@ -739,7 +739,7 @@ For the ports & adapters boundary see [architecture.md](architecture.md); for th
 | L3 capability summary | 90–120 ms | same |
 | L4 resolve_call_args (2.4 k sites) | 23 ms¹ | same |
 | L5 render_class_smali (77 methods) | 0.5 ms | same |
-| L6 decompile_method_java | ~0.06 ms / method (warm) | cached |
+| L6 decompile_method | ~0.06 ms / method (warm) | cached |
 | L7 find_classes_by_name | 1–3 ms | same |
 
 ¹ Measured before `resolve_call_args` became join-aware (dexllm#16). That change runs

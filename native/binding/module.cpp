@@ -366,8 +366,10 @@ public:
     std::string render_class_smali(const std::string& descriptor) const {
         return ext_.RenderClassSmali(descriptor);
     }
-    // Java text decompile via the dad_cpp Decompiler facade. The `_java` suffix
-    // is the stable public name (sweep script, /dexkit-* skills, the SDK layer, tests);
+    // Java text decompile via the dad_cpp Decompiler facade. These C++ members
+    // keep their historical `_java` names; the PYTHON-visible spelling is
+    // `decompile_method` / `decompile_class` / `decompile_method_with_pc_map`
+    // (the `*_java` .def registrations below are deprecated aliases — dexllm#21).
     // GIL is released at the binding site for true parallel decompilation.
     std::string decompile_method_java(const std::string& descriptor) const {
         return decompiler_->DecompileMethod(descriptor);
@@ -377,7 +379,7 @@ public:
     py::dict decompile_method_java_with_pc(const std::string& descriptor) const {
         dexkit::dad::Decompiler::DecompiledMethodWithMap r;
         {
-            py::gil_scoped_release release;  // same as decompile_method_java
+            py::gil_scoped_release release;  // as in the C++ decompile_method_java above
             r = decompiler_->DecompileMethodWithPcMap(descriptor);
         }
         py::dict out;
@@ -800,7 +802,7 @@ PYBIND11_MODULE(_dexkit_core, m) {
              py::arg("class_descriptor"),
              "L5: baksmali-style text rendering of a whole class — header, "
              "fields, and every declared method's body. Internal classes only.")
-        .def("decompile_method_java",
+        .def("decompile_method",
              [](const PyDexKit& self, const std::string& desc) {
                  py::gil_scoped_release release;
                  return self.decompile_method_java(desc);
@@ -808,8 +810,12 @@ PYBIND11_MODULE(_dexkit_core, m) {
              py::arg("method_descriptor"),
              "Decompile a single method to Java via DAD C++ port. "
              "Releases the GIL during execution to allow true parallel "
-             "decompilation.")
-        .def("decompile_method_java_with_pc",
+             "decompilation. The decompile_* family always produces Java — the "
+             "suffixed variants add structure to the SAME decompilation "
+             "(_with_pc_map adds an offset map, _ast adds the structured tree "
+             "and carries this text in its 'source'); a different output form "
+             "is a different verb (render_*_smali).")
+        .def("decompile_method_with_pc_map",
              &PyDexKit::decompile_method_java_with_pc,
              py::arg("method_descriptor"),
              "Decompile a method to Java plus a source-line ↔ dex bytecode "
@@ -821,7 +827,7 @@ PYBIND11_MODULE(_dexkit_core, m) {
              "Unicode-line-aware split (a string literal may contain a raw "
              "U+2028/U+2029/U+0085 that those split on but this counter does "
              "not). GIL released during execution.")
-        .def("decompile_class_java",
+        .def("decompile_class",
              [](const PyDexKit& self, const std::string& desc) {
                  py::gil_scoped_release release;
                  return self.decompile_class_java(desc);
@@ -829,6 +835,30 @@ PYBIND11_MODULE(_dexkit_core, m) {
              py::arg("class_descriptor"),
              "Decompile a whole class to Java via DAD C++ port. "
              "Releases the GIL during execution.")
+        // Back-compat aliases for the pre-rename names. The `_java` suffix
+        // advertised a symmetry with decompile_method_ast that does not exist:
+        // the AST call returns this same Java text in its `source`, so the two
+        // are base-vs-enriched, not two parallel output formats (a genuinely
+        // different form uses a different verb — render_*_smali). Dropping it
+        // also puts raw on the spelling the SDK and MCP already used.
+        .def("decompile_method_java",
+             [](const PyDexKit& self, const std::string& desc) {
+                 py::gil_scoped_release release;
+                 return self.decompile_method_java(desc);
+             },
+             py::arg("method_descriptor"),
+             "Deprecated alias of decompile_method.")
+        .def("decompile_method_java_with_pc",
+             &PyDexKit::decompile_method_java_with_pc,
+             py::arg("method_descriptor"),
+             "Deprecated alias of decompile_method_with_pc_map.")
+        .def("decompile_class_java",
+             [](const PyDexKit& self, const std::string& desc) {
+                 py::gil_scoped_release release;
+                 return self.decompile_class_java(desc);
+             },
+             py::arg("class_descriptor"),
+             "Deprecated alias of decompile_class.")
         .def("decompile_method_ast", &PyDexKit::decompile_method_ast,
              py::arg("method_descriptor"), py::arg("include_source") = true,
              "Return a structured method dict: "

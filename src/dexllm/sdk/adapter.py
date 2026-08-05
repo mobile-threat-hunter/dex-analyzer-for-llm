@@ -241,7 +241,7 @@ class DexKitAdapter:
     def decompile_method(self, method_descriptor: str) -> DecompiledMethod:
         """Decompile one method to Java text."""
         require_member_descriptor(method_descriptor)
-        src = self._dk.decompile_method_java(method_descriptor)
+        src = self._dk.decompile_method(method_descriptor)
         return DecompiledMethod(
             descriptor=method_descriptor, source=src, found=bool(src)
         )
@@ -249,7 +249,7 @@ class DexKitAdapter:
     def decompile_method_with_pc_map(self, method_descriptor: str) -> DecompiledMethod:
         """Decompile one method plus a source-line ↔ bytecode-offset map."""
         require_member_descriptor(method_descriptor)
-        r = self._dk.decompile_method_java_with_pc(method_descriptor)
+        r = self._dk.decompile_method_with_pc_map(method_descriptor)
         return DecompiledMethod(
             descriptor=method_descriptor,
             source=r["source"],
@@ -264,7 +264,7 @@ class DexKitAdapter:
         require_type_descriptor(class_descriptor)
         return DecompiledClass(
             descriptor=class_descriptor,
-            source=self._dk.decompile_class_java(class_descriptor),
+            source=self._dk.decompile_class(class_descriptor),
         )
 
     def decompile_method_ast(

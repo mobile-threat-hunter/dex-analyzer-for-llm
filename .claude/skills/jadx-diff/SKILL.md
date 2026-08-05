@@ -41,7 +41,7 @@ AOSP-dataset-gated tooling.
 ```bash
 # our engine (whichever backend) vs jadx, for one class:
 python scripts/jadx_ref.py test_apk/APK/<apk> 'La2dp/Vol/StoreLoc;'   # jadx's Java
-python -c "import dexllm; print(dexllm.DexKit('test_apk/APK/<apk>').decompile_class_java('La2dp/Vol/StoreLoc;'))"
+python -c "import dexllm; print(dexllm.DexKit('test_apk/APK/<apk>').decompile_class('La2dp/Vol/StoreLoc;'))"
 ```
 
 Read them side by side. jadx and our output differ in STYLE (imports vs FQNs, var names,

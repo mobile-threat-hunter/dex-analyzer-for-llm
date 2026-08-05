@@ -117,7 +117,7 @@ def test_no_non_tail_return_dropped():
         for m in _iter_clinit(dk):
             try:
                 ast = dk.decompile_method_ast(m, include_source=False)
-                txt = dk.decompile_method_java(m)
+                txt = dk.decompile_method(m)
             except Exception:
                 continue
             if not txt:

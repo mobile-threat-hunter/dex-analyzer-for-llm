@@ -13,7 +13,7 @@ For a chosen APK, decompile a sample of N methods (default 500) on both implemen
 
 | Metric | DexKit-DAD (C++) | androguard DAD (Python) |
 |---|---|---|
-| Total wall time | sum of `dk.decompile_method_java()` | sum of `DvMethod(m).process()` + `get_source()` |
+| Total wall time | sum of `dk.decompile_method()` | sum of `DvMethod(m).process()` + `get_source()` |
 | Per-method mean | ms | ms |
 | Output match rate | byte-identical method count / N | — |
 | Empty rate | external-ref methods (both should agree) | same |
@@ -44,7 +44,7 @@ print(f"Sampling {len(sample)} methods from {APK}", flush=True)
 
 def norm(s):
     # androguard DAD emits standalone-method output with class-context 4-space
-    # indent; DexKit's decompile_method_java is true standalone (no indent).
+    # indent; DexKit's decompile_method is true standalone (no indent).
     # Strip leading whitespace per line so byte-match isn't dominated by indent.
     return "\n".join(line.lstrip() for line in s.splitlines()) if s else ""
 
@@ -53,7 +53,7 @@ t0 = time.time(); dk_out = {}
 for m in sample:
     em = m.get_method()
     desc = f"{em.get_class_name()}->{em.get_name()}{em.get_descriptor()}"
-    try: dk_out[desc] = dk.decompile_method_java(desc)
+    try: dk_out[desc] = dk.decompile_method(desc)
     except Exception as e: dk_out[desc] = f"// CRASH: {type(e).__name__}"
 dk_ms = (time.time() - t0) * 1000
 

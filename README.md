@@ -24,7 +24,7 @@ parallel-safe — rather than Xposed module development.
 | Permissions | `permission_api_callers()` — which permissions the APK exercises through real framework API calls, across **all protection levels** (dangerous / signature / internal / normal), each group with its real `protectionLevel`; **signature-precise** against AOSP's metalava `@RequiresPermission` map plus the runtime-enforcement bridge (runtime-enforced APIs the annotation misses, e.g. SMS ICC ops → SEND_SMS; overloads disambiguated), and the methods that call them. `dangerous_permission_apis()` / `dangerous_permission_api_callers()` keep the dangerous-only view |
 | Engine-shared / WASM | the permission-caller join has a byte-identical **C++ engine port** (`permission_callers()`) over the engine-bundled AOSP dataset, so the pybind and the in-browser WASM binding run one implementation — no re-implemented join, no forked data (issue #14). The IoC / provider / capability analyses are canonical pure-Python (`extract_iocs` / `detect_content_providers` / `summarize_capabilities`); a WASM consumer vendors its own engine for those |
 | AST | `decompile_method_ast` returns the full androguard `dast.py` nested AST |
-| Smali sync | `decompile_method_java_with_pc` returns Java text + a source-line ↔ bytecode-offset `pc_map` (condition/loop/switch headers included) for precise smali ↔ Java cursor sync; parity-neutral metadata |
+| Smali sync | `decompile_method_with_pc_map` returns Java text + a source-line ↔ bytecode-offset `pc_map` (condition/loop/switch headers included) for precise smali ↔ Java cursor sync; parity-neutral metadata |
 | LLM | `dexllm.tools` catalog → MCP stdio server + FastAPI/SSE web backend |
 
 See [docs/workflow.md](docs/workflow.md) for how dexllm operates end to end (load →
@@ -286,10 +286,10 @@ for ref in dk.list_external_method_refs(framework_only=True)[:10]:
     print(ref.java_signature)
 
 # Decompile
-print(dk.decompile_method_java("Lcom/example/Foo;->bar()V"))
-print(dk.decompile_class_java("Lcom/example/Foo;"))
+print(dk.decompile_method("Lcom/example/Foo;->bar()V"))
+print(dk.decompile_class("Lcom/example/Foo;"))
 ast = dk.decompile_method_ast("Lcom/example/Foo;->bar()V")   # nested AST + Java text
-pc = dk.decompile_method_java_with_pc("Lcom/example/Foo;->bar()V")  # {"source", "pc_map": [(line, byte_off), …]}
+pc = dk.decompile_method_with_pc_map("Lcom/example/Foo;->bar()V")  # {"source", "pc_map": [(line, byte_off), …]}
 
 # Search — and its forward direction (which strings does THIS code load?)
 for m in dk.find_methods_using_strings(["http"]):

@@ -27,7 +27,7 @@ if target_method is None:
 
 print(f"# method : {target_method}\n")
 print("=== Java (method) ===")
-print(dk.decompile_method_java(target_method))
+print(dk.decompile_method(target_method))
 
 print("\n=== smali (method) ===")
 print(dk.render_method_smali(target_method))
@@ -42,4 +42,4 @@ ast_only = dk.decompile_method_ast(target_method, include_source=False)
 assert ast_only["ast"] == ast["ast"] and ast_only["source"] == ""
 
 print(f"\n=== Java (whole class: {target_cls}) — first 25 lines ===")
-print("\n".join(dk.decompile_class_java(target_cls).splitlines()[:25]))
+print("\n".join(dk.decompile_class(target_cls).splitlines()[:25]))

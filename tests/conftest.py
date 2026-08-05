@@ -94,6 +94,6 @@ def sample_method(dk):
     """First internal method that decompiles to a non-empty body."""
     for cls in dk.list_classes():
         for m in dk.list_class_methods(cls):
-            if dk.decompile_method_java(m):
+            if dk.decompile_method(m):
                 return m
     pytest.skip("no decompilable method in APK")

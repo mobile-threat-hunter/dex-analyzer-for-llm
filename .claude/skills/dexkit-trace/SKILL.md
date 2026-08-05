@@ -33,7 +33,7 @@ for dex in d_list:
     for cls in dex.get_classes():
         name = cls.get_name()
         print(f"trying {name}", flush=True)
-        try: dk.decompile_class_java(name)
+        try: dk.decompile_class(name)
         except Exception as e: print(f"  EXC {type(e).__name__}: {e}", flush=True)
 EOF
 ```
@@ -57,7 +57,7 @@ for dex in d_list:
         for em in cls.get_methods():
             desc = f"{em.get_class_name()}->{em.get_name()}{em.get_descriptor()}"
             print(f"trying {desc}", flush=True)
-            try: dk.decompile_method_java(desc)
+            try: dk.decompile_method(desc)
             except Exception as e: print(f"  EXC {type(e).__name__}: {e}", flush=True)
 EOF
 ```
@@ -68,7 +68,7 @@ gdb -batch -ex "set pagination off" -ex run -ex "thread apply all bt 20" -ex qui
     --args python -c "
 import dexllm
 dk = dexllm.DexKit('<resolved_apk_path>')
-dk.decompile_method_java('<method_descriptor>')
+dk.decompile_method('<method_descriptor>')
 " 2>&1 | grep -E "^#|signal|Program received" | head -40
 ```
 
@@ -78,7 +78,7 @@ dk.decompile_method_java('<method_descriptor>')
 python -c "
 import dexllm
 dk = dexllm.DexKit('<resolved_apk_path>')
-dk.decompile_method_java('<method_descriptor>')
+dk.decompile_method('<method_descriptor>')
 " &
 PID=$!
 

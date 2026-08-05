@@ -256,7 +256,7 @@ def test_lone_surrogate_query_is_rejected_not_silently_wrong(dk):
 
 def test_forward_strings_empty_for_bodyless_and_unknown(dk):
     """External / unknown / malformed / bodyless targets return [] (no raise) — the
-    same graceful-empty contract as render_method_smali / decompile_method_java."""
+    same graceful-empty contract as render_method_smali / decompile_method."""
     assert dk.list_method_strings("Landroid/util/Log;->d(Ljava/lang/String;)I") == []
     assert dk.list_class_strings("Ljava/lang/String;") == []
     assert dk.list_class_strings("Lnope/NotHere;") == []
@@ -527,14 +527,14 @@ def test_catch_handler_starts_from_an_unknown_register_file(loadable_apks):
 # ── decompile: Java ──────────────────────────────────────────────────────────
 
 
-def test_decompile_method_java(dk, sample_method):
-    src = dk.decompile_method_java(sample_method)
+def test_decompile_method(dk, sample_method):
+    src = dk.decompile_method(sample_method)
     assert src and "{" in src
 
 
-def test_decompile_class_java(dk):
+def test_decompile_class(dk):
     for cls in dk.list_classes():
-        out = dk.decompile_class_java(cls)
+        out = dk.decompile_class(cls)
         if out:
             assert out.lstrip().startswith(
                 ("package", "public", "class", "final", "abstract", "interface", "enum")
@@ -544,7 +544,7 @@ def test_decompile_class_java(dk):
 
 def test_external_method_returns_empty(dk):
     # External / framework methods must decompile to "" (graceful — androguard crashes).
-    out = dk.decompile_method_java(
+    out = dk.decompile_method(
         "Landroid/util/Log;->d(Ljava/lang/String;Ljava/lang/String;)I"
     )
     assert out == ""
@@ -761,6 +761,124 @@ def test_no_python_literals_in_output(dk):
     """null/true/false, never None/True/False (androguard-bug fix)."""
     pat = re.compile(r"=\s*(None|True|False)\b")
     for cls in dk.list_classes()[:500]:
-        out = dk.decompile_class_java(cls)
+        out = dk.decompile_class(cls)
         if out:
             assert not pat.search(out), f"python literal leaked in {cls}"
+
+
+# ── regression: the decompile_* family dropped its redundant `_java` suffix ───
+
+
+def test_deprecated_decompile_names_still_work(dk):
+    """dexllm#21 stage 2: the pre-rename spellings stay available as aliases.
+
+    `_java` advertised a parallelism with decompile_method_ast that does not
+    exist — the AST call returns the SAME Java text in its `source` — so the
+    family is base-vs-enriched, not two output formats. Each old name must still
+    resolve and return byte-identical output; the names are hard-coded here (a
+    loop over a mapping would delete its own coverage if an entry were removed).
+    """
+    import dexllm
+
+    # Search class and method JOINTLY: picking the first decompilable class and
+    # then requiring a decompilable method INSIDE it silently skips the whole
+    # test on a fixture whose first class is a marker interface / annotation
+    # (reproducible with DEXLLM_TEST_APK=test_apk/APK/hello-world.apk).
+    pair = next(
+        (
+            (c, x)
+            for c in dk.list_classes()
+            for x in dk.list_class_methods(c)
+            if dk.decompile_method(x)
+        ),
+        None,
+    )
+    if pair is None:
+        pytest.skip("no decompilable method in the fixture")
+    cls, m = pair
+
+    assert dk.decompile_method_java(m) == dk.decompile_method(m) != ""
+    assert dk.decompile_class_java(cls) == dk.decompile_class(cls) != ""
+    pc = dk.decompile_method_with_pc_map(m)
+    assert pc["source"]  # non-vacuous: both names failing alike must not pass
+    assert dk.decompile_method_java_with_pc(m) == pc
+    # the module-level hang-safe wrappers moved with them. They are the SAME
+    # function object, so comparing their output would be a tautology — state
+    # the real invariant, then check the output separately.
+    assert dexllm.safe_decompile_method_java is dexllm.safe_decompile_method
+    assert dexllm.safe_decompile_class_java is dexllm.safe_decompile_class
+    assert dexllm.safe_decompile_method_java(dk, m) == dk.decompile_method(m) != ""
+    # and every name is exported / advertised
+    for n in (
+        "safe_decompile_method",
+        "safe_decompile_class",
+        "safe_decompile_method_java",
+        "safe_decompile_class_java",
+    ):
+        assert n in dexllm.__all__ and hasattr(dexllm, n)
+
+
+def test_safe_wrappers_take_the_raw_dexkit(apk_path, dk):
+    """dexllm#21 stage 2: the safe wrappers' duck-typed contract, both ways.
+
+    They accept `dk: Any`, so the rename could have changed what they REQUIRE of
+    that argument. A stand-in implementing only the pre-rename spelling must keep
+    working (that is what the aliases are for), and a dexllm.sdk session — which
+    has a same-named `decompile_method` returning a typed model, not str — must
+    fail LOUDLY rather than return a non-str through a `-> str` signature.
+    """
+    import dexllm
+    from dexllm.sdk import open_apk
+
+    m = next(
+        x
+        for c in dk.list_classes()
+        for x in dk.list_class_methods(c)
+        if dk.decompile_method(x)
+    )
+
+    class LegacyStandIn:
+        def decompile_method_java(self, d):
+            return "// legacy\n"
+
+        def decompile_class_java(self, d):
+            return "// legacy class\n"
+
+    legacy = LegacyStandIn()
+    assert dexllm.safe_decompile_method(legacy, m) == "// legacy\n"
+    assert dexllm.safe_decompile_class(legacy, "La/B;") == "// legacy class\n"
+
+    with pytest.raises(TypeError, match="not str"):
+        dexllm.safe_decompile_method(open_apk(apk_path), m)
+    with pytest.raises(AttributeError, match="neither"):
+        dexllm.safe_decompile_method(object(), m)
+
+
+def test_ast_source_matches_the_text_decompile(dk):
+    """The claim the stage-2 rename rests on, over a bounded sample.
+
+    `_java` was dropped because decompile_method_ast is not a parallel output
+    FORMAT — it returns the same Java text in its `source` — so the family is
+    base-vs-enriched. Pinning that on one method would not catch an IR change
+    that desyncs the AST emitter from the text emitter on a subset (a <clinit>,
+    a float literal, ...), which is exactly what would invalidate the naming.
+    """
+    checked = 0
+    for c in dk.list_classes():
+        for m in dk.list_class_methods(c):
+            text = dk.decompile_method(m)
+            if not text:
+                continue
+            a = dk.decompile_method_ast(m)
+            assert a["source"] == text, m
+            assert dk.decompile_method_with_pc_map(m)["source"] == text, m
+            checked += 1
+            if checked >= 200:
+                # documented opt-out: the AST-only path carries no source
+                assert dk.decompile_method_ast(m, include_source=False)["source"] == ""
+                return
+    if checked == 0:
+        pytest.skip("no decompilable method in the fixture")
+
+    # the suffix claim itself: _ast carries the same Java text as the bare call
+    assert dk.decompile_method_ast(m)["source"] == dk.decompile_method(m)

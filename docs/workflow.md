@@ -105,7 +105,7 @@ flowchart LR
 | L3 | which permissions / categories are exercised? | permission mapping |
 | L4 | what is actually passed at each call site? | intra-method dataflow |
 | L5 | smali for a method/class (no JVM) | smali render |
-| L6 | DAD-quality Java text / AST | `decompile_method_java` / `_class_java` / `_method_ast` |
+| L6 | DAD-quality Java text / AST | `decompile_method` / `_class` / `_method_ast` |
 | L7 | find classes/methods by name/string/literal/super/annotation | `find_*` family |
 
 Full recipes: [usage.md](usage.md).
@@ -125,7 +125,7 @@ sequenceDiagram
     participant builder as MethodSnapshotBuilder
     participant pipeline as DAD pipeline (native/dad_cpp)
     participant writer as Writer / JSONWriter
-    caller->>facade: decompile_method_java(descriptor)
+    caller->>facade: decompile_method(descriptor)
     alt cache hit
         facade-->>caller: cached Java text
     else cache miss
@@ -181,7 +181,7 @@ sequenceDiagram
     participant mcp_server as dexllm MCP server (stdio)
     participant tools as dexllm.tools (safe wrappers + LRU)
     participant core as DexKit core
-    llm->>mcp_server: call tool (e.g. dexllm_decompile_class_java, apk_path=...)
+    llm->>mcp_server: call tool (e.g. dexllm_decompile_class, apk_path=...)
     mcp_server->>tools: dispatch (JSON-Schema validated)
     tools->>core: analyze / decompile (timeout-guarded)
     core-->>tools: result

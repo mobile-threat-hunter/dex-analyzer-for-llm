@@ -33,7 +33,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from jadx_ref import jadx_available, jadx_class_java  # noqa: E402
 
 import dexllm  # noqa: E402
-from dexllm import is_timeout_marker, safe_decompile_class_java  # noqa: E402
+from dexllm import is_timeout_marker, safe_decompile_class  # noqa: E402
 
 # a `Type name` local/field declaration (captures the type); good enough for a set-similarity
 # signal across both decompilers (we only compare the SET of simple type names).
@@ -84,8 +84,8 @@ def run(apk: str, limit: int, backend: str) -> dict:
         ref = jadx_class_java(apk, c)
         if not ref:
             continue  # class absent from jadx output (external/stripped) — skip
-        # backend is threaded once the jadx backend exists; today decompile_class_java is DAD.
-        ours = safe_decompile_class_java(dk, c, timeout=15.0)
+        # backend is threaded once the jadx backend exists; today decompile_class is DAD.
+        ours = safe_decompile_class(dk, c, timeout=15.0)
         if is_timeout_marker(ours) or not ours:
             continue
         compared += 1
