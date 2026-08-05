@@ -177,8 +177,8 @@ def test_new_xref_tools_execute_without_error(dk):
         ("find_type_references", {"type_descriptor": "Ljava/lang/String;", "limit": 5}),
         ("find_methods_using_int_literals", {"values": [2, 255], "limit": 5}),
         ("find_methods_using_double_literals", {"values": [1.0], "limit": 5}),
-        ("find_field_read_methods", {"field_descriptor": "Lno/such/C;->x:I"}),
-        ("find_field_write_methods", {"field_descriptor": "Lno/such/C;->x:I"}),
+        ("find_methods_reading_field", {"field_descriptor": "Lno/such/C;->x:I"}),
+        ("find_methods_writing_field", {"field_descriptor": "Lno/such/C;->x:I"}),
     ]
     for call in filter(None, calls):
         out = tools.execute(*call, dk)
@@ -187,10 +187,30 @@ def test_new_xref_tools_execute_without_error(dk):
     # an unknown field is a clean empty page, not a crash
     assert (
         tools.execute(
-            "find_field_read_methods", {"field_descriptor": "Lno/such/C;->x:I"}, dk
+            "find_methods_reading_field", {"field_descriptor": "Lno/such/C;->x:I"}, dk
         )["items"]
         == []
     )
+    # DIRECTION, on a real field: with only the unknown-field calls above, swapping
+    # the two tool impls passes (both return []). Ground-truth against smali.
+    fd = next(
+        (
+            x
+            for x in dk.list_field_descriptors()
+            if tools.execute("find_methods_reading_field", {"field_descriptor": x}, dk)[
+                "items"
+            ]
+        ),
+        None,
+    )
+    if fd is None:
+        pytest.skip("no read field in the fixture")
+    rd = tools.execute("find_methods_reading_field", {"field_descriptor": fd}, dk)
+    wr = tools.execute("find_methods_writing_field", {"field_descriptor": fd}, dk)
+    reader_only = [m for m in rd["items"] if m not in wr["items"]]
+    if reader_only:
+        sm = dk.render_method_smali(reader_only[0])
+        assert "iget" in sm or "sget" in sm
 
 
 def test_literal_tools_reject_empty_values(dk):
@@ -569,29 +589,22 @@ def test_sdk_identity_apis_reject_non_descriptor(dk):
     assert session.find_type_references("Ljava/lang/String;") is not None
 
 
-def test_deprecated_tool_names_still_dispatch(dk):
-    """dexllm#21: the pre-rename tool names keep executing via TOOL_ALIASES, and
-    return the same payload as the canonical name — an old agent prompt or saved
-    transcript does not silently break. They stay out of the advertised catalog.
+def test_tool_catalog_carries_no_aliases(dk):
+    """dexllm#21 stage 3: the MCP catalog advertises exactly one name per tool.
 
-    Both alias names are HARD-CODED here on purpose: a loop over TOOL_ALIASES is
-    self-referential, so deleting an entry would delete its own coverage.
+    An alias would not be transparent here — mcp validates arguments only for the
+    names it ADVERTISES, so an unadvertised spelling silently loses schema
+    validation. A renamed tool is therefore renamed outright, and the
+    catalog == impls invariant stays an exact set equality. Deprecated spellings
+    live on the Python API (raw DexKit / sdk adapter), not in this catalog.
     """
-    api = "Landroid/util/Log;->d(Ljava/lang/String;Ljava/lang/String;)I"
-    assert tools.execute("find_call_sites_to_api", {"api_descriptor": api}, dk) == (
-        tools.execute("find_call_sites_to", {"api_descriptor": api}, dk)
-    )
-    cls = next(c for c in dk.list_classes() if dk.list_class_methods(c))
-    m = next(
-        (mm for mm in dk.list_class_methods(cls) if dk.find_call_sites_from(mm)), None
-    )
-    if m is None:
-        pytest.skip("fixture has no method with a callee")
-    out = tools.execute("find_call_sites_from_method", {"method_descriptor": m}, dk)
-    assert out == tools.execute("find_call_sites_from", {"method_descriptor": m}, dk)
-    assert out["items"] and "error" not in out  # non-vacuous
-
-    catalog = {d["name"] for d in tools.tool_definitions()}
-    for alias, canonical in tools.TOOL_ALIASES.items():
-        assert alias not in catalog and canonical in catalog
+    assert not hasattr(tools, "TOOL_ALIASES")
+    for gone in (
+        "find_call_sites_to_api",
+        "find_call_sites_from_method",
+        "find_field_read_methods",
+        "find_field_write_methods",
+    ):
+        assert gone not in tools.TOOL_IMPLS
+        assert tools.execute(gone, {}, dk)["error"].startswith("unknown tool")
     assert tools.execute("no_such_tool", {}, dk)["error"].startswith("unknown tool")

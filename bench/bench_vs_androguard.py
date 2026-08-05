@@ -201,13 +201,13 @@ search_rows = bench_search()
 all_cls = dk.list_classes()
 workers = min(32, (os.cpu_count() or 8))
 
-dk.decompiler_clear_cache()
+dk.clear_decompiler_cache()
 t = time.time()
 for c in all_cls:
     dk.decompile_class(c)
 seq_full = time.time() - t
 
-dk.decompiler_clear_cache()
+dk.clear_decompiler_cache()
 t = time.time()
 with ThreadPoolExecutor(max_workers=workers) as ex:
     list(ex.map(dk.decompile_class, all_cls, chunksize=32))

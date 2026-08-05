@@ -1848,7 +1848,8 @@ std::pair<int, uint32_t> LocateField(DexKitExt& ext, std::string_view fd) {
 
 // Readers (FieldGetMethods, writers=false) / writers (FieldPutMethods) of a field.
 // THREAD-SAFETY PRECONDITION (same as the caller-analysis path): the exposed
-// entry points (find_field_read_methods / find_field_write_methods) are bound
+// entry points (find_methods_reading_field / find_methods_writing_field, and
+// their deprecated find_field_*_methods aliases) are bound
 // WITHOUT py::gil_scoped_release, so the GIL serializes this lazy WarmAnalysisCaches
 // warmup and the lazy GetMethodDescriptor population it feeds. Do NOT add
 // gil_scoped_release to those bindings without adding a std::once_flag / mutex here.

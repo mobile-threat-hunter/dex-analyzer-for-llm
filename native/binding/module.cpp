@@ -890,16 +890,27 @@ PYBIND11_MODULE(_dexkit_core, m) {
         .def("find_call_sites_from_method", &PyDexKit::find_call_sites_from_method,
              py::arg("method_descriptor"),
              "Deprecated alias of find_call_sites_from.")
-        .def("find_field_read_methods", &PyDexKit::find_field_read_methods,
+        .def("find_methods_reading_field", &PyDexKit::find_field_read_methods,
              py::arg("field_descriptor"),
              "L2.5: descriptors of every method that READS (iget*/sget*) the given "
              "field (\"Lpkg/Cls;->name:Type\"), from the core's field_get_method_ids "
              "reverse index. Empty if the field isn't declared in a loaded dex. "
              "Warms the analysis caches on first use.")
-        .def("find_field_write_methods", &PyDexKit::find_field_write_methods,
+        .def("find_methods_writing_field", &PyDexKit::find_field_write_methods,
              py::arg("field_descriptor"),
              "L2.5: descriptors of every method that WRITES (iput*/sput*) the given "
-             "field (\"Lpkg/Cls;->name:Type\"). Companion to find_field_read_methods.")
+             "field (\"Lpkg/Cls;->name:Type\"). Companion to "
+             "find_methods_reading_field.")
+        // Back-compat aliases. The find_* family names what it RETURNS right after
+        // `find_` (find_classes_by_name, find_methods_using_strings,
+        // find_call_sites_to, ...); these two returned METHOD descriptors while
+        // naming the queried FIELD, the only inversion in the family — dexllm#21.
+        .def("find_field_read_methods", &PyDexKit::find_field_read_methods,
+             py::arg("field_descriptor"),
+             "Deprecated alias of find_methods_reading_field.")
+        .def("find_field_write_methods", &PyDexKit::find_field_write_methods,
+             py::arg("field_descriptor"),
+             "Deprecated alias of find_methods_writing_field.")
         .def("find_type_references", &PyDexKit::find_type_references,
              py::arg("type_descriptor"),
              "L2.5: signature-position type xref for \"Lpkg/Cls;\" — a TypeReferences "
@@ -936,14 +947,23 @@ PYBIND11_MODULE(_dexkit_core, m) {
              "levels (each group's real protectionLevel bucket), over the bundled "
              "AOSP data. C++ engine join shared with the WASM binding; mirrors "
              "dexllm.permission_api_callers.")
-        .def("decompiler_clear_cache", &PyDexKit::decompiler_clear_cache)
-        .def("decompiler_cache_size", &PyDexKit::decompiler_cache_size)
-        .def("decompiler_set_cache_capacity",
+        // Cache control: an ACTION is verb-first, a read-only accessor is a noun —
+        // the scheme the already-verb-first `warm_analysis_caches` was following.
+        // The `decompiler_`-prefixed action spellings are deprecated aliases (dexllm#21).
+        .def("clear_decompiler_cache", &PyDexKit::decompiler_clear_cache,
+             "Drop every cached decompiled method.")
+        .def("set_decompiler_cache_capacity",
              &PyDexKit::decompiler_set_cache_capacity, py::arg("cap"),
              "Set the LRU cache capacity for decompiled methods (0 disables eviction).")
+        .def("decompiler_cache_size", &PyDexKit::decompiler_cache_size)
         .def("decompiler_cache_capacity",
              &PyDexKit::decompiler_cache_capacity,
-             "Get the current LRU cache capacity.");
+             "Get the current LRU cache capacity.")
+        .def("decompiler_clear_cache", &PyDexKit::decompiler_clear_cache,
+             "Deprecated alias of clear_decompiler_cache.")
+        .def("decompiler_set_cache_capacity",
+             &PyDexKit::decompiler_set_cache_capacity, py::arg("cap"),
+             "Deprecated alias of set_decompiler_cache_capacity.");
 
     m.def("is_framework_descriptor", &dexkit::ext::IsFrameworkDescriptor,
           py::arg("descriptor"),

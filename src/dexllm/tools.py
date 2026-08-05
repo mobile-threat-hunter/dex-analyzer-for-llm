@@ -487,18 +487,18 @@ def _t_find_call_sites_from(
     return _paginate(items, offset, limit)
 
 
-def _t_find_field_read_methods(
+def _t_find_methods_reading_field(
     dk: DexKit, field_descriptor: str, limit: int = 50, offset: int = 0
 ) -> dict:
     require_member_descriptor(field_descriptor)
-    return _paginate(dk.find_field_read_methods(field_descriptor), offset, limit)
+    return _paginate(dk.find_methods_reading_field(field_descriptor), offset, limit)
 
 
-def _t_find_field_write_methods(
+def _t_find_methods_writing_field(
     dk: DexKit, field_descriptor: str, limit: int = 50, offset: int = 0
 ) -> dict:
     require_member_descriptor(field_descriptor)
-    return _paginate(dk.find_field_write_methods(field_descriptor), offset, limit)
+    return _paginate(dk.find_methods_writing_field(field_descriptor), offset, limit)
 
 
 def _t_find_type_references(
@@ -733,8 +733,8 @@ TOOL_IMPLS: dict[str, Callable] = {
     "find_call_sites_to": _t_find_call_sites_to,
     "resolve_call_args": _t_resolve_call_args,
     "find_call_sites_from": _t_find_call_sites_from,
-    "find_field_read_methods": _t_find_field_read_methods,
-    "find_field_write_methods": _t_find_field_write_methods,
+    "find_methods_reading_field": _t_find_methods_reading_field,
+    "find_methods_writing_field": _t_find_methods_writing_field,
     "find_type_references": _t_find_type_references,
     "find_methods_using_int_literals": _t_find_methods_using_int_literals,
     "find_methods_using_double_literals": _t_find_methods_using_double_literals,
@@ -743,20 +743,14 @@ TOOL_IMPLS: dict[str, Callable] = {
     "capability_report": _t_capability_report,
 }
 
-# Back-compat tool-name aliases (pre-rename name → canonical). An agent prompt or
-# transcript written against the old name keeps executing. Deliberately NOT in
-# TOOL_IMPLS or TOOL_DEFINITIONS: the catalog advertises exactly one name per tool
-# and the catalog↔impl invariant stays an exact set equality.
-#
-# CAVEAT (accepted): the MCP layer validates arguments against the inputSchema of
-# the tool it ADVERTISES, so a call under an alias skips that validation (mcp's
-# Server.call_tool no-ops when the name is not in the catalog, and logs a warning).
-# The call still runs, and a malformed argument becomes an in-band {"error": ...}
-# instead of a protocol-level error — an error-shape difference, not a safety one.
-TOOL_ALIASES: dict[str, str] = {
-    "find_call_sites_to_api": "find_call_sites_to",
-    "find_call_sites_from_method": "find_call_sites_from",
-}
+# NOTE: the tool catalog carries NO deprecated aliases. An alias would not be a
+# transparent one — mcp validates arguments against the inputSchema of the tool it
+# ADVERTISES, so a call under an unadvertised name skips schema validation
+# entirely (Server.call_tool no-ops and logs a warning) and a malformed argument
+# degrades from a protocol-level error to an in-band {"error": ...}. Renaming a
+# tool outright keeps `TOOL_DEFINITIONS` ≡ `TOOL_IMPLS` exact and every advertised
+# name validated. Aliases are kept on the Python API (raw DexKit + sdk adapter),
+# which is where released names actually need protecting.
 
 
 TOOL_DEFINITIONS: list[dict] = [
@@ -1026,7 +1020,7 @@ TOOL_DEFINITIONS: list[dict] = [
         },
     },
     {
-        "name": "find_field_read_methods",
+        "name": "find_methods_reading_field",
         "description": (
             "Methods that READ a field (iget/sget). Pass the field descriptor "
             "'Lcom/foo/Bar;->f:I'. Returns caller method descriptors."
@@ -1042,7 +1036,7 @@ TOOL_DEFINITIONS: list[dict] = [
         },
     },
     {
-        "name": "find_field_write_methods",
+        "name": "find_methods_writing_field",
         "description": (
             "Methods that WRITE a field (iput/sput). Pass the field descriptor "
             "'Lcom/foo/Bar;->f:I'. Returns caller method descriptors."
@@ -1416,7 +1410,7 @@ def execute(name: str, args: dict, dk: DexKit) -> dict:
     surface as {"error": "<ExceptionType>: <msg>"} so the LLM can decide
     what to do next (rather than the tool loop crashing the conversation).
     """
-    impl = TOOL_IMPLS.get(TOOL_ALIASES.get(name, name))
+    impl = TOOL_IMPLS.get(name)
     if impl is None:
         return {"error": f"unknown tool: {name}"}
     try:

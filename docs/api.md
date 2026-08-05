@@ -371,12 +371,12 @@ dk.find_call_sites_from('La2dp/Vol/ALauncher;->onCreate()V')
 **Naming.** `find_call_sites_to` / `find_call_sites_from` is one spelling across all
 four layers — raw `DexKit`, the typed [`dexllm.sdk`](sdk.md) port and its adapter, and
 the MCP tool catalog. The names released before that unification still work as
-**deprecated aliases**: `find_call_sites_to_api` / `find_call_sites_from_method` on
-`DexKit`, in MCP dispatch (executed, but not advertised in the tool catalog — so an
-old name is dispatched WITHOUT the catalog's JSON-Schema argument validation, and a
-malformed argument surfaces as an in-band `{"error": ...}` instead of a protocol-level
-error), and on the SDK adapter, which also keeps its former `find_call_sites`. New
-code should use the canonical pair.
+**deprecated aliases** on the raw `DexKit` and on the SDK adapter (which also keeps
+its former `find_call_sites`). The **MCP catalog carries no aliases at all** — it
+advertises exactly one name per tool, and an unadvertised spelling returns
+`{"error": "unknown tool: ..."}`. That is deliberate: mcp validates arguments only
+against the schema of the tool it ADVERTISES, so an alias there would silently lose
+input validation. New code should use the canonical pair.
 
 ### Intra-method arg resolution → `list[ResolvedCallSite]`
 Same as call sites, plus the resolved origin of each argument (L4 dataflow).
@@ -415,11 +415,14 @@ for s in dk.resolve_call_args(API):
 ### Field read/write xref → `list[str]`
 Which methods READ (`iget*`/`sget*`) vs WRITE (`iput*`/`sput*`) a specific field
 (L2.5 reverse index). `field_descriptor` is the `Lcls;->name:Type` form; each returns
-plain method descriptors (`[]` if the field isn't declared in a loaded dex).
+plain method descriptors (`[]` if the field isn't declared in a loaded dex). The
+pre-rename spellings `find_field_read_methods` / `find_field_write_methods` remain
+as deprecated aliases — every other `find_*` names what it RETURNS right after
+`find_`, and these two named the queried field instead.
 ```python
 fd = 'La2dp/Vol/AppChooser$1;->this$0:La2dp/Vol/AppChooser;'
-dk.find_field_read_methods(fd)   # ['La2dp/Vol/AppChooser$1;->onClick(Landroid/view/View;)V']   (readers)
-dk.find_field_write_methods(fd)  # ['La2dp/Vol/AppChooser$1;-><init>(La2dp/Vol/AppChooser;)V']  (writers)
+dk.find_methods_reading_field(fd)   # ['La2dp/Vol/AppChooser$1;->onClick(Landroid/view/View;)V']   (readers)
+dk.find_methods_writing_field(fd)  # ['La2dp/Vol/AppChooser$1;-><init>(La2dp/Vol/AppChooser;)V']  (writers)
 ```
 
 ### Type references → `TypeReferences`
@@ -581,9 +584,13 @@ dk2 = dexllm.add_dumped_dexes(dk, ['/tmp/dump.dex'])
 ```python
 dk.decompiler_cache_capacity()          # 4096   (int; default cap)
 dk.decompiler_cache_size()              # 0      (int; current entries)
-dk.decompiler_set_cache_capacity(8192)  # None   (0 = unbounded)
-dk.decompiler_clear_cache()             # None
+dk.set_decompiler_cache_capacity(8192)  # None   (0 = unbounded)
+dk.clear_decompiler_cache()             # None
 ```
+An **action** is verb-first, a **read-only accessor** is a noun — the scheme the
+already-verb-first `warm_analysis_caches` was following. The pre-rename action spellings
+`decompiler_clear_cache` / `decompiler_set_cache_capacity` remain as deprecated
+aliases.
 
 ---
 
@@ -612,7 +619,7 @@ dexllm.DEFAULT_TIMEOUT_S    # 10.0
 
 ### MCP tool definitions
 ```python
-dexllm.tools.tool_definitions()    # list of 32 MCP tool schemas
+dexllm.tools.tool_definitions()    # list of 35 MCP tool schemas
 ```
 
 ---

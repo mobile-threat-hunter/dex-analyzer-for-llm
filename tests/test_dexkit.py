@@ -613,12 +613,14 @@ def test_field_read_write_xref(dk):
     The DIRECTION is verified against the method's smali, so a reader/writer swap
     (FieldGetMethods vs FieldPutMethods wired backwards) is caught, not just the
     membership. An unknown field returns []."""
-    assert dk.find_field_read_methods("Lno/such/Class;->x:I") == []
+    assert dk.find_methods_reading_field("Lno/such/Class;->x:I") == []
+    saw_xref = False
     for cls in dk.list_classes():
         for f in getattr(dk.get_class_summary(cls), "fields", []):
             fd = f"{cls}->{f.name}:{f.type}"
-            rd = dk.find_field_read_methods(fd)
-            wr = dk.find_field_write_methods(fd)
+            rd = dk.find_methods_reading_field(fd)
+            wr = dk.find_methods_writing_field(fd)
+            saw_xref = saw_xref or bool(rd or wr)
             assert all(isinstance(m, str) and "->" in m for m in rd + wr)
             # a method that ONLY reads must contain an iget*/sget* of the field;
             # a method that ONLY writes must contain an iput*/sput* — verified via
@@ -633,7 +635,16 @@ def test_field_read_write_xref(dk):
                 sm = dk.render_method_smali(writer_only[0])
                 assert f.name in sm and ("iput" in sm or "sput" in sm)
                 return
-    pytest.skip("no field with a direction-distinct read/write xref in the test APK")
+    # A fixture with NO field xref at all cannot exercise direction — skip. But if
+    # xref data existed and NOT ONE field distinguished readers from writers, that is
+    # the signature of the two entry points collapsing onto one C++ impl (which a
+    # copy-paste in the duplicated `.def` block makes plausible) — fail, don't skip.
+    if saw_xref:
+        pytest.fail(
+            "field xref returned results but no field had a direction-distinct "
+            "read/write set — readers and writers may be wired to the same impl"
+        )
+    pytest.skip("no field read/write xref in this fixture")
 
 
 def test_call_sites_cross_dex_multidex():
@@ -882,3 +893,51 @@ def test_ast_source_matches_the_text_decompile(dk):
 
     # the suffix claim itself: _ast carries the same Java text as the bare call
     assert dk.decompile_method_ast(m)["source"] == dk.decompile_method(m)
+
+
+def test_stage3_deprecated_names_still_work(dk):
+    """dexllm#21 stage 3: field-xref and cache-action renames keep their aliases.
+
+    The find_* family names what it RETURNS right after `find_` (find_classes_*,
+    find_methods_*, find_call_sites_*); the field pair returned METHOD descriptors
+    while naming the queried FIELD — the only inversion in the family. Cache
+    control uses verb-first for ACTIONS and nouns for read-only accessors, which
+    `warm_analysis_caches` already did. Both old spellings stay as aliases.
+    """
+    fd = next(
+        (f for f in dk.list_field_descriptors() if dk.find_methods_reading_field(f)),
+        None,
+    )
+    if fd is None:
+        pytest.skip("no read field in the fixture")
+    assert dk.find_field_read_methods(fd) == dk.find_methods_reading_field(fd) != []
+    wr = dk.find_methods_writing_field(fd)
+    assert dk.find_field_write_methods(fd) == wr
+
+    m = next(
+        (
+            x
+            for c in dk.list_classes()
+            for x in dk.list_class_methods(c)
+            if dk.decompile_method(x)
+        ),
+        None,
+    )
+    if m is None:
+        pytest.skip("no decompilable method in the fixture")
+    # `dk` is session-scoped, so restore the ORIGINAL capacity (not a hardcoded
+    # default) even if an assertion below fails.
+    original = dk.decompiler_cache_capacity()
+    try:
+        dk.set_decompiler_cache_capacity(64)  # canonical setter
+        assert dk.decompiler_cache_capacity() == 64
+        dk.decompiler_set_cache_capacity(128)  # deprecated alias
+        assert dk.decompiler_cache_capacity() == 128
+        for clear in (dk.clear_decompiler_cache, dk.decompiler_clear_cache):
+            clear()
+            dk.decompile_method(m)
+            assert dk.decompiler_cache_size() > 0  # non-vacuous: something to clear
+            clear()  # canonical on the first pass, deprecated alias on the second
+            assert dk.decompiler_cache_size() == 0
+    finally:
+        dk.set_decompiler_cache_capacity(original)

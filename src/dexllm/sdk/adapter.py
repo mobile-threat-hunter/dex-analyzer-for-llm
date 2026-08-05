@@ -463,15 +463,23 @@ class DexKitAdapter:
             for s in self._dk.resolve_call_args(api_descriptor)
         )
 
-    def find_field_readers(self, field_descriptor: str) -> tuple[str, ...]:
+    def find_methods_reading_field(self, field_descriptor: str) -> tuple[str, ...]:
         """Return descriptors of methods that READ (iget*/sget*) the given field."""
         require_member_descriptor(field_descriptor)
-        return tuple(self._dk.find_field_read_methods(field_descriptor))
+        return tuple(self._dk.find_methods_reading_field(field_descriptor))
 
-    def find_field_writers(self, field_descriptor: str) -> tuple[str, ...]:
+    def find_methods_writing_field(self, field_descriptor: str) -> tuple[str, ...]:
         """Return descriptors of methods that WRITE (iput*/sput*) the given field."""
         require_member_descriptor(field_descriptor)
-        return tuple(self._dk.find_field_write_methods(field_descriptor))
+        return tuple(self._dk.find_methods_writing_field(field_descriptor))
+
+    def find_field_readers(self, field_descriptor: str) -> tuple[str, ...]:
+        """Return :meth:`find_methods_reading_field` — deprecated alias."""
+        return self.find_methods_reading_field(field_descriptor)
+
+    def find_field_writers(self, field_descriptor: str) -> tuple[str, ...]:
+        """Return :meth:`find_methods_writing_field` — deprecated alias."""
+        return self.find_methods_writing_field(field_descriptor)
 
     def find_type_references(self, type_descriptor: str) -> TypeReferences:
         """Return signature-position references to the given type."""
@@ -757,7 +765,7 @@ class DexKitAdapter:
 
     def set_decompiler_cache_capacity(self, capacity: int) -> None:
         """Set the decompiled-method LRU capacity (0 disables eviction)."""
-        self._dk.decompiler_set_cache_capacity(capacity)
+        self._dk.set_decompiler_cache_capacity(capacity)
 
     def decompiler_cache_size(self) -> int:
         """Return the number of methods currently cached."""
@@ -765,7 +773,7 @@ class DexKitAdapter:
 
     def clear_decompiler_cache(self) -> None:
         """Evict every cached decompiled method (free memory)."""
-        self._dk.decompiler_clear_cache()
+        self._dk.clear_decompiler_cache()
 
     def warm_analysis_caches(self) -> None:
         """Eagerly warm the upstream L2/L4 caches (else built lazily on first use)."""

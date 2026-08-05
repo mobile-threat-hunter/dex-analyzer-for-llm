@@ -237,7 +237,7 @@ class CrossReferencePort(Protocol):
         """
         ...
 
-    def find_field_readers(self, field_descriptor: str) -> tuple[str, ...]:
+    def find_methods_reading_field(self, field_descriptor: str) -> tuple[str, ...]:
         """Descriptors of methods that READ (iget*/sget*) the given field.
 
         ``field_descriptor`` is the ``Lcls;->name:Type`` form; empty if the field
@@ -245,7 +245,7 @@ class CrossReferencePort(Protocol):
         """
         ...
 
-    def find_field_writers(self, field_descriptor: str) -> tuple[str, ...]:
+    def find_methods_writing_field(self, field_descriptor: str) -> tuple[str, ...]:
         """Descriptors of methods that WRITE (iput*/sput*) the given field."""
         ...
 

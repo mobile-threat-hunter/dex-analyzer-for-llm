@@ -207,8 +207,8 @@ from dexkit's exact `field_get_method_ids` / `field_put_method_ids` reverse inde
 
 ```python
 fd = "La2dp/Vol/StoreLoc;->MAX_ACC:F"          # Lcls;->name:Type
-dk.find_field_read_methods(fd)                  # -> [method descriptors that read it]
-dk.find_field_write_methods(fd)                 # -> [method descriptors that write it]
+dk.find_methods_reading_field(fd)                  # -> [method descriptors that read it]
+dk.find_methods_writing_field(fd)                 # -> [method descriptors that write it]
 ```
 
 Type xref (signature positions) — where a `Lpkg/Cls;` type appears as a field type,
@@ -355,7 +355,7 @@ print(pc["source"], pc["pc_map"])   # pc_map: [(line_1based, byte_off), …], he
 ```
 
 API surface: `decompile_method` / `decompile_method_with_pc_map` / `decompile_class` / `decompile_method_ast` / `render_method_smali`, plus cache control
-(`decompiler_clear_cache`, `decompiler_cache_size`, `decompiler_set_cache_capacity`). External / native / abstract methods return `""` (graceful — androguard crashes on these).
+(`clear_decompiler_cache`, `decompiler_cache_size`, `set_decompiler_cache_capacity`). External / native / abstract methods return `""` (graceful — androguard crashes on these).
 
 The decompiler is a strict, function-by-function port of androguard's `decompiler/*.py` (graph → dataflow → control_flow → writer/dast) under `dad_cpp/`, validated by 25 DAD parity suites (`ninja parity_tests && ctest`) and an end-to-end diff vs androguard. A few spec-correctness divergences are intentional (valid `null`/`true`/`false` where androguard leaks `None`/`True`/`False`; IEEE754 floats) — see [CLAUDE.md](../CLAUDE.md) "Upstream DAD bug fixes".
 
@@ -367,7 +367,8 @@ The decompiler is a strict, function-by-function port of androguard's `decompile
 name query and is lenient — all operations here auto-normalise their inputs, so you may
 pass a descriptor (`Landroid/app/Activity;`), a smali path (`android/app/Activity`), or a
 Java dotted name (`android.app.Activity`). By contrast the IDENTITY APIs (decompile,
-`find_call_sites_to` / `resolve_call_args`, `find_type_references`, `find_field_*`,
+`find_call_sites_to` / `resolve_call_args`, `find_type_references`,
+`find_methods_reading_field` / `find_methods_writing_field`,
 `render_*_smali`, `get_class_summary`, `list_class_methods`, `list_class_strings` /
 `list_method_strings`, `locate_class_dex`) address one
 EXACT entity and require the canonical Dalvik descriptor (the L-form emitted by `list_*` /
@@ -679,8 +680,8 @@ sites = session.find_call_sites_to("Landroid/util/Log;->d(...)I")     # -> tuple
 callees = session.find_call_sites_from("Lcom/x/Y;->m(I)V")              # -> tuple[CallSite, ...] (caller fixed)
 for rc in session.resolve_call_args("...->getInstance(Ljava/lang/String;)..."):
     for arg in rc.args: arg.kind, arg.string_value          # -> ArgOrigin (only the kind's field set)
-session.find_field_readers("Lcom/x/Y;->token:Ljava/lang/String;")  # -> methods that iget/sget it
-session.find_field_writers("Lcom/x/Y;->token:Ljava/lang/String;")  # -> methods that iput/sput it
+session.find_methods_reading_field("Lcom/x/Y;->token:Ljava/lang/String;")  # -> methods that iget/sget it
+session.find_methods_writing_field("Lcom/x/Y;->token:Ljava/lang/String;")  # -> methods that iput/sput it
 session.find_type_references("Lcom/x/Y;")                 # -> TypeReferences(fields, methods_returning, methods_with_param)
 
 info = session.class_info("Lcom/x/Y;")                    # -> ClassInfo(superclass, interfaces, access_flags, ...)
