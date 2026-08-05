@@ -94,7 +94,7 @@ def verify(path: str, lenient: bool = ...) -> list[_VerifyStatus]:
     """
 
 def is_framework_descriptor(descriptor: str) -> bool:
-    """True for an Android/JDK framework type — the ``app_only`` filter's rule.
+    """Report whether a type is Android/JDK framework — the ``app_only`` rule.
 
     Example::
 
@@ -333,13 +333,13 @@ class DexKit:
 
     # load / container
     def dex_count(self) -> int:
-        """Number of loaded dexes. Example: ``dk.dex_count()`` -> ``1``."""
+        """Count the loaded dexes. Example: ``dk.dex_count()`` -> ``1``."""
 
     def apk_path(self) -> str:
-        """The first construction source (back-compat; prefer ``sources()``)."""
+        """Return the first construction source (back-compat; prefer ``sources()``)."""
 
     def sources(self) -> list[str]:
-        """Construction sources, in load order — earlier sources get lower dex_ids.
+        """Return the construction sources in load order — earlier ones get lower dex_ids.
 
         Example: ``dk.sources()`` -> ``['app.apk']``. After
         ``add_dumped_dexes(dk, ['dump.dex'])`` -> ``['dump.dex', 'app.apk']``.
@@ -363,7 +363,6 @@ class DexKit:
         Example: ``dk.locate_class_dex("Lcom/example/android/tvleanback/Utils;")``
         -> ``0``.
         """
-
     # enumeration (all-dex + per-dex)
     def list_classes(self) -> list[str]:
         """Every DECLARED class descriptor, all dexes.
@@ -426,9 +425,11 @@ class DexKit:
         """
 
     def list_class_strings(self, class_descriptor: str) -> list[str]:
-        """Strings this class loads — union over its declared methods, then its
-        static-field ``VALUE_STRING`` initializers. ``[]`` (never raises) for an
-        unknown / external class.
+        """List the strings this class loads.
+
+        The union over its declared methods, then its own static-field
+        ``VALUE_STRING`` initializers. ``[]`` (never raises) for an unknown or
+        external class.
 
         Example::
 
@@ -437,10 +438,11 @@ class DexKit:
         """
 
     def list_method_strings(self, method_descriptor: str) -> list[str]:
-        """Strings this method body loads. Bytecode-only — a ``static final
-        String`` is a class-level EncodedValue and appears in
-        ``list_class_strings`` instead. ``[]`` for an abstract / native / unknown
-        method.
+        """List the strings this method body loads.
+
+        Bytecode-only — a ``static final String`` is a class-level EncodedValue
+        and appears in ``list_class_strings`` instead. ``[]`` for an abstract,
+        native or unknown method.
 
         Example::
 
@@ -451,7 +453,7 @@ class DexKit:
         """
 
     def extract_dex_bytes(self, dex_id: int) -> bytes:
-        """The dex image as bytes — feed another tool, or dump an unpacked dex.
+        r"""Extract the dex image as bytes — feed another tool, or dump an unpacked dex.
 
         Example::
 
@@ -459,7 +461,6 @@ class DexKit:
             >>> b[:4], len(b)
             (b'dex\\n', 5472720)
         """
-
     # class inspection / external refs
     def get_class_summary(self, descriptor: str) -> ClassSummary:
         """Class metadata + declared fields and methods in one call.
@@ -515,7 +516,6 @@ class DexKit:
             >>> f.signature
             'Landroid/app/Notification$Action;->actionIntent:Landroid/app/PendingIntent;'
         """
-
     # cross-reference
     def find_call_sites_to(self, api_descriptor: str) -> list[CallSite]:
         """Call sites invoking the API — its CALLERS (callee fixed, caller varies).
@@ -600,7 +600,6 @@ class DexKit:
             >>> t.methods_returning[:1]
             ['Lcom/example/android/tvleanback/Utils;->getDisplaySize(Landroid/content/Context;)Landroid/graphics/Point;']
         """
-
     # search (L1–L7)
     #
     # ``match_type`` is one of "contains" (default) / "equals" / "starts_with" /
@@ -772,7 +771,6 @@ class DexKit:
             ...  for m in dk.find_methods_using_double_literals([0.5])][:1]
             ['Landroid/support/graphics/drawable/AnimatorInflaterCompat;->setupObjectAnimator(Landroid/animation/ValueAnimator;Landroid/content/res/TypedArray;IFLorg/xmlpull/v1/XmlPullParser;)V']
         """
-
     # decompile / smali
     def decompile_method(self, method_descriptor: str) -> str:
         """Java text. The suffixed variants add structure to the SAME output.
@@ -795,7 +793,7 @@ class DexKit:
     def decompile_method_with_pc_map(
         self, method_descriptor: str
     ) -> _DecompiledMethodWithPc:
-        """The same text plus a source-line -> dex-offset map, for smali sync.
+        r"""Decompile, and also map each source line to a dex byte offset (smali sync).
 
         ``line`` is a 1-based index into ``source.split("\\n")`` — ONLY ``\\n``
         delimits a line. Do NOT use ``splitlines()``: a string literal may carry a
@@ -812,7 +810,7 @@ class DexKit:
         """
 
     def decompile_class(self, class_descriptor: str) -> str:
-        """Whole-class Java: package, header, field declarations, method bodies.
+        r"""Decompile a whole class: package, header, fields, method bodies.
 
         Example::
 
@@ -868,11 +866,8 @@ class DexKit:
 
     def render_class_smali(self, class_descriptor: str) -> str:
         """``render_method_smali`` for every declared method, under a class header."""
-
     # permissions
-    def permission_callers(
-        self, app_only: bool = True
-    ) -> list[_PermissionCallerGroup]:
+    def permission_callers(self, app_only: bool = True) -> list[_PermissionCallerGroup]:
         """Dangerous-permission APIs the app calls, grouped by permission.
 
         Joins AOSP's permission->API map against this APK's external method refs,
@@ -886,7 +881,6 @@ class DexKit:
             [('android.permission.ACCESS_NETWORK_STATE', 'normal', 1),
              ('android.permission.INTERACT_ACROSS_USERS', 'signature', 4)]
         """
-
     # caches / lifecycle — actions are verb-first, read-only accessors are nouns
     def warm_analysis_caches(self) -> None:
         """Build the cross-ref indexes up front instead of on first query.
@@ -917,7 +911,7 @@ class DexKit:
         """
 
     def decompiler_cache_capacity(self) -> int:
-        """The configured cap (``0`` = unbounded)."""
+        """Return the configured cap (``0`` = unbounded)."""
     # deprecated aliases of the two ACTIONS above (clear / set_..._capacity)
     def decompiler_clear_cache(self) -> None: ...
     def decompiler_set_cache_capacity(self, cap: int) -> None: ...
