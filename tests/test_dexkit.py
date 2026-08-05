@@ -109,14 +109,12 @@ def test_method_strings_match_smali_ground_truth(dk):
         for m in dk.list_class_methods(cls):
             got = dk.list_method_strings(m)
             assert got == list(dict.fromkeys(got))  # dedup + order preserved
-            try:
-                expected = _smali_strings(dk, m)
-            except UnicodeDecodeError:
-                # The oracle itself fails here: render_*_smali hands back raw MUTF-8,
-                # so a surrogate / embedded-NUL literal is undecodable (26 methods in
-                # the bundled corpus). That is exactly what these accessors fix — skip
-                # the method rather than let the oracle's limitation ERROR the test.
-                continue
+            # No UnicodeDecodeError guard: the renderer decodes MUTF-8 before
+            # escaping (dexllm#22), so the oracle no longer needs to skip those
+            # methods. This loop stops at 25 string-bearing methods, so it does not
+            # by itself reach an affected one — test_render_smali_decodes_mutf8
+            # and test_smali_never_contains_raw_control_chars are the real guards.
+            expected = _smali_strings(dk, m)
             assert got == expected, m
             checked += 1
             with_strings += bool(got)
@@ -504,10 +502,9 @@ def test_catch_handler_starts_from_an_unknown_register_file(loadable_apks):
             "Ljava/lang/StringBuilder;",
         ):
             for s in dk.resolve_call_args(api):
-                try:
-                    smali = dk.render_method_smali(s.caller_descriptor)
-                except UnicodeDecodeError:
-                    continue
+                # No UnicodeDecodeError guard: dexllm#22 made the renderer decode
+                # MUTF-8 before escaping, so smali is always valid text now.
+                smali = dk.render_method_smali(s.caller_descriptor)
                 offs = [
                     int(m.group(1), 16)
                     for line in smali.splitlines()
@@ -941,3 +938,182 @@ def test_stage3_deprecated_names_still_work(dk):
             assert dk.decompiler_cache_size() == 0
     finally:
         dk.set_decompiler_cache_capacity(original)
+
+
+# ── regression: rendered smali must decode MUTF-8 (dexllm#22) ────────────────
+
+
+def test_render_smali_decodes_mutf8_literals(loadable_apks):
+    """dexllm#22: a literal pybind's strict UTF-8 cannot accept must not RAISE.
+
+    `EscapeSmaliString` escapes only \\ " \\n \\r \\t and bytes < 0x20, so every byte
+    >= 0x20 of a MUTF-8 literal survived into the rendered text. A supplementary-
+    plane character (stored as a SURROGATE PAIR, `ED ..`) or an embedded NUL
+    (`C0 80`) is not valid UTF-8, so `std::string -> py::str` raised
+    UnicodeDecodeError where text was expected — 29 of 201,079 methods and 25 of
+    26,938 classes in the bundled corpus, across 11 files.
+
+    Finds such a literal through `list_value_strings` (which always decoded), then
+    asserts BOTH renderers return text and that the rendered literal round-trips to
+    the same value the string accessor reports.
+    """
+    for apk in loadable_apks:
+        dk = dexllm.DexKit(apk)
+        # Exactly the shapes whose RAW MUTF-8 strict UTF-8 rejects: a supplementary
+        # code point (stored as a surrogate PAIR) or an embedded NUL (`C0 80`).
+        # U+FFFD is deliberately NOT a selector — a genuine U+FFFD literal is valid
+        # UTF-8 and never raised, so selecting one would make this pass vacuously.
+        hard = [
+            s
+            for s in dk.list_value_strings()
+            if any(ord(ch) > 0xFFFF or ch == "\x00" for ch in s)
+        ]
+        if not hard:
+            continue
+        hits = dk.find_methods_using_strings([hard[0]], "equals")
+        if not hits:
+            continue
+        m = hits[0].descriptor
+        sm = dk.render_method_smali(m)  # would raise UnicodeDecodeError pre-fix
+        assert sm, m
+        cls = m.split("->")[0]
+        assert dk.render_class_smali(cls), cls  # the class renderer too
+        # The renderer and the string accessor agree on the decoded value. Compare
+        # through the un-escape oracle, not a substring: EscapeSmaliString doubles
+        # backslashes, so a literal containing one is not a verbatim substring.
+        assert hard[0] in _smali_strings(dk, m), m
+        assert hard[0] in dk.list_method_strings(m), m
+        return
+    pytest.skip("no supplementary/NUL/lone-surrogate literal in the corpus")
+
+
+def test_smali_never_contains_raw_control_chars(loadable_apks):
+    """dexllm#22: a rendered listing must not carry a RAW C0 control character.
+
+    `EscapeSmaliString` hex-escapes bytes < 0x20, but a dex NUL arrives as the
+    two bytes `C0 80` and a decode-AFTER-escape design turned it into a real
+    U+0000 inside the text — the same literal then showed `\\x01` escaped and NUL
+    raw. Escaping the DECODED characters makes every C0 control escape alike.
+    Newline is the format's own line separator, so it is excluded.
+
+    Scope note: this asserts C0 only (`cp < 0x20`), which is exactly what the
+    escaper covers. DEL, the C1 range and the Unicode line separators U+2028 /
+    U+2029 / U+0085 are emitted as themselves — see the encoding contract in
+    docs/api.md; a consumer must split on `\\n`, never `str.splitlines()`.
+
+    Must run over the WHOLE loadable corpus, not the `dk` fixture: that fixture
+    resolves to an APK with ZERO control-bearing literals, so the assertion could
+    not be violated by any implementation and the test passed even against the
+    broken escapers it exists to catch.
+    """
+    seen_candidate = False
+    for apk in loadable_apks:
+        dk = dexllm.DexKit(apk)
+        # Does this APK even carry a control character to get wrong?
+        seen_candidate = seen_candidate or any(
+            any(ord(ch) < 0x20 for ch in s) for s in dk.list_value_strings()
+        )
+        for cls in dk.list_classes():
+            text = dk.render_class_smali(cls)
+            assert not any(ord(c) < 0x20 and c != "\n" for c in text), (apk, cls)
+    # Without this the test is vacuous — it would "pass" on a corpus that has
+    # nothing to escape, which is precisely how it slipped through review.
+    assert seen_candidate, "no control-bearing literal in the corpus — test vacuous"
+
+
+def test_smali_literals_cannot_be_broken_by_overlong_mutf8(tmp_path):
+    """dexllm#22: a verifier-ACCEPTED overlong sequence must not inject structure.
+
+    `VerifyMutf8` checks lead/continuation shape only (ART does the same), so a
+    non-NUL OVERLONG is legal input: `E0 80 A2` decodes to `"` and `E0 80 8A` to a
+    newline. Escaping raw BYTES let those through untouched, so anything decoding
+    the assembled text afterwards MATERIALISED a structural character inside the
+    quoted literal — ending it early or forging a whole instruction line. The
+    rendered listing is handed to an analyst / LLM, so that is a hostile-input
+    write into the analysis view. Escaping the DECODED characters closes it.
+
+    Crafts the input in place: a 3-byte MUTF-8 sequence is replaced by a 3-byte
+    overlong, so byte length, utf16_len and string_ids order are all unchanged and
+    the dex still verifies.
+    """
+    import struct
+
+    def uleb(buf, off):
+        r = s = 0
+        while True:
+            x = buf[off]
+            off += 1
+            r |= (x & 0x7F) << s
+            s += 7
+            if not (x & 0x80):
+                return r, off
+
+    def find_seq(buf):
+        """Offset of the first 3-byte MUTF-8 sequence inside any string_data."""
+        n, off0 = struct.unpack_from("<II", buf, 56)
+        for i in range(n):
+            o = struct.unpack_from("<I", buf, off0 + 4 * i)[0]
+            _len, d = uleb(buf, o)
+            e = buf.index(0, d)
+            for j in range(d, e - 2):
+                if (
+                    0xE0 <= buf[j] <= 0xEF
+                    and 0x80 <= buf[j + 1] <= 0xBF
+                    and 0x80 <= buf[j + 2] <= 0xBF
+                ):
+                    return j
+        return None
+
+    # Scan EVERY bare .dex, not just the first — the alphabetically-first one has
+    # no non-ASCII literal, and skipping here would silently disarm the guard.
+    src = pos = None
+    for cand in sorted(glob.glob(str(REPO_ROOT / "test_apk" / "APK" / "*.dex"))):
+        raw = open(cand, "rb").read()
+        if raw[:4] != b"dex\n":
+            continue
+        found = find_seq(bytearray(raw))
+        if found is not None:
+            src, pos = cand, found
+            break
+    if src is None:
+        pytest.skip("no .dex with a 3-byte MUTF-8 literal in the corpus")
+
+    for payload, what in (
+        (b"\xe0\x80\xa2", 'overlong "'),
+        (b"\xe0\x80\x8a", "overlong \\n"),
+    ):
+        b = bytearray(open(src, "rb").read())
+        b[pos : pos + 3] = payload
+
+        f = tmp_path / "overlong.dex"
+        f.write_bytes(bytes(b))
+        d2 = dexllm.DexKit(str(f))
+        assert d2.verify_report()[0]["valid"], "the crafted dex must still verify"
+
+        reached = 0
+        for cls in d2.list_classes():
+            for m in d2.list_class_methods(cls):
+                sm = d2.render_method_smali(m)  # must not raise
+                assert not any(ord(c) < 0x20 and c != "\n" for c in sm), what
+                for line in sm.split("\n"):
+                    if "const-string" not in line:
+                        continue
+                    body = line.split(", ", 1)[1] if ", " in line else ""
+                    bare, k = 0, 0
+                    while k < len(body):
+                        if body[k] == "\\":
+                            k += 2
+                            continue
+                        if body[k] == '"':
+                            bare += 1
+                        k += 1
+                    # exactly the opening and closing quote — an injected one would
+                    # make this odd and terminate the literal early
+                    assert bare == 2, (what, line[:120])
+                    # did the payload actually land in THIS literal, escaped?
+                    if '\\"' in body or "\\n" in body:
+                        reached += 1
+        # Without this the guard can go vacuous: find_seq scans all string_data,
+        # so on a different corpus it could patch an identifier instead, leaving
+        # no const-string line carrying the payload and nothing to balance.
+        assert reached, f"{what} never reached a const-string literal"

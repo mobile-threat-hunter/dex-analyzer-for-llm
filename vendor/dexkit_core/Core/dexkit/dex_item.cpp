@@ -26,6 +26,10 @@
 #include "utils/opcode_util.h"
 #include "utils/dex_descriptor_util.h"
 
+// dexllm#22: the shared ART-faithful MUTF-8 codec (dexkit_mutf8 target). Used by
+// EscapeSmaliString so a pool string is DECODED before it is escaped.
+#include "mutf8.h"
+
 namespace dexkit {
 
 inline void PushEncodeNumber(dex::InstructionFormat op_format, uint8_t op, const uint16_t *ptr, std::vector<EncodeNumber> *using_numbers);
@@ -1380,25 +1384,69 @@ bool DexItem::CheckAllTypeNamesDeclared(std::vector<std::string_view> &types) {
 namespace {
 
 // Escape a string literal for smali display (similar to baksmali rules).
+// dexllm#22: DECODE the dex MUTF-8 first, then escape CHARACTERS.
+//
+// This used to escape raw BYTES, which is unsound for two reasons:
+//
+//  1. INJECTION. A non-NUL OVERLONG sequence is accepted by the structural
+//     verifier (VerifyMutf8 checks lead/continuation shape only — ART does the
+//     same, see native/dad_cpp/include/mutf8.h), and `C0 A2` decodes to `"`,
+//     `C1 9C` to `\`, `C0 8A` to a newline. Escaping the BYTES let those through
+//     untouched, so whoever decoded the assembled text afterwards MATERIALISED a
+//     structural character inside the quoted literal — terminating it early or
+//     forging an entire instruction line. The rendered listing is fed to an
+//     analyst / LLM, so an analysed (hostile) app could write into that view.
+//  2. Nothing decoded it at all, so a literal holding a surrogate pair
+//     (supplementary-plane char) or an embedded NUL (`C0 80`) reached pybind's
+//     strict-UTF-8 str conversion as raw bytes and RAISED UnicodeDecodeError —
+//     29 of 201,079 methods and 25 of 26,938 classes in the bundled corpus.
+//
+// Escaping the DECODED characters fixes both at the origin: a decoded `"` is
+// escaped like any other, and `C0 80` becomes `\x00` like every other control
+// character instead of a raw NUL in the text.
+//
+// Decode semantics match the binding's DecodeMutf8ForPy so a rendered literal
+// and list_method_strings() agree: a surrogate PAIR becomes one code point, a
+// LONE surrogate collapses to U+FFFD (it has no UTF-8 form).
 std::string EscapeSmaliString(std::string_view in) {
     std::string out;
     out.reserve(in.size() + 2);
-    for (char c : in) {
-        switch (c) {
-            case '\\': out += "\\\\"; break;
-            case '"':  out += "\\\""; break;
-            case '\n': out += "\\n";  break;
-            case '\r': out += "\\r";  break;
-            case '\t': out += "\\t";  break;
-            default:
-                if (static_cast<unsigned char>(c) < 0x20) {
-                    char buf[8];
-                    snprintf(buf, sizeof(buf), "\\x%02x",
-                             static_cast<unsigned>(static_cast<unsigned char>(c)));
-                    out += buf;
-                } else {
-                    out += c;
-                }
+    const std::vector<uint16_t> units = dexkit::dad::mutf8::Mutf8ToUtf16(in);
+    for (size_t i = 0; i < units.size(); ++i) {
+        uint32_t cp = units[i];
+        if (cp >= 0xD800 && cp <= 0xDBFF && i + 1 < units.size() &&
+            units[i + 1] >= 0xDC00 && units[i + 1] <= 0xDFFF) {
+            cp = 0x10000 + ((cp - 0xD800) << 10) + (units[i + 1] - 0xDC00);
+            ++i;
+        } else if (cp >= 0xD800 && cp <= 0xDFFF) {
+            cp = 0xFFFD;  // lone surrogate — no UTF-8 form
+        }
+        switch (cp) {
+            case '\\': out += "\\\\"; continue;
+            case '"':  out += "\\\""; continue;
+            case '\n': out += "\\n";  continue;
+            case '\r': out += "\\r";  continue;
+            case '\t': out += "\\t";  continue;
+            default: break;
+        }
+        if (cp < 0x20) {
+            char buf[8];
+            snprintf(buf, sizeof(buf), "\\x%02x", static_cast<unsigned>(cp));
+            out += buf;
+        } else if (cp < 0x80) {
+            out += static_cast<char>(cp);
+        } else if (cp < 0x800) {
+            out += static_cast<char>(0xC0 | (cp >> 6));
+            out += static_cast<char>(0x80 | (cp & 0x3F));
+        } else if (cp < 0x10000) {
+            out += static_cast<char>(0xE0 | (cp >> 12));
+            out += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
+            out += static_cast<char>(0x80 | (cp & 0x3F));
+        } else {
+            out += static_cast<char>(0xF0 | (cp >> 18));
+            out += static_cast<char>(0x80 | ((cp >> 12) & 0x3F));
+            out += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
+            out += static_cast<char>(0x80 | (cp & 0x3F));
         }
     }
     return out;

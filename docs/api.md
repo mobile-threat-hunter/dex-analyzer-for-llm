@@ -144,11 +144,14 @@ dk.list_class_strings('Lcom/example/android/tvleanback/Utils;')
   app-wide. It is always a subset of `list_value_strings()`.
 - Both return `[]` (never raise) for an external / abstract / native / unknown target,
   the same graceful-empty contract as `render_method_smali`.
-- They also decode strings the smali workaround cannot: `render_*_smali` returns raw
-  MUTF-8, so a literal carrying a surrogate (a supplementary-plane character, `ED …`)
-  or an embedded NUL (`C0 80`) makes the text API raise `UnicodeDecodeError` — **26 of
-  the 188,065 methods** in the bundled corpus. These accessors decode MUTF-8 → UTF-8
-  like `list_value_strings()`, so those literals are readable.
+- They decode MUTF-8 → UTF-8, as `render_*_smali` now does too (dexllm#22 — until
+  then the renderer escaped raw BYTES and handed the pool bytes through, so a literal
+  carrying a surrogate pair (a supplementary-plane character) or an embedded NUL
+  (`C0 80`) made the text API raise `UnicodeDecodeError`: **26 of the 188,065 methods
+  and 22 of the 25,309 classes** of the apk-only sweep corpus — 29 / 25 counting the
+  bare `.dex` files too). The accessors' remaining advantages are
+  scope (one method / one class), dedup on the decoded text, and a graceful empty
+  rather than a whole rendered listing to parse.
 - **Round-trip caveat — "forward direction" is a scope statement, not an exact
   inverse.** Feeding a returned string back into `find_*_using_strings` finds the
   origin whenever the string appears in *bytecode*, but of 29,588 distinct
@@ -163,7 +166,10 @@ dk.list_class_strings('Lcom/example/android/tvleanback/Utils;')
   arguments as strict UTF-8, which rejects an unpaired surrogate, and the decode
   direction replaces it with U+FFFD — though passing the raw MUTF-8 as `bytes` does
   match), and one carrying a non-NUL OVERLONG encoding, which the verifier accepts
-  (as ART does) but canonical encoding never produces.) Both directions are individually correct — do not assume set
+  (as ART does) but canonical encoding never produces — note that overlong is no
+  longer merely a query-matching curiosity: `EscapeSmaliString` escapes the DECODED
+  characters precisely so an overlong `"` / newline cannot inject structure into a
+  rendered listing, see dexllm#22.) Both directions are individually correct — do not assume set
   equality.
 
 ### Per-dex enumeration (uniform scope axis)
@@ -268,6 +274,29 @@ dk.render_method_smali(M)
 
 ### `dk.render_class_smali(cls_desc: str) -> str`
 Whole-class smali.
+
+**Encoding contract (dexllm#22).** A pool string used as a **string literal** (a
+`const-string` operand, and `.source`) is MUTF-8-**decoded before it is escaped**. A
+surrogate PAIR becomes one code point (an astral character renders as itself — the
+Java text path escapes it as `\uXXXX` code units instead, a deliberate difference:
+that path claims ART code-unit fidelity, this one is a readable listing); a LONE
+surrogate collapses to U+FFFD (lossy, absent from the corpus); every **C0** control
+character (`cp < 0x20`) — including a NUL, which arrives as `C0 80` — escapes as
+`\xNN`. Escaping the decoded characters is what stops a verifier-accepted OVERLONG
+sequence (`E0 80 A2` = `"`, `E0 80 8A` = newline) from injecting structure into a
+literal. A rendered literal equals what `list_method_strings` reports for the same
+method.
+
+Two things this does **not** cover:
+- **IDENTIFIERS** (type / method / field names, which do not go through the escaper)
+  are still emitted as raw MUTF-8, so a crafted APK with an astral identifier can
+  still raise `UnicodeDecodeError` here — the out-of-scope half of dexllm#22. Corpus
+  incidence is 0.
+- Only C0 is escaped. **DEL, the C1 range and the Unicode line separators U+2028 /
+  U+2029 / U+0085 render as themselves**, and Python's `str.splitlines()` treats the
+  last three as line breaks — `PatternsCompat.<clinit>` renders 208 `\n` but 248
+  `splitlines()` lines. **Split rendered smali on `\n`, never `str.splitlines()`** —
+  the same contract the D-3 `pc_map` line numbering carries.
 
 ---
 

@@ -33,6 +33,15 @@ find_package(pybind11 CONFIG REQUIRED)
 set(THREADS_PREFER_PTHREAD_FLAG ON)
 find_package(Threads REQUIRED)
 
+# The shared MUTF-8 codec (an ART port, see native/dad_cpp/include/mutf8.h). Its
+# own leaf target with NO dependencies, because three layers need it: the DAD
+# decompiler, the pybind boundary, and — since dexllm#22 — the vendored Core's
+# smali renderer, which must DECODE a pool string before escaping it. Keeping one
+# implementation is the point: CLAUDE.md records that the hand-rolled copies were
+# consolidated onto this file precisely because they drifted.
+add_library(dexkit_mutf8 STATIC native/dad_cpp/mutf8.cpp)
+target_include_directories(dexkit_mutf8 PUBLIC native/dad_cpp/include)
+
 # Our C++ extension over DexKit.
 add_library(dexkit_ext STATIC
     native/core_ext/dexkit_ext.cpp
@@ -41,12 +50,13 @@ add_library(dexkit_ext STATIC
     native/core_ext/analysis.cpp
 )
 target_include_directories(dexkit_ext PUBLIC native/core_ext/include native/dad_cpp/include)
-target_link_libraries(dexkit_ext PUBLIC dexkit_static Threads::Threads)
+target_link_libraries(dexkit_ext PUBLIC dexkit_static Threads::Threads dexkit_mutf8)
+# The vendored Core's smali renderer decodes MUTF-8 before escaping (dexllm#22).
+target_link_libraries(dexkit_static PRIVATE dexkit_mutf8)
 
 # DexKit-DAD decompiler.
 add_library(dexkit_dad STATIC
     native/dad_cpp/decompiler.cpp
-    native/dad_cpp/mutf8.cpp
     native/dad_cpp/util.cpp
     native/dad_cpp/node.cpp
     native/dad_cpp/basic_blocks.cpp
@@ -64,7 +74,7 @@ add_library(dexkit_dad STATIC
     native/dad_cpp/instruction_accept.cpp
 )
 target_include_directories(dexkit_dad PUBLIC native/dad_cpp/include)
-target_link_libraries(dexkit_dad PUBLIC dexkit_ext)
+target_link_libraries(dexkit_dad PUBLIC dexkit_ext dexkit_mutf8)
 
 # pybind11 module.
 pybind11_add_module(_dexkit_core MODULE
@@ -76,7 +86,7 @@ target_link_libraries(_dexkit_core PRIVATE dexkit_ext dexkit_dad)
 # while GCC (Linux) only warns. Make it a hard error on OUR targets (not the
 # vendored Core) so the Linux dev build catches what the macOS build would,
 # instead of discovering it in CI. See dexitem_code_source.cpp uint16/uint32.
-foreach(t dexkit_ext dexkit_dad _dexkit_core)
+foreach(t dexkit_mutf8 dexkit_ext dexkit_dad _dexkit_core)
     target_compile_options(${t} PRIVATE -Werror=narrowing)
 endforeach()
 
