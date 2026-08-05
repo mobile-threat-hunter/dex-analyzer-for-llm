@@ -17,6 +17,7 @@
 #include "decompiler.h"
 #include "dexitem_code_source.h"
 #include "dexkit_ext.h"
+#include "mutf8.h"
 
 namespace py = pybind11;
 
@@ -101,6 +102,31 @@ py::object AstToPy(const dexkit::dad::AstValue& v) {
         }
     }
     return py::none();
+}
+
+// dexllm#19 — a string QUERY arrives from Python as UTF-8, but the matchers compare
+// against the raw MUTF-8 bytes of the dex string pool. The two differ for exactly two
+// things (NUL, and a supplementary code point, which dex stores as a surrogate pair),
+// so a literal containing either could never match — including one this very library
+// had just handed the caller back. Encode the query at the boundary, once, for every
+// content matcher. Identifier/NAME matchers are deliberately NOT converted — not
+// because normalisation prevents it, but because that path is unreachable anyway: a
+// dex CAN carry a supplementary-plane identifier (the verifier allows a surrogate
+// pair in a member name), but enumerating such a class already raises
+// UnicodeDecodeError in `list_classes()`, so the whole name path is broken for it
+// independently of this. Recorded as a known residual, not as a fixed case; the
+// corpus has 0 non-ASCII identifiers.
+std::vector<std::string> to_mutf8_query(const std::vector<std::string>& q) {
+    std::vector<std::string> out;
+    out.reserve(q.size());
+    for (const auto& s : q) out.push_back(dexkit::dad::mutf8::Utf8ToMutf8(s));
+    return out;
+}
+std::map<std::string, std::vector<std::string>> to_mutf8_query(
+    const std::map<std::string, std::vector<std::string>>& q) {
+    std::map<std::string, std::vector<std::string>> out;
+    for (const auto& [k, v] : q) out.emplace(k, to_mutf8_query(v));
+    return out;
 }
 
 // MUTF-8 → UTF-8 decode a raw string list, preserving order and dropping
@@ -273,31 +299,31 @@ public:
     find_classes_using_strings(const std::vector<std::string>& strings,
                                const std::string& match_type,
                                bool ignore_case) {
-        return ext_.FindClassesUsingStrings(strings, match_type, ignore_case);
+        return ext_.FindClassesUsingStrings(to_mutf8_query(strings), match_type, ignore_case);
     }
     std::vector<dexkit::ext::ClassMatch>
     find_classes_declaring_strings(const std::vector<std::string>& strings,
                                    const std::string& match_type,
                                    bool ignore_case) {
-        return ext_.FindClassesDeclaringStrings(strings, match_type, ignore_case);
+        return ext_.FindClassesDeclaringStrings(to_mutf8_query(strings), match_type, ignore_case);
     }
     std::vector<dexkit::ext::MethodMatch>
     find_methods_using_strings(const std::vector<std::string>& strings,
                                const std::string& match_type,
                                bool ignore_case) {
-        return ext_.FindMethodsUsingStrings(strings, match_type, ignore_case);
+        return ext_.FindMethodsUsingStrings(to_mutf8_query(strings), match_type, ignore_case);
     }
     std::map<std::string, std::vector<dexkit::ext::ClassMatch>>
     batch_find_classes_using_strings(
         const std::map<std::string, std::vector<std::string>>& q,
         const std::string& match_type, bool ignore_case) {
-        return ext_.BatchFindClassesUsingStrings(q, match_type, ignore_case);
+        return ext_.BatchFindClassesUsingStrings(to_mutf8_query(q), match_type, ignore_case);
     }
     std::map<std::string, std::vector<dexkit::ext::MethodMatch>>
     batch_find_methods_using_strings(
         const std::map<std::string, std::vector<std::string>>& q,
         const std::string& match_type, bool ignore_case) {
-        return ext_.BatchFindMethodsUsingStrings(q, match_type, ignore_case);
+        return ext_.BatchFindMethodsUsingStrings(to_mutf8_query(q), match_type, ignore_case);
     }
     std::vector<dexkit::ext::MethodMatch>
     find_methods_by_name(const std::string& name,

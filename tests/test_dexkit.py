@@ -6,6 +6,7 @@ use the `dk`/`sample_method` fixtures and skip when no test APK is present.
 Run:  pytest tests -v
 """
 
+import glob
 import re
 from pathlib import Path
 
@@ -163,32 +164,94 @@ def test_class_strings_subset_of_value_strings(dk):
 
 
 def test_method_strings_round_trips_into_the_reverse_query(dk):
-    """A bytecode string reported for M finds M again via find_methods_using_strings.
-
-    Only asserted for strings that CAN round-trip: matching compares raw MUTF-8 pool
-    bytes, while these accessors hand back decoded UTF-8, so a supplementary-plane
-    character (6-byte surrogate pair vs 4-byte UTF-8) or an embedded NUL (`C0 80` vs
-    `00`) cannot match — a pre-existing property of `list_value_strings()` + the
-    matcher, documented as the round-trip caveat in docs/api.md. Those are counted
-    and reported here, not silently skipped, so a REGRESSION (the encodable majority
-    breaking) still fails.
-    """
-
-    def encodable(s):
-        return all(ord(c) <= 0xFFFF for c in s) and "\x00" not in s
-
+    """A bytecode string reported for M finds M again via find_methods_using_strings."""
     checked = 0
     for cls in dk.list_classes():
         for m in dk.list_class_methods(cls):
             for s in dk.list_method_strings(m):
-                if not encodable(s):
-                    continue
                 hits = dk.find_methods_using_strings([s], "equals")
                 assert any(h.descriptor == m for h in hits), (m, s)
                 checked += 1
         if checked >= 20:
             break
-    assert checked > 0, "no encodable const-string in the corpus"
+    assert checked > 0, "no const-string in the corpus"
+
+
+def test_non_ascii_literals_round_trip():
+    """dexllm#19: a supplementary-plane or NUL-bearing literal must round-trip.
+
+    This is the ONLY Python-level guard for the MUTF-8 query encoding, and it must
+    SEEK such a string: the plain round-trip test above stops after 20 strings and
+    never reaches one (measured: 0 astral/NUL among the first 20 in every corpus APK),
+    so it passes even with the encoder regressed to identity.
+
+    It scans the bundled corpus DIRECTLY rather than through the `loadable_apks`
+    fixture, which honours `$DEXLLM_TEST_APK` — pointing that documented knob at a
+    small APK (TC-debug, multidex, com.politedroid) would otherwise turn this guard
+    into a hard failure instead of leaving it to the corpus.
+
+    Covers all FIVE converted entry points: they share one helper, so a wholesale
+    revert is caught by any of them, but a partial one (dropping the conversion from
+    a single call site) is only caught by exercising each.
+    """
+    apks = sorted(glob.glob(str(REPO_ROOT / "test_apk" / "APK" / "*.apk")))
+    if not apks:
+        pytest.skip("no bundled corpus")
+    checked = 0
+    for apk in apks:
+        try:
+            dk = dexllm.DexKit(apk)
+        except Exception:  # noqa: BLE001
+            continue
+        for cls in dk.list_classes():
+            for m in dk.list_class_methods(cls):
+                for s in dk.list_method_strings(m):
+                    if all(ord(c) <= 0xFFFF for c in s) and "\x00" not in s:
+                        continue
+                    assert any(
+                        h.descriptor == m
+                        for h in dk.find_methods_using_strings([s], "equals")
+                    ), f"find_methods_using_strings lost {s!r} (reported for {m})"
+                    assert dk.find_classes_using_strings([s], "equals"), s
+                    assert dk.batch_find_methods_using_strings({"k": [s]})["k"], s
+                    assert dk.batch_find_classes_using_strings({"k": [s]})["k"], s
+                    checked += 1
+                    if checked >= 5:
+                        break
+                if checked >= 5:
+                    break
+            if checked >= 5:
+                break
+        if checked >= 5:
+            break
+    assert checked > 0, (
+        "no astral / NUL-bearing literal reached — this test is the only Python guard "
+        "for dexllm#19 and must not pass vacuously"
+    )
+    # the fifth converted entry point: a declaration-side query
+    for apk in apks:
+        try:
+            dk = dexllm.DexKit(apk)
+        except Exception:  # noqa: BLE001
+            continue
+        for cls in dk.list_classes():
+            for s in dk.list_class_strings(cls):
+                if all(ord(c) <= 0xFFFF for c in s) and "\x00" not in s:
+                    continue
+                if dk.find_classes_declaring_strings([s], "equals"):
+                    return  # a declared astral constant resolves through the encoder
+    # none declared as a constant in this corpus — the four above already ran
+
+
+def test_lone_surrogate_query_is_rejected_not_silently_wrong(dk):
+    """dexllm#19 residual, pinned: a lone surrogate cannot be queried as a `str`.
+
+    Not because Python forbids it (a ``str`` may hold U+D800) but because pybind11
+    encodes arguments as strict UTF-8 and rejects an unpaired surrogate — a LOUD
+    failure, not a silent miss, which is the property worth keeping.
+    """
+    with pytest.raises(TypeError):
+        dk.find_methods_using_strings(["\ud800"], "equals")
 
 
 def test_forward_strings_empty_for_bodyless_and_unknown(dk):
@@ -229,12 +292,6 @@ def test_find_classes_declaring_strings_finds_what_using_cannot(dk):
         for s in dk.list_class_strings(cls):
             if s in code or not s:
                 continue  # loaded somewhere → `using` finds it; that is its own test
-            if not s.isascii():
-                # Matching compares raw MUTF-8 pool bytes against a UTF-8 query, so a
-                # supplementary-plane literal cannot match (documented, dexllm#19).
-                # Corpus order keeps these out of the first 10 today, but a different
-                # $DEXLLM_TEST_APK would hit one — skip explicitly rather than flake.
-                continue
             assert dk.find_classes_using_strings([s], "equals") == []
             declaring = [
                 m.descriptor for m in dk.find_classes_declaring_strings([s], "equals")

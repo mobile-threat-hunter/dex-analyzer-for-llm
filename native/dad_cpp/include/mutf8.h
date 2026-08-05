@@ -46,6 +46,32 @@ std::string Utf16ToUtf8(const std::vector<uint16_t>& units);
 // Convenience: MUTF-8 → standard UTF-8 (Mutf8ToUtf16 ∘ Utf16ToUtf8).
 std::string Mutf8ToUtf8(std::string_view raw);
 
+// Standard UTF-8 → MUTF-8: the INVERSE direction, for turning a caller-supplied
+// query (a Python `str`, which pybind11 hands over as UTF-8) into the bytes the dex
+// string pool actually holds, so a byte-comparing matcher can find it. Only two
+// things change — NUL becomes `C0 80`, and a supplementary code point's 4-byte UTF-8
+// form becomes the two 3-byte surrogate halves — so ASCII and BMP text pass through
+// untouched (and the implementation returns the input unchanged when it contains
+// neither, which is the overwhelming majority).
+//
+// Not every pool string can be reconstructed, and the two residuals of dexllm#19 are
+// both crafted-only (0 occurrences across the corpus's 292,157 raw string_data
+// entries):
+//   * a LONE surrogate. Not because a Python `str` cannot hold one — `"\ud800"` is
+//     a legal str — but because pybind11 encodes arguments as STRICT UTF-8, which
+//     rejects an unpaired surrogate (the call raises), and in the other direction the
+//     binding's decode replaces it with U+FFFD, which cannot be encoded back. Passing
+//     the raw MUTF-8 as `bytes` DOES match: the fast path is the identity there. (The
+//     codec itself round-trips it — Utf16ToUtf8 keeps the raw 3-byte form — so the
+//     loss is at the pybind boundary, not here.)
+//   * a non-NUL OVERLONG encoding (`C0 81`, `E0 80 81`, …) — VerifyMutf8 accepts
+//     these, as ART does, but canonical encoding never produces them, so a pool
+//     string carrying one is unmatchable by any well-formed query.
+// Malformed input bytes are passed through unchanged (the decoder's posture): pybind
+// accepts `bytes` for the query arguments, so ill-formed input does reach here and
+// must not be silently rewritten into different, valid bytes.
+std::string Utf8ToMutf8(std::string_view utf8);
+
 // Append one UTF-16 code unit to `out` as Java SOURCE TEXT: a control char
 // (< 0x20) or a surrogate (0xD800–0xDFFF) becomes a `\uXXXX` escape — the only
 // valid, pybind11-decodable text form — and any other BMP unit becomes readable

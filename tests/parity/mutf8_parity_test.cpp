@@ -160,6 +160,72 @@ int main() {
         check("escape BMP -> readable UTF-8", c == "\xEC\x97\xB0");
     }
 
+    // 6. Utf8ToMutf8 (dexllm#19) — the query-encode direction. The property that
+    //    matters for matching: encoding the DECODED form of a pool string must
+    //    reproduce the pool bytes, so a caller can feed a returned string straight
+    //    back into a byte-comparing matcher.
+    {
+        std::mt19937 rng(0xF19E19);
+        std::uniform_int_distribution<uint32_t> pick(0, 0x10FFFF);
+        int mism = 0;
+        for (int iter = 0; iter < 4000; ++iter) {
+            std::string pool;  // as the dex string pool would hold it
+            int n = 1 + (iter % 12);
+            for (int k = 0; k < n; ++k) {
+                uint32_t cp;
+                do { cp = pick(rng); }
+                while (cp >= 0xD800 && cp <= 0xDFFF);  // lone surrogates: see below
+                EncodeMutf8(cp, pool);
+            }
+            // pool --(what the API hands the caller)--> UTF-8 --(this)--> pool
+            if (m::Utf8ToMutf8(m::Mutf8ToUtf8(pool)) != pool) ++mism;
+        }
+        char buf[80];
+        std::snprintf(buf, sizeof(buf),
+                      "round-trip pool->UTF-8->pool (4000 streams, %d mismatch)", mism);
+        check(buf, mism == 0);
+
+        // The two encodings that actually differ, explicitly.
+        check("encode NUL -> C0 80", m::Utf8ToMutf8(std::string("\0", 1)) ==
+                                         std::string("\xC0\x80", 2));
+        check("encode astral -> surrogate PAIR (CESU-8), not 4-byte UTF-8",
+              m::Utf8ToMutf8("\xF0\x9F\x98\x80") ==
+                  std::string("\xED\xA0\xBD\xED\xB8\x80"));
+        // Everything else must pass through untouched (the fast path).
+        check("ASCII passthrough", m::Utf8ToMutf8("Exif") == "Exif");
+        check("BMP passthrough (korean)", m::Utf8ToMutf8("\xEC\x97\xB0") == "\xEC\x97\xB0");
+        check("empty passthrough", m::Utf8ToMutf8("").empty());
+        // A truncated 4-byte sequence must not read past the end or hang.
+        check("truncated 4-byte lead is passed through",
+              m::Utf8ToMutf8(std::string("\xF0\x9F", 2)) == std::string("\xF0\x9F", 2));
+        // pybind accepts `bytes` for the query arguments, so ill-formed input DOES
+        // reach the encoder. It must pass such bytes through rather than synthesise
+        // different valid ones — an over-long `F0 80 80 80` previously became a RAW
+        // NUL (impossible in a dex pool) and `F0 80 81 9E` became `^`, which silently
+        // turns a Contains query into StartWith.
+        check("over-long 4-byte is passed through, not folded to NUL",
+              m::Utf8ToMutf8(std::string("\xF0\x80\x80\x80", 4)) ==
+                  std::string("\xF0\x80\x80\x80", 4));
+        check("over-long 4-byte does not synthesise a regex anchor",
+              m::Utf8ToMutf8(std::string("\xF0\x80\x81\x9E", 4)) ==
+                  std::string("\xF0\x80\x81\x9E", 4));
+        check("out-of-range lead (>F4) is passed through",
+              m::Utf8ToMutf8(std::string("\xF5\x80\x80\x80", 4)) ==
+                  std::string("\xF5\x80\x80\x80", 4));
+        check("5-byte lead is not mis-decoded as 4-byte",
+              m::Utf8ToMutf8(std::string("\xF8\x80\x80\x80", 4)) ==
+                  std::string("\xF8\x80\x80\x80", 4));
+        // A LONE surrogate round-trips through the CODEC (Utf16ToUtf8 keeps its raw
+        // 3-byte form) — the encoder is not the lossy step. The residual of dexllm#19
+        // sits one layer up, at the pybind boundary: DecodeMutf8ForPy must replace a
+        // lone surrogate with U+FFFD because a Python `str` cannot hold one, and
+        // U+FFFD cannot be encoded back. So such a pool string stays unmatchable
+        // FROM PYTHON, while the C++ codec itself is a faithful inverse.
+        check("lone surrogate round-trips through the codec itself",
+              m::Utf8ToMutf8(m::Mutf8ToUtf8(std::string("\xED\xA0\xBD", 3))) ==
+                  std::string("\xED\xA0\xBD", 3));
+    }
+
     std::printf("\n%s — %d failure(s)\n", g_fail ? "FAIL" : "PASS", g_fail);
     return g_fail ? 1 : 0;
 }

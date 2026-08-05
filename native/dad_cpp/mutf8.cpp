@@ -127,6 +127,60 @@ std::string Mutf8ToUtf8(std::string_view raw) {
     return Utf16ToUtf8(Mutf8ToUtf16(raw));
 }
 
+std::string Utf8ToMutf8(std::string_view utf8) {
+    // Fast path: MUTF-8 differs from UTF-8 only for NUL and for supplementary code
+    // points (4-byte lead 0xF0-0xF4). Neither present → the bytes are already MUTF-8.
+    bool needs = false;
+    for (unsigned char c : utf8) {
+        if (c == 0x00 || c >= 0xF0) {
+            needs = true;
+            break;
+        }
+    }
+    if (!needs) return std::string(utf8);
+
+    std::string out;
+    out.reserve(utf8.size() + 8);
+    const auto* p = reinterpret_cast<const uint8_t*>(utf8.data());
+    const auto* end = p + utf8.size();
+    while (p < end) {
+        uint8_t c = *p;
+        if (c == 0x00) {  // NUL → the two-byte MUTF-8 form
+            out += static_cast<char>(0xC0);
+            out += static_cast<char>(0x80);
+            ++p;
+        } else if (c < 0xF0) {  // ASCII / 2-byte / 3-byte: identical in both encodings
+            out += static_cast<char>(c);
+            ++p;
+        } else if (c <= 0xF4 && p + 4 <= end && (p[1] & 0xC0) == 0x80 &&
+                   (p[2] & 0xC0) == 0x80 && (p[3] & 0xC0) == 0x80 &&
+                   ((static_cast<uint32_t>(c & 0x07u) << 18) |
+                    (static_cast<uint32_t>(p[1] & 0x3Fu) << 12) |
+                    (static_cast<uint32_t>(p[2] & 0x3Fu) << 6) |
+                    static_cast<uint32_t>(p[3] & 0x3Fu)) >= 0x10000) {
+            // A WELL-FORMED supplementary sequence → the surrogate PAIR, each half as
+            // its own 3-byte sequence (CESU-8), which is how dex stores it. The lead
+            // is restricted to F0-F4 and the value to >= 0x10000 on purpose: pybind
+            // accepts `bytes` for these arguments, so malformed input DOES arrive
+            // here, and a looser branch would SYNTHESISE bytes — an over-long
+            // `F0 80 80 80` became a raw NUL (which no dex pool can contain), and
+            // `F0 80 81 9E` became `^`, silently turning a Contains query into
+            // StartWith. Anything not well-formed now falls through untouched, the
+            // same "malformed passes through" posture the decoder takes.
+            uint32_t cp = ((c & 0x07u) << 18) | ((p[1] & 0x3Fu) << 12) |
+                          ((p[2] & 0x3Fu) << 6) | (p[3] & 0x3Fu);
+            p += 4;
+            cp -= 0x10000;
+            AppendUtf8Bmp(out, static_cast<uint16_t>(0xD800 + (cp >> 10)));
+            AppendUtf8Bmp(out, static_cast<uint16_t>(0xDC00 + (cp & 0x3FF)));
+        } else {  // truncated / over-long / out-of-range: pass the byte through
+            out += static_cast<char>(c);
+            ++p;
+        }
+    }
+    return out;
+}
+
 void AppendUtf16Escaped(std::string& out, uint16_t unit) {
     if (unit < 0x20 || (unit >= 0xD800 && unit <= 0xDFFF)) {
         char buf[8];

@@ -148,9 +148,9 @@ class EnumerationPort(Protocol):
         ``VALUE_STRING`` initializers. Deduplicated, first-occurrence order.
         Empty if the class is not declared in any loaded dex.
 
-        A static-init string is not in the reverse (const-string) index, so it may
-        not be findable via ``find_classes_using_strings`` — see docs/api.md's
-        round-trip caveat.
+        A static-init string is not in the reverse (const-string) index, so it is not
+        findable via ``find_classes_using_strings`` — use
+        ``find_classes_declaring_strings``. See docs/api.md's round-trip caveat.
         """
         ...
 

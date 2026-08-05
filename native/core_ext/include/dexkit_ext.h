@@ -230,9 +230,10 @@ public:
     // DexItem::IsStringMatched): match_type equals/contains/starts_with/ends_with/
     // regex (SimilarRegex ^prefix / suffix$), optional ignore_case, and ALL query
     // strings must match (each by some declared string of the class).
-    // NOTE: matching compares raw MUTF-8 pool bytes against the caller's UTF-8 query,
-    // exactly like the rest of the family — so it shares the supplementary-plane /
-    // embedded-NUL blind spot tracked in dexllm#19, and is fixed by the same change.
+    // Matching compares raw MUTF-8 pool bytes; the binding encodes the caller's query
+    // to MUTF-8 first (dexllm#19), so a supplementary-plane / NUL-bearing literal
+    // matches like any other. A DIRECT C++ caller of this method must encode its own
+    // query (dexkit::dad::mutf8::Utf8ToMutf8) — the conversion lives at the binding.
     // EDGE CASES diverge from the `using` family, deliberately: `using` routes an
     // empty-ish matcher through upstream's Aho-Corasick keyword path instead of
     // IsStringMatched, so an empty query list returns EVERY class there and nothing

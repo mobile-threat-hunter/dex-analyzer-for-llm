@@ -151,15 +151,20 @@ dk.list_class_strings('Lcom/example/android/tvleanback/Utils;')
   like `list_value_strings()`, so those literals are readable.
 - **Round-trip caveat — "forward direction" is a scope statement, not an exact
   inverse.** Feeding a returned string back into `find_*_using_strings` finds the
-  origin in the common case, but not always: of 29,588 distinct value-strings in the
-  bundled corpus, 1,299 do not round-trip — **1,236** because the reverse index covers
-  only `const-string` *bytecode* (a static-field `VALUE_STRING` initializer is not in
-  it, so a string only ever seen as a static init is unfindable by the reverse query),
-  and **63** because matching compares raw MUTF-8 pool bytes while these accessors
-  hand back decoded UTF-8 (a supplementary-plane character is a 6-byte surrogate pair
-  in the pool but 4 bytes in UTF-8; NUL is `C0 80` vs `00`). The second cause is a
-  pre-existing property of `list_value_strings()` + the matcher, not of these
-  accessors. Both directions are individually correct — do not assume set equality.
+  origin whenever the string appears in *bytecode*, but of 29,588 distinct
+  value-strings in the bundled corpus **1,236 do not round-trip** — all for one
+  reason: the reverse index covers only `const-string` bytecode, so a string seen
+  only as a static-field `VALUE_STRING` initializer is not in it. Use
+  `find_classes_declaring_strings` for those. (A second cause — a supplementary-plane
+  or NUL-bearing literal never matching because the query was compared as UTF-8
+  against MUTF-8 pool bytes — accounted for 63 more until dexllm#19; the query is now
+  encoded to MUTF-8 at the binding boundary. Two crafted-only residuals remain, both
+  absent from the corpus: a pool string carrying a LONE surrogate (pybind11 encodes
+  arguments as strict UTF-8, which rejects an unpaired surrogate, and the decode
+  direction replaces it with U+FFFD — though passing the raw MUTF-8 as `bytes` does
+  match), and one carrying a non-NUL OVERLONG encoding, which the verifier accepts
+  (as ART does) but canonical encoding never produces.) Both directions are individually correct — do not assume set
+  equality.
 
 ### Per-dex enumeration (uniform scope axis)
 The bare form is all loaded dexes; the `…_in_dex(dex_id)` form is one dex (empty for
@@ -305,8 +310,9 @@ dk.find_classes_declaring_strings(['android.contentMaturity.all'], 'equals')
   class_def, not to a method, so `find_methods_declaring_strings` would be
   meaningless. (Method annotations do carry EncodedValues; this index does not scan
   them.)
-- Shares the family's MUTF-8 blind spot (a supplementary-plane / embedded-NUL literal
-  cannot match) — same cause, same future fix.
+- Non-ASCII literals match like any other: the query is encoded to MUTF-8 at the
+  binding boundary (dexllm#19), so a supplementary-plane or NUL-bearing constant is
+  findable here too.
 
 ### Literal search → `list[MethodMatch]`
 ```python
