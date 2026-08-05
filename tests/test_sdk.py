@@ -86,6 +86,40 @@ _DEPRECATED_ALIASES = {
     "find_field_writers",
 }
 
+# ── the raw ↔ port name boundary (dexllm#21) ─────────────────────────────────
+# One operation, one spelling: a raw `DexKit` method and its port method share a
+# name. The whole dexllm#21 series existed because that had drifted and nothing
+# noticed. These are the ONLY licensed exceptions; anything else fails the audit.
+
+# raw-only, because they are deprecated spellings of a name that IS unified.
+# Declared alias → canonical so the list cannot be used to smuggle in an
+# unrelated new raw method: the canonical must exist on raw AND on a port.
+_RAW_DEPRECATED_ALIASES = {
+    "decompile_method_java": "decompile_method",
+    "decompile_class_java": "decompile_class",
+    "decompile_method_java_with_pc": "decompile_method_with_pc_map",
+    "find_call_sites_to_api": "find_call_sites_to",
+    "find_call_sites_from_method": "find_call_sites_from",
+    "find_field_read_methods": "find_methods_reading_field",
+    "find_field_write_methods": "find_methods_writing_field",
+    "decompiler_clear_cache": "clear_decompiler_cache",
+    "decompiler_set_cache_capacity": "set_decompiler_cache_capacity",
+}
+
+# raw-only, because the SDK deliberately DECOMPOSES it (ISP) — a different
+# operation shape, so a different name is correct. Maps raw name → port pieces.
+_RAW_DECOMPOSED = {"get_class_summary": ("class_info", "class_fields")}
+
+# port-only, because the raw layer exposes them as MODULE-level dexllm functions
+# rather than DexKit methods — a location difference, not a naming drift.
+_PORT_FROM_MODULE_FUNCTION = {
+    "identify",
+    "verify",
+    "extract_iocs",
+    "detect_content_providers",
+    "summarize_capabilities",
+}
+
 
 # ── self-contained ────────────────────────────────────────────────────────────
 
@@ -743,6 +777,62 @@ def test_adapter_public_surface_has_no_undeclared_drift():
     allowed = on_ports | {"raw"} | _DEPRECATED_ALIASES
     public = {n for n in dir(DexKitAdapter) if not n.startswith("_")}
     assert public - allowed == set(), f"undeclared adapter surface: {public - allowed}"
+
+
+def test_raw_and_port_share_one_spelling_per_operation():
+    """dexllm#21: lock the raw ↔ port name boundary so drift cannot creep back.
+
+    The whole issue existed because `find_call_sites_to_api` (raw) and
+    `find_call_sites` (port) were the same operation under two names and nothing
+    noticed for three releases. A raw method and its port method must share a
+    name; every exception must be one of three LICENSED kinds, declared above:
+    a deprecated alias of a unified name, an ISP decomposition, or an operation
+    the raw layer exposes as a module-level function.
+
+    Set EQUALITY, not subset: removing an alias, or adding a raw method the SDK
+    does not expose, both have to be a conscious edit here.
+    """
+    import dexllm
+    import dexllm.sdk.ports as ports_mod
+
+    raw = {n for n in dir(dexllm.DexKit) if not n.startswith("_")}
+    ports: set[str] = set()
+    for name in dir(ports_mod):
+        obj = getattr(ports_mod, name)
+        if isinstance(obj, type) and (
+            name.endswith("Port") or name == "DexAnalysisUseCase"
+        ):
+            ports |= {m for m in vars(obj) if not m.startswith("_")}
+
+    licensed_raw_only = set(_RAW_DEPRECATED_ALIASES) | set(_RAW_DECOMPOSED)
+    assert raw - ports == licensed_raw_only, (
+        f"unlicensed raw-only names: {(raw - ports) - licensed_raw_only} | "
+        f"stale exceptions: {licensed_raw_only - (raw - ports)}"
+    )
+
+    licensed_port_only = _PORT_FROM_MODULE_FUNCTION | {
+        piece for pieces in _RAW_DECOMPOSED.values() for piece in pieces
+    }
+    assert ports - raw == licensed_port_only, (
+        f"unlicensed port-only names: {(ports - raw) - licensed_port_only} | "
+        f"stale exceptions: {licensed_port_only - (ports - raw)}"
+    )
+
+    # An exception must be justified, not merely listed:
+    for alias, canonical in _RAW_DEPRECATED_ALIASES.items():
+        assert alias in raw, f"{alias} is no longer on raw"
+        # the canonical it defers to must itself be unified across both layers,
+        # so a brand-new raw method cannot be hidden here
+        assert (
+            canonical in raw and canonical in ports
+        ), f"{alias} claims canonical {canonical}, which is not unified"
+    for raw_name, pieces in _RAW_DECOMPOSED.items():
+        assert raw_name in raw
+        assert all(p in ports for p in pieces), f"{raw_name} pieces missing: {pieces}"
+    for name in _PORT_FROM_MODULE_FUNCTION:
+        assert callable(
+            getattr(dexllm, name, None)
+        ), f"{name} is not a module-level dexllm function"
 
 
 def test_deprecated_adapter_aliases_delegate_not_rebind(apk_path):
