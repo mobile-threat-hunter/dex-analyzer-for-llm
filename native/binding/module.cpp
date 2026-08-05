@@ -275,6 +275,12 @@ public:
                                bool ignore_case) {
         return ext_.FindClassesUsingStrings(strings, match_type, ignore_case);
     }
+    std::vector<dexkit::ext::ClassMatch>
+    find_classes_declaring_strings(const std::vector<std::string>& strings,
+                                   const std::string& match_type,
+                                   bool ignore_case) {
+        return ext_.FindClassesDeclaringStrings(strings, match_type, ignore_case);
+    }
     std::vector<dexkit::ext::MethodMatch>
     find_methods_using_strings(const std::vector<std::string>& strings,
                                const std::string& match_type,
@@ -695,6 +701,17 @@ PYBIND11_MODULE(_dexkit_core, m) {
              py::arg("strings"), py::arg("match_type") = "contains",
              py::arg("ignore_case") = false,
              "Find classes whose bytecode references all of the given strings.")
+        .def("find_classes_declaring_strings",
+             &PyDexKit::find_classes_declaring_strings,
+             py::arg("strings"), py::arg("match_type") = "contains",
+             py::arg("ignore_case") = false,
+             "L7 (declaration side of find_classes_using_strings): find classes that "
+             "DECLARE all of the given strings as static-field constants "
+             "(EncodedValue VALUE_STRING). `using` searches the const-string bytecode "
+             "index, so a `static final String` the app never loads is invisible to "
+             "it — this finds it. Same match semantics (match_type / ignore_case). "
+             "No method-level analogue exists: an EncodedValue belongs to a class, "
+             "not to a method.")
         .def("find_methods_using_strings", &PyDexKit::find_methods_using_strings,
              py::arg("strings"), py::arg("match_type") = "contains",
              py::arg("ignore_case") = false,

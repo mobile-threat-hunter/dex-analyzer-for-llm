@@ -342,15 +342,20 @@ def extract_iocs(
 
     Args:
         dk: A loaded ``dexllm.DexKit`` instance.
-        with_xref: If True, attach the referencing method descriptors to each
-            indicator (the "where in the code" view). One L7 search per indicator.
+        with_xref: If True, attach each indicator's location: the referencing
+            method descriptors AND the classes declaring it as a constant. Two L7
+            searches per indicator (a const-string xref and a declaration xref).
         denoise: If True, drop residual identifier hosts (dex packages, xmlns URIs)
             that survive into the candidate set.
         xref_limit: Cap on indicators cross-referenced, spent highest-signal first.
 
     Returns:
         A dict keyed by :data:`IOC_CATEGORIES`; each value a list of
-        ``{"value": str, "methods": list[str]}`` sorted by value.
+        ``{"value": str, "methods": list[str], "declared_in": list[str]}`` sorted by
+        value. ``methods`` are the call sites that LOAD the indicator (const-string
+        xref); ``declared_in`` are the classes that DECLARE it as a static-field
+        constant — an indicator kept only as a constant has no call site at all, so
+        that is its only location (dexllm#20). Both empty when ``with_xref=False``.
     """
     dex_packages: frozenset[str] = frozenset()
     if denoise:
@@ -366,6 +371,7 @@ def extract_iocs(
         rows: list[dict[str, Any]] = []
         for value in sorted(buckets[cat]):
             methods: list[str] = []
+            declared_in: list[str] = []
             if with_xref and xref_budget > 0:
                 try:
                     hits = dk.find_methods_using_strings(
@@ -379,7 +385,26 @@ def extract_iocs(
                     Exception
                 ):  # noqa: BLE001 — one bad query must not abort the report
                     methods = []
+                # dexllm#20 — the method xref searches the const-string BYTECODE index,
+                # so an indicator kept only as a `static final String` constant (never
+                # loaded by code) would get no location at all. The declaration side
+                # covers that. Queried unconditionally, not just when `methods` is
+                # empty, so the field always means "classes declaring this string"
+                # rather than something that silently depends on the other field —
+                # and it is ~free next to the method xref (0 ms vs 3-4 ms per 9
+                # indicators, thanks to the lazy declaration index).
+                try:
+                    declared_in = [
+                        m.descriptor
+                        for m in dk.find_classes_declaring_strings(
+                            [value], match_type="contains", ignore_case=False
+                        )
+                    ]
+                except Exception:  # noqa: BLE001 — same containment as above
+                    declared_in = []
                 xref_budget -= 1
-            rows.append({"value": value, "methods": methods})
+            rows.append(
+                {"value": value, "methods": methods, "declared_in": declared_in}
+            )
         result[cat] = rows
     return {cat: result[cat] for cat in IOC_CATEGORIES}

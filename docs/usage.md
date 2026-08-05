@@ -380,8 +380,13 @@ dk.find_classes_by_name("Activity", "ends_with")       # match mode: equals / st
 dk.find_methods_by_name("onCreate", "equals",
                         declaring_class="Landroid/app/Activity;")
 
-# String literal usage
+# String literal usage — which code LOADS the string
 dk.find_classes_using_strings(["android.permission.READ_CONTACTS"])
+
+# …and which class DECLARES it as a constant. `using` searches the const-string
+# bytecode index, so a `static final String` the app never loads is invisible to it —
+# this is the only way to locate an indicator kept solely in a constant.
+dk.find_classes_declaring_strings(["https://c2.example/gate.php"], "equals")
 dk.find_methods_using_strings(["AES/CBC/PKCS5Padding"])
 
 # The FORWARD direction — which strings does THIS code load? (identity APIs:
@@ -436,7 +441,9 @@ dk = dexllm.DexKit("app.apk")
 iocs = dexllm.extract_iocs(dk)           # with_xref=True, denoise=True by default
 for category in dexllm.IOC_CATEGORIES:   # urls / ips / domains / emails / onion
     for row in iocs[category]:
-        print(category, row["value"], "<-", row["methods"][:1])
+        # `methods` = call sites that LOAD it; `declared_in` = classes that DECLARE it
+        # as a constant (an indicator kept only as a constant has no call site at all)
+        print(category, row["value"], "<-", row["methods"][:1] or row["declared_in"][:1])
 # urls https://c2.example.top/gate.php <- ['Lcom/x/Net;->beacon()V']
 
 # The value-string feed it scans, for custom queries:
@@ -683,7 +690,7 @@ for g in session.permission_callers(app_only=True):       # -> tuple[PermissionC
     g.permission, g.protection_level                        # dangerous|signature|internal|normal|other
     for row in g.rows: row.api, row.callers                 # PermissionCallerRow
 
-ioc = session.extract_iocs()                              # -> IocReport; ioc.domains: tuple[Indicator(value, methods)]
+ioc = session.extract_iocs()                              # -> IocReport; ioc.domains: tuple[Indicator(value, methods, declared_in)]
 cap = session.summarize_capabilities()                   # -> CapabilityReport(api_hits, permissions, categories, ...)
 prov = session.detect_content_providers()                # -> tuple[ContentProviderUse(uri, family, methods)]
 

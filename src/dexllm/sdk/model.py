@@ -513,9 +513,12 @@ class PermissionCallerGroup:
 
 @dataclass(frozen=True)
 class Indicator:
-    """One network indicator with the app methods that reference it.
+    """One network indicator, with where it lives in the app.
 
-    ``methods`` is empty when extracted without cross-reference.
+    ``methods`` are the call sites that LOAD it (const-string xref); ``declared_in``
+    are the classes that DECLARE it as a static-field constant. An indicator kept only
+    as a constant has no call site at all, so ``declared_in`` is its only location
+    (dexllm#20). Both are empty when extracted without cross-reference.
 
     Example (real, tvleanback — a domain in an ExoPlayer string)::
 
@@ -527,6 +530,7 @@ class Indicator:
 
     value: str
     methods: tuple[str, ...] = ()
+    declared_in: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

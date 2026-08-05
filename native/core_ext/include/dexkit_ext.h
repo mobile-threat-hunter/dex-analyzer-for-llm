@@ -217,6 +217,35 @@ public:
                             std::string_view match_type = "contains",
                             bool ignore_case = false);
 
+    // The DECLARATION-side counterpart of FindClassesUsingStrings (dexllm#20).
+    // `using` searches the const-string bytecode index — "which code LOADS S" — so a
+    // `static final String` the app declares but never loads is invisible to it (the
+    // empty result is correct for that question; javac inlines a compile-time constant
+    // at each use site, so a constant that IS used also exists as a const-string and
+    // is found). This one searches the class-level EncodedValue VALUE_STRING (0x17)
+    // initializers instead, answering "which class DECLARES S" — the only way to
+    // locate an indicator that lives solely in a constant.
+    //
+    // Same match semantics as the whole find_* family (it reuses the core's
+    // DexItem::IsStringMatched): match_type equals/contains/starts_with/ends_with/
+    // regex (SimilarRegex ^prefix / suffix$), optional ignore_case, and ALL query
+    // strings must match (each by some declared string of the class).
+    // NOTE: matching compares raw MUTF-8 pool bytes against the caller's UTF-8 query,
+    // exactly like the rest of the family — so it shares the supplementary-plane /
+    // embedded-NUL blind spot tracked in dexllm#19, and is fixed by the same change.
+    // EDGE CASES diverge from the `using` family, deliberately: `using` routes an
+    // empty-ish matcher through upstream's Aho-Corasick keyword path instead of
+    // IsStringMatched, so an empty query list returns EVERY class there and nothing
+    // here, and "" / "^" / "$" match 61 classes there vs every class that declares any
+    // string here. For a non-empty pattern the two run the same comparison and agree.
+    // There is deliberately no method-level analogue: a static-field EncodedValue
+    // belongs to a class_def, not to a method (method annotations carry EncodedValues
+    // too, but those are not what this index scans).
+    [[nodiscard]] std::vector<ClassMatch>
+    FindClassesDeclaringStrings(const std::vector<std::string>& strings,
+                                std::string_view match_type = "contains",
+                                bool ignore_case = false);
+
     // Find methods whose body uses the given strings.
     [[nodiscard]] std::vector<MethodMatch>
     FindMethodsUsingStrings(const std::vector<std::string>& strings,
@@ -349,6 +378,27 @@ private:
     bool analysis_caches_warm_ = false;
     std::vector<ApiResolveIndex> api_resolve_index_;  // one per dex, empty until built
     bool api_resolve_index_built_ = false;
+
+    // dexllm#20 — lazily built declaration index: per dex, one entry per class_def
+    // that declares at least one static-field VALUE_STRING, holding its type_idx and
+    // that class's declared string ids. Same lazy one-shot + GIL precondition as
+    // EnsureApiResolveIndex (FindClassesDeclaringStrings does not release the GIL).
+    struct DeclaredStrings {
+        uint32_t type_idx;
+        std::vector<uint32_t> string_ids;
+    };
+    void EnsureDeclaredStringIndex();
+    // Retained-id budget. `static_values_off` may be SHARED by many class_defs (the
+    // structural verifier only requires the array to parse), so a valid dex can point
+    // every class_def at one huge encoded_array and make a retained index quadratic —
+    // measured 5.7 MB dex -> 1.6 GB RSS. On exhaustion the index is refused and
+    // queries scan per call instead (identical results, bounded memory). ~50x the
+    // whole bundled corpus (38,865 declared strings summed over 22 APKs), so it only
+    // bites on crafted input.
+    static constexpr size_t kMaxDeclaredIds = 1u << 21;
+    std::vector<std::vector<DeclaredStrings>> declared_string_index_;
+    bool declared_string_index_built_ = false;
+    bool declared_string_index_disabled_ = false;
     std::unique_ptr<DexItemCodeSource> code_source_;  // lazy-constructed
     std::vector<DexVerifyStatus> verify_status_;      // load-boundary verdicts
 };

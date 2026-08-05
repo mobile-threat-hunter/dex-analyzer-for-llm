@@ -7,6 +7,7 @@ app's dex strings and ties each one back to the class/method that references it.
 Usage:
     python examples/05_extract_iocs.py [path/to/app.apk | classes.dex]
 """
+
 from _common import resolve_apk
 
 import dexllm
@@ -26,6 +27,10 @@ for category in dexllm.IOC_CATEGORIES:
         print(f"  - {row['value']}")
         for method in row["methods"][:3]:
             print(f"      referenced by: {method}")
+        # An indicator kept only as a `static final String` constant is loaded by no
+        # code, so it has no call site — `declared_in` is then its only location.
+        for cls in row["declared_in"][:3]:
+            print(f"      declared in:   {cls}")
     print()
 
 # The value-bearing string feed is also available for custom queries:

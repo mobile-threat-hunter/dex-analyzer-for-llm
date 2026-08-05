@@ -298,6 +298,22 @@ class SearchPort(Protocol):
         """Find classes whose bytecode references ALL of ``strings``."""
         ...
 
+    def find_classes_declaring_strings(
+        self,
+        strings: Sequence[str],
+        *,
+        match_type: MatchType = "contains",
+        ignore_case: bool = False,
+    ) -> tuple[ClassMatch, ...]:
+        """Find classes that DECLARE all of ``strings`` as static-field constants.
+
+        The declaration-side counterpart of :meth:`find_classes_using_strings`, which
+        searches the ``const-string`` bytecode index and therefore cannot see a
+        ``static final String`` the app never loads. Same match semantics. There is no
+        method-level analogue — an ``EncodedValue`` belongs to a class, not a method.
+        """
+        ...
+
     def find_methods_by_name(
         self,
         name: str,

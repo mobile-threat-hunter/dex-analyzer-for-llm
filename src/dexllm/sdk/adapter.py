@@ -156,7 +156,12 @@ def _to_method_match(r: object) -> MethodMatch:
 def _to_indicators(items: "list[dict]") -> tuple[Indicator, ...]:
     """Convert an extract_iocs indicator list to a tuple of typed Indicators."""
     return tuple(
-        Indicator(value=d["value"], methods=tuple(d.get("methods", ()))) for d in items
+        Indicator(
+            value=d["value"],
+            methods=tuple(d.get("methods", ())),
+            declared_in=tuple(d.get("declared_in", ())),
+        )
+        for d in items
     )
 
 
@@ -500,6 +505,21 @@ class DexKitAdapter:
         return tuple(
             _to_class_match(m)
             for m in self._dk.find_classes_using_strings(
+                _str_seq(strings), match_type, ignore_case
+            )
+        )
+
+    def find_classes_declaring_strings(
+        self,
+        strings: Sequence[str],
+        *,
+        match_type: MatchType = "contains",
+        ignore_case: bool = False,
+    ) -> tuple[ClassMatch, ...]:
+        """Find classes that DECLARE ALL of ``strings`` as static-field constants."""
+        return tuple(
+            _to_class_match(m)
+            for m in self._dk.find_classes_declaring_strings(
                 _str_seq(strings), match_type, ignore_case
             )
         )

@@ -278,6 +278,36 @@ dk.find_classes_using_strings(['entry'])   # list[ClassMatch]  len 9
 dk.find_methods_using_strings(['entry'])   # list[MethodMatch] len 14
 ```
 
+### `dk.find_classes_declaring_strings(strings, match_type='contains', ignore_case=False) -> list[ClassMatch]`
+The **declaration** side of `find_classes_using_strings`. The `using` family searches
+the `const-string` **bytecode** index — "which code LOADS S" — so a `static final
+String` the app declares but never loads is invisible to it. That empty result is
+*correct* for the question it asks (javac inlines a compile-time constant at each use
+site, so a constant that IS used also exists as a `const-string` and is found); this
+API answers the other question, and is the only way to locate an indicator that lives
+solely in a constant.
+```python
+dk.find_classes_using_strings(['android.contentMaturity.all'], 'equals')      # []
+dk.find_classes_declaring_strings(['android.contentMaturity.all'], 'equals')
+# [ClassMatch 'Landroid/support/app/recommendation/ContentRecommendation;']
+```
+- Same match semantics as the rest of the family (it reuses the core's own
+  `IsStringMatched`): `equals` / `contains` / `starts_with` / `ends_with` / `regex`
+  (SimilarRegex `^prefix` / `suffix$`), optional `ignore_case`, and **ALL** query
+  strings must match (each by some declared string of the class).
+- **Edge cases differ from the `using` family** — deliberately. `using` routes an
+  empty-ish matcher through upstream's Aho-Corasick keyword path rather than
+  `IsStringMatched`, so on tvleanback an empty query list returns **every** class
+  (4135) there but **nothing** here, and `[""]` / `["^"]` / `["$"]` return 61 there vs
+  403 here (every class that declares any string). For a non-empty pattern the two run
+  the same comparison and agree exactly.
+- **No method-level analogue** — a *static-field* `EncodedValue` belongs to a
+  class_def, not to a method, so `find_methods_declaring_strings` would be
+  meaningless. (Method annotations do carry EncodedValues; this index does not scan
+  them.)
+- Shares the family's MUTF-8 blind spot (a supplementary-plane / embedded-NUL literal
+  cannot match) — same cause, same future fix.
+
 ### Literal search → `list[MethodMatch]`
 ```python
 dk.find_methods_using_int_literals([255])      # len 133
@@ -455,9 +485,18 @@ Static network-IOC over `list_value_strings()`. Defang-aware, public-suffix-
 validated (tldextract).
 ```python
 dexllm.extract_iocs(dk).keys()          # dict_keys(['urls', 'ips', 'domains', 'emails', 'onion'])
-# each value is a list of {'value': str, 'methods': list[str]} when with_xref=True:
-# {'domains': [{'value': 'dolby.com', 'methods': ['L.../DashManifestParser;->parseAudioChannelConfiguration(...)V']}], ...}
+# each value is a list of {'value': str, 'methods': list[str], 'declared_in': list[str]}:
+# {'domains': [{'value': 'dolby.com',
+#               'methods': ['L.../DashManifestParser;->parseAudioChannelConfiguration(...)V'],
+#               'declared_in': []}], ...}
 ```
+`methods` are the call sites that LOAD the indicator (const-string xref); `declared_in`
+are the classes that DECLARE it as a static-field constant. An indicator kept only as a
+constant has no const-string, so it used to be reported with **no location at all** —
+`declared_in` gives it one (21 such indicators in the bundled corpus, e.g.
+`https://wear.googleapis.com/3p_auth/` → `Landroid/support/wearable/authentication/OAuthClient;`).
+Both are populated independently, so an empty `methods` with a non-empty `declared_in`
+means exactly "declared but never loaded". Both are `[]` when `with_xref=False`.
 `dexllm.IOC_CATEGORIES == ('urls', 'ips', 'domains', 'emails', 'onion')`.
 
 ### `dexllm.detect_content_providers(dk, *, with_xref=True, xref_limit=300) -> list`

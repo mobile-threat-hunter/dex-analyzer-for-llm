@@ -221,6 +221,21 @@ def _t_find_classes_using_strings(
     return _paginate([_match_to_desc(h) for h in hits], offset, limit)
 
 
+def _t_find_classes_declaring_strings(
+    dk: DexKit,
+    strings: list[str],
+    match_type: str = "contains",
+    ignore_case: bool = False,
+    limit: int = 50,
+    offset: int = 0,
+) -> dict:
+    """Classes that DECLARE the strings as static-field constants (dexllm#20)."""
+    hits = dk.find_classes_declaring_strings(
+        strings, match_type=match_type, ignore_case=ignore_case
+    )
+    return _paginate([_match_to_desc(h) for h in hits], offset, limit)
+
+
 def _t_find_methods_by_name(
     dk: DexKit,
     name: str,
@@ -346,7 +361,13 @@ def _t_extract_iocs(
 
     Recovers the URLs, IPs, domains, emails, and onion addresses embedded in the
     app's dex value-strings — the VirusTotal "contacted addresses" view, but static
-    and with each indicator tied to the referencing method (when with_xref).
+    and with each indicator tied to its location (when with_xref).
+
+    Each row is ``{value, methods, declared_in}``. ``methods`` are the call sites that
+    LOAD the indicator; ``declared_in`` are the classes that DECLARE it as a
+    static-field constant. An indicator kept only as a constant is loaded by no code,
+    so ``methods`` is EMPTY and ``declared_in`` is its only location — do not read an
+    empty ``methods`` as "this indicator is not used anywhere".
     """
     from .ioc import IOC_CATEGORIES, extract_iocs
 
@@ -706,6 +727,7 @@ TOOL_IMPLS: dict[str, Callable] = {
     "find_classes_implementing": _t_find_classes_implementing,
     "find_classes_by_annotation": _t_find_classes_by_annotation,
     "find_classes_using_strings": _t_find_classes_using_strings,
+    "find_classes_declaring_strings": _t_find_classes_declaring_strings,
     "find_methods_by_name": _t_find_methods_by_name,
     "find_methods_using_strings": _t_find_methods_using_strings,
     "find_call_sites_to_api": _t_find_call_sites_to_api,
@@ -860,6 +882,28 @@ TOOL_DEFINITIONS: list[dict] = [
     {
         "name": "find_classes_using_strings",
         "description": "Find classes whose bytecode references any of the given string literals.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "strings": {"type": "array", "items": {"type": "string"}},
+                "match_type": {"type": "string", "default": "contains"},
+                "ignore_case": {"type": "boolean", "default": False},
+                "limit": {"type": "integer", "default": 50},
+                "offset": {"type": "integer", "default": 0},
+            },
+            "required": ["strings"],
+        },
+    },
+    {
+        "name": "find_classes_declaring_strings",
+        "description": (
+            "Find classes that DECLARE the given strings as static-field constants. "
+            "Use this when find_classes_using_strings returns nothing for a string you "
+            "know is in the app: `using` searches the const-string BYTECODE index, so a "
+            "`static final String` the app never loads (an API constant, a BuildConfig "
+            "field, a hardcoded URL kept only as a constant) is invisible to it. There "
+            "is no method-level version — a constant belongs to a class, not a method."
+        ),
         "input_schema": {
             "type": "object",
             "properties": {

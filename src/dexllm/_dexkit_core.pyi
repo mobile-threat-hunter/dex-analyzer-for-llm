@@ -298,6 +298,12 @@ class DexKit:
         match_type: str = "contains",
         ignore_case: bool = False,
     ) -> list[ClassMatch]: ...
+    def find_classes_declaring_strings(
+        self,
+        strings: Sequence[str],
+        match_type: str = "contains",
+        ignore_case: bool = False,
+    ) -> list[ClassMatch]: ...
     def find_methods_using_strings(
         self,
         strings: Sequence[str],

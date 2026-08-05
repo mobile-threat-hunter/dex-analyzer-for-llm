@@ -73,13 +73,48 @@ def test_value_strings_feed_exposed(dk):
     assert len(strings) == len(set(strings))  # deduplicated
 
 
+def test_declared_in_locates_constant_only_indicators(loadable_apks):
+    """dexllm#20: an indicator kept only as a `static final String` has no const-string
+    for the method xref to find, so it used to be reported with NO location at all.
+    `declared_in` gives it one — e.g. an OAuth endpoint declared in a Scopes class.
+
+    Asserts a FLOOR on how many such indicators the corpus yields: the earlier version
+    only asserted inside `if row["declared_in"]`, so a regression that returned nothing
+    skipped green instead of failing.
+    """
+    located = 0
+    for apk in loadable_apks:
+        try:
+            dk = dexllm.DexKit(apk)
+        except Exception:  # noqa: BLE001
+            continue
+        report = dexllm.extract_iocs(dk)
+        for cat in dexllm.IOC_CATEGORIES:
+            for row in report[cat]:
+                if row["declared_in"] and not row["methods"]:
+                    assert all(
+                        d.startswith("L") and d.endswith(";")
+                        for d in row["declared_in"]
+                    )
+                    located += 1
+    assert located >= 15, (
+        f"only {located} constant-only indicators located; the bundled corpus yields 21 "
+        "(a2dp.Vol 1 + weardrawers 19 + partialsignature 1) — the declaration fallback "
+        "has regressed"
+    )
+
+
 def test_extract_iocs_shape_and_recovery(dk):
     iocs = dexllm.extract_iocs(dk, with_xref=False)
     assert set(iocs) == set(dexllm.IOC_CATEGORIES)
     for cat in dexllm.IOC_CATEGORIES:
         for row in iocs[cat]:
-            assert set(row) == {"value", "methods"}
+            # dexllm#20 added `declared_in` — the declaration-side location, for an
+            # indicator kept only as a `static final String` (invisible to the
+            # const-string method xref).
+            assert set(row) == {"value", "methods", "declared_in"}
             assert isinstance(row["value"], str) and isinstance(row["methods"], list)
+            assert isinstance(row["declared_in"], list)
         # value-sorted
         assert [r["value"] for r in iocs[cat]] == sorted(r["value"] for r in iocs[cat])
     if any("a2dp.Vol" in p for p in _fixture_apk()):

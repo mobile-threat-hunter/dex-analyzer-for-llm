@@ -213,6 +213,86 @@ def test_forward_strings_empty_for_bodyless_and_unknown(dk):
     assert bodyless > 0, "no interface (abstract) method in the corpus"
 
 
+# ── declaration-side string lookup (dexllm#20) ───────────────────────────────
+
+
+def test_find_classes_declaring_strings_finds_what_using_cannot(dk):
+    """dexllm#20: a `static final String` the app never LOADS has no const-string, so
+    find_classes_using_strings correctly returns nothing — the declaration index is the
+    only way to locate it. Verified on real static-init-only strings of this corpus."""
+    code = set()
+    for c in dk.list_classes():
+        for m in dk.list_class_methods(c):
+            code.update(dk.list_method_strings(m))
+    checked = 0
+    for cls in dk.list_classes():
+        for s in dk.list_class_strings(cls):
+            if s in code or not s:
+                continue  # loaded somewhere → `using` finds it; that is its own test
+            if not s.isascii():
+                # Matching compares raw MUTF-8 pool bytes against a UTF-8 query, so a
+                # supplementary-plane literal cannot match (documented, dexllm#19).
+                # Corpus order keeps these out of the first 10 today, but a different
+                # $DEXLLM_TEST_APK would hit one — skip explicitly rather than flake.
+                continue
+            assert dk.find_classes_using_strings([s], "equals") == []
+            declaring = [
+                m.descriptor for m in dk.find_classes_declaring_strings([s], "equals")
+            ]
+            assert cls in declaring, (cls, s, declaring)
+            checked += 1
+            if checked >= 10:
+                return
+    pytest.skip("no static-init-only string in this corpus")
+
+
+def test_declaring_matcher_shares_the_family_semantics(dk):
+    """match_type / ignore_case / ALL-strings behave as in find_classes_using_strings
+    (the implementation reuses the core's own DexItem::IsStringMatched).
+
+    The target MUST be a declaration-only string: `list_class_strings` emits method
+    const-strings first, so picking its first entry would yield a method string, every
+    `declaring` query would return the empty set, and every assertion below would hold
+    vacuously — verified: a stub implementation returning nothing passed that version.
+    """
+    code = set()
+    for c in dk.list_classes():
+        for m in dk.list_class_methods(c):
+            code.update(dk.list_method_strings(m))
+    target = None
+    for cls in dk.list_classes():
+        for s in dk.list_class_strings(cls):
+            if s not in code and len(s) > 8 and s.isascii() and s.islower():
+                target = (cls, s)
+                break
+        if target:
+            break
+    if not target:
+        pytest.skip("no declaration-only ASCII string in this corpus")
+    cls, s = target
+
+    eq = {m.descriptor for m in dk.find_classes_declaring_strings([s], "equals")}
+    assert cls in eq, (cls, s, eq)  # non-vacuous anchor: the query must actually hit
+    assert eq == {
+        m.descriptor for m in dk.find_classes_declaring_strings([f"^{s}$"], "regex")
+    }
+    assert eq <= {
+        m.descriptor for m in dk.find_classes_declaring_strings([s[:6]], "starts_with")
+    }
+    assert eq <= {
+        m.descriptor
+        for m in dk.find_classes_declaring_strings([s.upper()], "equals", True)
+    }
+    # ALL semantics: a pair no single class declares together yields nothing
+    assert (
+        dk.find_classes_declaring_strings([s, "\x00no-such-string\x00"], "equals") == []
+    )
+    # Empty query returns nothing — a DELIBERATE divergence from the `using` family,
+    # where an empty matcher list is vacuously true and returns every class.
+    assert dk.find_classes_declaring_strings([], "equals") == []
+    assert len(dk.find_classes_using_strings([], "equals")) > 0
+
+
 # ── L4 arg resolution: join-aware dataflow (dexllm#16) ───────────────────────
 
 

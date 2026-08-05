@@ -934,6 +934,137 @@ DexKitExt::FindClassesUsingStrings(const std::vector<std::string>& strings,
     return ParseClassMetaArray(holder);
 }
 
+void DexKitExt::EnsureDeclaredStringIndex() {
+    // Lazy one-shot, guarded by a plain bool — same pattern and same GIL precondition
+    // as EnsureApiResolveIndex (its only caller does not release the GIL).
+    if (declared_string_index_built_) return;
+    const int dex_num = core_->GetDexNum();
+
+    // Built into a LOCAL and published atomically. Appending straight into the member
+    // would, after a mid-build throw (bad_alloc — reachable via the amplification
+    // below), leave a PARTIAL index that the next call appends to again, duplicating
+    // every already-indexed class for the lifetime of the instance.
+    std::vector<std::vector<DeclaredStrings>> built(
+        static_cast<size_t>(dex_num < 0 ? 0 : dex_num));
+    size_t total_ids = 0;
+    for (int i = 0; i < dex_num; ++i) {
+        auto* item = core_->GetDexItem(static_cast<uint16_t>(i));
+        if (item == nullptr) continue;
+        auto& out = built[static_cast<size_t>(i)];
+        const auto& reader = item->GetReader();
+        const auto class_defs = reader.ClassDefs();
+        for (uint32_t ci = 0; ci < class_defs.size(); ++ci) {
+            std::vector<uint32_t> ids;
+            ScanClassDefStaticStrings(*item, class_defs[ci], ids);
+            if (ids.empty()) continue;
+            // One encoded_array may legitimately repeat a string id, and a crafted dex
+            // can repeat it thousands of times — dedup before storing.
+            std::sort(ids.begin(), ids.end());
+            ids.erase(std::unique(ids.begin(), ids.end()), ids.end());
+            // erase() does not release capacity: a class_def sharing a crafted
+            // 100k-entry encoded_array would keep a 400 KB buffer holding ~256 ids,
+            // ×4135 class_defs = 1.6 GB of pure slack (measured). Shrink before
+            // retaining — the budget below counts LOGICAL ids and would not catch it.
+            ids.shrink_to_fit();
+            total_ids += ids.size();
+            if (total_ids > kMaxDeclaredIds) {
+                // `static_values_off` is NOT required to be unique across class_defs
+                // (the structural verifier only checks that the array PARSES), so a
+                // valid dex can point every class_def at one huge array and make a
+                // retained index quadratic — measured 5.7 MB dex → 1.6 GB RSS, reached
+                // straight from extract_iocs. Stop retaining and fall back to scanning
+                // per query (same results, bounded memory, slower on that input only).
+                declared_string_index_.clear();
+                declared_string_index_disabled_ = true;
+                declared_string_index_built_ = true;
+                return;
+            }
+            out.push_back({class_defs[ci].class_idx, std::move(ids)});
+        }
+    }
+    declared_string_index_ = std::move(built);
+    declared_string_index_built_ = true;
+}
+
+std::vector<ClassMatch>
+DexKitExt::FindClassesDeclaringStrings(const std::vector<std::string>& strings,
+                                       std::string_view match_type,
+                                       bool ignore_case) {
+    std::vector<ClassMatch> out;
+    // Empty query returns nothing. This DIVERGES from the `using` family, where an
+    // empty matcher list is vacuously true and returns every class; returning
+    // everything for "find classes declaring []" is a footgun, so it is deliberate
+    // (documented in the header, the binding docstring and docs/api.md).
+    if (strings.empty()) return out;
+
+    // Build the query matchers ONCE, then compare with the core's own
+    // DexItem::IsStringMatched so the semantics (kmp, ignore_case, SimilarRegex
+    // ^prefix / suffix$) are byte-identical to find_classes_using_strings.
+    flatbuffers::FlatBufferBuilder fbb;
+    auto type = ParseStringMatchType(match_type);
+    std::vector<flatbuffers::Offset<dexkit::schema::StringMatcher>> sms;
+    sms.reserve(strings.size());
+    for (const auto& s : strings)
+        sms.push_back(dexkit::schema::CreateStringMatcher(
+            fbb, fbb.CreateString(s), type, ignore_case));
+    auto vec = fbb.CreateVector(sms);
+    fbb.Finish(vec);
+    const auto* matchers = ::flatbuffers::GetRoot<
+        ::flatbuffers::Vector<::flatbuffers::Offset<dexkit::schema::StringMatcher>>>(
+        fbb.GetBufferPointer());
+
+    // ALL query strings must match (each by SOME declared string of the class) — the
+    // match_all=true default of the sibling matchers.
+    auto consider = [&](const dexkit::DexItem& item, uint32_t type_idx,
+                        const std::vector<uint32_t>& ids) {
+        const auto& pool = item.GetStrings();
+        for (::flatbuffers::uoffset_t q = 0; q < matchers->size(); ++q) {
+            bool any = false;
+            for (uint32_t sid : ids) {
+                if (sid >= pool.size()) continue;
+                if (dexkit::DexItem::IsStringMatched(pool[sid], matchers->Get(q))) {
+                    any = true;
+                    break;
+                }
+            }
+            if (!any) return;
+        }
+        const auto& type_names = item.GetTypeNames();
+        ClassMatch m;
+        m.dex_id = item.GetDexId();
+        m.class_id = type_idx;
+        if (type_idx < type_names.size())
+            m.descriptor = std::string(type_names[type_idx]);
+        out.push_back(std::move(m));
+    };
+
+    EnsureDeclaredStringIndex();
+    if (!declared_string_index_disabled_) {
+        for (size_t d = 0; d < declared_string_index_.size(); ++d) {
+            auto* item = core_->GetDexItem(static_cast<uint16_t>(d));
+            if (item == nullptr) continue;
+            for (const auto& entry : declared_string_index_[d])
+                consider(*item, entry.type_idx, entry.string_ids);
+        }
+        return out;
+    }
+    // Index refused (crafted amplification) — scan per query instead, discarding each
+    // class's ids like ListValueStrings does. Identical results, bounded memory.
+    const int dex_num = core_->GetDexNum();
+    for (int i = 0; i < dex_num; ++i) {
+        auto* item = core_->GetDexItem(static_cast<uint16_t>(i));
+        if (item == nullptr) continue;
+        const auto class_defs = item->GetReader().ClassDefs();
+        for (uint32_t ci = 0; ci < class_defs.size(); ++ci) {
+            std::vector<uint32_t> ids;
+            ScanClassDefStaticStrings(*item, class_defs[ci], ids);
+            if (ids.empty()) continue;
+            consider(*item, class_defs[ci].class_idx, ids);
+        }
+    }
+    return out;
+}
+
 std::vector<MethodMatch>
 DexKitExt::FindMethodsUsingStrings(const std::vector<std::string>& strings,
                                    std::string_view match_type,

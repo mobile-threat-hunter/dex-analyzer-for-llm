@@ -140,8 +140,11 @@ needs (methods stay on `EnumerationPort.list_class_methods`).
   g.protection_level == "dangerous"]`).
 
 ### Indicators (IOC)
-- **`Indicator`** `(value, methods)` — one network indicator + the app methods
-  referencing it (`methods` empty without cross-reference).
+- **`Indicator`** `(value, methods, declared_in)` — one network indicator and where it
+  lives: `methods` = the call sites that LOAD it (const-string xref), `declared_in` =
+  the classes that DECLARE it as a static-field constant. An indicator kept only as a
+  constant has no call site, so `declared_in` is its only location. Both empty without
+  cross-reference.
 - **`IocReport`** `(urls, ips, domains, emails, onion)` — each a tuple of
   `Indicator`; defang-aware, public-suffix-validated.
 
@@ -174,7 +177,7 @@ so a consumer depends on just what it needs:
 | **`DexExtractionPort`** | `extract_dex_bytes` (raw per-dex byte extraction; packer/dump primitive) |
 | **`ClassInspectionPort`** | `class_info`, `class_fields`, `locate_class_dex` (metadata + fields split out; methods via `list_class_methods`; `locate_class_dex` = cheap declaring-dex lookup, vs the heavy `class_info().dex_id`) |
 | **`CrossReferencePort`** | `find_call_sites` (callers) / `find_call_sites_from_method` (callees — the forward edge), `resolve_call_args`, `find_field_readers`, `find_field_writers`, `find_type_references` |
-| **`SearchPort`** | `find_classes_by_name` / `by_super` / `implementing` / `by_annotation` / `using_strings`, `find_methods_by_name` / `by_annotation` / `using_strings` / `using_int_literals` / `using_double_literals`, `batch_find_{classes,methods}_using_strings` (DexKit's L1–L7 search; `match_type` ∈ `MatchType`) |
+| **`SearchPort`** | `find_classes_by_name` / `by_super` / `implementing` / `by_annotation` / `using_strings` / `declaring_strings` (the declaration side — static-field constants the `using` index cannot see), `find_methods_by_name` / `by_annotation` / `using_strings` / `using_int_literals` / `using_double_literals`, `batch_find_{classes,methods}_using_strings` (DexKit's L1–L7 search; `match_type` ∈ `MatchType`) |
 | **`PermissionAnalysisPort`** | `permission_callers` (all protection levels) |
 | **`IndicatorExtractionPort`** | `extract_iocs` |
 | **`CapabilityPort`** | `summarize_capabilities` |

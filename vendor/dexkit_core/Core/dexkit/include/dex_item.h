@@ -91,6 +91,13 @@ public:
     [[nodiscard]] const std::vector<std::vector<std::pair<uint16_t, uint32_t>>> &
     GetMethodCallerIds() const { return method_caller_ids; }
 
+    // dexllm#20 extension hook — upstream's own string comparison (kmp + ignore_case
+    // + SimilarRegex ^prefix / suffix$), hoisted from private so a dexllm-side matcher
+    // (DexKitExt::FindClassesDeclaringStrings, which searches class-level EncodedValue
+    // initializers instead of the const-string index) reuses the SAME semantics as the
+    // find_*_using_strings family rather than reimplementing and drifting from them.
+    static bool IsStringMatched(std::string_view str, const schema::StringMatcher *matcher);
+
     // dexllm L1.5 extension hooks — per-class declared member access. Valid
     // after InitBaseCache (i.e. immediately after construction). Empty / kNoIndex
     // for type_idx that has no class_def in this dex.
@@ -372,7 +379,6 @@ private:
     std::vector<EncodeNumber> ParseUsingNumbersFromCode(uint32_t method_idx);
     const std::vector<EncodeNumber> &GetUsingNumbers(uint32_t method_idx);
 
-    static bool IsStringMatched(std::string_view str, const schema::StringMatcher *matcher);
     static bool IsAccessFlagsMatched(uint32_t access_flags, const schema::AccessFlagsMatcher *matcher);
     static std::set<std::string_view> BuildBatchFindKeywordsMap(
             const flatbuffers::Vector<flatbuffers::Offset<schema::StringMatcher>> *using_strings_matcher,
