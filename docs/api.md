@@ -341,7 +341,7 @@ dk.batch_find_classes_using_strings({...})   # dict[str, list[ClassMatch]]
 Every invoke of a specific API descriptor (internal or external) — the target's
 CALLERS.
 ```python
-dk.find_call_sites_to_api('Landroid/content/Context;->getSystemService(Ljava/lang/String;)Ljava/lang/Object;')
+dk.find_call_sites_to('Landroid/content/Context;->getSystemService(Ljava/lang/String;)Ljava/lang/Object;')
 # list[CallSite]  len 54; each .caller_descriptor calls the (fixed) .callee_descriptor
 ```
 
@@ -349,12 +349,22 @@ dk.find_call_sites_to_api('Landroid/content/Context;->getSystemService(Ljava/lan
 The mirror of the above: every call site INSIDE a method — the methods it invokes.
 Each `CallSite` fixes `.caller_descriptor` (this method) and varies `.callee_descriptor`
 (+ `.bytecode_offset`, `.invoke_opcode`). `[]` for an external / bodyless / unresolved
-method. `find_call_sites_from_method(M)` and `find_call_sites_to_api(C)` are forward
+method. `find_call_sites_from(M)` and `find_call_sites_to(C)` are forward
 and reverse of the same edge: if `M` invokes `C`, `M` is among `C`'s callers.
 ```python
-dk.find_call_sites_from_method('La2dp/Vol/ALauncher;->onCreate()V')
+dk.find_call_sites_from('La2dp/Vol/ALauncher;->onCreate()V')
 # list[CallSite]  len 17; e.g. .callee_descriptor 'Ljava/io/FileInputStream;->read([B)I'
 ```
+
+**Naming.** `find_call_sites_to` / `find_call_sites_from` is one spelling across all
+four layers — raw `DexKit`, the typed [`dexllm.sdk`](sdk.md) port and its adapter, and
+the MCP tool catalog. The names released before that unification still work as
+**deprecated aliases**: `find_call_sites_to_api` / `find_call_sites_from_method` on
+`DexKit`, in MCP dispatch (executed, but not advertised in the tool catalog — so an
+old name is dispatched WITHOUT the catalog's JSON-Schema argument validation, and a
+malformed argument surfaces as an in-band `{"error": ...}` instead of a protocol-level
+error), and on the SDK adapter, which also keeps its former `find_call_sites`. New
+code should use the canonical pair.
 
 ### Intra-method arg resolution → `list[ResolvedCallSite]`
 Same as call sites, plus the resolved origin of each argument (L4 dataflow).
@@ -447,7 +457,7 @@ Python-side filter helpers: `dexllm.filter_method_refs(refs, ...)`,
 `filter_field_refs`, `filter_type_refs` (e.g. keep only `android.content.*`).
 `dexllm.find_call_sites_to_ref(dk, ref)` → the `list[CallSite]` for an
 `ExternalMethodRef` (the convenience that resolves `ref.signature` and calls
-`find_call_sites_to_api`).
+`find_call_sites_to`).
 
 ---
 
@@ -629,13 +639,19 @@ Field: class/name/type descriptors + `signature`. Type: `descriptor` +
 |---|---|---|
 | `caller_descriptor` | `str` | the calling method |
 | `callee_descriptor` | `str` | the API called |
-| `caller_dex_id` | `int` | |
-| `caller_method_idx` | `int` | |
-| `bytecode_offset` | `int` | byte offset of the invoke |
+| `caller_dex_id` | `int` | dex the caller lives in |
+| `caller_method_idx` | `int` | **dex-local** `method_ids` index — only meaningful paired with `caller_dex_id`, not a stable global id |
+| `bytecode_offset` | `int` | byte offset of the invoke, always **inside the caller** |
 | `invoke_opcode` | `int` | Dalvik opcode (e.g. 110 = `invoke-virtual`) |
 
+**Which half is fixed depends on the producing direction** — `find_call_sites_to(X)`
+fixes `callee_descriptor` and varies `caller_*` ("who calls X");
+`find_call_sites_from(M)` fixes `caller_*` and varies `callee_descriptor`
+("what M calls"), so the repeated caller on every element is the queried method.
+
 ### `ResolvedCallSite`
-All `CallSite` fields plus `args: list[ArgOrigin]`.
+All `CallSite` fields plus `args: list[ArgOrigin]`. Only `resolve_call_args` produces
+it, i.e. always the reverse direction (callee fixed).
 
 ### `ArgOrigin`
 Where one argument came from (intra-method).

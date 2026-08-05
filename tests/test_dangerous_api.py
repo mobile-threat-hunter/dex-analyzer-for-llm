@@ -189,7 +189,7 @@ class _OverloadDK:
             )
         ]
 
-    def find_call_sites_to_api(self, desc):
+    def find_call_sites_to(self, desc):
         return []
 
 
@@ -414,7 +414,7 @@ def test_same_arity_overloads_need_type_match(monkeypatch):
         def list_external_method_refs(self, framework_only):
             return [_Ref("p.C", "m", "(I)V", "Lp/C;")]  # the int overload
 
-        def find_call_sites_to_api(self, desc):
+        def find_call_sites_to(self, desc):
             return []
 
     apis = da.dangerous_permission_apis(_DK())
@@ -444,7 +444,7 @@ def test_constructor_entries_match_init_refs(monkeypatch):
                 )
             ]
 
-        def find_call_sites_to_api(self, desc):
+        def find_call_sites_to(self, desc):
             return []
 
     apis = da.dangerous_permission_apis(_DK())
@@ -472,7 +472,7 @@ def test_inner_class_separator_canonicalised(monkeypatch):
                 )
             ]
 
-        def find_call_sites_to_api(self, desc):
+        def find_call_sites_to(self, desc):
             return []
 
     apis = da.dangerous_permission_apis(_DK())

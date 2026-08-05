@@ -21,7 +21,7 @@ for m in dk.find_methods_using_strings(["http"], "contains")[:10]:
 
 print("\n== call sites of Log.d(String, String) ==")
 api = "Landroid/util/Log;->d(Ljava/lang/String;Ljava/lang/String;)I"
-sites = dk.find_call_sites_to_api(api)
+sites = dk.find_call_sites_to(api)
 print(f"  {len(sites)} call site(s); first 5:")
 for s in sites[:5]:
     print(f"    {s}")

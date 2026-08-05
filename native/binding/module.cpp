@@ -837,15 +837,29 @@ PYBIND11_MODULE(_dexkit_core, m) {
              "JSONWriter: {triple, flags, ret, params, comments, body}. "
              "`source` is the equivalent Java text — pass include_source=False "
              "to skip its (separate) pipeline run when only the AST is needed.")
-        .def("find_call_sites_to_api", &PyDexKit::find_call_sites_to_api,
+        .def("find_call_sites_to", &PyDexKit::find_call_sites_to_api,
              py::arg("api_descriptor"),
-             "L2: every call site invoking the given API (\"Lpkg/Cls;->name(args)Ret;\"). "
-             "First call warms upstream analysis caches (may take a few seconds).")
-        .def("find_call_sites_from_method", &PyDexKit::find_call_sites_from_method,
+             "L2 (reverse direction): every call site invoking the given API "
+             "(\"Lpkg/Cls;->name(args)Ret;\") — its CALLERS. Each CallSite fixes "
+             "callee_descriptor (the queried API) and varies the caller_* fields; "
+             "one entry per invoke INSTRUCTION, so a caller that invokes twice "
+             "appears twice. First call warms upstream analysis caches (may take a "
+             "few seconds).")
+        .def("find_call_sites_from", &PyDexKit::find_call_sites_from_method,
              py::arg("method_descriptor"),
              "L2 (forward direction): every call site INSIDE the given method — the "
-             "methods it invokes (callees). Each CallSite fixes the caller and varies "
-             "callee_descriptor. Empty for an external / bodyless / unresolved method.")
+             "methods it invokes (callees). Each CallSite fixes the caller_* fields "
+             "(the queried method) and varies callee_descriptor. Empty for an "
+             "external / bodyless / unresolved method.")
+        // Back-compat aliases for the pre-rename names. find_call_sites_to /
+        // find_call_sites_from are canonical across raw, SDK and MCP; the _api /
+        // _method suffixes were redundant with the parameter they name.
+        .def("find_call_sites_to_api", &PyDexKit::find_call_sites_to_api,
+             py::arg("api_descriptor"),
+             "Deprecated alias of find_call_sites_to.")
+        .def("find_call_sites_from_method", &PyDexKit::find_call_sites_from_method,
+             py::arg("method_descriptor"),
+             "Deprecated alias of find_call_sites_from.")
         .def("find_field_read_methods", &PyDexKit::find_field_read_methods,
              py::arg("field_descriptor"),
              "L2.5: descriptors of every method that READS (iget*/sget*) the given "

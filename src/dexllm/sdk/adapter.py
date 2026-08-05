@@ -214,7 +214,7 @@ class DexKitAdapter:
         """Return the underlying ``dexllm.DexKit`` (advanced / L7 search access).
 
         This is the low-level primitive and is NOT descriptor-validated: an identity
-        call made through it (e.g. ``adapter.raw.find_call_sites_to_api("android.util.Log->d")``
+        call made through it (e.g. ``adapter.raw.find_call_sites_to("android.util.Log->d")``
         with a dotted name) bypasses the ``require_*`` guards and returns the raw
         silent-empty instead of a guiding error. Use the adapter's own methods for the
         validated contract; reach for ``.raw`` only when you intentionally want the
@@ -384,8 +384,11 @@ class DexKitAdapter:
 
     # -- CrossReferencePort --
 
-    def find_call_sites(self, api_descriptor: str) -> tuple[CallSite, ...]:
-        """Return every call site invoking the given API descriptor (its callers)."""
+    def find_call_sites_to(self, api_descriptor: str) -> tuple[CallSite, ...]:
+        """Return every call site invoking the given API descriptor (its callers).
+
+        Reverse edge: callee_descriptor is fixed, the caller_* fields vary.
+        """
         require_member_descriptor(api_descriptor)
         return tuple(
             CallSite(
@@ -396,13 +399,14 @@ class DexKitAdapter:
                 bytecode_offset=s.bytecode_offset,
                 invoke_opcode=s.invoke_opcode,
             )
-            for s in self._dk.find_call_sites_to_api(api_descriptor)
+            for s in self._dk.find_call_sites_to(api_descriptor)
         )
 
-    def find_call_sites_from_method(
-        self, method_descriptor: str
-    ) -> tuple[CallSite, ...]:
-        """Return the call sites inside the method — the methods it invokes (callees)."""
+    def find_call_sites_from(self, method_descriptor: str) -> tuple[CallSite, ...]:
+        """Return the call sites inside the method — the methods it invokes (callees).
+
+        Forward edge: the caller_* fields are fixed (this method), callee varies.
+        """
         require_member_descriptor(method_descriptor)
         return tuple(
             CallSite(
@@ -413,8 +417,35 @@ class DexKitAdapter:
                 bytecode_offset=s.bytecode_offset,
                 invoke_opcode=s.invoke_opcode,
             )
-            for s in self._dk.find_call_sites_from_method(method_descriptor)
+            for s in self._dk.find_call_sites_from(method_descriptor)
         )
+
+    # Back-compat aliases for the names released before raw / SDK / MCP unified
+    # on find_call_sites_to / find_call_sites_from: find_call_sites was the SDK
+    # spelling, the _to_api / _from_method pair the raw + MCP one. Kept working,
+    # but deliberately NOT on CrossReferencePort — the port states the contract
+    # in the canonical names, so a port-annotated call to an alias is a type
+    # error that names its replacement.
+    #
+    # These DELEGATE rather than being class-attribute aliases
+    # (`find_call_sites = find_call_sites_to`): an attribute alias binds the base
+    # function object, so a subclass overriding one spelling would be silently
+    # bypassed by the other — and DexKitAdapter is the documented embedding
+    # surface (open_apk returns it), so subclassing is a supported pattern.
+
+    def find_call_sites(self, api_descriptor: str) -> tuple[CallSite, ...]:
+        """Return :meth:`find_call_sites_to` — deprecated alias, the former SDK name."""
+        return self.find_call_sites_to(api_descriptor)
+
+    def find_call_sites_to_api(self, api_descriptor: str) -> tuple[CallSite, ...]:
+        """Return :meth:`find_call_sites_to` — deprecated alias, the former raw name."""
+        return self.find_call_sites_to(api_descriptor)
+
+    def find_call_sites_from_method(
+        self, method_descriptor: str
+    ) -> tuple[CallSite, ...]:
+        """Return :meth:`find_call_sites_from` — deprecated alias, former raw name."""
+        return self.find_call_sites_from(method_descriptor)
 
     def resolve_call_args(self, api_descriptor: str) -> tuple[ResolvedCallSite, ...]:
         """Return call sites of the API with each argument's resolved origin."""

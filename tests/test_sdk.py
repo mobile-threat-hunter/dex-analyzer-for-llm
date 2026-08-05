@@ -77,6 +77,13 @@ _HASHABLE_MODELS = [
 # models carrying a Mapping — frozen but NOT hashable (documented)
 _MAPPING_MODELS = [CapabilityReport, MethodAst]
 
+# dexllm#21: adapter-only back-compat spellings, deliberately absent from the ports
+_DEPRECATED_ALIASES = {
+    "find_call_sites",
+    "find_call_sites_to_api",
+    "find_call_sites_from_method",
+}
+
 
 # ── self-contained ────────────────────────────────────────────────────────────
 
@@ -230,7 +237,7 @@ def test_typed_enumeration_and_xref(apk_path):
     assert trefs and all(isinstance(t, ExternalTypeRef) for t in trefs)
     # external types are reference (L…;) or array ([…) descriptors, never primitives
     assert all(t.descriptor and t.descriptor[0] in "L[" for t in trefs)
-    # find_call_sites / resolve_call_args → typed, with per-kind ArgOrigin
+    # find_call_sites_to / resolve_call_args → typed, with per-kind ArgOrigin
     crossed = 0
     for rc in session.resolve_call_args(
         "Landroid/util/Log;->d(Ljava/lang/String;Ljava/lang/String;)I"
@@ -642,9 +649,9 @@ def test_type_references_xref(apk_path):
 
 
 def test_call_sites_from_method_callees(apk_path):
-    """CrossReferencePort.find_call_sites_from_method — the CALLEE direction, typed.
+    """CrossReferencePort.find_call_sites_from — the CALLEE direction, typed.
 
-    The forward of find_call_sites: each CallSite fixes the caller (this method) and
+    The forward of find_call_sites_to: each CallSite fixes the caller (this method) and
     varies callee. Verified symmetric — the method is a caller of its own callee — and
     empty for an external/unresolved method."""
     from dexllm.sdk import CallSite
@@ -652,19 +659,115 @@ def test_call_sites_from_method_callees(apk_path):
     session = open_apk(apk_path)
     for cls in session.list_classes():
         for m in session.list_class_methods(cls):
-            callees = session.find_call_sites_from_method(m)
+            callees = session.find_call_sites_from(m)
             if callees:
                 assert all(isinstance(c, CallSite) for c in callees)
                 assert all(c.caller_descriptor == m for c in callees)  # caller fixed
                 # forward ≡ reverse for EVERY distinct callee
                 for callee in {c.callee_descriptor for c in callees}:
                     callers = {
-                        c.caller_descriptor for c in session.find_call_sites(callee)
+                        c.caller_descriptor for c in session.find_call_sites_to(callee)
                     }
                     assert m in callers
-                assert session.find_call_sites_from_method("Lno/x;->y()V") == ()
+                assert session.find_call_sites_from("Lno/x;->y()V") == ()
                 return
     pytest.skip("no method with a callee in the test APK")
+
+
+def test_call_site_names_are_unified_across_layers(apk_path):
+    """dexllm#21: raw DexKit, the SDK port/adapter and the MCP catalog all spell the
+    pair find_call_sites_to / find_call_sites_from. The names released before the
+    rename stay available as aliases (raw + adapter + MCP dispatch) and return the
+    identical result, but only the canonical pair is on the port."""
+    import dexllm
+    from dexllm import tools
+
+    session = open_apk(apk_path)
+    for name in ("find_call_sites_to", "find_call_sites_from"):
+        assert hasattr(CrossReferencePort, name)  # the port states the contract
+        assert hasattr(dexllm.DexKit, name)  # raw agrees
+        assert any(t["name"] == name for t in tools.TOOL_DEFINITIONS)  # MCP agrees
+    for alias in ("find_call_sites", "find_call_sites_to_api"):
+        assert not hasattr(CrossReferencePort, alias)
+    # the catalog advertises ONE name per tool — an alias is dispatch-only
+    for alias, canonical in tools.TOOL_ALIASES.items():
+        assert canonical in tools.TOOL_IMPLS and alias not in tools.TOOL_IMPLS
+        assert not any(t["name"] == alias for t in tools.TOOL_DEFINITIONS)
+
+    for cls in session.list_classes():
+        for m in session.list_class_methods(cls):
+            callees = session.find_call_sites_from(m)
+            if not callees:
+                continue
+            assert session.find_call_sites_from_method(m) == callees
+            api = callees[0].callee_descriptor
+            callers = session.find_call_sites_to(api)
+            assert callers  # non-vacuous: m itself is among them
+            assert session.find_call_sites(api) == callers
+            assert session.find_call_sites_to_api(api) == callers
+            # raw aliases resolve to the same underlying binding — BOTH directions
+            # (the forward one is otherwise touched by no test at all)
+            raw = session.raw
+            assert [c.caller_descriptor for c in raw.find_call_sites_to_api(api)] == [
+                c.caller_descriptor for c in raw.find_call_sites_to(api)
+            ]
+            raw_fwd = raw.find_call_sites_from(m)
+            assert [
+                (c.callee_descriptor, c.bytecode_offset)
+                for c in raw.find_call_sites_from_method(m)
+            ] == [(c.callee_descriptor, c.bytecode_offset) for c in raw_fwd]
+            # and the adapter's forward direction matches raw value-for-value
+            assert [c.callee_descriptor for c in callees] == [
+                c.callee_descriptor for c in raw_fwd
+            ]
+            return
+    pytest.skip("no method with a callee in the test APK")
+
+
+def test_adapter_public_surface_has_no_undeclared_drift():
+    """The audit invariant CLAUDE.md asserts, actually locked.
+
+    Every public adapter member must be either declared on a port, the documented
+    ``raw`` escape hatch, or one of the enumerated back-compat aliases. Without
+    this, a method could be added to the adapter and never reach the contract —
+    the isinstance conformance test only checks ports ⊆ adapter, not the reverse.
+    """
+    from dexllm.sdk.adapter import DexKitAdapter
+
+    on_ports: set[str] = set()
+    for port in _PORTS:
+        on_ports |= {n for n in vars(port) if not n.startswith("_")}
+    allowed = on_ports | {"raw"} | _DEPRECATED_ALIASES
+    public = {n for n in dir(DexKitAdapter) if not n.startswith("_")}
+    assert public - allowed == set(), f"undeclared adapter surface: {public - allowed}"
+
+
+def test_deprecated_adapter_aliases_delegate_not_rebind(apk_path):
+    """dexllm#21: the adapter's back-compat aliases must DELEGATE.
+
+    A class-attribute alias (``find_call_sites = find_call_sites_to``) binds the base
+    function object, so a subclass overriding the canonical name would be silently
+    bypassed when a caller uses the old spelling. DexKitAdapter is the documented
+    embedding surface (``open_apk`` returns it), so subclassing is supported.
+    """
+    from dexllm.sdk.adapter import DexKitAdapter
+
+    api = "Landroid/util/Log;->d(Ljava/lang/String;Ljava/lang/String;)I"
+    seen: list[str] = []
+
+    class Audited(DexKitAdapter):
+        def find_call_sites_to(self, api_descriptor: str):
+            seen.append(api_descriptor)
+            return super().find_call_sites_to(api_descriptor)
+
+    session = Audited(apk_path)
+    # every deprecated spelling must route through the subclass override
+    session.find_call_sites(api)
+    session.find_call_sites_to_api(api)
+    assert seen == [api, api]
+    # not the same function object — that is what an attribute alias would give
+    assert Audited.find_call_sites is not DexKitAdapter.find_call_sites_to
+    assert DexKitAdapter.find_call_sites is not DexKitAdapter.find_call_sites_to
 
 
 def test_typed_analysis_surface(apk_path):

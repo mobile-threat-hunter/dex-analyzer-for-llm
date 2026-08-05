@@ -521,7 +521,7 @@ def dangerous_permission_api_callers(
             for ref in matched:
                 desc = f"{ref.class_descriptor}->{ref.name}{ref.proto}"
                 descriptors.append(desc)
-                for site in dk.find_call_sites_to_api(desc):
+                for site in dk.find_call_sites_to(desc):
                     caller = site.caller_descriptor
                     if app_only and _is_framework_caller(caller):
                         continue
@@ -570,7 +570,7 @@ def _rows_for_perm(
         for ref in matched:
             desc = f"{ref.class_descriptor}->{ref.name}{ref.proto}"
             descriptors.append(desc)
-            for site in dk.find_call_sites_to_api(desc):
+            for site in dk.find_call_sites_to(desc):
                 caller = site.caller_descriptor
                 if app_only and _is_framework_caller(caller):
                     continue

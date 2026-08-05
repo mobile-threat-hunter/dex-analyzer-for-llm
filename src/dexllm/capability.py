@@ -85,7 +85,7 @@ def summarize_capabilities(
         cats = meta.get("categories", [])
         if only_categories and not (set(cats) & set(only_categories)):
             continue
-        sites = dk.find_call_sites_to_api(api_sig)
+        sites = dk.find_call_sites_to(api_sig)
         if not sites:
             continue
 

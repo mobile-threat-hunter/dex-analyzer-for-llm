@@ -200,10 +200,21 @@ class ArgOrigin:
     def crossed_branch(self) -> bool: ...
 
 class CallSite:
+    """One invoke edge; which half is FIXED depends on the producing direction.
+
+    find_call_sites_to(X) fixes callee_descriptor and varies caller_*;
+    find_call_sites_from(M) fixes caller_* and varies callee_descriptor.
+    bytecode_offset is always an offset into the CALLER's instruction stream.
+    One entry per invoke INSTRUCTION — a caller that invokes the target twice
+    appears twice.
+    """
+
     @property
     def caller_dex_id(self) -> int: ...
     @property
-    def caller_method_idx(self) -> int: ...
+    def caller_method_idx(self) -> int:
+        """Dex-LOCAL method_ids index — meaningful only with caller_dex_id."""
+
     @property
     def caller_descriptor(self) -> str: ...
     @property
@@ -214,10 +225,18 @@ class CallSite:
     def invoke_opcode(self) -> int: ...
 
 class ResolvedCallSite:
+    """A CallSite plus a resolved origin per argument.
+
+    Only resolve_call_args produces it, so callee_descriptor is fixed and the
+    caller_* fields vary.
+    """
+
     @property
     def caller_dex_id(self) -> int: ...
     @property
-    def caller_method_idx(self) -> int: ...
+    def caller_method_idx(self) -> int:
+        """Dex-LOCAL method_ids index — meaningful only with caller_dex_id."""
+
     @property
     def caller_descriptor(self) -> str: ...
     @property
@@ -278,6 +297,12 @@ class DexKit:
     ) -> list[ExternalFieldRef]: ...
 
     # cross-reference
+    def find_call_sites_to(self, api_descriptor: str) -> list[CallSite]:
+        """Call sites invoking the API — its CALLERS (callee fixed, caller varies)."""
+
+    def find_call_sites_from(self, method_descriptor: str) -> list[CallSite]:
+        """Call sites inside the method — its CALLEES (caller fixed, callee varies)."""
+    # deprecated aliases of the two above (pre-rename names)
     def find_call_sites_to_api(self, api_descriptor: str) -> list[CallSite]: ...
     def find_call_sites_from_method(self, method_descriptor: str) -> list[CallSite]: ...
     def resolve_call_args(self, api_descriptor: str) -> list[ResolvedCallSite]: ...

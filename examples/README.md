@@ -17,7 +17,7 @@ python examples/04_decompile_dex.py classes.dex       # decompile straight from 
 |---|---|
 | `01_overview.py` | load, class/method counts, `list_external_method_refs`, `summarize_capabilities` |
 | `02_decompile.py` | `decompile_method_java` / `decompile_class_java` / `decompile_method_ast` / `render_method_smali` |
-| `03_search.py` | `find_classes_by_name` / `find_methods_using_strings` / `find_call_sites_to_api` / `resolve_call_args` |
+| `03_search.py` | `find_classes_by_name` / `find_methods_using_strings` / `find_call_sites_to` / `resolve_call_args` |
 | `04_decompile_dex.py` | loading a **bare `.dex`** (no zip) and decompiling a class from it |
 
 For the LLM backends, see the top-level [README](../README.md):

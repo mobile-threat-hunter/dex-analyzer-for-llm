@@ -578,19 +578,19 @@ def test_search_classes_by_name(dk):
 
 
 def test_search_call_sites(dk):
-    sites = dk.find_call_sites_to_api(
+    sites = dk.find_call_sites_to(
         "Landroid/util/Log;->d(Ljava/lang/String;Ljava/lang/String;)I"
     )
     assert isinstance(sites, list)  # may be empty if the APK never logs
 
 
 def test_call_sites_from_method_is_forward_of_to_api(dk):
-    """find_call_sites_from_method (callees) is the exact FORWARD of
-    find_call_sites_to_api (callers): if M invokes C, then M appears among C's callers.
+    """find_call_sites_from (callees) is the exact FORWARD of
+    find_call_sites_to (callers): if M invokes C, then M appears among C's callers.
     Verified structurally on a real method, plus the external/unresolved empty case."""
     for cls in dk.list_classes():
         for m in dk.list_class_methods(cls):
-            callees = dk.find_call_sites_from_method(m)
+            callees = dk.find_call_sites_from(m)
             if len(callees) >= 1:
                 for s in callees:
                     assert s.caller_descriptor == m  # caller is fixed to M
@@ -599,10 +599,10 @@ def test_call_sites_from_method_is_forward_of_to_api(dk):
                 # among the callers of each method it invokes (forward ≡ reverse edge).
                 for callee in {c.callee_descriptor for c in callees}:
                     callers = {
-                        x.caller_descriptor for x in dk.find_call_sites_to_api(callee)
+                        x.caller_descriptor for x in dk.find_call_sites_to(callee)
                     }
                     assert m in callers, f"{m} invokes {callee} but is not its caller"
-                assert dk.find_call_sites_from_method("Lno/such/C;->x()V") == []
+                assert dk.find_call_sites_from("Lno/such/C;->x()V") == []
                 return
     pytest.skip("no method with a callee in the test APK")
 
@@ -637,7 +637,7 @@ def test_field_read_write_xref(dk):
 
 
 def test_call_sites_cross_dex_multidex():
-    """find_call_sites_to_api / resolve_call_args must find a CROSS-DEX caller — a
+    """find_call_sites_to / resolve_call_args must find a CROSS-DEX caller — a
     target method declared in one classes*.dex but invoked from another. The caller
     reverse-index redesign made this the sharp edge (DexKit aggregates cross-dex
     callers into the declaring dex, tagged with their source dex_id)."""
@@ -656,7 +656,7 @@ def test_call_sites_cross_dex_multidex():
         "Lcom/foobar/foo/Foobar;-><init>()V",
         "Lcom/foobar/foo/Foobar;->somemethod(Ljava/lang/String;)V",
     ):
-        callers = {s.caller_descriptor for s in dk.find_call_sites_to_api(target)}
+        callers = {s.caller_descriptor for s in dk.find_call_sites_to(target)}
         assert any(
             "Lcom/blafoo/bar/Blafoo;" in c for c in callers
         ), f"cross-dex caller of {target} lost: {callers}"
@@ -666,22 +666,22 @@ def test_call_sites_cross_dex_multidex():
         # ORDER CONTRACT: the reverse-index path emits callers in (living-dex,
         # caller_method_idx) order — identical to the pre-redesign forward scan. Lock
         # it so a future grouping change can't silently reorder the returned list.
-        sites = dk.find_call_sites_to_api(target)
+        sites = dk.find_call_sites_to(target)
         keys = [(s.caller_dex_id, s.caller_method_idx) for s in sites]
         assert keys == sorted(
             keys
         ), f"caller order not (dex, method_idx)-sorted: {keys}"
 
     # CROSS-DEX callee direction: a Blafoo (dex 1) caller of Foobar.somemethod (dex 0)
-    # must, via find_call_sites_from_method, list that dex-0 method as a callee — the
+    # must, via find_call_sites_from, list that dex-0 method as a callee — the
     # forward path resolving a cross-dex edge round-trips against the reverse index.
     target = "Lcom/foobar/foo/Foobar;->somemethod(Ljava/lang/String;)V"
     caller = next(
         s.caller_descriptor
-        for s in dk.find_call_sites_to_api(target)
+        for s in dk.find_call_sites_to(target)
         if "Lcom/blafoo/bar/Blafoo;" in s.caller_descriptor
     )
-    callee_descs = {s.callee_descriptor for s in dk.find_call_sites_from_method(caller)}
+    callee_descs = {s.callee_descriptor for s in dk.find_call_sites_from(caller)}
     assert target in callee_descs, f"cross-dex callee {target} lost from {caller}"
 
 

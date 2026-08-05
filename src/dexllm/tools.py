@@ -268,11 +268,11 @@ def _t_find_methods_using_strings(
     return _paginate([_match_to_desc(h) for h in hits], offset, limit)
 
 
-def _t_find_call_sites_to_api(
+def _t_find_call_sites_to(
     dk: DexKit, api_descriptor: str, limit: int = 50, offset: int = 0
 ) -> dict:
     require_member_descriptor(api_descriptor)
-    sites = dk.find_call_sites_to_api(api_descriptor)
+    sites = dk.find_call_sites_to(api_descriptor)
     items = []
     for s in sites:
         items.append(
@@ -471,11 +471,11 @@ def _t_resolve_call_args(
     return _paginate(items, offset, limit)
 
 
-def _t_find_call_sites_from_method(
+def _t_find_call_sites_from(
     dk: DexKit, method_descriptor: str, limit: int = 50, offset: int = 0
 ) -> dict:
     require_member_descriptor(method_descriptor)
-    sites = dk.find_call_sites_from_method(method_descriptor)
+    sites = dk.find_call_sites_from(method_descriptor)
     items = [
         {
             "caller": s.caller_descriptor,
@@ -730,9 +730,9 @@ TOOL_IMPLS: dict[str, Callable] = {
     "find_classes_declaring_strings": _t_find_classes_declaring_strings,
     "find_methods_by_name": _t_find_methods_by_name,
     "find_methods_using_strings": _t_find_methods_using_strings,
-    "find_call_sites_to_api": _t_find_call_sites_to_api,
+    "find_call_sites_to": _t_find_call_sites_to,
     "resolve_call_args": _t_resolve_call_args,
-    "find_call_sites_from_method": _t_find_call_sites_from_method,
+    "find_call_sites_from": _t_find_call_sites_from,
     "find_field_read_methods": _t_find_field_read_methods,
     "find_field_write_methods": _t_find_field_write_methods,
     "find_type_references": _t_find_type_references,
@@ -741,6 +741,21 @@ TOOL_IMPLS: dict[str, Callable] = {
     "get_class_summary": _t_get_class_summary,
     "render_method_smali": _t_render_method_smali,
     "capability_report": _t_capability_report,
+}
+
+# Back-compat tool-name aliases (pre-rename name → canonical). An agent prompt or
+# transcript written against the old name keeps executing. Deliberately NOT in
+# TOOL_IMPLS or TOOL_DEFINITIONS: the catalog advertises exactly one name per tool
+# and the catalog↔impl invariant stays an exact set equality.
+#
+# CAVEAT (accepted): the MCP layer validates arguments against the inputSchema of
+# the tool it ADVERTISES, so a call under an alias skips that validation (mcp's
+# Server.call_tool no-ops when the name is not in the catalog, and logs a warning).
+# The call still runs, and a malformed argument becomes an in-band {"error": ...}
+# instead of a protocol-level error — an error-shape difference, not a safety one.
+TOOL_ALIASES: dict[str, str] = {
+    "find_call_sites_to_api": "find_call_sites_to",
+    "find_call_sites_from_method": "find_call_sites_from",
 }
 
 
@@ -948,11 +963,13 @@ TOOL_DEFINITIONS: list[dict] = [
         },
     },
     {
-        "name": "find_call_sites_to_api",
+        "name": "find_call_sites_to",
         "description": (
             "Every call site invoking the given API method descriptor — "
             "e.g. 'Landroid/telephony/TelephonyManager;->getDeviceId()Ljava/lang/String;'. "
-            "Returns caller method descriptors. Use this to trace usage of "
+            "The CALLER direction (reverse of find_call_sites_from): the "
+            "callee is the API you asked about, so what varies per row is the "
+            "caller and its bytecode_offset. Use this to trace usage of "
             "sensitive APIs (PII, crypto, network, file IO)."
         ),
         "input_schema": {
@@ -968,7 +985,7 @@ TOOL_DEFINITIONS: list[dict] = [
     {
         "name": "resolve_call_args",
         "description": (
-            "Like find_call_sites_to_api, but ALSO resolves the ARGUMENT VALUES "
+            "Like find_call_sites_to, but ALSO resolves the ARGUMENT VALUES "
             "passed at each call site (intra-method dataflow). Each arg is "
             "{index, kind, value}: a literal for a const (kind ConstInt/"
             "ConstString/...), the field/method signature for FieldRead/"
@@ -990,12 +1007,13 @@ TOOL_DEFINITIONS: list[dict] = [
         },
     },
     {
-        "name": "find_call_sites_from_method",
+        "name": "find_call_sites_from",
         "description": (
             "The CALLEE direction: every method the given method invokes (the "
-            "forward edge of find_call_sites_to_api). Returns {caller, callee, "
-            "bytecode_offset} per invoke. Use to see what a suspicious method "
-            "actually does."
+            "forward edge of find_call_sites_to). Returns {caller, callee, "
+            "bytecode_offset} per invoke — 'caller' is the SAME on every row (it "
+            "is the method you asked about); 'callee' and the offset are what "
+            "vary. Use to see what a suspicious method actually does."
         ),
         "input_schema": {
             "type": "object",
@@ -1260,7 +1278,7 @@ TOOL_DEFINITIONS: list[dict] = [
             "The value-strings ONE method loads — its const-string/jumbo operands, "
             "deduplicated and paginated. The forward direction of "
             "find_methods_using_strings: use "
-            "it after find_call_sites_to_api / permission_callers to see what "
+            "it after find_call_sites_to / permission_callers to see what "
             "literals a suspicious method carries, without decompiling it. Bytecode "
             "only — a `static final String` shows up in list_class_strings instead. "
             "Empty for an external / abstract / native method."
@@ -1398,7 +1416,7 @@ def execute(name: str, args: dict, dk: DexKit) -> dict:
     surface as {"error": "<ExceptionType>: <msg>"} so the LLM can decide
     what to do next (rather than the tool loop crashing the conversation).
     """
-    impl = TOOL_IMPLS.get(name)
+    impl = TOOL_IMPLS.get(TOOL_ALIASES.get(name, name))
     if impl is None:
         return {"error": f"unknown tool: {name}"}
     try:

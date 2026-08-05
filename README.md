@@ -296,7 +296,7 @@ for m in dk.find_methods_using_strings(["http"]):
     print(m)
 print(dk.list_method_strings("Lcom/example/Foo;->bar()V"))   # its const-string operands
 print(dk.list_class_strings("Lcom/example/Foo;"))            # + static VALUE_STRING inits
-for site in dk.find_call_sites_to_api("Landroid/util/Log;->d(Ljava/lang/String;Ljava/lang/String;)I"):
+for site in dk.find_call_sites_to("Landroid/util/Log;->d(Ljava/lang/String;Ljava/lang/String;)I"):
     print(site)
 ```
 

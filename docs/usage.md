@@ -185,19 +185,19 @@ For external classes (e.g. `Landroid/util/Log;`), the summary lists only the mem
 ## L2 — find every call site to a specific API (internal or external)
 
 ```python
-for site in dk.find_call_sites_to_api(
+for site in dk.find_call_sites_to(
     "Landroid/util/Log;->d(Ljava/lang/String;Ljava/lang/String;)I"
 ):
     print(f"[opcode {site.invoke_opcode:02x} @ off 0x{site.bytecode_offset:x}] "
           f"{site.caller_descriptor}  dex={site.caller_dex_id}")
 ```
 
-Each site is a distinct invoke instruction — if the same caller invokes the API twice, you get two entries. `bytecode_offset` is the absolute byte offset within the method's code item.
+Each site is a distinct invoke instruction — if the same caller invokes the API twice, you get two entries. `bytecode_offset` is the byte offset into the caller's **instruction stream** — the same base `render_method_smali` prints (`0xNN:`), i.e. relative to `insns`, not to the start of the `code_item` struct.
 
 The **forward** direction — what a given method calls (its callees) — is
-`dk.find_call_sites_from_method(method)`: the same `CallSite` list, but the caller is
-fixed to the method and `callee_descriptor` varies. `find_call_sites_from_method(M)`
-and `find_call_sites_to_api(C)` are the forward and reverse of one invoke edge (if
+`dk.find_call_sites_from(method)`: the same `CallSite` list, but the caller is
+fixed to the method and `callee_descriptor` varies. `find_call_sites_from(M)`
+and `find_call_sites_to(C)` are the forward and reverse of one invoke edge (if
 `M` invokes `C`, `M` is among `C`'s callers). `[]` for an external / bodyless method.
 
 ### L2.5 — field read/write xref
@@ -367,7 +367,7 @@ The decompiler is a strict, function-by-function port of androguard's `decompile
 name query and is lenient — all operations here auto-normalise their inputs, so you may
 pass a descriptor (`Landroid/app/Activity;`), a smali path (`android/app/Activity`), or a
 Java dotted name (`android.app.Activity`). By contrast the IDENTITY APIs (decompile,
-`find_call_sites_to_api` / `resolve_call_args`, `find_type_references`, `find_field_*`,
+`find_call_sites_to` / `resolve_call_args`, `find_type_references`, `find_field_*`,
 `render_*_smali`, `get_class_summary`, `list_class_methods`, `list_class_strings` /
 `list_method_strings`, `locate_class_dex`) address one
 EXACT entity and require the canonical Dalvik descriptor (the L-form emitted by `list_*` /
@@ -675,7 +675,8 @@ for cls in session.list_classes():                        # -> tuple[str, ...]
     for meth in session.list_class_methods(cls): ...       # -> tuple[str, ...]
 refs = session.list_external_method_refs(framework_only=True)  # -> tuple[ExternalMethodRef, ...]
 
-sites = session.find_call_sites("Landroid/util/Log;->d(...)I")  # -> tuple[CallSite, ...]
+sites = session.find_call_sites_to("Landroid/util/Log;->d(...)I")     # -> tuple[CallSite, ...] (callee fixed)
+callees = session.find_call_sites_from("Lcom/x/Y;->m(I)V")              # -> tuple[CallSite, ...] (caller fixed)
 for rc in session.resolve_call_args("...->getInstance(Ljava/lang/String;)..."):
     for arg in rc.args: arg.kind, arg.string_value          # -> ArgOrigin (only the kind's field set)
 session.find_field_readers("Lcom/x/Y;->token:Ljava/lang/String;")  # -> methods that iget/sget it

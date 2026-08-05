@@ -383,7 +383,22 @@ class ArgOrigin:
 
 @dataclass(frozen=True)
 class CallSite:
-    """One bytecode call site invoking the queried API.
+    """One bytecode invoke edge — a ``caller`` method calling a ``callee`` method.
+
+    **Which half is fixed depends on the direction that produced it**, because the
+    same model serves both queries:
+
+    - ``find_call_sites_to(X)`` → ``callee_descriptor`` is constant (``X``) and the
+      ``caller_*`` fields vary — "who calls X".
+    - ``find_call_sites_from(M)`` → the ``caller_*`` fields are constant (``M``) on every
+      element and ``callee_descriptor`` varies — "what M calls". The repeated
+      caller is the queried method, not a per-site value.
+
+    ``bytecode_offset`` is ALWAYS an offset into the CALLER's instruction stream
+    (so it varies in both directions) — the same base ``render_method_smali``
+    prints, i.e. relative to ``insns``, NOT to the start of the ``code_item``
+    struct. ``caller_method_idx`` is a **dex-local** ``method_ids`` index —
+    meaningful only paired with ``caller_dex_id``, not a stable global id.
 
     Example (real, a call to Log.d in a2dp.Vol)::
 
@@ -404,6 +419,10 @@ class CallSite:
 @dataclass(frozen=True)
 class ResolvedCallSite:
     """A call site plus a resolved :class:`ArgOrigin` per argument register.
+
+    Produced only by ``resolve_call_args(X)``, i.e. the same reverse direction as
+    ``find_call_sites_to``: ``callee_descriptor`` is constant and the ``caller_*`` fields
+    vary. Field semantics are otherwise :class:`CallSite`'s.
 
     Example (real, the same Log.d call — args resolved)::
 

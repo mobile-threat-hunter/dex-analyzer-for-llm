@@ -99,7 +99,7 @@ def test_get_class_summary_external_class_has_no_dex_name(dk):
 
 def test_find_call_sites_returns_clean_caller_descriptor(dk):
     api = "Landroid/util/Log;->d(Ljava/lang/String;Ljava/lang/String;)I"
-    out = tools.execute("find_call_sites_to_api", {"api_descriptor": api}, dk)
+    out = tools.execute("find_call_sites_to", {"api_descriptor": api}, dk)
     if not out["items"]:
         pytest.skip("fixture has no Log.d call sites")
     for item in out["items"]:
@@ -123,13 +123,13 @@ def test_tool_catalog_definitions_match_impls():
 
 def test_resolve_call_args_shapes_compact_args(dk):
     """resolve_call_args yields JSON-safe {index, kind, value} args whose value
-    matches the raw ArgOrigin, and the same call sites as find_call_sites_to_api."""
+    matches the raw ArgOrigin, and the same call sites as find_call_sites_to."""
     api = "Landroid/util/Log;->d(Ljava/lang/String;Ljava/lang/String;)I"
     out = tools.execute("resolve_call_args", {"api_descriptor": api}, dk)
     json.dumps(out)  # must be serialisable for the transport
     if not out["items"]:
         pytest.skip("fixture has no Log.d call sites")
-    callers = {s.caller_descriptor for s in dk.find_call_sites_to_api(api)}
+    callers = {s.caller_descriptor for s in dk.find_call_sites_to(api)}
     for site in out["items"]:
         assert site["caller"] in callers  # same sites as the plain xref tool
         for i, a in enumerate(site["args"]):
@@ -173,7 +173,7 @@ def test_new_xref_tools_execute_without_error(dk):
     cls = dk.list_classes()[0]
     f = next((mm for mm in dk.list_class_methods(cls)), None)
     calls = [
-        ("find_call_sites_from_method", {"method_descriptor": f}) if f else None,
+        ("find_call_sites_from", {"method_descriptor": f}) if f else None,
         ("find_type_references", {"type_descriptor": "Ljava/lang/String;", "limit": 5}),
         ("find_methods_using_int_literals", {"values": [2, 255], "limit": 5}),
         ("find_methods_using_double_literals", {"values": [1.0], "limit": 5}),
@@ -567,3 +567,31 @@ def test_sdk_identity_apis_reject_non_descriptor(dk):
         session.list_class_methods("java.lang.String")
     # L-form still works
     assert session.find_type_references("Ljava/lang/String;") is not None
+
+
+def test_deprecated_tool_names_still_dispatch(dk):
+    """dexllm#21: the pre-rename tool names keep executing via TOOL_ALIASES, and
+    return the same payload as the canonical name — an old agent prompt or saved
+    transcript does not silently break. They stay out of the advertised catalog.
+
+    Both alias names are HARD-CODED here on purpose: a loop over TOOL_ALIASES is
+    self-referential, so deleting an entry would delete its own coverage.
+    """
+    api = "Landroid/util/Log;->d(Ljava/lang/String;Ljava/lang/String;)I"
+    assert tools.execute("find_call_sites_to_api", {"api_descriptor": api}, dk) == (
+        tools.execute("find_call_sites_to", {"api_descriptor": api}, dk)
+    )
+    cls = next(c for c in dk.list_classes() if dk.list_class_methods(c))
+    m = next(
+        (mm for mm in dk.list_class_methods(cls) if dk.find_call_sites_from(mm)), None
+    )
+    if m is None:
+        pytest.skip("fixture has no method with a callee")
+    out = tools.execute("find_call_sites_from_method", {"method_descriptor": m}, dk)
+    assert out == tools.execute("find_call_sites_from", {"method_descriptor": m}, dk)
+    assert out["items"] and "error" not in out  # non-vacuous
+
+    catalog = {d["name"] for d in tools.tool_definitions()}
+    for alias, canonical in tools.TOOL_ALIASES.items():
+        assert alias not in catalog and canonical in catalog
+    assert tools.execute("no_such_tool", {}, dk)["error"].startswith("unknown tool")

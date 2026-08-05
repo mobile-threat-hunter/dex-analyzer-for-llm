@@ -87,8 +87,8 @@ def filter_type_refs(
 def find_call_sites_to_ref(dk: DexKit, ref: "ExternalMethodRef") -> List:
     """Return the call sites for an ExternalMethodRef.
 
-    Equivalent to dk.find_call_sites_to_api(ref.signature).
+    Equivalent to dk.find_call_sites_to(ref.signature).
     """
     if not hasattr(ref, "signature") or not hasattr(ref, "proto"):
         raise TypeError(f"expected ExternalMethodRef, got {type(ref).__name__}")
-    return dk.find_call_sites_to_api(ref.signature)
+    return dk.find_call_sites_to(ref.signature)

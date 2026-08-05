@@ -101,7 +101,7 @@ def test_descriptor_contract_preserved_through_server(apk):
         bad.get("error", "").startswith("ValueError") and "descriptor" in bad["error"]
     )
     bad_api = M.dispatch_tool(
-        "dexllm_find_call_sites_to_api",
+        "dexllm_find_call_sites_to",
         {"apk_path": apk, "api_descriptor": "android.util.Log->d(Ljava/lang/String;)I"},
     )
     assert bad_api.get("error", "").startswith("ValueError")

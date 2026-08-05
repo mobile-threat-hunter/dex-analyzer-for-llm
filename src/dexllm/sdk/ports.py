@@ -209,23 +209,32 @@ class DexExtractionPort(Protocol):
 class CrossReferencePort(Protocol):
     """Caller ↔ callee (method) + read/write (field) cross-reference."""
 
-    def find_call_sites(self, api_descriptor: str) -> tuple[CallSite, ...]:
-        """Every call site invoking the given API descriptor (its CALLERS)."""
+    def find_call_sites_to(self, api_descriptor: str) -> tuple[CallSite, ...]:
+        """Every call site invoking the given API descriptor — its CALLERS.
+
+        The REVERSE edge, so ``callee_descriptor`` is FIXED (the queried API) on
+        every returned :class:`CallSite` and the ``caller_*`` fields vary. One
+        entry per invoke INSTRUCTION — a caller that invokes the API twice
+        appears twice. ``bytecode_offset`` is an offset inside the caller.
+        """
         ...
 
-    def find_call_sites_from_method(
-        self, method_descriptor: str
-    ) -> tuple[CallSite, ...]:
+    def find_call_sites_from(self, method_descriptor: str) -> tuple[CallSite, ...]:
         """Every call site INSIDE the given method — the methods it invokes (CALLEES).
 
-        The forward direction of :meth:`find_call_sites`: each :class:`CallSite` fixes
-        the caller (this method) and varies ``callee_descriptor``. Empty for an
-        external / bodyless / unresolved method.
+        The FORWARD edge of :meth:`find_call_sites_to`, so the ``caller_*`` fields
+        are FIXED (this method) on every returned :class:`CallSite` and
+        ``callee_descriptor`` varies. Empty for an external / bodyless /
+        unresolved method.
         """
         ...
 
     def resolve_call_args(self, api_descriptor: str) -> tuple[ResolvedCallSite, ...]:
-        """Call sites of the API with each argument's resolved origin."""
+        """Call sites of the API with each argument's resolved origin.
+
+        Same reverse direction (and same fixed/varying fields) as
+        :meth:`find_call_sites_to`, plus ``args``.
+        """
         ...
 
     def find_field_readers(self, field_descriptor: str) -> tuple[str, ...]:

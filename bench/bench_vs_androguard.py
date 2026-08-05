@@ -179,9 +179,9 @@ def bench_search():
     rows.append(("methods using string 'http'", d2, a2, len(r), c))
 
     api = "Landroid/util/Log;->d(Ljava/lang/String;Ljava/lang/String;)I"
-    dk.find_call_sites_to_api(api)  # warm
+    dk.find_call_sites_to(api)  # warm
     t = time.time()
-    r = dk.find_call_sites_to_api(api)
+    r = dk.find_call_sites_to(api)
     d3 = time.time() - t
     t = time.time()
     c = sum(

@@ -128,7 +128,7 @@ def method_ref_java(class_descriptor: str, name: str, proto: str) -> str:
 
 
 def signature(class_descriptor: str, name: str, proto: str) -> str:
-    """Build the wire-form API signature accepted by find_call_sites_to_api."""
+    """Build the wire-form API signature accepted by find_call_sites_to."""
     return f"{class_descriptor}->{name}{proto}"
 
 
