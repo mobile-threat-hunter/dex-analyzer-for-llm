@@ -1023,7 +1023,8 @@ TOOL_DEFINITIONS: list[dict] = [
         "name": "find_methods_reading_field",
         "description": (
             "Methods that READ a field (iget/sget). Pass the field descriptor "
-            "'Lcom/foo/Bar;->f:I'. Returns caller method descriptors."
+            "'Lcom/foo/Bar;->f:I'. Returns caller method descriptors, one "
+            "entry per read INSTRUCTION - a method reading it twice appears twice."
         ),
         "input_schema": {
             "type": "object",
@@ -1039,7 +1040,8 @@ TOOL_DEFINITIONS: list[dict] = [
         "name": "find_methods_writing_field",
         "description": (
             "Methods that WRITE a field (iput/sput). Pass the field descriptor "
-            "'Lcom/foo/Bar;->f:I'. Returns caller method descriptors."
+            "'Lcom/foo/Bar;->f:I'. Returns caller method descriptors, one "
+            "entry per write INSTRUCTION - a method writing it twice appears twice."
         ),
         "input_schema": {
             "type": "object",

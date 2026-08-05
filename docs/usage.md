@@ -211,6 +211,10 @@ dk.find_methods_reading_field(fd)                  # -> [method descriptors that
 dk.find_methods_writing_field(fd)                 # -> [method descriptors that write it]
 ```
 
+Both return **one entry per access instruction, not per method** (like `CallSite`),
+so a method touching the field twice appears twice — `set()` the result when you
+want distinct methods.
+
 Type xref (signature positions) — where a `Lpkg/Cls;` type appears as a field type,
 a method return type, or a method parameter:
 

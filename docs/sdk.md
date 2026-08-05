@@ -132,6 +132,8 @@ needs (methods stay on `EnumerationPort.list_class_methods`).
   `find_field_readers`/`_writers` inverted that) returns plain
   method descriptors `tuple[str, ...]` — the methods that iget*/sget* (read) or
   iput*/sput* (write) a `Lcls;->name:Type` field (from dexkit's L2.5 reverse index).
+  **One entry per access INSTRUCTION, not per method** (like `CallSite`), so a
+  method accessing the field twice appears twice; `set()` it for distinct methods.
 - **`TypeReferences`** `(fields, methods_returning, methods_with_param)` —
   `find_type_references(Lpkg/Cls;)` signature-position xref: where a type appears as
   a field type, a method return type, or a method parameter (each a `tuple[str]`).

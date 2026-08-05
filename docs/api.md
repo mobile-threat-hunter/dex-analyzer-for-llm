@@ -453,6 +453,16 @@ fd = 'La2dp/Vol/AppChooser$1;->this$0:La2dp/Vol/AppChooser;'
 dk.find_methods_reading_field(fd)   # ['La2dp/Vol/AppChooser$1;->onClick(Landroid/view/View;)V']   (readers)
 dk.find_methods_writing_field(fd)  # ['La2dp/Vol/AppChooser$1;-><init>(La2dp/Vol/AppChooser;)V']  (writers)
 ```
+**One entry per ACCESS INSTRUCTION, not per method** — the same semantics as
+`CallSite`. A method with two `iget`s of the field appears twice, so the list is
+not deduplicated; wrap in `set()` (or `dict.fromkeys()` to keep order) when you
+want distinct methods. Measured on the bundled corpus: of 634 fields with at
+least one reader, 164 have a reader that repeats.
+```python
+tp = 'Lcom/google/android/exoplayer2/ui/DefaultTimeBar;->touchPosition:Landroid/graphics/Point;'
+len(dk.find_methods_reading_field(tp))   # 2 — one method, two iget-object
+len(dk.find_methods_writing_field(tp))   # 1 — the same method, one iput-object
+```
 
 ### Type references → `TypeReferences`
 Signature-position uses of a `Lpkg/Cls;` type — where it appears as a field type, a

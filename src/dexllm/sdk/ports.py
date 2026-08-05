@@ -242,11 +242,19 @@ class CrossReferencePort(Protocol):
 
         ``field_descriptor`` is the ``Lcls;->name:Type`` form; empty if the field
         isn't declared in a loaded dex.
+
+        One entry per access INSTRUCTION, not per method (the same semantics as
+        :class:`CallSite`), so a method with two ``iget``s of the field appears
+        twice. Wrap in ``set()`` when you want distinct methods.
         """
         ...
 
     def find_methods_writing_field(self, field_descriptor: str) -> tuple[str, ...]:
-        """Descriptors of methods that WRITE (iput*/sput*) the given field."""
+        """Descriptors of methods that WRITE (iput*/sput*) the given field.
+
+        Same per-instruction (undeduplicated) semantics as
+        :meth:`find_methods_reading_field`.
+        """
         ...
 
     def find_type_references(self, type_descriptor: str) -> TypeReferences:

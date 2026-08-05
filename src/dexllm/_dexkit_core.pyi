@@ -8,6 +8,16 @@ properties attached in ``src/dexllm/_enrich.py``.
 Runtime is the source of truth. When a binding changes, update module.cpp first,
 then reflect the added/removed/renamed ``.def(...)`` / ``py::class_`` attribute
 here. Do not advertise names the runtime does not export.
+
+Every ``Example`` below is REAL output, captured against
+``test_apk/APK/com.example.android.tvleanback.apk`` — not illustrative. The
+shared prologue for all of them::
+
+    import dexllm
+    dk = dexllm.DexKit("app.apk")
+
+Descriptors are Dalvik form throughout: ``Lpkg/Cls;`` for a type,
+``Lpkg/Cls;->name(args)Ret`` for a method, ``Lpkg/Cls;->name:Type`` for a field.
 """
 
 from __future__ import annotations
@@ -57,9 +67,40 @@ class _PermissionCallerGroup(TypedDict):
 
 # ── module-level functions ───────────────────────────────────────────────────
 
-def identify(path: str) -> _IdentifyResult: ...
-def verify(path: str, lenient: bool = ...) -> list[_VerifyStatus]: ...
-def is_framework_descriptor(descriptor: str) -> bool: ...
+def identify(path: str) -> _IdentifyResult:
+    """Probe a container WITHOUT loading it — cheap pre-filter for a sweep.
+
+    Detects by content, not extension, so a disguised APK still reports
+    ``is_apk``. ``dex_count == 0`` means a resources-only container, which
+    ``DexKit(...)`` would reject by raising.
+
+    Example::
+
+        >>> dexllm.identify("app.apk")
+        {'format': 'zip', 'is_apk': True, 'has_manifest': True, 'dex_count': 1}
+    """
+
+def verify(path: str, lenient: bool = ...) -> list[_VerifyStatus]:
+    """Structural verdict per dex, load-free — and it NEVER raises.
+
+    Same VerifyDex call and dex_id assignment as ``DexKit(path).verify_report()``,
+    so the verdicts match for a loadable source; unlike construction, a malformed
+    or non-dex path comes back as ``valid=False`` instead of an exception.
+
+    Example::
+
+        >>> dexllm.verify("app.apk")
+        [{'dex_id': 0, 'name': 'classes.dex', 'valid': True, 'reason': ''}]
+    """
+
+def is_framework_descriptor(descriptor: str) -> bool:
+    """True for an Android/JDK framework type — the ``app_only`` filter's rule.
+
+    Example::
+
+        >>> dexllm.is_framework_descriptor("Landroid/app/Activity;")
+        True
+    """
 
 # ── pybind return-object classes (read-only) ─────────────────────────────────
 
@@ -265,131 +306,520 @@ class TypeReferences:
 # ── the engine ───────────────────────────────────────────────────────────────
 
 class DexKit:
+    """A loaded APK / dex. Every query below is a method on this object.
+
+    The source is identified by CONTENT, not extension, so a disguised or
+    extension-less APK loads; a non-dex/non-zip file, or a zip with no
+    ``classes*.dex``, raises. Each dex passes the structural verifier before the
+    parser sees it.
+
+    Example::
+
+        >>> dk = dexllm.DexKit("app.apk")                  # one apk or bare .dex
+        >>> dk = dexllm.DexKit(["dump.dex", "app.apk"])    # unpacked dex wins
+        >>> dk = dexllm.DexKit("partial.dex", lenient=True)
+
+    ``sources`` are loaded IN ORDER — earlier sources get lower dex_ids and win a
+    class-name collision, so list a runtime-dumped dex BEFORE the original APK
+    (this mirrors ART). ``lenient=True`` verifies in ART-structural-equivalent
+    mode, so a partially-decrypted dump (valid structure, garbage method bodies)
+    still loads; header/ids/code_item bounds stay verified either way.
+    """
+
     @overload
     def __init__(self, apk_path: str, lenient: bool = False) -> None: ...
     @overload
     def __init__(self, sources: Sequence[str], lenient: bool = False) -> None: ...
 
     # load / container
-    def dex_count(self) -> int: ...
-    def apk_path(self) -> str: ...
-    def sources(self) -> list[str]: ...
-    def verify_report(self) -> list[_VerifyStatus]: ...
-    def locate_class_dex(self, class_descriptor: str) -> int: ...
+    def dex_count(self) -> int:
+        """Number of loaded dexes. Example: ``dk.dex_count()`` -> ``1``."""
+
+    def apk_path(self) -> str:
+        """The first construction source (back-compat; prefer ``sources()``)."""
+
+    def sources(self) -> list[str]:
+        """Construction sources, in load order — earlier sources get lower dex_ids.
+
+        Example: ``dk.sources()`` -> ``['app.apk']``. After
+        ``add_dumped_dexes(dk, ['dump.dex'])`` -> ``['dump.dex', 'app.apk']``.
+        """
+
+    def verify_report(self) -> list[_VerifyStatus]:
+        """Per-dex structural verdict from the load-time gate.
+
+        A fully-rejected container raises at construction instead, so a reachable
+        ``valid=False`` here means a sibling dex in the same APK was rejected.
+
+        Example::
+
+            >>> dk.verify_report()
+            [{'dex_id': 0, 'name': 'classes.dex', 'valid': True, 'reason': ''}]
+        """
+
+    def locate_class_dex(self, class_descriptor: str) -> int:
+        """dex_id declaring the class, or -1 if it is only referenced.
+
+        Example: ``dk.locate_class_dex("Lcom/example/android/tvleanback/Utils;")``
+        -> ``0``.
+        """
 
     # enumeration (all-dex + per-dex)
-    def list_classes(self) -> list[str]: ...
-    def list_classes_in_dex(self, dex_id: int) -> list[str]: ...
-    def list_class_methods(self, class_descriptor: str) -> list[str]: ...
-    def list_field_descriptors(self) -> list[str]: ...
-    def list_field_descriptors_in_dex(self, dex_id: int) -> list[str]: ...
-    def list_method_descriptors(self) -> list[str]: ...
-    def list_method_descriptors_in_dex(self, dex_id: int) -> list[str]: ...
-    def list_value_strings(self) -> list[str]: ...
-    def list_class_strings(self, class_descriptor: str) -> list[str]: ...
-    def list_method_strings(self, method_descriptor: str) -> list[str]: ...
-    def extract_dex_bytes(self, dex_id: int) -> bytes: ...
+    def list_classes(self) -> list[str]:
+        """Every DECLARED class descriptor, all dexes.
+
+        Example::
+
+            >>> dk.list_classes()[:2]
+            ['Landroid/arch/core/internal/FastSafeIterableMap;',
+             'Landroid/arch/core/internal/SafeIterableMap$1;']
+        """
+
+    def list_classes_in_dex(self, dex_id: int) -> list[str]:
+        """``list_classes`` scoped to one dex — use with ``locate_class_dex``."""
+
+    def list_class_methods(self, class_descriptor: str) -> list[str]:
+        """Full descriptors of the class's declared methods (no superclass walk).
+
+        Example::
+
+            >>> dk.list_class_methods("Lcom/example/android/tvleanback/Utils;")[:2]
+            ['Lcom/example/android/tvleanback/Utils;-><init>()V',
+             'Lcom/example/android/tvleanback/Utils;->convertDpToPixel(Landroid/content/Context;I)I']
+        """
+
+    def list_field_descriptors(self) -> list[str]:
+        """Every field descriptor in the field_ids pool (declared AND referenced).
+
+        Example::
+
+            >>> dk.list_field_descriptors()[:1]
+            ['Landroid/app/Notification$Action;->actionIntent:Landroid/app/PendingIntent;']
+        """
+
+    def list_field_descriptors_in_dex(self, dex_id: int) -> list[str]:
+        """``list_field_descriptors`` scoped to one dex."""
+
+    def list_method_descriptors(self) -> list[str]:
+        """Every method descriptor in the method_ids pool (declared AND referenced).
+
+        Example::
+
+            >>> dk.list_method_descriptors()[:1]
+            ['Landroid/accessibilityservice/AccessibilityServiceInfo;->getCanRetrieveWindowContent()Z']
+        """
+
+    def list_method_descriptors_in_dex(self, dex_id: int) -> list[str]:
+        """``list_method_descriptors`` scoped to one dex."""
+
+    def list_value_strings(self) -> list[str]:
+        """Every distinct string the app LOADS as a value — the IOC feed.
+
+        ``const-string``/``jumbo`` operands plus static-field ``VALUE_STRING``
+        initializers, deduplicated. Excludes identifier/metadata pool entries
+        (type, method and field names, shorty, source files).
+
+        Example::
+
+            >>> [s for s in dk.list_value_strings() if s.startswith("http")][:1]
+            ['http://schemas.android.com/apk/res/android']
+        """
+
+    def list_class_strings(self, class_descriptor: str) -> list[str]:
+        """Strings this class loads — union over its declared methods, then its
+        static-field ``VALUE_STRING`` initializers. ``[]`` (never raises) for an
+        unknown / external class.
+
+        Example::
+
+            >>> dk.list_class_strings("Lcom/example/android/tvleanback/Utils;")
+            ['window']
+        """
+
+    def list_method_strings(self, method_descriptor: str) -> list[str]:
+        """Strings this method body loads. Bytecode-only — a ``static final
+        String`` is a class-level EncodedValue and appears in
+        ``list_class_strings`` instead. ``[]`` for an abstract / native / unknown
+        method.
+
+        Example::
+
+            >>> dk.list_method_strings(
+            ...     "Lcom/example/android/tvleanback/Utils;"
+            ...     "->getDisplaySize(Landroid/content/Context;)Landroid/graphics/Point;")
+            ['window']
+        """
+
+    def extract_dex_bytes(self, dex_id: int) -> bytes:
+        """The dex image as bytes — feed another tool, or dump an unpacked dex.
+
+        Example::
+
+            >>> b = dk.extract_dex_bytes(0)
+            >>> b[:4], len(b)
+            (b'dex\\n', 5472720)
+        """
 
     # class inspection / external refs
-    def get_class_summary(self, descriptor: str) -> ClassSummary: ...
+    def get_class_summary(self, descriptor: str) -> ClassSummary:
+        """Class metadata + declared fields and methods in one call.
+
+        For a class only REFERENCED (not declared) in a loaded dex, the result
+        has ``is_internal=False`` and empty members.
+
+        Example::
+
+            >>> s = dk.get_class_summary("Lcom/example/android/tvleanback/Utils;")
+            >>> s.dex_id, s.is_internal, s.access_flags, s.superclass_descriptor
+            (0, True, 1, 'Ljava/lang/Object;')
+            >>> s.source_file, len(s.fields), len(s.methods)
+            ('Utils.java', 0, 5)
+            >>> [(m.name, m.proto) for m in s.methods][:2]
+            [('<init>', '()V'), ('convertDpToPixel', '(Landroid/content/Context;I)I')]
+        """
+
     def list_external_type_refs(
         self, framework_only: bool = True
-    ) -> list[ExternalTypeRef]: ...
+    ) -> list[ExternalTypeRef]:
+        """Types referenced but not declared here — the app's outward surface.
+
+        Example::
+
+            >>> t = dk.list_external_type_refs()[0]
+            >>> t.descriptor, t.java_name, t.referenced_in_dex_ids
+            ('Landroid/accessibilityservice/AccessibilityServiceInfo;',
+             'android.accessibilityservice.AccessibilityServiceInfo', [0])
+        """
+
     def list_external_method_refs(
         self, framework_only: bool = True
-    ) -> list[ExternalMethodRef]: ...
+    ) -> list[ExternalMethodRef]:
+        """Methods called but not declared here — what ``permission_callers`` joins on.
+
+        Example::
+
+            >>> m = dk.list_external_method_refs()[0]
+            >>> m.class_descriptor, m.name, m.proto
+            ('Landroid/accessibilityservice/AccessibilityServiceInfo;',
+             'getCanRetrieveWindowContent', '()Z')
+        """
+
     def list_external_field_refs(
         self, framework_only: bool = True
-    ) -> list[ExternalFieldRef]: ...
+    ) -> list[ExternalFieldRef]:
+        """Fields touched but not declared here.
+
+        Example::
+
+            >>> f = dk.list_external_field_refs()[0]
+            >>> f.signature
+            'Landroid/app/Notification$Action;->actionIntent:Landroid/app/PendingIntent;'
+        """
 
     # cross-reference
     def find_call_sites_to(self, api_descriptor: str) -> list[CallSite]:
-        """Call sites invoking the API — its CALLERS (callee fixed, caller varies)."""
+        """Call sites invoking the API — its CALLERS (callee fixed, caller varies).
+
+        Example::
+
+            >>> c = dk.find_call_sites_to(
+            ...     "Landroid/content/Context;"
+            ...     "->getSystemService(Ljava/lang/String;)Ljava/lang/Object;")[0]
+            >>> c.caller_descriptor
+            'Landroid/support/v14/preference/SwitchPreference;->syncViewIfAccessibilityEnabled(Landroid/view/View;)V'
+            >>> c.bytecode_offset, c.invoke_opcode, c.caller_dex_id
+            (14, 110, 0)
+        """
 
     def find_call_sites_from(self, method_descriptor: str) -> list[CallSite]:
-        """Call sites inside the method — its CALLEES (caller fixed, callee varies)."""
+        """Call sites inside the method — its CALLEES (caller fixed, callee varies).
+
+        Example::
+
+            >>> [(c.callee_descriptor, c.bytecode_offset)
+            ...  for c in dk.find_call_sites_from(
+            ...      "Lcom/example/android/tvleanback/Utils;"
+            ...      "->getDisplaySize(Landroid/content/Context;)Landroid/graphics/Point;")]
+            [('Landroid/content/Context;->getSystemService(Ljava/lang/String;)Ljava/lang/Object;', 6),
+             ('Landroid/view/WindowManager;->getDefaultDisplay()Landroid/view/Display;', 18), ...]
+        """
     # deprecated aliases of the two above (pre-rename names)
     def find_call_sites_to_api(self, api_descriptor: str) -> list[CallSite]: ...
     def find_call_sites_from_method(self, method_descriptor: str) -> list[CallSite]: ...
-    def resolve_call_args(self, api_descriptor: str) -> list[ResolvedCallSite]: ...
-    def find_methods_reading_field(self, field_descriptor: str) -> list[str]: ...
-    def find_methods_writing_field(self, field_descriptor: str) -> list[str]: ...
+    def resolve_call_args(self, api_descriptor: str) -> list[ResolvedCallSite]:
+        """``find_call_sites_to`` plus each argument's resolved origin.
+
+        The analysis is join-aware: a definition is reported only if EVERY
+        control-flow edge reaching the call carries it, otherwise the origin is
+        ``Unknown`` with ``crossed_branch=True``. This is what makes an argument
+        rule ("which call sites pass state 2?") trustworthy.
+
+        Example::
+
+            >>> r = dk.resolve_call_args(
+            ...     "Landroid/content/Context;"
+            ...     "->getSystemService(Ljava/lang/String;)Ljava/lang/Object;")[0]
+            >>> [(a.kind, a.string_value, a.crossed_branch) for a in r.args]
+            [('MethodReturn', '', False), ('ConstString', 'accessibility', False)]
+        """
+
+    def find_methods_reading_field(self, field_descriptor: str) -> list[str]:
+        """Methods that READ the field. Returns method descriptors, not the field.
+
+        NOT deduplicated: one entry per READ INSTRUCTION, like ``CallSite``, so a
+        method with two ``iget``s of the field appears twice. Wrap in ``set()``
+        (or ``dict.fromkeys()`` to keep order) for distinct methods.
+
+        Example — the method below holds two ``iget-object`` of the field::
+
+            >>> dk.find_methods_reading_field(
+            ...     "Lcom/google/android/exoplayer2/ui/DefaultTimeBar;"
+            ...     "->touchPosition:Landroid/graphics/Point;")
+            ['Lcom/google/android/exoplayer2/ui/DefaultTimeBar;->resolveRelativeTouchPosition(Landroid/view/MotionEvent;)Landroid/graphics/Point;',
+             'Lcom/google/android/exoplayer2/ui/DefaultTimeBar;->resolveRelativeTouchPosition(Landroid/view/MotionEvent;)Landroid/graphics/Point;']
+        """
+
+    def find_methods_writing_field(self, field_descriptor: str) -> list[str]:
+        """Methods that WRITE the field — the taint-source half of the pair.
+
+        Same per-INSTRUCTION (undeduplicated) semantics as
+        ``find_methods_reading_field``. The field above has a single ``iput``, so
+        its writer list holds one entry against the reader list's two.
+        """
     # deprecated aliases of the two above (pre-rename names)
     def find_field_read_methods(self, field_descriptor: str) -> list[str]: ...
     def find_field_write_methods(self, field_descriptor: str) -> list[str]: ...
-    def find_type_references(self, type_descriptor: str) -> TypeReferences: ...
+    def find_type_references(self, type_descriptor: str) -> TypeReferences:
+        """Where a TYPE appears: as a field type, a return type, a parameter type.
+
+        Example::
+
+            >>> t = dk.find_type_references("Landroid/graphics/Point;")
+            >>> t.fields[:1]
+            ['Lcom/google/android/exoplayer2/ui/DefaultTimeBar;->touchPosition:Landroid/graphics/Point;']
+            >>> t.methods_returning[:1]
+            ['Lcom/example/android/tvleanback/Utils;->getDisplaySize(Landroid/content/Context;)Landroid/graphics/Point;']
+        """
 
     # search (L1–L7)
+    #
+    # ``match_type`` is one of "contains" (default) / "equals" / "starts_with" /
+    # "ends_with" / "similar_regex"; an unrecognised value falls back to
+    # "contains" (the dexllm.sdk layer narrows this to a Literal). String-CONTENT
+    # queries are MUTF-8-encoded at the binding, so a literal containing NUL or a
+    # supplementary code point matches.
     def find_classes_by_name(
         self,
         name: str,
         match_type: str = "contains",
         ignore_case: bool = False,
-    ) -> list[ClassMatch]: ...
+    ) -> list[ClassMatch]:
+        """Search class NAMES. Accepts dotted or Dalvik form.
+
+        Example::
+
+            >>> [c.descriptor for c in dk.find_classes_by_name("tvleanback/Utils")]
+            ['Lcom/example/android/tvleanback/Utils$MediaDimensions;',
+             'Lcom/example/android/tvleanback/Utils;']
+        """
+
     def find_classes_using_strings(
         self,
         strings: Sequence[str],
         match_type: str = "contains",
         ignore_case: bool = False,
-    ) -> list[ClassMatch]: ...
+    ) -> list[ClassMatch]:
+        """Classes whose CODE loads all of these strings (``const-string`` index).
+
+        Cannot see a ``static final String`` that is declared but never loaded —
+        that is ``find_classes_declaring_strings``. An empty query returns EVERY
+        class here (upstream's keyword path), unlike the declaring variant.
+
+        Example::
+
+            >>> [c.descriptor for c in dk.find_classes_using_strings(["window"])][:1]
+            ['Landroid/support/v4/util/PatternsCompat;']
+        """
+
     def find_classes_declaring_strings(
         self,
         strings: Sequence[str],
         match_type: str = "contains",
         ignore_case: bool = False,
-    ) -> list[ClassMatch]: ...
+    ) -> list[ClassMatch]:
+        """Classes DECLARING all of these as static-field constants.
+
+        The declaration-side counterpart of ``find_classes_using_strings`` — the
+        only way to locate an indicator kept solely in a constant. An EMPTY query
+        returns nothing.
+
+        Example::
+
+            >>> [c.descriptor for c in dk.find_classes_declaring_strings(["http"])][:1]
+            ['Landroid/support/v4/content/res/TypedArrayUtils;']
+        """
+
     def find_methods_using_strings(
         self,
         strings: Sequence[str],
         match_type: str = "contains",
         ignore_case: bool = False,
-    ) -> list[MethodMatch]: ...
+    ) -> list[MethodMatch]:
+        """Methods whose body loads all of these strings.
+
+        Example::
+
+            >>> [m.descriptor for m in dk.find_methods_using_strings(["accessibility"])][:1]
+            ['Landroid/support/v14/preference/SwitchPreference;->syncViewIfAccessibilityEnabled(Landroid/view/View;)V']
+        """
+
     def batch_find_classes_using_strings(
         self,
         query_map: Mapping[str, Sequence[str]],
         match_type: str = "contains",
         ignore_case: bool = False,
-    ) -> dict[str, list[ClassMatch]]: ...
+    ) -> dict[str, list[ClassMatch]]:
+        """Many labelled queries in one pass — one shared index build, not N.
+
+        Example::
+
+            >>> r = dk.batch_find_classes_using_strings({"ui": ["window"]})
+            >>> [c.descriptor for c in r["ui"]][:1]
+            ['Landroid/support/v17/leanback/widget/GuidedActionsStylist;']
+        """
+
     def batch_find_methods_using_strings(
         self,
         query_map: Mapping[str, Sequence[str]],
         match_type: str = "contains",
         ignore_case: bool = False,
-    ) -> dict[str, list[MethodMatch]]: ...
+    ) -> dict[str, list[MethodMatch]]:
+        """Method-scoped ``batch_find_classes_using_strings``."""
+
     def find_methods_by_name(
         self,
         name: str,
         match_type: str = "contains",
         declaring_class: str = "",
         ignore_case: bool = False,
-    ) -> list[MethodMatch]: ...
+    ) -> list[MethodMatch]:
+        """Search method NAMES, optionally narrowed to a declaring class.
+
+        Example::
+
+            >>> [m.descriptor for m in dk.find_methods_by_name("getDisplaySize")][:1]
+            ['Lcom/example/android/tvleanback/Utils;->getDisplaySize(Landroid/content/Context;)Landroid/graphics/Point;']
+        """
+
     def find_classes_by_annotation(
         self, annotation_class: str, match_type: str = "equals"
-    ) -> list[ClassMatch]: ...
+    ) -> list[ClassMatch]:
+        """Classes carrying the annotation.
+
+        Example::
+
+            >>> [c.descriptor
+            ...  for c in dk.find_classes_by_annotation("Ljava/lang/Deprecated;")][:1]
+            ['Landroid/support/v17/leanback/widget/OnChildSelectedListener;']
+        """
+
     def find_methods_by_annotation(
         self, annotation_class: str, match_type: str = "equals"
-    ) -> list[MethodMatch]: ...
+    ) -> list[MethodMatch]:
+        """Method-scoped ``find_classes_by_annotation``."""
+
     def find_classes_by_super(
         self, super_class: str, match_type: str = "equals"
-    ) -> list[ClassMatch]: ...
+    ) -> list[ClassMatch]:
+        """Direct subclasses (one level — not a transitive hierarchy walk).
+
+        Example::
+
+            >>> [c.descriptor
+            ...  for c in dk.find_classes_by_super("Landroid/app/Activity;")][:1]
+            ['Lcom/example/android/tvleanback/mobile/MobileWelcomeActivity;']
+        """
+
     def find_classes_implementing(
         self, interface_class: str, match_type: str = "equals"
-    ) -> list[ClassMatch]: ...
+    ) -> list[ClassMatch]:
+        """Classes declaring the interface.
+
+        Example::
+
+            >>> [c.descriptor
+            ...  for c in dk.find_classes_implementing("Ljava/lang/Runnable;")][:1]
+            ['Landroid/support/v14/preference/PreferenceFragment$2;']
+        """
+
     def find_methods_using_int_literals(
         self, values: Sequence[int]
-    ) -> list[MethodMatch]: ...
+    ) -> list[MethodMatch]:
+        """Methods whose body materializes all of these int constants.
+
+        Useful for magic numbers (a port, an XOR key, a state code). ``[]`` when
+        no method carries every value.
+        """
+
     def find_methods_using_double_literals(
         self, values: Sequence[float]
-    ) -> list[MethodMatch]: ...
+    ) -> list[MethodMatch]:
+        """Float/double counterpart of ``find_methods_using_int_literals``.
+
+        Example::
+
+            >>> [m.descriptor
+            ...  for m in dk.find_methods_using_double_literals([0.5])][:1]
+            ['Landroid/support/graphics/drawable/AnimatorInflaterCompat;->setupObjectAnimator(Landroid/animation/ValueAnimator;Landroid/content/res/TypedArray;IFLorg/xmlpull/v1/XmlPullParser;)V']
+        """
 
     # decompile / smali
     def decompile_method(self, method_descriptor: str) -> str:
-        """Java text. The suffixed variants add structure to the SAME output."""
+        """Java text. The suffixed variants add structure to the SAME output.
+
+        ``""`` for an external ref (no body in any loaded dex). Results are LRU
+        cached; the GIL is released, so this parallelizes across threads. In
+        batch code use ``dexllm.safe_decompile_method`` (a wall-clock deadline).
+
+        Example::
+
+            >>> print(dk.decompile_method(
+            ...     "Lcom/example/android/tvleanback/Utils;"
+            ...     "->convertDpToPixel(Landroid/content/Context;I)I"))
+            public static int convertDpToPixel(android.content.Context p2, int p3)
+            {
+                return Math.round((((float) p3) * p2.getResources().getDisplayMetrics().density));
+            }
+        """
 
     def decompile_method_with_pc_map(
         self, method_descriptor: str
-    ) -> _DecompiledMethodWithPc: ...
-    def decompile_class(self, class_descriptor: str) -> str: ...
+    ) -> _DecompiledMethodWithPc:
+        """The same text plus a source-line -> dex-offset map, for smali sync.
+
+        ``line`` is a 1-based index into ``source.split("\\n")`` — ONLY ``\\n``
+        delimits a line. Do NOT use ``splitlines()``: a string literal may carry a
+        raw U+2028/U+2029/U+0085 that it splits on but the counter does not, which
+        desyncs the map. Lines with no source op (braces, ``while(true)``) are
+        omitted; condition / loop / switch header lines ARE mapped. Uncached.
+
+        Example::
+
+            >>> dk.decompile_method_with_pc_map(
+            ...     "Lcom/example/android/tvleanback/Utils;"
+            ...     "->convertDpToPixel(Landroid/content/Context;I)I")["pc_map"]
+            [(4, 32)]
+        """
+
+    def decompile_class(self, class_descriptor: str) -> str:
+        """Whole-class Java: package, header, field declarations, method bodies.
+
+        Example::
+
+            >>> dk.decompile_class(
+            ...     "Lcom/example/android/tvleanback/Utils;").split("\\n")[:2]
+            ['package com.example.android.tvleanback;', 'public class Utils {']
+        """
     # deprecated aliases of the three above (pre-rename names)
     def decompile_method_java(self, method_descriptor: str) -> str: ...
     def decompile_method_java_with_pc(
@@ -398,21 +828,96 @@ class DexKit:
     def decompile_class_java(self, class_descriptor: str) -> str: ...
     def decompile_method_ast(
         self, method_descriptor: str, include_source: bool = True
-    ) -> _MethodAstResult: ...
-    def render_method_smali(self, method_descriptor: str) -> str: ...
-    def render_class_smali(self, class_descriptor: str) -> str: ...
+    ) -> _MethodAstResult:
+        """Signature parts + the structured AST (+ the same Java text by default).
+
+        ``source`` is byte-identical to ``decompile_method``; pass
+        ``include_source=False`` to skip that emit pass (~1.7x faster, ``source``
+        comes back empty). ``access`` is decoded modifier NAMES off the raw dex
+        bits, so a Java ``synchronized`` method reads ``declared_synchronized``.
+
+        Example::
+
+            >>> a = dk.decompile_method_ast(
+            ...     "Lcom/example/android/tvleanback/Utils;"
+            ...     "->convertDpToPixel(Landroid/content/Context;I)I",
+            ...     include_source=False)
+            >>> a["ret_type"], a["params_type"], a["access"]
+            ('I', ['Landroid/content/Context;', 'I'], ['public', 'static'])
+            >>> sorted(a["ast"])
+            ['body', 'comments', 'flags', 'params', 'ret', 'triple']
+        """
+
+    def render_method_smali(self, method_descriptor: str) -> str:
+        """Disassembly, one instruction per line prefixed with its byte offset.
+
+        Those ``0xNN:`` prefixes are the offsets ``decompile_method_with_pc_map``
+        maps to.
+
+        Example::
+
+            >>> print(dk.render_method_smali(
+            ...     "Lcom/example/android/tvleanback/Utils;"
+            ...     "->convertDpToPixel(Landroid/content/Context;I)I"))
+            Lcom/example/android/tvleanback/Utils;->convertDpToPixel(Landroid/content/Context;I)I
+                .registers 4
+                0x0: invoke-virtual {v2}, Landroid/content/Context;->getResources()Landroid/content/res/Resources;
+                0x6: move-result-object v1
+                ...
+        """
+
+    def render_class_smali(self, class_descriptor: str) -> str:
+        """``render_method_smali`` for every declared method, under a class header."""
 
     # permissions
     def permission_callers(
         self, app_only: bool = True
-    ) -> list[_PermissionCallerGroup]: ...
+    ) -> list[_PermissionCallerGroup]:
+        """Dangerous-permission APIs the app calls, grouped by permission.
+
+        Joins AOSP's permission->API map against this APK's external method refs,
+        then attaches the calling methods. ``app_only=True`` drops bundled
+        framework/library callers (androidx, kotlin, play-services).
+
+        Example::
+
+            >>> [(g["perm"], g["protectionLevel"], len(g["rows"]))
+            ...  for g in dk.permission_callers()][:2]
+            [('android.permission.ACCESS_NETWORK_STATE', 'normal', 1),
+             ('android.permission.INTERACT_ACROSS_USERS', 'signature', 4)]
+        """
 
     # caches / lifecycle — actions are verb-first, read-only accessors are nouns
-    def warm_analysis_caches(self) -> None: ...
-    def clear_decompiler_cache(self) -> None: ...
-    def set_decompiler_cache_capacity(self, cap: int) -> None: ...
-    def decompiler_cache_size(self) -> int: ...
-    def decompiler_cache_capacity(self) -> int: ...
+    def warm_analysis_caches(self) -> None:
+        """Build the cross-ref indexes up front instead of on first query.
+
+        Pays the one-time cost where you choose it — useful before timing a
+        query, or before fanning out across threads.
+        """
+
+    def clear_decompiler_cache(self) -> None:
+        """Drop every cached decompile result (frees memory; does not reset caps)."""
+
+    def set_decompiler_cache_capacity(self, cap: int) -> None:
+        """LRU cap in methods. Default 4096; ``0`` means unbounded.
+
+        Example: ``dk.set_decompiler_cache_capacity(0)`` before a whole-APK sweep.
+        """
+
+    def decompiler_cache_size(self) -> int:
+        """Methods currently cached — grows with each distinct ``decompile_method``.
+
+        Example::
+
+            >>> dk.decompiler_cache_size()                    # fresh session
+            0
+            >>> _ = dk.decompile_method(some_descriptor)
+            >>> dk.decompiler_cache_capacity(), dk.decompiler_cache_size()
+            (4096, 1)
+        """
+
+    def decompiler_cache_capacity(self) -> int:
+        """The configured cap (``0`` = unbounded)."""
     # deprecated aliases of the two ACTIONS above (clear / set_..._capacity)
     def decompiler_clear_cache(self) -> None: ...
     def decompiler_set_cache_capacity(self, cap: int) -> None: ...

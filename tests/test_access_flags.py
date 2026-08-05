@@ -221,3 +221,39 @@ def test_dad_path_still_reports_declared_synchronized(loadable_apks):
         )
         return
     pytest.skip(f"{target_cls} not present in the available APK(s)")
+
+
+def test_field_xref_is_per_instruction_not_per_method(loadable_apks):
+    """Pin the undeduplicated contract the docs now state across all four layers.
+
+    ``find_methods_reading_field`` / ``_writing_field`` return one entry per
+    ACCESS INSTRUCTION (like ``CallSite``), so a method with two ``iget``s of the
+    field appears twice. This was undocumented until 2026-08-06 and is easy to
+    "fix" into a dedup by accident, which would silently change the meaning of
+    every count built on it.
+    """
+    import dexllm
+
+    for apk in loadable_apks:
+        try:
+            dk = dexllm.DexKit(apk)
+        except Exception:
+            continue
+        for fd in dk.list_field_descriptors()[:4000]:
+            readers = dk.find_methods_reading_field(fd)
+            if len(readers) > len(set(readers)):
+                # the repeat must be a genuine multi-access method, and the
+                # smali must show at least as many reads as the repeat count
+                dup = max(set(readers), key=readers.count)
+                smali = dk.render_method_smali(dup)
+                reads = sum(
+                    1
+                    for line in smali.splitlines()
+                    if fd in line and "get" in line.split(",")[0].split(":")[-1]
+                )
+                assert reads >= readers.count(dup), (
+                    f"{dup} appears {readers.count(dup)}x in the reader list but "
+                    f"the smali shows only {reads} read(s) of {fd}"
+                )
+                return
+    pytest.skip("no field with a repeated reader in the available APK(s)")
