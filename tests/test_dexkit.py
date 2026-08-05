@@ -7,10 +7,13 @@ Run:  pytest tests -v
 """
 
 import re
+from pathlib import Path
 
 import pytest
 
 import dexllm
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 # ── self-contained (no APK) ──────────────────────────────────────────────────
 
@@ -18,6 +21,24 @@ import dexllm
 def test_import_and_version():
     assert isinstance(dexllm.__version__, str)
     assert dexllm.DexKit is not None
+
+
+def test_optional_extras_bound_incompatible_majors():
+    """Every optional dependency whose MAJOR bump is known to break us must carry an
+    upper bound (#18).
+
+    `mcp` 2.x removed the low-level `Server` decorators `dexllm.mcp_server` is written
+    against, so an unbounded `mcp>=1.0` let a clean install resolve a version that
+    fails at IMPORT and aborted pytest collection for the whole suite. This guards the
+    bound itself — the runtime cannot, since by then the wrong version is installed.
+    """
+    pyproject = (REPO_ROOT / "pyproject.toml").read_text()
+    spec = re.search(r'^mcp = \["mcp([^"]*)"\]', pyproject, re.M)
+    assert spec, "the [mcp] extra no longer declares a single `mcp` requirement"
+    assert "<2" in spec.group(1), (
+        "dexllm.mcp_server targets the mcp 1.x Server API; the extra must stay "
+        f"upper-bounded until it is ported (found: mcp{spec.group(1)})"
+    )
 
 
 def test_tools_catalog():

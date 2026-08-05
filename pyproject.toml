@@ -23,7 +23,11 @@ dependencies = []
 
 [project.optional-dependencies]
 # MCP stdio server (Claude Desktop / Cursor / Continue): `python -m dexllm.mcp_server`
-mcp = ["mcp>=1.0"]
+# Upper-bounded: mcp 2.x reworked the low-level Server decorator API (`Server.list_tools`
+# is gone), so `dexllm.mcp_server` — written against 1.x — fails at IMPORT time under it,
+# which also aborts pytest collection for the whole suite. See #18; lifting the bound
+# means porting mcp_server.py to the 2.x API.
+mcp = ["mcp>=1.0,<2"]
 # FastAPI + SSE web backend: `uvicorn dexllm.server:app`
 server = [
     "fastapi>=0.110",

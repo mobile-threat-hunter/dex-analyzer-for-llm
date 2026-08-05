@@ -256,6 +256,11 @@ pip install -e ".[all]"          # + MCP server + FastAPI backend
 pip install -e ".[dev]"          # + pytest + androguard (for tests / parity)
 ```
 
+The `mcp` extra is pinned to `>=1.0,<2`: `dexllm.mcp_server` targets the mcp **1.x**
+low-level `Server` API, and 2.x removed those decorators (the module then fails at
+import). If your environment already carries mcp 2.x, `pip install -e ".[mcp]"`
+downgrades it.
+
 After editing C++ sources, rebuild with the two-step loop (or `/dexkit-build`):
 
 ```bash

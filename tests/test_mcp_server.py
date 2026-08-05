@@ -17,7 +17,24 @@ import pytest
 pytest.importorskip("mcp")  # the whole module needs the optional [mcp] extra
 
 import dexllm  # noqa: E402
-from dexllm import mcp_server as M  # noqa: E402
+
+try:
+    from dexllm import mcp_server as M  # noqa: E402
+except AttributeError as exc:  # pragma: no cover — env violates the declared bound
+    # mcp_server is written against the mcp 1.x low-level Server API; 2.x removed
+    # those decorators, so the import raises. dexllm declares `mcp>=1.0,<2` (#18), so
+    # this only happens when the environment overrides that. Skip with the version in
+    # the reason instead of letting a module-level raise abort collection of the WHOLE
+    # suite — which is what made this a one-line dependency bug with an outsized blast
+    # radius in the first place.
+    import importlib.metadata as _md
+
+    _ver = _md.version("mcp")
+    pytest.skip(
+        f"installed mcp {_ver} is incompatible with dexllm.mcp_server "
+        f"(declared bound: >=1.0,<2) — {exc}",
+        allow_module_level=True,
+    )
 
 REPO = Path(__file__).resolve().parents[1]
 
