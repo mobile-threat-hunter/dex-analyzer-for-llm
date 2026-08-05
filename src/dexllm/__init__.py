@@ -117,4 +117,4 @@ __all__ = [
     "summarize_capabilities",
     "verify",
 ]
-__version__ = "0.7.0"
+__version__ = "0.8.0"
