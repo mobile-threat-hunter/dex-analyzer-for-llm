@@ -154,7 +154,13 @@ class ClassMemberMethod:
     @property
     def proto(self) -> str: ...
     @property
-    def access_flags(self) -> int: ...
+    def access_flags(self) -> int:
+        """Raw dex access flags — no ``java.lang.reflect.Modifier`` normalization.
+
+        A method declared ``synchronized`` in Java carries
+        ``ACC_DECLARED_SYNCHRONIZED`` (0x20000), not ``ACC_SYNCHRONIZED`` (0x20);
+        in dex 0x20 means JNI ``synchronized native``.
+        """
 
 class ClassSummary:
     @property

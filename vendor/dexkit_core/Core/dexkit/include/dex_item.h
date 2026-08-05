@@ -112,16 +112,25 @@ public:
     // global method_idx / field_idx (the same indices used by MethodIds /
     // FieldIds). Returns 0 for methods/fields whose class is not defined in
     // this dex (external refs).
+    //
+    // The values are the RAW bits as stored in the dex file — NO
+    // java.lang.reflect.Modifier normalization. In particular a method
+    // declared `synchronized` in Java keeps `kAccDeclaredSynchronized`
+    // (0x20000); it is NOT rewritten to `kAccSynchronized` (0x20), which in
+    // dex means something else entirely (JNI synchronized-native). Upstream
+    // DexKit did that rewrite here; dexllm removed it (it is lossy, and both
+    // callers of THIS accessor — the DAD decompiler's `declared_synchronized`
+    // modifier via dexitem_code_source.cpp, and the `get_class_summary` API via
+    // dexkit_ext.cpp `FillInternalClassSummary` — want the dex's own bits).
+    //
+    // NOTE for anyone changing this: `method_access_flags` has two further
+    // readers that bypass this accessor — `GetMethodBean` (whose access_flags
+    // dexllm's ParseMethodMetaArray discards) and `IsMethodMatched`'s
+    // `IsAccessFlagsMatched` (unreachable: every dexllm query passes a null
+    // access-flags matcher). Both are dead ends TODAY; wiring either up makes
+    // the raw form observable in a third place.
     [[nodiscard]] const std::vector<uint32_t> &
     GetMethodAccessFlags() const { return method_access_flags; }
-
-    // dexllm L8.1 — raw method access flags as stored in the dex file,
-    // WITHOUT the Java-Modifier-compat transformation that
-    // `GetMethodAccessFlags()` applies (declared_synchronized ↔ synchronized
-    // bit swap). DAD-aligned decompilation needs the raw form so it can emit
-    // `declared_synchronized` modifier matching androguard's output.
-    [[nodiscard]] const std::vector<uint32_t> &
-    GetMethodRawAccessFlags() const { return method_raw_access_flags; }
 
     // dexllm L8 extension (DAD adapter) — direct read of the parsed
     // `dex::Code*` for a given method_idx. Populated in InitBaseCache.
@@ -502,8 +511,6 @@ private:
     // one-shot worklists for cross-ref against members whose declaring class is outside this dex
     std::vector<std::vector<uint32_t /*method_id*/>> pending_cross_ref_method_ids;
     std::vector<uint32_t /*access_flag*/> method_access_flags;
-    // Raw method access flags (pre-transformation). See GetMethodRawAccessFlags.
-    std::vector<uint32_t /*access_flag*/> method_raw_access_flags;
     std::vector<std::optional<std::string>> field_descriptors;
     std::vector<std::vector<uint32_t /*field_id*/>> class_field_ids;
     std::vector<std::vector<uint32_t /*field_id*/>> pending_cross_ref_field_ids;

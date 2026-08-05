@@ -720,6 +720,17 @@ Where one argument came from (intra-method).
 (`list[str]`); `fields` (`list[ClassMemberField]`); `methods`
 (`list[ClassMemberMethod]`).
 
+**Access flags are the RAW dex bits** — the values as stored in the file, with no
+`java.lang.reflect.Modifier` normalization, on the class and on every member. In
+particular a method declared `synchronized` in Java carries
+`ACC_DECLARED_SYNCHRONIZED` (`0x20000`), **not** `ACC_SYNCHRONIZED` (`0x20`) — in
+dex, `0x20` means JNI `synchronized native`, a different property. (Upstream
+DexKit rewrote `0x20000` → `0x20` for Modifier compatibility; dexllm removed that
+because it conflates the two and because the decompiler already reported the raw
+form, so one method described itself two ways.) The same bits drive the
+`declared_synchronized` modifier in `decompile_class` /
+`decompile_method_ast(...)["access"]`.
+
 ### `CapabilityReport`
 `permissions: collections.Counter[str]`, `categories: collections.Counter[str]`.
 

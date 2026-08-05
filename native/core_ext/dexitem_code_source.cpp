@@ -445,11 +445,11 @@ uint32_t DexItemCodeSource::GetMethodAccessFlags(uint16_t dex_id,
                                                  uint32_t midx) {
     DexItem* item = SafeGetDexItem(core_, dex_id);
     if (!item) return 0;
-    // DAD-aligned decompilation needs the RAW access flags (with
-    // declared_synchronized bit intact). The default GetMethodAccessFlags
-    // applies a Java-Modifier-compat transform that drops the
-    // declared_synchronized bit; use the raw vector here.
-    const auto& flags = item->GetMethodRawAccessFlags();
+    // DAD-aligned decompilation needs the dex's own bits (declared_synchronized
+    // intact) so the Writer can emit that modifier like androguard does.
+    // GetMethodAccessFlags is exactly that — the Java-Modifier-compat rewrite
+    // upstream used to apply here was removed (see dex_item.h).
+    const auto& flags = item->GetMethodAccessFlags();
     return midx < flags.size() ? flags[midx] : 0;
 }
 
