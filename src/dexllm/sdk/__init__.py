@@ -37,6 +37,7 @@ from .model import (
     ExternalFieldRef,
     ExternalMethodRef,
     ExternalTypeRef,
+    ExtractedDex,
     FieldInfo,
     Indicator,
     IocReport,
@@ -94,6 +95,7 @@ __all__ = [
     # models
     "ContainerInfo",
     "DexVerifyStatus",
+    "ExtractedDex",
     "SourceLocation",
     "StatementLocation",
     "DecompiledMethod",

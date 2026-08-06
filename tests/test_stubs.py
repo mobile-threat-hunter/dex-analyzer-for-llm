@@ -77,9 +77,9 @@ def test_dexkit_pyi_covers_every_public_method():
         for n in _pyi_toplevel_defs(_CORE_PYI)
         if isinstance(n, ast.ClassDef) and n.name == "DexKit"
     )
-    stub_methods = {
-        m.name for m in stub_cls.body if isinstance(m, ast.FunctionDef)
-    } - {"__init__"}
+    stub_methods = {m.name for m in stub_cls.body if isinstance(m, ast.FunctionDef)} - {
+        "__init__"
+    }
     runtime_methods = {m for m in dir(C.DexKit) if not m.startswith("_")}
     assert runtime_methods == stub_methods, (
         f"only in runtime: {runtime_methods - stub_methods} | "
@@ -102,3 +102,88 @@ def test_return_class_attrs_match_runtime():
             f"{node.name}: only in stub {stub_attrs - runtime_attrs} | "
             f"only in runtime {runtime_attrs - stub_attrs}"
         )
+
+
+def test_stub_argument_names_match_the_runtime():
+    """The `.pyi` must declare the SAME parameter names as the binding.
+
+    Coverage this file did not have: it checked method presence and return-class
+    attributes, never parameter names — so a stub could say `api_descriptor` while
+    the binding said `method_descriptor` and a keyword call type-checked but raised
+    at runtime. pybind embeds the real signature in `__doc__`'s first line, which
+    is the ground truth.
+    """
+    import re
+
+    stub = ast.parse((_PKG / "_dexkit_core.pyi").read_text())
+    dexkit = next(
+        n for n in ast.walk(stub) if isinstance(n, ast.ClassDef) and n.name == "DexKit"
+    )
+
+    def runtime_params(doc: str):
+        m = re.match(r"\w+\((?:self: [^,)]+(?:, )?|self(?:, )?)?([^)]*)\)", doc)
+        if not m:
+            return None
+        body, out, depth, cur = m.group(1), [], 0, ""
+        if not body.strip():
+            return []
+        for ch in body:
+            if ch in "[(":
+                depth += 1
+            elif ch in "])":
+                depth -= 1
+            if ch == "," and depth == 0:
+                out.append(cur)
+                cur = ""
+            else:
+                cur += ch
+        out.append(cur)
+        return [x.split(":")[0].strip() for x in out if x.strip()]
+
+    checked = 0
+    for fn in dexkit.body:
+        if not isinstance(fn, ast.FunctionDef) or fn.name.startswith("_"):
+            continue
+        rt = getattr(dexllm.DexKit, fn.name, None)
+        assert (
+            rt is not None
+        ), f"stub declares DexKit.{fn.name}, runtime does not have it"
+        doc = (getattr(rt, "__doc__", "") or "").splitlines()
+        if not doc:
+            continue
+        rt_params = runtime_params(doc[0])
+        if rt_params is None:
+            continue
+        stub_params = [a.arg for a in fn.args.args if a.arg != "self"]
+        assert (
+            rt_params == stub_params
+        ), f"DexKit.{fn.name}: stub {stub_params} != runtime {rt_params}"
+        checked += 1
+    assert checked >= 20, f"only {checked} signatures compared — the parser regressed"
+
+
+def test_stub_typeddict_keys_match_the_returned_dict(dk):
+    """Every `_XxxTypedDict` in the stub must have exactly the runtime dict's keys.
+
+    A dict-returning API's SHAPE is part of its contract, and nothing else checks
+    it: adding a key (dexllm#26 added `source` to the verify rows) or renaming one
+    would leave the stub silently wrong for every consumer's type-checker.
+    """
+    stub = ast.parse((_PKG / "_dexkit_core.pyi").read_text())
+    classes = {n.name: n for n in ast.walk(stub) if isinstance(n, ast.ClassDef)}
+    cls0 = dk.list_classes()[0]
+    m0 = dk.list_class_methods(cls0)[0]
+    samples = {
+        "_ExtractedDex": dk.extract_dex(0),
+        "_VerifyStatus": dk.verify_report()[0],
+        "_DecompiledMethodWithPc": dk.decompile_method_with_pc_map(m0),
+        "_MethodAstResult": dk.decompile_method_ast(m0),
+        "_IdentifyResult": dexllm.identify(dk.apk_path()),
+    }
+    for name, real in samples.items():
+        node = classes.get(name)
+        assert node is not None, f"{name} is not declared in the stub"
+        declared = {s.target.id for s in node.body if isinstance(s, ast.AnnAssign)}
+        assert declared == set(
+            real
+        ), f"{name}: stub {sorted(declared)} != runtime {sorted(real)}"

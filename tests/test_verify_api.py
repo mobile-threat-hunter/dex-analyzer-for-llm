@@ -58,6 +58,10 @@ def test_verify_matches_verify_report(loadable_apks):
         report = dexllm.verify(apk)
         loaded = dexllm.DexKit(apk).verify_report()
         assert report == loaded, apk
+        # …and PIN the value, not just the agreement: this test compares the two
+        # implementations to EACH OTHER, so a symmetric omission of `source`
+        # (dexllm#26) would pass it. Verified by monkeypatching both to "".
+        assert all(r["source"] == apk for r in report), apk
         # every dex of a loadable container is structurally valid; the ids of the
         # accepted dexes are the running 0-based sequence.
         assert report, apk
@@ -82,6 +86,9 @@ def test_verify_never_throws_on_missing_file():
             "name": "/nonexistent/does/not/exist.dex",
             "valid": False,
             "reason": "cannot open (file not found or empty)",
+            # dexllm#26 — every row names the source it came from, including a
+            # row for a path that never produced a dex at all
+            "source": "/nonexistent/does/not/exist.dex",
         }
     ]
 
@@ -125,10 +132,12 @@ def test_verify_crafted_store_overread_does_not_crash(tmp_path: Path):
         [
             sys.executable,
             "-c",
-            "import dexllm,sys;"
-            "r=dexllm.verify(sys.argv[1]);"
-            "assert r==[{'dex_id':-1,'name':'classes.dex','valid':False,"
-            "'reason':'decompression failed'}], r;"
+            "import dexllm,sys;" "r=dexllm.verify(sys.argv[1]);"
+            # dexllm#26 added `source`; compare the verdict fields explicitly
+            # and the new one against the path, rather than pinning a dict shape.
+            "assert [(x['dex_id'],x['name'],x['valid'],x['reason']) for x in r]"
+            "==[(-1,'classes.dex',False,'decompression failed')], r;"
+            "assert r[0]['source']==sys.argv[1], r;"
             "print('OK')",
             str(evil),
         ],

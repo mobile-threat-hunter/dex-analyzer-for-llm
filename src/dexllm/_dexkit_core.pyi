@@ -35,9 +35,19 @@ class _IdentifyResult(TypedDict):
 
 class _VerifyStatus(TypedDict):
     dex_id: int
-    name: str
+    name: str  # entry name for a zip member, file path for a bare .dex
     valid: bool
     reason: str
+    source: str  # the path handed to the constructor (dexllm#26)
+
+class _ExtractedDex(TypedDict):
+    bytes: bytes
+    dex_id: int  # -1 when dex_id was out of range
+    source: str  # the path handed to the constructor
+    entry: str  # zip member; "" when the source IS the dex
+    offset: int  # start within the LOADED IMAGE (the decompressed `entry`
+    #              when `entry` is set, else the file at `source`)
+    size: int
 
 class _DecompiledMethodWithPc(TypedDict):
     source: str
@@ -90,7 +100,7 @@ def verify(path: str, lenient: bool = ...) -> list[_VerifyStatus]:
     Example::
 
         >>> dexllm.verify("app.apk")
-        [{'dex_id': 0, 'name': 'classes.dex', 'valid': True, 'reason': ''}]
+        [{'dex_id': 0, 'name': 'classes.dex', 'valid': True, 'reason': '', 'source': 'app.apk'}]
     """
 
 def is_framework_descriptor(descriptor: str) -> bool:
@@ -354,7 +364,7 @@ class DexKit:
         Example::
 
             >>> dk.verify_report()
-            [{'dex_id': 0, 'name': 'classes.dex', 'valid': True, 'reason': ''}]
+            [{'dex_id': 0, 'name': 'classes.dex', 'valid': True, 'reason': '', 'source': 'app.apk'}]
         """
 
     def locate_class_dex(self, class_descriptor: str) -> int:
@@ -452,14 +462,21 @@ class DexKit:
             ['window']
         """
 
-    def extract_dex_bytes(self, dex_id: int) -> bytes:
-        r"""Extract the dex image as bytes — feed another tool, or dump an unpacked dex.
+    def extract_dex(self, dex_id: int) -> _ExtractedDex:
+        r"""Extract one dex's bytes AND where it came from — dump an unpacked dex.
+
+        ``source``/``entry`` are what identify it: two sources in one session can
+        both carry a ``classes.dex``, and a concatenated container has no
+        ``verify_report`` row at all for its second logical dex. ``offset`` is that
+        dex's start within the LOADED IMAGE — the decompressed ``entry`` when
+        ``entry`` is set, otherwise the file at ``source``; do not slice a zip
+        ``source`` at it.
 
         Example::
 
-            >>> b = dk.extract_dex_bytes(0)
-            >>> b[:4], len(b)
-            (b'dex\\n', 5472720)
+            >>> d = dk.extract_dex(0)
+            >>> d["bytes"][:4], d["size"], d["entry"]
+            (b'dex\\n', 5472720, 'classes.dex')
         """
     # class inspection / external refs
     def get_class_summary(self, class_descriptor: str) -> ClassSummary:

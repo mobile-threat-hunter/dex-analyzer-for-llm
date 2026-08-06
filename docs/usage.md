@@ -68,7 +68,7 @@ per-dex verdicts of a **loaded** container with `dk.verify_report()`:
 
 ```python
 for r in dk.verify_report():
-    print(r)   # → {'dex_id': 0, 'name': 'classes.dex', 'valid': True, 'reason': ''}
+    print(r)   # → {'dex_id': 0, 'name': 'classes.dex', 'valid': True, 'reason': '', 'source': 'app.apk'}
 ```
 
 To verify **without loading** — the `verify()` sibling of `identify()` — use
@@ -79,7 +79,7 @@ For a loadable source the result is byte-identical to `dk.verify_report()`.
 
 ```python
 dexllm.verify("/path/to/suspect")     # per-dex, no load, no raise
-# → [{'dex_id': 0, 'name': 'classes.dex', 'valid': True, 'reason': ''}]
+# → [{'dex_id': 0, 'name': 'classes.dex', 'valid': True, 'reason': '', 'source': 'app.apk'}]
 dexllm.verify("broken.dex", lenient=True)   # lenient = ART-structural mode (skip VerifyInsns)
 ```
 
@@ -231,7 +231,7 @@ all-dexes form is exactly the per-dex concatenation: `dk.list_classes` /
 `dk.list_classes_in_dex(dex_id)` (declared classes), `dk.list_field_descriptors` /
 `dk.list_field_descriptors_in_dex(dex_id)`, `dk.list_method_descriptors` /
 `dk.list_method_descriptors_in_dex(dex_id)` (id-table references), and
-`dk.extract_dex_bytes(dex_id)` (raw dex image bytes).
+`dk.extract_dex(dex_id)` (raw dex image bytes **plus** where they came from — `source` / `entry` / `offset`).
 
 ---
 

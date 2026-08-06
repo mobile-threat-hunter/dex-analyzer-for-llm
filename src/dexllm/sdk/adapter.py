@@ -32,6 +32,7 @@ from .model import (
     ExternalFieldRef,
     ExternalMethodRef,
     ExternalTypeRef,
+    ExtractedDex,
     FieldInfo,
     Indicator,
     IocReport,
@@ -378,9 +379,17 @@ class DexKitAdapter:
 
     # -- DexExtractionPort --
 
-    def extract_dex_bytes(self, dex_id: int) -> bytes:
-        """Return the raw bytes of one loaded dex (its own file_size slice)."""
-        return self._dk.extract_dex_bytes(dex_id)
+    def extract_dex(self, dex_id: int) -> ExtractedDex:
+        """Return one loaded dex's bytes together with where it came from."""
+        d = self._dk.extract_dex(dex_id)
+        return ExtractedDex(
+            dex_id=d["dex_id"],
+            data=d["bytes"],
+            source=d["source"],
+            entry=d["entry"],
+            offset=d["offset"],
+            size=d["size"],
+        )
 
     # -- CrossReferencePort --
 
@@ -748,13 +757,16 @@ class DexKitAdapter:
 def _to_verify_statuses(
     rows: Sequence[Mapping[str, Any]],
 ) -> tuple[DexVerifyStatus, ...]:
-    """Convert raw {dex_id, name, valid, reason} rows to the typed model."""
+    """Convert raw {dex_id, name, valid, reason, source} rows to the typed model."""
     return tuple(
         DexVerifyStatus(
             dex_id=x["dex_id"],
             name=x["name"],
             valid=x["valid"],
             reason=x["reason"],
+            # x["source"], not .get(): the raw layer always emits it, so a
+            # missing key is a regression that should raise, not degrade to "".
+            source=x["source"],
         )
         for x in rows
     )

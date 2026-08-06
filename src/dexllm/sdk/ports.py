@@ -28,6 +28,7 @@ from .model import (
     ExternalFieldRef,
     ExternalMethodRef,
     ExternalTypeRef,
+    ExtractedDex,
     FieldInfo,
     IocReport,
     MethodAst,
@@ -194,13 +195,17 @@ class DexExtractionPort(Protocol):
     raw dex image, the packer/dump-analysis primitive.
     """
 
-    def extract_dex_bytes(self, dex_id: int) -> bytes:
-        """Return the raw bytes of one loaded dex (its own ``file_size`` slice).
+    def extract_dex(self, dex_id: int) -> ExtractedDex:
+        """Return one loaded dex's bytes together with its provenance.
 
-        The logical dex's own slice — ``header_off`` is applied, so a
-        concatenated / packer container yields THIS dex, not the shared image.
-        Empty ``bytes`` for an out-of-range ``dex_id``. Feeds a runtime-decrypted
-        dex back into analysis via ``add_dumped_dexes``.
+        ``data`` is the logical dex's own slice — ``header_off`` is applied, so a
+        concatenated / packer container yields THIS dex, not the shared image —
+        and ``source`` / ``entry`` / ``offset`` say where it came from, which
+        nothing else can answer: the verify report's ``name`` is only the entry
+        name for a zip member, and a concatenated source has no report row at all
+        for its second logical dex. Empty ``data`` and ``dex_id == -1`` for an
+        out-of-range ``dex_id``. Feeds a runtime-decrypted dex back into analysis
+        via ``add_dumped_dexes``.
         """
         ...
 

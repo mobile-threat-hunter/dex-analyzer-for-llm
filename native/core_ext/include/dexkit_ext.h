@@ -49,6 +49,29 @@ struct DexVerifyStatus {
     std::string name;
     bool valid = true;
     std::string reason;         // empty when valid
+    std::string source;         // the constructor argument this dex came from
+};
+
+// Where a loaded dex came from. `name` alone cannot answer that: it is the file
+// path for a bare .dex but only the entry name for a zip member, so two sources
+// in one session both report "classes.dex" with nothing to tell them apart.
+//
+// `source` is the path handed to the constructor and `entry` the member inside
+// it (empty when the source IS the dex). `offset` is nonzero only for a
+// concatenated / packer-dump container, which the core splits into several
+// LOGICAL dexes sharing one image — so one source can back several dex_ids, and
+// this is keyed by dex_id rather than by source for exactly that reason.
+struct DexOrigin {
+    int dex_id = -1;
+    std::string source;
+    std::string entry;
+    // Byte offset of this logical dex within the LOADED IMAGE — the
+    // decompressed `entry` when `entry` is non-empty, otherwise the file at
+    // `source`. NOT an offset into `source` for a zip member: a packer apk
+    // whose classes.dex is two concatenated dexes yields entry="classes.dex"
+    // AND a nonzero offset, and slicing the .apk at that offset is garbage.
+    uint32_t offset = 0;
+    uint32_t size = 0;    // its own header->file_size
 };
 
 // Type-reference xref: everywhere a type appears in a SIGNATURE position (not a
@@ -343,6 +366,9 @@ public:
     [[nodiscard]] std::vector<std::string> ListMethodDescriptorsInDex(int dex_id) const;
     // Raw bytes of one loaded dex image (empty if dex_id is out of range).
     [[nodiscard]] std::vector<uint8_t> GetDexBytes(int dex_id) const;
+    // Provenance of one loaded dex — see DexOrigin. `dex_id == -1` (and empty
+    // strings) when out of range.
+    [[nodiscard]] DexOrigin GetDexOrigin(int dex_id) const;
 
     // L5 — baksmali-style text rendering. RenderMethod returns empty string
     // for unknown / native / abstract methods. RenderClass returns empty if
@@ -402,6 +428,13 @@ private:
     bool declared_string_index_disabled_ = false;
     std::unique_ptr<DexItemCodeSource> code_source_;  // lazy-constructed
     std::vector<DexVerifyStatus> verify_status_;      // load-boundary verdicts
+    // MemMap* -> (source path, zip entry), recorded in CollectSource BEFORE the
+    // image is moved into the core. Keyed by image rather than by dex_id because
+    // the core splits a concatenated image into several logical dexes, so the
+    // dex_id -> source relation is only knowable after the load; DexItem keeps the
+    // image alive for the session, so these pointers stay valid.
+    std::unordered_map<const dexkit::MemMap*, std::pair<std::string, std::string>>
+        image_origin_;
 };
 
 // Public for testing/customisation: returns true if the descriptor is a

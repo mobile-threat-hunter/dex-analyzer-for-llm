@@ -168,6 +168,11 @@ public:
             d["name"] = s.name;
             d["valid"] = s.valid;
             d["reason"] = s.reason;
+            // dexllm#26 — `name` is the file path for a bare .dex but only the
+            // entry name for a zip member, so it cannot say WHICH source a
+            // "classes.dex" came from in a multi-source session. `source` always
+            // names the constructor argument.
+            d["source"] = s.source;
             out.append(std::move(d));
         }
         return out;
@@ -232,9 +237,22 @@ public:
     py::list list_method_descriptors_in_dex(int dex_id) const {
         return ident_out(ext_.ListMethodDescriptorsInDex(dex_id));
     }
-    py::bytes extract_dex_bytes(int dex_id) const {
+    // dexllm#26 — bytes PLUS provenance. `extract_dex_bytes` returned the bytes
+    // alone, and nothing else could supply the origin: verify_report's `name` is
+    // the file path for a bare .dex but only the entry name for a zip member, so
+    // two sources in one session both report "classes.dex", and a concatenated
+    // source has no verify_report row for its second logical dex at all.
+    py::dict extract_dex(int dex_id) const {
         const auto v = ext_.GetDexBytes(dex_id);
-        return py::bytes(reinterpret_cast<const char*>(v.data()), v.size());
+        const auto o = ext_.GetDexOrigin(dex_id);
+        py::dict d;
+        d["bytes"] = py::bytes(reinterpret_cast<const char*>(v.data()), v.size());
+        d["dex_id"] = o.dex_id;
+        d["source"] = o.source;  // the path handed to the constructor
+        d["entry"] = o.entry;    // zip member; "" when the source IS the dex
+        d["offset"] = o.offset;  // nonzero only for a concatenated container
+        d["size"] = o.size;
+        return d;
     }
     void warm_analysis_caches() { ext_.WarmAnalysisCaches(); }
 
@@ -461,13 +479,14 @@ PYBIND11_MODULE(_dexkit_core, m) {
                 d["name"] = s.name;
                 d["valid"] = s.valid;
                 d["reason"] = s.reason;
+                d["source"] = s.source;  // see verify_report (dexllm#26)
                 out.append(std::move(d));
             }
             return out;
         },
         py::arg("path"), py::arg("lenient") = false,
         "Structurally verify a .dex / apk's dex(es) without loading (the verify() "
-        "sibling of identify()). Returns a list of {dex_id, name, valid, reason} — "
+        "sibling of identify()). Returns a list of {dex_id, name, valid, reason, source} — "
         "one per dex — byte-identical to DexKit(path).verify_report() for a loadable "
         "source. Never throws: a malformed / unopenable / non-dex path is reported as "
         "a valid=False verdict. lenient=True skips VerifyInsns (ART-structural mode).");
@@ -770,7 +789,7 @@ PYBIND11_MODULE(_dexkit_core, m) {
              "dexllm.extract_iocs. (Annotation-embedded 0x17 omitted.)")
         .def("verify_report", &PyDexKit::verify_report,
              "Structural-verification report, one dict per dex considered at "
-             "load: {dex_id, name, valid, reason}. A dex with valid==False was "
+             "load: {dex_id, name, valid, reason, source}. A dex with valid==False was "
              "screened out at the load boundary (DexVerifier — AOSP "
              "DexFileVerifier criteria port) with a specific reason.")
         .def("list_class_methods", &PyDexKit::list_class_methods,
@@ -987,9 +1006,17 @@ PYBIND11_MODULE(_dexkit_core, m) {
              &PyDexKit::list_method_descriptors_in_dex, py::arg("dex_id"),
              "Method descriptors of ONE loaded dex (0-based); empty if out of range. "
              "The per-dex form of list_method_descriptors().")
-        .def("extract_dex_bytes", &PyDexKit::extract_dex_bytes, py::arg("dex_id"),
-             "Raw bytes of the given loaded dex image; empty bytes if dex_id is out "
-             "of range.")
+        .def("extract_dex", &PyDexKit::extract_dex, py::arg("dex_id"),
+             "Raw bytes of one loaded dex PLUS where it came from: "
+             "{bytes, dex_id, source, entry, offset, size}. `source` is the path "
+             "given to the constructor and `entry` the member inside it (empty when "
+             "the source IS the dex), which is what distinguishes two sources that "
+             "both carry a 'classes.dex'. `offset` is this logical dex's start "
+             "within the LOADED IMAGE — the decompressed `entry` when `entry` is "
+             "set, otherwise the file at `source` — and is nonzero only for a "
+             "concatenated / packer-dump container, which the core splits into "
+             "several dex_ids over one image. "
+             "`bytes` is empty and dex_id is -1 if dex_id is out of range.")
         .def("warm_analysis_caches", &PyDexKit::warm_analysis_caches,
              "Eagerly warm upstream caches needed for L2/L4 (otherwise lazy).")
         .def("permission_callers", &PyDexKit::permission_callers,

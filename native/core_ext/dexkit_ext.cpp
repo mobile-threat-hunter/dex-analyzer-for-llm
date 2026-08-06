@@ -356,14 +356,15 @@ std::vector<DexVerifyStatus> DexKitExt::Verify(const std::string& path,
                  ? std::string("neither a .dex (no 'dex\\n' magic) nor a "
                                "zip/apk container (no PK signature / invalid "
                                "central directory)")
-                 : std::string("cannot open (file not found or empty)")});
+                 : std::string("cannot open (file not found or empty)"),
+             path});
         return report;
     }
 
     if (p.format == "dex") {
         auto vr = VerifyDex(reinterpret_cast<const uint8_t*>(p.map->data()),
                             p.map->len(), check_insns);
-        report.push_back({vr.ok ? accepted : -1, path, vr.ok, vr.reason});
+        report.push_back({vr.ok ? accepted : -1, path, vr.ok, vr.reason, path});
         return report;
     }
 
@@ -374,7 +375,8 @@ std::vector<DexVerifyStatus> DexKitExt::Verify(const std::string& path,
         report.push_back(
             {-1, path, false,
              std::string("zip container has no classes*.dex (AndroidManifest.xml ") +
-                 (p.has_manifest ? "present" : "absent") + ")"});
+                 (p.has_manifest ? "present" : "absent") + ")",
+             path});
         return report;
     }
     for (int idx = 1; idx <= p.dex_count; ++idx) {
@@ -384,15 +386,15 @@ std::vector<DexVerifyStatus> DexKitExt::Verify(const std::string& path,
         if (entry == nullptr) continue;  // counted by ProbeContainer; defensive
         auto mm = p.za->GetUncompressData(*entry);
         if (!mm.ok()) {
-            report.push_back({-1, name, false, "decompression failed"});
+            report.push_back({-1, name, false, "decompression failed", path});
             continue;
         }
         auto vr = VerifyDex(reinterpret_cast<const uint8_t*>(mm.data()), mm.len(),
                             check_insns);
         if (vr.ok) {
-            report.push_back({accepted++, name, true, {}});
+            report.push_back({accepted++, name, true, {}, path});
         } else {
-            report.push_back({-1, name, false, vr.reason});
+            report.push_back({-1, name, false, vr.reason, path});
         }
     }
     return report;
@@ -418,11 +420,12 @@ void DexKitExt::CollectSource(const std::string& path, bool check_insns,
         auto vr = VerifyDex(reinterpret_cast<const uint8_t*>(p.map->data()),
                             p.map->len(), check_insns);
         verify_status_.push_back(
-            {static_cast<int>(out.size()), path, vr.ok, vr.reason});
+            {static_cast<int>(out.size()), path, vr.ok, vr.reason, path});
         if (!vr.ok) {
             throw std::runtime_error(
                 "dexllm: '" + path + "' failed dex verification: " + vr.reason);
         }
+        image_origin_[p.map.get()] = {path, std::string{}};
         out.push_back(std::move(p.map));
         return;
     }
@@ -445,17 +448,19 @@ void DexKitExt::CollectSource(const std::string& path, bool check_insns,
         if (entry == nullptr) continue;  // counted by ProbeContainer; defensive
         auto mm = p.za->GetUncompressData(*entry);
         if (!mm.ok()) {
-            verify_status_.push_back({-1, name, false, "decompression failed"});
+            verify_status_.push_back({-1, name, false, "decompression failed", path});
             continue;
         }
         auto vr = VerifyDex(reinterpret_cast<const uint8_t*>(mm.data()), mm.len(),
                             check_insns);
         if (!vr.ok) {
-            verify_status_.push_back({-1, name, false, vr.reason});
+            verify_status_.push_back({-1, name, false, vr.reason, path});
             continue;
         }
-        verify_status_.push_back({static_cast<int>(out.size()), name, true, {}});
-        out.push_back(std::make_unique<dexkit::MemMap>(std::move(mm)));
+        verify_status_.push_back({static_cast<int>(out.size()), name, true, {}, path});
+        auto owned = std::make_unique<dexkit::MemMap>(std::move(mm));
+        image_origin_[owned.get()] = {path, name};
+        out.push_back(std::move(owned));
     }
     if (out.size() == before) {
         throw std::runtime_error(
@@ -1980,6 +1985,34 @@ std::vector<std::string> DexKitExt::ListMethodDescriptors() const {
     return out;
 }
 
+// The byte span of ONE logical dex inside its (possibly shared) image. Shared by
+// GetDexBytes and GetDexOrigin so `size` and `len(bytes)` cannot disagree — they
+// used to compute it separately, and the clamp sat inside the `base >= map_base`
+// guard in one and outside it in the other (unreachable today, since DexItem
+// builds its reader at `image + header_off` with an unsigned offset, but a
+// duplicated invariant is one edit away from drifting).
+//
+// A concatenated / packer-dump container is split into logical dexes that SHARE
+// one MemMap, each at its own header_off. The reader base (== Header()) is this
+// dex's first byte and header->file_size its length; using img->data()/img->len()
+// would over-return and mis-attribute siblings. (The WASM extractDexBytes has the
+// same omission — fix deferred to the web side.) The clamp to the mapped span is
+// a defensive net; VerifyDex already bounds file_size.
+static bool LogicalDexSpan(const dexkit::DexItem& item, const dexkit::MemMap& img,
+                           const uint8_t*& base_out, std::size_t& size_out) {
+    const auto* hdr = item.GetReader().Header();
+    if (hdr == nullptr) return false;
+    const auto* base = reinterpret_cast<const uint8_t*>(hdr);
+    const auto* map_base = reinterpret_cast<const uint8_t*>(img.data());
+    if (base < map_base) return false;
+    std::size_t n = hdr->file_size;
+    const std::size_t avail = img.len() - static_cast<std::size_t>(base - map_base);
+    if (n > avail) n = avail;
+    base_out = base;
+    size_out = n;
+    return true;
+}
+
 std::vector<uint8_t> DexKitExt::GetDexBytes(int dex_id) const {
     if (dex_id < 0 || dex_id >= core_->GetDexNum()) return {};
     auto* item = core_->GetDexItem(static_cast<uint16_t>(dex_id));
@@ -1993,18 +2026,37 @@ std::vector<uint8_t> DexKitExt::GetDexBytes(int dex_id) const {
     // would over-return and mis-attribute sibling dexes. (The WASM extractDexBytes has
     // this same omission — fix deferred to the web side.) Clamp to the mapped span as a
     // defensive net (VerifyDex already bounds file_size).
-    const auto& reader = item->GetReader();
-    const auto* hdr = reader.Header();
-    if (hdr == nullptr) return {};
-    // Header() sits at the reader base (image + header_off) = this dex's first byte.
-    const auto* base = reinterpret_cast<const uint8_t*>(hdr);
-    const auto* map_base = reinterpret_cast<const uint8_t*>(img->data());
-    std::size_t n = hdr->file_size;
-    if (base >= map_base) {
-        const std::size_t avail = img->len() - static_cast<std::size_t>(base - map_base);
-        if (n > avail) n = avail;
-    }
+    const uint8_t* base = nullptr;
+    std::size_t n = 0;
+    if (!LogicalDexSpan(*item, *img, base, n)) return {};
     return std::vector<uint8_t>(base, base + n);
+}
+
+// Provenance of one loaded dex (dexllm#26). Resolved through the IMAGE rather
+// than by index: `AddImage` runs ParseLogicalDexOffsets, so a concatenated /
+// packer-dump source becomes SEVERAL dex_ids over one image and the load-order
+// index is not the dex_id. `offset` is this logical dex's start within that
+// image — 0 for the ordinary one-dex-per-source case.
+DexOrigin DexKitExt::GetDexOrigin(int dex_id) const {
+    DexOrigin o;
+    if (dex_id < 0 || dex_id >= core_->GetDexNum()) return o;
+    auto* item = core_->GetDexItem(static_cast<uint16_t>(dex_id));
+    if (item == nullptr) return o;
+    o.dex_id = dex_id;
+    auto* img = item->GetImage();
+    if (img == nullptr) return o;
+    auto it = image_origin_.find(img);
+    if (it != image_origin_.end()) {
+        o.source = it->second.first;
+        o.entry = it->second.second;
+    }
+    const uint8_t* base = nullptr;
+    std::size_t n = 0;
+    if (!LogicalDexSpan(*item, *img, base, n)) return o;
+    o.offset = static_cast<uint32_t>(
+        base - reinterpret_cast<const uint8_t*>(img->data()));
+    o.size = static_cast<uint32_t>(n);
+    return o;
 }
 
 }  // namespace dexkit::ext

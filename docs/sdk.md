@@ -60,8 +60,17 @@ fields are `tuple`s; `Mapping` fields are read-only views. See
 ### Loading & probing
 - **`ContainerInfo`** `(format, is_apk, has_manifest, dex_count)` — content-based
   file probe. `format` ∈ `"dex" | "zip" | "unknown"`.
-- **`DexVerifyStatus`** `(dex_id, name, valid, reason)` — one loaded dex's
-  structural-verification verdict; `reason` is empty when `valid`.
+- **`DexVerifyStatus`** `(dex_id, name, valid, reason, source)` — one loaded dex's
+  structural-verification verdict; `reason` is empty when `valid`. `name` is the
+  entry name for a zip member but the file path for a bare `.dex`, so `source` —
+  the path handed to the session — is what identifies it (dexllm#26).
+- **`ExtractedDex`** `(dex_id, data, source, entry, offset, size)` — one dex's
+  bytes plus its provenance, returned by `extract_dex`. `data` is spelled `bytes`
+  on the raw `DexKit.extract_dex` dict (a `bytes: bytes` dataclass field would
+  shadow the builtin in its own annotation scope). `offset` indexes the **loaded
+  image** — the decompressed `entry` when `entry` is set, otherwise the file at
+  `source` — so a packer apk whose `classes.dex` is two concatenated dexes has
+  `entry` set **and** a nonzero `offset`.
 
 ### Decompilation
 - **`SourceLocation`** `(line, byte_offset)` — one line ↔ bytecode-offset entry.
@@ -193,7 +202,7 @@ so a consumer depends on just what it needs:
 | **`ContainerProbePort`** | `identify(path) -> ContainerInfo`, `verify(path, *, lenient=False) -> tuple[DexVerifyStatus, …]` (load-free) |
 | **`DecompilationPort`** | `decompile_method`, `decompile_method_with_pc_map`, `decompile_class`, `decompile_method_ast`, `render_method_smali`, `render_class_smali` |
 | **`EnumerationPort`** | `list_classes` / `list_classes_in_dex`, `list_class_methods`, `list_field_descriptors` / `list_field_descriptors_in_dex`, `list_method_descriptors` / `list_method_descriptors_in_dex`, `list_value_strings` / `list_class_strings` / `list_method_strings` (app-wide, class-scoped, method-scoped — the forward direction of `find_*_using_strings`), `list_external_method_refs` / `list_external_field_refs` / `list_external_type_refs`, `verify_report` (uniform scope axis: bare = all dexes, `…_in_dex(dex_id)` = one dex) |
-| **`DexExtractionPort`** | `extract_dex_bytes` (raw per-dex byte extraction; packer/dump primitive) |
+| **`DexExtractionPort`** | `extract_dex` → `ExtractedDex` (bytes + provenance: `source` / `entry` / `offset`; the packer/dump primitive). Provenance is not derivable elsewhere — the verify report's `name` is only the entry name for a zip member, so two sources both report `classes.dex`, and a concatenated container has no report row at all for its second logical dex |
 | **`ClassInspectionPort`** | `class_info`, `class_fields`, `locate_class_dex` (metadata + fields split out; methods via `list_class_methods`; `locate_class_dex` = cheap declaring-dex lookup, vs the heavy `class_info().dex_id`) |
 | **`CrossReferencePort`** | `find_call_sites_to` (a target's callers — the reverse edge) / `find_call_sites_from` (a method's callees — the forward edge), `resolve_call_args`, `find_methods_reading_field`, `find_methods_writing_field`, `find_type_references`. `find_call_sites_to` / `find_call_sites_from` is the same pair the raw `DexKit` and the MCP catalog use — one spelling across all three layers, and the only one: the pre-unification adapter aliases (`find_call_sites`, `find_call_sites_to_api`, `find_call_sites_from_method`, `find_field_readers`, `find_field_writers`) were removed. Both call-site directions and `resolve_call_args` take `method_descriptor` |
 | **`SearchPort`** | `find_classes_by_name` / `by_super` / `implementing` / `by_annotation` / `using_strings` / `declaring_strings` (the declaration side — static-field constants the `using` index cannot see), `find_methods_by_name` / `by_annotation` / `using_strings` / `using_int_literals` / `using_double_literals`, `batch_find_{classes,methods}_using_strings` (DexKit's L1–L7 search; `match_type` ∈ `MatchType`) |

@@ -484,7 +484,7 @@ def test_enumeration_companions_typed(apk_path):
 
     Mirrors the raw-binding test_enumeration_companions, but through the typed port —
     every return is a tuple[str, ...] (or bytes), and the invariants hold: the union
-    of per-dex classes == list_classes, and extract_dex_bytes returns THIS dex's slice
+    of per-dex classes == list_classes, and extract_dex returns THIS dex's slice
     (its own magic + file_size), not the shared image.
     """
     session = open_apk(apk_path)
@@ -513,11 +513,11 @@ def test_enumeration_companions_typed(apk_path):
     assert session.list_field_descriptors_in_dex(9999) == ()
     assert session.list_method_descriptors_in_dex(-1) == ()
 
-    raw = session.extract_dex_bytes(0)
+    raw = session.extract_dex(0).data
     assert isinstance(raw, bytes) and raw[:4] == b"dex\n"
     # the slice is THIS dex only — length == the header's file_size, not the map len
     assert len(raw) == int.from_bytes(raw[32:36], "little")
-    assert session.extract_dex_bytes(9999) == b""
+    assert session.extract_dex(9999).data == b""
 
 
 def test_enumeration_companions_multidex():
@@ -526,7 +526,7 @@ def test_enumeration_companions_multidex():
     The single-dex apk_path fixture makes the union/concat invariants vacuous (a
     broken "return everything regardless of dex_id" impl would still pass), so this
     loads a real >1-dex container. Asserts: class slices are DISJOINT/non-empty and
-    partition list_classes; extract_dex_bytes yields a distinct dex per id; and the
+    partition list_classes; extract_dex yields a distinct dex per id; and the
     field/method aggregate equals the per-dex CONCATENATION with a genuine cross-dex
     duplicate present (so a set-union impl would drop it and fail) — the case the
     single-dex fixture cannot exercise.
@@ -560,7 +560,7 @@ def test_enumeration_companions_multidex():
         assert session.class_info(sample).dex_id == d  # cheap path == heavy path
     # each dex extracts as its own dex blob (own magic + own file_size)
     for d in range(session.dex_count()):
-        b = session.extract_dex_bytes(d)
+        b = session.extract_dex(d).data
         assert b[:4] == b"dex\n" and len(b) == int.from_bytes(b[32:36], "little")
 
     # field/method descriptors: the all-dexes form is the per-dex CONCATENATION,

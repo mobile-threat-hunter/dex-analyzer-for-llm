@@ -51,9 +51,10 @@ loadable source the result is byte-identical to `DexKit(path).verify_report()`
 `VerifyInsns` (ART-structural-equivalent mode), as in the constructor.
 ```python
 dexllm.verify('app.apk')
-# [{'dex_id': 0, 'name': 'classes.dex', 'valid': True, 'reason': ''}]
+# [{'dex_id': 0, 'name': 'classes.dex', 'valid': True, 'reason': '', 'source': 'app.apk'}]
 dexllm.verify('broken.dex')
-# [{'dex_id': -1, 'name': 'broken.dex', 'valid': False, 'reason': 'Empty or truncated file'}]
+# [{'dex_id': -1, 'name': 'broken.dex', 'valid': False, 'reason': 'Empty or truncated file',
+#   'source': 'broken.dex'}]
 ```
 Entry shape matches `dk.verify_report()` (below). Use it to screen an unknown
 file (dumped/decrypted dex, disguised container) before committing to a load.
@@ -81,7 +82,7 @@ dk.sources()     # ['test_apk/APK/com.example.android.tvleanback.apk']
 Per-dex structural-verification verdict (the load-time `VerifyDex` gate results).
 ```python
 dk.verify_report()
-# [{'dex_id': 0, 'name': 'classes.dex', 'valid': True, 'reason': ''}]
+# [{'dex_id': 0, 'name': 'classes.dex', 'valid': True, 'reason': '', 'source': 'app.apk'}]
 ```
 | key | type |
 |---|---|
@@ -89,6 +90,7 @@ dk.verify_report()
 | `name` | `str` |
 | `valid` | `bool` |
 | `reason` | `str` (empty when valid; byte-level reason when rejected) |
+| `source` | `str` — the path handed to the constructor. `name` alone is ambiguous: it is the file path for a bare `.dex` but only the entry name for a zip member, so two sources both report `classes.dex` (dexllm#26) |
 
 ### `dk.warm_analysis_caches() -> None`
 One-time (~200 ms on a 50-dex APK) eager warm of all analysers; otherwise they
@@ -210,14 +212,32 @@ dk.list_method_descriptors_in_dex(0)      # …of one dex
 dk.locate_class_dex('La2dp/Vol/ALauncher;')   # 0  (declaring dex id, -1 if external; cheaper than get_class_summary().dex_id)
 ```
 
-### `dk.extract_dex_bytes(dex_id: int) -> bytes`
-Raw bytes of one loaded dex — its own `file_size` slice (`header_off` applied, so a
-concatenated/packer container yields THIS dex, not the shared image). `b""` for an
-out-of-range id. The packer/dump-analysis primitive (feed a runtime-decrypted dex
-back via `dexllm.add_dumped_dexes`).
+### `dk.extract_dex(dex_id: int) -> dict`
+Raw bytes of one loaded dex **and where it came from**. `bytes` is the dex's own
+`file_size` slice (`header_off` applied, so a concatenated/packer container yields
+THIS dex, not the shared image). The packer/dump-analysis primitive (feed a
+runtime-decrypted dex back via `dexllm.add_dumped_dexes`).
 ```python
-raw = dk.extract_dex_bytes(0)   # len 5472720, raw[:4] == b'dex\n'
+d = dk.extract_dex(0)
+# {'bytes': b'dex\n...', 'dex_id': 0, 'source': 'app.apk',
+#  'entry': 'classes.dex', 'offset': 0, 'size': 5472720}
 ```
+| key | meaning |
+|---|---|
+| `bytes` | the dex image; `b""` for an out-of-range id |
+| `dex_id` | echoes the argument; `-1` when out of range |
+| `source` | the path handed to the constructor |
+| `entry` | the member inside it (`classes2.dex`); `""` when the source IS the dex |
+| `offset` | this logical dex's start within the **loaded image** — the decompressed `entry` when `entry` is set, otherwise the file at `source`. Nonzero only for a concatenated / packer-dump container. A packer apk whose `classes.dex` is two concatenated dexes has `entry` set **and** a nonzero `offset`, so slicing the `.apk` at it is meaningless |
+| `size` | `len(bytes)` |
+
+**Why provenance is part of the return** (dexllm#26 — this was `extract_dex_bytes`,
+returning only the bytes). Nothing else could answer "which file did this come
+from": `verify_report()['name']` is the file path for a bare `.dex` but only the
+entry name for a zip member, so two sources in one session both report
+`classes.dex`; and a concatenated source, which the core splits into several
+`dex_id` over one image, has **no `verify_report` row at all** for its second
+logical dex. `verify_report()` now also carries `source` for the same reason.
 
 ---
 

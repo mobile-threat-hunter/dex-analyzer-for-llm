@@ -51,15 +51,55 @@ class DexVerifyStatus:
 
     ``reason`` is empty when ``valid``; a rejected dex never reached the core.
 
+    ``name`` is the file path for a bare ``.dex`` but only the entry name for a
+    zip member, so it cannot say WHICH source a ``classes.dex`` came from in a
+    multi-source session — ``source`` always names the constructor argument
+    (dexllm#26).
+
     Example (real)::
 
-        DexVerifyStatus(dex_id=0, name='classes.dex', valid=True, reason='')
+        DexVerifyStatus(dex_id=0, name='classes.dex', valid=True, reason='',
+                        source='app.apk')
     """
 
     dex_id: int
     name: str
     valid: bool
     reason: str
+    source: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class ExtractedDex:
+    """One loaded dex's bytes together with where it came from (dexllm#26).
+
+    ``source`` is the path handed to the session and ``entry`` the member inside
+    it (empty when the source IS the dex). ``offset`` is this logical dex's start
+    within the LOADED IMAGE — the decompressed ``entry`` when ``entry`` is set,
+    otherwise the file at ``source``. It is nonzero only for a concatenated /
+    packer-dump container, which is split into several ``dex_id`` over one image,
+    so one source can back several entries here; a packer apk whose
+    ``classes.dex`` is two concatenated dexes has ``entry`` set AND a nonzero
+    ``offset``, so slicing the ``.apk`` file at that offset is meaningless.
+
+    ``data`` is spelled ``bytes`` on the raw ``DexKit.extract_dex`` dict — a
+    ``bytes: bytes`` dataclass field would shadow the builtin inside its own
+    annotation scope, so the typed model renames it.
+
+    ``data`` is empty and ``dex_id`` is ``-1`` for an out-of-range id.
+
+    Example (real)::
+
+        ExtractedDex(dex_id=1, source='app.apk', entry='classes2.dex',
+                     offset=0, size=672)      # len(data) == size
+    """
+
+    dex_id: int
+    data: bytes
+    source: str
+    entry: str
+    offset: int
+    size: int
 
 
 # ── decompilation ────────────────────────────────────────────────────────────

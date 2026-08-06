@@ -723,15 +723,15 @@ def test_enumeration_companions(dk):
     assert m_concat == dk.list_method_descriptors() and len(m_concat) > 0
     assert dk.list_field_descriptors_in_dex(9999) == []
     assert dk.list_method_descriptors_in_dex(-1) == []
-    raw = dk.extract_dex_bytes(0)
+    raw = dk.extract_dex(0)["bytes"]
     assert isinstance(raw, bytes) and raw[:4] == b"dex\n"
     # the slice is THIS dex only — length == the header's file_size, not the map len
     assert len(raw) == int.from_bytes(raw[32:36], "little")
-    assert dk.extract_dex_bytes(9999) == b""
+    assert dk.extract_dex(9999)["bytes"] == b""
 
 
-def test_extract_dex_bytes_slices_concatenated_container(apk_path, tmp_path):
-    """extract_dex_bytes must return THIS logical dex's slice (header_off applied),
+def test_extract_dex_slices_concatenated_container(apk_path, tmp_path):
+    """extract_dex must return THIS logical dex's slice (header_off applied),
     not the whole shared MemMap — the packer/concatenated-dex case. A single buffer
     of two dexes splits into two logical dexes sharing one image; each extract must
     yield its own dex (own magic, own file_size), NOT the full container."""
@@ -749,9 +749,102 @@ def test_extract_dex_bytes_slices_concatenated_container(apk_path, tmp_path):
     dk = dexllm.DexKit(str(cat))
     if dk.dex_count() < 2:
         pytest.skip("core did not split the concatenated buffer")
-    a, b = dk.extract_dex_bytes(0), dk.extract_dex_bytes(1)
+    a, b = dk.extract_dex(0)["bytes"], dk.extract_dex(1)["bytes"]
     assert a[:4] == b"dex\n" and b[:4] == b"dex\n"  # each starts at its own magic
     assert len(a) == len(one) and len(b) == len(one)  # each is one dex, not the pair
+
+    # dexllm#26 — provenance for the case that had NONE: the core split one file
+    # into two dex_ids, so verify_report has a single row and cannot describe the
+    # second. `offset` is what separates them.
+    d0, d1 = dk.extract_dex(0), dk.extract_dex(1)
+    assert d0["source"] == d1["source"] == str(cat)
+    assert d0["entry"] == d1["entry"] == ""  # the source IS the dex
+    assert (d0["offset"], d1["offset"]) == (0, len(one))
+    assert d0["size"] == d1["size"] == len(one)
+    assert len(dk.verify_report()) == 1  # the row-per-dex_id assumption does NOT hold
+
+
+def test_extract_dex_offset_is_within_the_loaded_image_not_the_source(tmp_path):
+    """`offset` indexes the LOADED IMAGE — for a zip member, the DECOMPRESSED entry.
+
+    The packer shape this feature targets: an apk whose `classes.dex` is itself two
+    concatenated dexes. Then `entry` is set AND `offset` is nonzero at the same
+    time, and slicing the `.apk` FILE at that offset is meaningless — the docs
+    said "start within `source`", which a review demonstrated to be wrong here.
+    """
+    import zipfile
+
+    apks = [
+        p
+        for p in sorted(glob.glob(str(REPO_ROOT / "test_apk" / "APK" / "*.apk")))
+        if dexllm.identify(p).get("dex_count", 0) > 0
+    ]
+    if not apks:
+        pytest.skip("no loadable apk")
+    with zipfile.ZipFile(apks[0]) as z:
+        member = next((n for n in z.namelist() if n.endswith(".dex")), None)
+        if member is None:
+            pytest.skip("apk has no dex member")
+        one = z.read(member)
+
+    packer = tmp_path / "packer.apk"
+    with zipfile.ZipFile(packer, "w") as z:
+        z.writestr("classes.dex", one + one)  # two logical dexes inside ONE entry
+    dk = dexllm.DexKit(str(packer))
+    if dk.dex_count() < 2:
+        pytest.skip("core did not split the concatenated zip member")
+
+    got = [dk.extract_dex(i) for i in range(dk.dex_count())]
+    # the combination the old wording made impossible to describe
+    assert got[1]["entry"] == "classes.dex" and got[1]["offset"] == len(one)
+    decompressed = zipfile.ZipFile(str(packer)).read("classes.dex")
+    for d in got:
+        assert decompressed[d["offset"] : d["offset"] + d["size"]] == d["bytes"]
+        assert d["size"] == len(d["bytes"])
+    # …and the .apk FILE is explicitly NOT what offset indexes
+    raw_apk = packer.read_bytes()
+    assert (
+        raw_apk[got[1]["offset"] : got[1]["offset"] + got[1]["size"]] != got[1]["bytes"]
+    )
+
+
+def test_extract_dex_provenance_disambiguates_sources():
+    """Two sources both carrying `classes.dex` must be tellable apart.
+
+    This is the case nothing could answer before dexllm#26: `verify_report`'s
+    `name` is only the entry name for a zip member, so both report `classes.dex`,
+    and `sources()` is not keyed by dex_id.
+    """
+    apks = sorted(glob.glob(str(REPO_ROOT / "test_apk" / "APK" / "*.apk")))
+    loadable = []
+    for p in apks:
+        try:
+            if dexllm.identify(p).get("dex_count", 0) > 0:
+                loadable.append(p)
+        except Exception:  # noqa: BLE001
+            continue
+        if len(loadable) == 2:
+            break
+    if len(loadable) < 2:
+        pytest.skip("need two loadable apks")
+
+    dk = dexllm.DexKit(loadable)
+    seen = [dk.extract_dex(i) for i in range(dk.dex_count())]
+    assert {d["source"] for d in seen} == set(loadable)  # every source represented
+    # the ambiguity itself: at least two dexes share an entry name, and only
+    # `source` separates them
+    by_entry: dict[str, set[str]] = {}
+    for d in seen:
+        by_entry.setdefault(d["entry"], set()).add(d["source"])
+    assert any(
+        len(v) > 1 for v in by_entry.values()
+    ), "fixtures do not share an entry name — the test cannot show the ambiguity"
+    # dex_id ordering follows source order (first-wins resolution depends on it)
+    assert [d["source"] for d in seen] == sorted(
+        [d["source"] for d in seen], key=loadable.index
+    )
+    # …and the bytes still match what the id addresses
+    assert all(len(d["bytes"]) == d["size"] for d in seen)
 
 
 def test_external_refs(dk):
