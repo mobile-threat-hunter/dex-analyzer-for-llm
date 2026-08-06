@@ -7,6 +7,7 @@ Run:  pytest tests -v
 """
 
 import glob
+import pathlib
 import re
 from pathlib import Path
 
@@ -805,7 +806,16 @@ def test_extract_dexes_row_for_an_unreadable_dex_keeps_its_own_id(tmp_path):
     contract `extract_dexes()` documents. It now carries its real id with empty
     bytes; `-1` means out-of-range and nothing else.
     """
-    one = (REPO_ROOT / "test_apk" / "APK" / "StringTests.dex").read_bytes()
+    # Any bare .dex will do — the corpus is gitignored, so a hardcoded path is a
+    # FAILURE in a clean checkout where the rule is SKIP (CI caught exactly that).
+    src = next(
+        iter(sorted(glob.glob(str(REPO_ROOT / "test_apk" / "APK" / "*.dex")))), None
+    )
+    if src is None:
+        pytest.skip("no bare .dex in the corpus")
+    one = pathlib.Path(src).read_bytes()
+    if one[:4] != b"dex\n" or len(one) <= 112:
+        pytest.skip("first bare .dex is not usable as a template")
     p = tmp_path / "partial.dex"
     # header intact (so the split sees it), body zeroed (so construction fails)
     p.write_bytes(one + one[:112] + b"\x00" * (len(one) - 112))
