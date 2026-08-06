@@ -245,7 +245,7 @@ source rather than replacing PyPI, so `pip` still resolves to the highest versio
 can see anywhere:
 
 ```bash
-pip install "dexllm==0.8.2"
+pip install "dexllm==0.9.0"
 # ≤0.8.1 predates PyPI and lives only on Releases — point pip at that tag's assets:
 pip install "dexllm==0.8.1" --find-links https://github.com/mobile-threat-hunter/dex-analyzer-for-llm/releases/expanded_assets/v0.8.1
 ```
