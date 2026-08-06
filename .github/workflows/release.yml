@@ -1,8 +1,10 @@
 name: release
 
-# Build platform wheels on a version tag and attach them to THIS repo's Releases.
-# No setup needed — the publish job uses the built-in GITHUB_TOKEN (contents:write)
-# to create the release in the same repo. See docs/RELEASING.md.
+# Build platform wheels on a version tag, attach them to THIS repo's Releases,
+# and upload the same artifacts to PyPI (so `pip install dexllm` just works).
+# The `publish` job needs no setup — it uses the built-in GITHUB_TOKEN
+# (contents:write). The `pypi` job needs the PYPI_API_TOKEN repo secret.
+# See docs/RELEASING.md.
 
 on:
   push:
@@ -84,3 +86,29 @@ jobs:
           # the repo from git. GITHUB_REPOSITORY is auto-set by Actions to owner/repo.
           gh release create "$TAG" dist/* --repo "$GITHUB_REPOSITORY" --title "$TAG" --notes "$NOTES" \
             || gh release upload "$TAG" dist/* --repo "$GITHUB_REPOSITORY" --clobber
+
+  pypi:
+    # Same artifacts, second destination: PyPI, so users get a plain
+    # `pip install dexllm` with no --find-links. Independent of `publish` —
+    # a GitHub-release hiccup shouldn't block the PyPI upload or vice versa.
+    needs: [wheels, sdist]
+    runs-on: ubuntu-latest
+    # Named environment so PyPI uploads can be gated on a manual approval
+    # (Settings → Environments → pypi → required reviewers). Optional; the
+    # environment is auto-created on first run with no protection rules.
+    environment:
+      name: pypi
+      url: https://pypi.org/p/dexllm
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          password: ${{ secrets.PYPI_API_TOKEN }}
+          # PyPI refuses re-uploads of an existing version; skip instead of
+          # failing so `workflow_dispatch` on an already-published tag is
+          # re-runnable (matching the `--clobber` behaviour above).
+          skip-existing: true

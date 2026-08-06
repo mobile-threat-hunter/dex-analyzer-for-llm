@@ -1,18 +1,49 @@
-# Releasing — pre-built wheels on this repo's Releases
+# Releasing — pre-built wheels on PyPI and this repo's Releases
 
 dexllm ships **pre-built platform wheels** so users `pip install` without a C++
-toolchain. A version tag triggers CI to build the wheels and attach them to this
-repo's GitHub **Releases**.
+toolchain. A version tag triggers CI to build the wheels and ship them to two
+places: **PyPI** (the normal install path) and this repo's GitHub **Releases**
+(mirror / direct `.whl` download).
 
 ```
 push tag vX.Y.Z → .github/workflows/release.yml
    guard (tag == pyproject version)
    → wheels  (Linux manylinux_2_28 x86_64, macOS x86_64+arm64, cp39–cp313)  +  sdist
    → publish (gh release create on THIS repo, auth: built-in GITHUB_TOKEN)
+     pypi    (pypa/gh-action-pypi-publish,  auth: PYPI_API_TOKEN secret)
 ```
 
-No tokens or extra setup: the publish job uses the workflow's built-in
-`GITHUB_TOKEN` with `contents: write`, since releases now live in the same repo.
+`publish` needs no setup — it uses the workflow's built-in `GITHUB_TOKEN` with
+`contents: write`, since releases live in the same repo. `pypi` needs the
+one-time token setup below.
+
+## One-time PyPI setup
+
+1. **Create the API token** at <https://pypi.org/manage/account/token/>. Until
+   `dexllm` exists on PyPI there is no project to scope to, so the first token
+   must be **account-scoped** ("Entire account"). The value starts with `pypi-`
+   and is shown exactly once.
+2. **Store it as a repo secret** named `PYPI_API_TOKEN`:
+   ```bash
+   gh secret set PYPI_API_TOKEN --repo mobile-threat-hunter/dex-analyzer-for-llm
+   # paste the pypi-... value at the prompt, then Ctrl-D
+   ```
+   (Or Settings → Secrets and variables → Actions → New repository secret.)
+3. **After the first successful release**, replace it with a token scoped to the
+   `dexllm` project only, and delete the account-scoped one — same
+   `gh secret set` command overwrites in place.
+
+Optional hardening: Settings → Environments → `pypi` → **Required reviewers**
+makes every PyPI upload wait for a manual approval. PyPI uploads are
+irreversible (a version can be yanked but never re-uploaded), so this is worth
+turning on if releases are ever cut by automation.
+
+> Alternative: PyPI **Trusted Publishing** (OIDC) removes the long-lived token
+> entirely. It needs a "pending publisher" registered on PyPI for
+> owner `mobile-threat-hunter` / repo `dex-analyzer-for-llm` / workflow
+> `release.yml` / environment `pypi`, plus `permissions: id-token: write` on the
+> `pypi` job and dropping the `password:` line. Worth switching to once the
+> token flow is proven.
 
 ## Cutting a release
 
@@ -26,8 +57,10 @@ No tokens or extra setup: the publish job uses the workflow's built-in
    git push origin master vX.Y.Z      # DOCS_CHECKED=1 if the docs gate blocks
    ```
 3. The `release` workflow runs: `guard` → `wheels` (Linux + macOS) + `sdist` →
-   `publish` (uploads every wheel + the sdist to the `vX.Y.Z` Release).
-   Re-running re-uploads with `--clobber`.
+   `publish` (uploads every wheel + the sdist to the `vX.Y.Z` Release) **and**
+   `pypi` (uploads the same set to PyPI). Re-running re-uploads to the Release
+   with `--clobber`; PyPI is `skip-existing`, so an already-published version is
+   left alone rather than failing the run.
 
 `workflow_dispatch` (Actions tab → release → Run workflow) rebuilds an existing
 tag without re-pushing.
@@ -35,13 +68,24 @@ tag without re-pushing.
 ## Installing (what users do)
 
 ```bash
-pip install dexllm --find-links https://github.com/mobile-threat-hunter/dex-analyzer-for-llm/releases/expanded_assets/vX.Y.Z
+pip install dexllm
+pip install "dexllm[all]"    # + MCP server + FastAPI backend
 ```
 
-`pip` picks the wheel matching the platform/Python. LLM backends:
-`pip install "dexllm[all]" --find-links <same-url>`. Or grab a specific `.whl`
-from the [Releases page](https://github.com/mobile-threat-hunter/dex-analyzer-for-llm/releases)
-and `pip install ./that-file.whl`.
+`pip` picks the wheel matching the platform/Python from PyPI. The GitHub Release
+remains a mirror — grab a specific `.whl` from the
+[Releases page](https://github.com/mobile-threat-hunter/dex-analyzer-for-llm/releases)
+and `pip install ./that-file.whl`, or pin to one release with
+`pip install dexllm --find-links https://github.com/mobile-threat-hunter/dex-analyzer-for-llm/releases/expanded_assets/vX.Y.Z`.
+
+### Platforms with no wheel
+
+The sdist is on PyPI too, so an unmatched platform (Windows, musllinux, PyPy,
+Linux aarch64, CPython 3.14+) falls back to **building from source** — which
+needs a C++20 toolchain and, on Windows, is not yet supported at all. Those users
+see a compiler error rather than a clean "no distribution" message. If that
+becomes a support burden, either narrow `requires-python` in `pyproject.toml` or
+drop the sdist from the `pypi` job's upload set.
 
 ## Build matrix & scope
 
