@@ -113,6 +113,28 @@ dk.list_class_methods('Lcom/example/android/tvleanback/Utils;')     # len 5
 #  'Lcom/example/android/tvleanback/Utils;->convertDpToPixel(Landroid/content/Context;I)I', ...]
 ```
 
+### Identifiers are decoded on the way out and encoded on the way in
+An identifier — a class descriptor, a member name, a proto — is dex string-pool
+MUTF-8 exactly like a literal is, and a supplementary-plane (astral) character is
+stored there as a **surrogate pair**, which is not valid UTF-8. Every API that
+RETURNS an identifier decodes it, and every API that TAKES one encodes it back
+before matching (dexllm#22). This is a pair by necessity: identifiers are also the
+input to every identity API, and the matchers compare against raw pool bytes, so
+decoding alone would turn a loud `UnicodeDecodeError` into a silent miss. The
+round trip therefore holds — a descriptor from `list_classes()` resolves through
+`list_class_methods` → `decompile_*` / `render_*_smali` / `find_*` / the xref
+family — and the same encoding is applied to the NAME matchers, which closes the
+residual dexllm#19 recorded (an astral identifier was unfindable).
+
+The two directions are exact inverses for **everything a loadable dex can hold**,
+and that is enforced rather than assumed. Two encodings would break it — a LONE
+surrogate and a non-NUL OVERLONG both decode to something that cannot be encoded
+back — and the verifier rejects both: a lone surrogate by ART's member-name rules,
+an overlong by ART's "Illegal representation" check (`CheckIntraStringDataItem`),
+which dexllm#22 ported after finding it missing. That matters because the failure
+mode is silent, not loud: an overlong descriptor enumerated fine and then resolved
+to nothing in every identity API. Corpus incidence of any non-ASCII identifier is 0.
+
 ### `dk.list_value_strings() -> list[str]`
 Every distinct string the app **loads as a value** (`const-string`/`jumbo` +
 static-field `VALUE_STRING` initializers), MUTF-8→UTF-8, deduplicated. Excludes
@@ -165,16 +187,14 @@ dk.list_class_strings('Lcom/example/android/tvleanback/Utils;')
   `find_classes_declaring_strings` for those. (A second cause — a supplementary-plane
   or NUL-bearing literal never matching because the query was compared as UTF-8
   against MUTF-8 pool bytes — accounted for 63 more until dexllm#19; the query is now
-  encoded to MUTF-8 at the binding boundary. Two crafted-only residuals remain, both
-  absent from the corpus: a pool string carrying a LONE surrogate (pybind11 encodes
+  encoded to MUTF-8 at the binding boundary. One crafted-only residual remains,
+  absent from the corpus: a pool string carrying a LONE surrogate — pybind11 encodes
   arguments as strict UTF-8, which rejects an unpaired surrogate, and the decode
-  direction replaces it with U+FFFD — though passing the raw MUTF-8 as `bytes` does
-  match), and one carrying a non-NUL OVERLONG encoding, which the verifier accepts
-  (as ART does) but canonical encoding never produces — note that overlong is no
-  longer merely a query-matching curiosity: `EscapeSmaliString` escapes the DECODED
-  characters precisely so an overlong `"` / newline cannot inject structure into a
-  rendered listing, see dexllm#22.) Both directions are individually correct — do not assume set
-  equality.
+  direction replaces it with U+FFFD, though passing the raw MUTF-8 as `bytes` does
+  match. The other former residual, a non-NUL OVERLONG encoding, is gone: it was
+  listed as "the verifier accepts it, as ART does", which was wrong on both counts —
+  ART rejects it, and dexllm#22 ported that check, so such a dex no longer loads.)
+  Both directions are individually correct — do not assume set equality.
 
 ### Per-dex enumeration (uniform scope axis)
 The bare form is all loaded dexes; the `…_in_dex(dex_id)` form is one dex (empty for
@@ -243,8 +263,12 @@ dk.decompile_method_with_pc_map(M)
 ### `dk.decompile_class(cls_desc: str) -> str`
 Full Java class text — `package`, class header (access + extends + implements),
 static→instance field declarations with decoded EncodedValue initializers, then
-method bodies. The header+fields region is byte-identical to androguard
-`DvClass.get_source()`.
+method bodies. The header+fields region matches androguard `DvClass.get_source()`
+byte for byte **except** that a `"` inside a `String` initializer is escaped as
+`\"` (dexllm#22). androguard escapes the value with Python's `unicode-escape`,
+whose repr is single-quoted, then wraps it in DOUBLE quotes to form a Java
+literal — so an embedded `"` ends the literal early. 9 lines of the bundled
+corpus are affected; all of them were invalid Java before.
 
 ### `dk.decompile_method_ast(desc: str, include_source: bool = True) -> dict`
 Signature components + Java `source` + the full DAD nested-list AST + D-3 pc_map.
@@ -286,16 +310,23 @@ Java text path escapes it as `\uXXXX` code units instead, a deliberate differenc
 that path claims ART code-unit fidelity, this one is a readable listing); a LONE
 surrogate collapses to U+FFFD (lossy, absent from the corpus); every **C0** control
 character (`cp < 0x20`) — including a NUL, which arrives as `C0 80` — escapes as
-`\xNN`. Escaping the decoded characters is what stops a verifier-accepted OVERLONG
-sequence (`E0 80 A2` = `"`, `E0 80 8A` = newline) from injecting structure into a
-literal. A rendered literal equals what `list_method_strings` reports for the same
+`\xNN`. Escaping the DECODED characters (rather than the raw bytes) is what stopped
+an OVERLONG sequence (`E0 80 A2` = `"`, `E0 80 8A` = newline) from injecting
+structure into a literal; since dexllm#22 also ported ART's canonicality check such
+a dex no longer loads at all, so this is now defence in depth rather than the only
+barrier. A rendered literal equals what `list_method_strings` reports for the same
 method.
 
-Two things this does **not** cover:
-- **IDENTIFIERS** (type / method / field names, which do not go through the escaper)
-  are still emitted as raw MUTF-8, so a crafted APK with an astral identifier can
-  still raise `UnicodeDecodeError` here — the out-of-scope half of dexllm#22. Corpus
-  incidence is 0.
+**IDENTIFIERS** (type / method / field names) do not go through the escaper — they
+are unquoted in smali — but they are pool MUTF-8 too, so each one is DECODED at its
+emission point (dexllm#22). A class or member carrying a supplementary-plane
+character therefore renders instead of raising. They are decoded, not escaped,
+because a loadable dex cannot carry a structural character in an identifier: member
+names were always name-validated, and since dexllm#23 every `type_id` descriptor is
+too — on the DECODED code points, so an overlong that would decode to `"` or a
+newline is rejected at load rather than rendered here.
+
+One thing this does **not** cover:
 - Only C0 is escaped. **DEL, the C1 range and the Unicode line separators U+2028 /
   U+2029 / U+0085 render as themselves**, and Python's `str.splitlines()` treats the
   last three as line breaks — `PatternsCompat.<clinit>` renders 208 `\n` but 248

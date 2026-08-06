@@ -206,13 +206,21 @@ std::string Decompiler::DecompileClass(std::string_view class_descriptor) {
     if (body.size() >= 2 && body.front() == 'L' && body.back() == ';') {
         body = body.substr(1, body.size() - 2);
     }
+    // dexllm#22 — every identifier below is RAW pool MUTF-8, so it is sanitised
+    // AT ITS SOURCE, the same discipline `SmaliIdent` follows in the renderer. A
+    // single pass over the ASSEMBLED text would be the variant an earlier review
+    // rejected: `SanitizeUtf8` escapes only controls and surrogates, so decoding
+    // after assembly could in principle MATERIALISE a structural character that
+    // was never escaped. Sanitising each component makes that structurally
+    // impossible instead of relying on the descriptor validators to have rejected
+    // it. (Method bodies appended later are already sanitised by RunPipeline.)
     std::string package, name;
     auto last_slash = body.rfind('/');
     if (last_slash != std::string_view::npos) {
-        package = slash_to_dot(std::string{body.substr(0, last_slash)});
-        name.assign(body.substr(last_slash + 1));
+        package = SanitizeUtf8(slash_to_dot(std::string{body.substr(0, last_slash)}));
+        name = SanitizeUtf8(body.substr(last_slash + 1));
     } else {
-        name.assign(body);
+        name = SanitizeUtf8(body);
     }
 
     uint32_t access = info.access_flags;
@@ -242,7 +250,7 @@ std::string Decompiler::DecompileClass(std::string_view class_descriptor) {
         info.superclass != "Ljava/lang/Object;") {
         std::string sc{info.superclass.substr(1, info.superclass.size() - 2)};
         prototype += " extends ";
-        prototype += slash_to_dot(sc);
+        prototype += SanitizeUtf8(slash_to_dot(sc));
     }
     // implements
     if (!info.interfaces.empty()) {
@@ -250,7 +258,7 @@ std::string Decompiler::DecompileClass(std::string_view class_descriptor) {
         for (size_t i = 0; i < info.interfaces.size(); ++i) {
             if (i > 0) prototype += ", ";
             std::string_view iv = info.interfaces[i];
-            prototype += slash_to_dot(std::string{iv.substr(1, iv.size() - 2)});
+            prototype += SanitizeUtf8(slash_to_dot(std::string{iv.substr(1, iv.size() - 2)}));
         }
     }
 
@@ -273,9 +281,9 @@ std::string Decompiler::DecompileClass(std::string_view class_descriptor) {
             out += a;
             out += ' ';
         }
-        out += GetType(finfo.type);
+        out += SanitizeUtf8(GetType(finfo.type));
         out += ' ';
-        out.append(finfo.name);
+        out += SanitizeUtf8(finfo.name);
         // Initializer: ClassInfo carries the parsed static_values_off text
         // (Phase 2). GetFieldInfo's per-call init_text is left as a future
         // hook for non-class-context lookups.
@@ -284,7 +292,15 @@ std::string Decompiler::DecompileClass(std::string_view class_descriptor) {
                 ? info.field_init_texts[i] : finfo.init_text;
         if (!init.empty()) {
             out += " = ";
-            out += init;
+            // Sanitised like every other component: an initializer is NOT always
+            // pre-escaped text. Only the STRING arm (0x17) goes through
+            // PythonUnicodeEscape; the TYPE (0x18) and FIELD/ENUM (0x19/0x1b)
+            // arms of DecodeEncodedValueText emit RAW pool identifiers, so a
+            // `static final Class F = Astral.class;` re-raised at the pybind
+            // boundary. Found by the delta review — the earlier whole-text pass
+            // covered this append incidentally, so removing it needed the seventh
+            // site too. Identity for the ASCII/pre-escaped cases.
+            out += SanitizeUtf8(init);
         }
         out += ";\n";
     }
@@ -304,7 +320,9 @@ std::string Decompiler::DecompileClass(std::string_view class_descriptor) {
             out += DecompileMethod(method_descriptor);
         } catch (const std::exception& e) {
             out += "// METHOD ERROR (";
-            out += method_descriptor;
+            // Raw pool bytes — the ONE identifier append after the method-body
+            // loop starts, so it needs its own sanitize (dexllm#22 review C2).
+            out += SanitizeUtf8(method_descriptor);
             out += "): ";
             out += e.what();
             out += "\n";

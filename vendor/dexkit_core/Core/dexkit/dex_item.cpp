@@ -1378,9 +1378,11 @@ namespace {
 //
 // This used to escape raw BYTES, which is unsound for two reasons:
 //
-//  1. INJECTION. A non-NUL OVERLONG sequence is accepted by the structural
-//     verifier (VerifyMutf8 checks lead/continuation shape only — ART does the
-//     same, see native/dad_cpp/include/mutf8.h), and `C0 A2` decodes to `"`,
+//  1. INJECTION. A non-NUL OVERLONG sequence was accepted by the structural
+//     verifier (VerifyMutf8 checked lead/continuation shape only, believed to
+//     match ART — it did NOT; dexllm#22 later ported ART's "Illegal
+//     representation" check, so such a dex no longer loads and this escaping is
+//     now defence in depth), and `C0 A2` decodes to `"`,
 //     `C1 9C` to `\`, `C0 8A` to a newline. Escaping the BYTES let those through
 //     untouched, so whoever decoded the assembled text afterwards MATERIALISED a
 //     structural character inside the quoted literal — terminating it early or
@@ -1440,6 +1442,22 @@ std::string EscapeSmaliString(std::string_view in) {
         }
     }
     return out;
+}
+
+// dexllm#22 — an IDENTIFIER (type descriptor, member name) is pool MUTF-8 just
+// like a literal is, so it needs the same decode before it enters the assembled
+// listing. Without it a class or member carrying a supplementary-plane character
+// (a surrogate PAIR in the pool — the verifier explicitly permits one in a name)
+// reached pybind's strict UTF-8 str conversion as raw bytes and RAISED, so the
+// method could not be rendered at all.
+//
+// Decoded, not escaped: an identifier is unquoted in smali, and after dexllm#23
+// (every type_id descriptor is now syntax-checked, joining the member names that
+// always were) a loadable dex cannot carry a structural character in one — the
+// validity check runs on the DECODED code points, so an overlong that would
+// decode to `"` or a newline is rejected at load, not rendered here.
+std::string SmaliIdent(std::string_view raw) {
+    return dexkit::dad::mutf8::Mutf8ToUtf8Lossy(raw);
 }
 
 // Format access flags into smali keyword sequence (subset relevant to fields
@@ -1519,21 +1537,21 @@ std::string FormatMethodRef(const dex::Reader& reader,
     const auto& proto = reader.ProtoIds()[m.proto_idx];
 
     std::string out;
-    out += std::string(type_names[m.class_idx]);
+    out += SmaliIdent(type_names[m.class_idx]);
     out += "->";
-    out += std::string(strings[m.name_idx]);
+    out += SmaliIdent(strings[m.name_idx]);
     out += '(';
     if (proto.parameters_off != 0) {
         const auto* type_list =
             reader.dataPtr<dex::TypeList>(proto.parameters_off);
         if (type_list != nullptr) {
             for (uint32_t i = 0; i < type_list->size; ++i) {
-                out += std::string(type_names[type_list->list[i].type_idx]);
+                out += SmaliIdent(type_names[type_list->list[i].type_idx]);
             }
         }
     }
     out += ')';
-    out += std::string(type_names[proto.return_type_idx]);
+    out += SmaliIdent(type_names[proto.return_type_idx]);
     return out;
 }
 
@@ -1545,11 +1563,11 @@ std::string FormatFieldRef(const dex::Reader& reader,
     if (field_idx >= reader.FieldIds().size()) return "<bad-field-idx>";
     const auto& f = reader.FieldIds()[field_idx];
     std::string out;
-    out += std::string(type_names[f.class_idx]);
+    out += SmaliIdent(type_names[f.class_idx]);
     out += "->";
-    out += std::string(strings[f.name_idx]);
+    out += SmaliIdent(strings[f.name_idx]);
     out += ':';
-    out += std::string(type_names[f.type_idx]);
+    out += SmaliIdent(type_names[f.type_idx]);
     return out;
 }
 
@@ -1573,7 +1591,7 @@ std::string FormatOperands(const dex::Instruction& insn,
                 } else o << "string@" << v;
                 break;
             case kIndexTypeRef:
-                if (v < type_names.size()) o << type_names[v];
+                if (v < type_names.size()) o << SmaliIdent(type_names[v]);
                 else o << "type@" << v;
                 break;
             case kIndexFieldRef:
@@ -1700,8 +1718,8 @@ std::string DexItem::RenderClassSmali(uint32_t type_idx) const {
 
     std::ostringstream out;
     out << ".class " << FormatAccessFlags(class_def.access_flags)
-        << type_names[type_idx] << "\n";
-    out << ".super " << type_names[class_def.superclass_idx] << "\n";
+        << SmaliIdent(type_names[type_idx]) << "\n";
+    out << ".super " << SmaliIdent(type_names[class_def.superclass_idx]) << "\n";
     if (class_def.source_file_idx != dex::kNoIndex) {
         out << ".source \""
             << EscapeSmaliString(strings[class_def.source_file_idx])
@@ -1711,7 +1729,8 @@ std::string DexItem::RenderClassSmali(uint32_t type_idx) const {
         const auto* il = reader.dataPtr<dex::TypeList>(class_def.interfaces_off);
         if (il != nullptr) {
             for (uint32_t i = 0; i < il->size; ++i) {
-                out << ".implements " << type_names[il->list[i].type_idx] << "\n";
+                out << ".implements " << SmaliIdent(type_names[il->list[i].type_idx])
+                    << "\n";
             }
         }
     }
@@ -1720,8 +1739,8 @@ std::string DexItem::RenderClassSmali(uint32_t type_idx) const {
     for (uint32_t field_idx : class_field_ids[type_idx]) {
         const auto& f = reader.FieldIds()[field_idx];
         out << ".field "
-            << strings[f.name_idx]
-            << ":" << type_names[f.type_idx] << "\n";
+            << SmaliIdent(strings[f.name_idx])
+            << ":" << SmaliIdent(type_names[f.type_idx]) << "\n";
     }
     if (!class_field_ids[type_idx].empty()) out << "\n";
 

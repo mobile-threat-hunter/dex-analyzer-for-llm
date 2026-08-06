@@ -46,6 +46,16 @@ std::string Utf16ToUtf8(const std::vector<uint16_t>& units);
 // Convenience: MUTF-8 → standard UTF-8 (Mutf8ToUtf16 ∘ Utf16ToUtf8).
 std::string Mutf8ToUtf8(std::string_view raw);
 
+// MUTF-8 → standard UTF-8, LOSSY where UTF-8 has no form: a lone surrogate and a
+// malformed/truncated sequence both become U+FFFD (Mutf8ToUtf8 emits them raw,
+// which is NOT valid UTF-8). Use this at any boundary that hands bytes to
+// pybind11's strict `str` conversion — a raw pool string reaching it unchanged
+// RAISES UnicodeDecodeError instead of returning a value (dexllm#22). It is the
+// exact inverse of Utf8ToMutf8 for everything a verified dex can hold: a
+// surrogate PAIR (supplementary code point) round-trips, so a descriptor decoded
+// on the way out and re-encoded on the way in still finds its class.
+std::string Mutf8ToUtf8Lossy(std::string_view raw);
+
 // Standard UTF-8 → MUTF-8: the INVERSE direction, for turning a caller-supplied
 // query (a Python `str`, which pybind11 hands over as UTF-8) into the bytes the dex
 // string pool actually holds, so a byte-comparing matcher can find it. Only two
@@ -64,9 +74,14 @@ std::string Mutf8ToUtf8(std::string_view raw);
 //     the raw MUTF-8 as `bytes` DOES match: the fast path is the identity there. (The
 //     codec itself round-trips it — Utf16ToUtf8 keeps the raw 3-byte form — so the
 //     loss is at the pybind boundary, not here.)
-//   * a non-NUL OVERLONG encoding (`C0 81`, `E0 80 81`, …) — VerifyMutf8 accepts
-//     these, as ART does, but canonical encoding never produces them, so a pool
-//     string carrying one is unmatchable by any well-formed query.
+//   * a non-NUL OVERLONG encoding (`C0 81`, `E0 80 81`, …). NO LONGER REACHABLE:
+//     VerifyMutf8 used to accept these — documented as "ART does the same", which
+//     was simply wrong (ART's CheckIntraStringDataItem rejects both forms as an
+//     "Illegal representation", dex_file_verifier.cc:1897/:1922) — and the two
+//     checks are now ported, so such a dex does not load at all. That is what
+//     makes the identifier decode/encode pair (dexllm#22) a genuine bijection:
+//     canonical re-encoding cannot reproduce an overlong, so leaving it loadable
+//     meant an identifier that enumerated fine and then resolved to nothing.
 // Malformed input bytes are passed through unchanged (the decoder's posture): pybind
 // accepts `bytes` for the query arguments, so ill-formed input does reach here and
 // must not be silently rewritten into different, valid bytes.

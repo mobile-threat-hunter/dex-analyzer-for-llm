@@ -39,7 +39,10 @@
 //                              encoded_array/encoded_value (VerifyEncodedArrayAt
 //                              == ART CheckEncodedArray :1225 — static_values_off)
 //   CheckInterSection :3477  — cross-refs: id ordering/uniqueness; descriptor
-//                              syntax + class_def semantics (see VerifyClassDefs)
+//                              syntax for EVERY type_id (CheckInterTypeIdItem
+//                              :2735) as well as the field/method/class_def
+//                              references to one; member-name validity;
+//                              class_def semantics (see VerifyClassDefs)
 //
 //   ONE DELIBERATE DIVERGENCE — instruction-operand bounds (VerifyInsns, inside
 //   VerifyCodeItem). ART's *structural* verifier does NOT check per-instruction

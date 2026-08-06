@@ -226,6 +226,88 @@ int main() {
                   std::string("\xED\xA0\xBD", 3));
     }
 
+    // 7. Mutf8ToUtf8Lossy (dexllm#22) — the decoder the pybind boundary uses. Its
+    //    contract is absolute ("the result is ALWAYS valid UTF-8"), because a
+    //    single invalid byte reaching py::str RAISES instead of returning a value.
+    //    So assert the contract itself over arbitrary bytes, not just agreement
+    //    with the ART decoder on well-formed input. It is a second, non-ART
+    //    decoder in this module, which is exactly why it needs its own coverage.
+    {
+        auto valid_utf8 = [](const std::string& s) {
+            const auto* p = reinterpret_cast<const uint8_t*>(s.data());
+            const auto* e = p + s.size();
+            while (p < e) {
+                uint32_t cp;
+                size_t n;
+                if (*p < 0x80) { ++p; continue; }
+                else if ((*p & 0xE0) == 0xC0) { cp = *p & 0x1F; n = 2; }
+                else if ((*p & 0xF0) == 0xE0) { cp = *p & 0x0F; n = 3; }
+                else if ((*p & 0xF8) == 0xF0) { cp = *p & 0x07; n = 4; }
+                else return false;
+                if (p + n > e) return false;
+                for (size_t i = 1; i < n; ++i) {
+                    if ((p[i] & 0xC0) != 0x80) return false;
+                    cp = (cp << 6) | (p[i] & 0x3F);
+                }
+                if (cp > 0x10FFFF) return false;
+                if (cp >= 0xD800 && cp <= 0xDFFF) return false;  // no raw surrogate
+                p += n;
+            }
+            return true;
+        };
+
+        std::mt19937 rng(0x105591);
+        std::uniform_int_distribution<int> byte(0, 255);
+        int bad = 0;
+        for (int iter = 0; iter < 4000; ++iter) {
+            std::string raw;
+            int n = 1 + (iter % 24);
+            for (int k = 0; k < n; ++k) raw += static_cast<char>(byte(rng));
+            if (!valid_utf8(m::Mutf8ToUtf8Lossy(raw))) ++bad;
+        }
+        char buf[92];
+        std::snprintf(buf, sizeof(buf),
+                      "Mutf8ToUtf8Lossy output is valid UTF-8 (4000 random streams, %d bad)",
+                      bad);
+        check(buf, bad == 0);
+
+        // The specific shapes that could escape: an out-of-range 4-byte value and
+        // a 0xF5-0xF7 lead both encode above U+10FFFF, which py::str rejects.
+        check("F7 BF BF BF -> replacement, not a >U+10FFFF sequence",
+              valid_utf8(m::Mutf8ToUtf8Lossy(std::string("\xF7\xBF\xBF\xBF", 4))));
+        check("F4 90 80 80 (U+110000) -> replacement",
+              valid_utf8(m::Mutf8ToUtf8Lossy(std::string("\xF4\x90\x80\x80", 4))));
+        check("lone surrogate -> U+FFFD",
+              m::Mutf8ToUtf8Lossy(std::string("\xED\xA0\xBD", 3)) == "\xEF\xBF\xBD");
+        check("surrogate PAIR -> one code point",
+              m::Mutf8ToUtf8Lossy(std::string("\xED\xA0\xBD\xED\xB8\x80", 6)) ==
+                  "\xF0\x9F\x98\x80");
+        check("ASCII fast path is the identity", m::Mutf8ToUtf8Lossy("Lcom/foo/Bar;") ==
+                                                     "Lcom/foo/Bar;");
+        // Agreement with the ART path on everything a VERIFIED dex can hold — the
+        // property that keeps a rendered identifier and list_classes() consistent.
+        {
+            std::mt19937 r2(0x5EED22);
+            std::uniform_int_distribution<uint32_t> pick(0, 0x10FFFF);
+            int mism = 0;
+            for (int iter = 0; iter < 2000; ++iter) {
+                std::string pool;
+                for (int k = 0, n = 1 + (iter % 10); k < n; ++k) {
+                    uint32_t cp;
+                    do { cp = pick(r2); }
+                    while (cp >= 0xD800 && cp <= 0xDFFF);
+                    EncodeMutf8(cp, pool);
+                }
+                if (m::Mutf8ToUtf8Lossy(pool) != m::Mutf8ToUtf8(pool)) ++mism;
+            }
+            char b2[96];
+            std::snprintf(b2, sizeof(b2),
+                          "Lossy == ART decode on verifier-legal input (2000 streams, %d mismatch)",
+                          mism);
+            check(b2, mism == 0);
+        }
+    }
+
     std::printf("\n%s — %d failure(s)\n", g_fail ? "FAIL" : "PASS", g_fail);
     return g_fail ? 1 : 0;
 }

@@ -492,10 +492,13 @@ bool DexVerifier::CheckMap() {
            require(kClassDefItem, header_->class_defs_off, header_->class_defs_size, "class_defs");
 }
 
-// Modified UTF-8 validation (dex string_data): 1-byte 0x01–0x7F; 2-byte
-// 0xC0–0xDF + continuation (overlong NUL 0xC0 0x80 legal); 3-byte 0xE0–0xEF +
-// 2 continuations (surrogates legal); no 4-byte form. Each sequence is one
-// UTF-16 code unit; count must equal utf16_len; NUL terminator within image.
+// Modified UTF-8 validation (dex string_data) — ART CheckIntraStringDataItem
+// :1838: 1-byte 0x01–0x7F; 2-byte 0xC0–0xDF + continuation; 3-byte 0xE0–0xEF +
+// 2 continuations (surrogates legal); no 4-byte form. A sequence must also be
+// CANONICAL — the encoded NUL `C0 80` is the single legal below-0x80 form, and
+// every other overlong is rejected as ART's "Illegal representation" (:1897,
+// :1922). Each sequence is one UTF-16 code unit; count must equal utf16_len;
+// NUL terminator within image.
 bool DexVerifier::VerifyMutf8(const u1* p, u4 utf16_len) {
     const u1* end = EndOfFile();
     u4 units = 0;
@@ -508,10 +511,38 @@ bool DexVerifier::VerifyMutf8(const u1* p, u4 utf16_len) {
         } else if (b < 0xC0) {
             return Fail("string_data invalid MUTF-8 lead byte");
         } else if (b < 0xE0) {
-            if (p >= end || (*p++ & 0xC0) != 0x80) return Fail("string_data bad MUTF-8 2-byte seq");
+            if (p >= end) return Fail("string_data bad MUTF-8 2-byte seq");
+            u1 b2 = *p++;
+            if ((b2 & 0xC0) != 0x80) return Fail("string_data bad MUTF-8 2-byte seq");
+            // ART :1897 — "Illegal representation": a non-NUL OVERLONG. `C0 80`
+            // is the one legal 2-byte form below 0x80 (MUTF-8's encoded NUL);
+            // anything else that decodes below 0x80 is a non-canonical spelling
+            // of a 1-byte character. See the block comment at the 3-byte arm.
+            u2 v2 = static_cast<u2>(((b & 0x1F) << 6) | (b2 & 0x3F));
+            if (v2 != 0 && v2 < 0x80) return Fail("string_data illegal MUTF-8 representation");
         } else if (b < 0xF0) {
-            if (p >= end || (*p++ & 0xC0) != 0x80) return Fail("string_data bad MUTF-8 3-byte seq");
-            if (p >= end || (*p++ & 0xC0) != 0x80) return Fail("string_data bad MUTF-8 3-byte seq");
+            if (p >= end) return Fail("string_data bad MUTF-8 3-byte seq");
+            u1 b2 = *p++;
+            if ((b2 & 0xC0) != 0x80) return Fail("string_data bad MUTF-8 3-byte seq");
+            if (p >= end) return Fail("string_data bad MUTF-8 3-byte seq");
+            u1 b3 = *p++;
+            if ((b3 & 0xC0) != 0x80) return Fail("string_data bad MUTF-8 3-byte seq");
+            // ART :1922 — same "Illegal representation" rule for the 3-byte form.
+            //
+            // dexllm#22/#23 — these two checks were MISSING, and the omission was
+            // documented backwards ("VerifyMutf8 checks lead/continuation shape
+            // only, as ART does" — ART rejects overlongs right here). It matters
+            // beyond ART parity: a decoded identifier is handed to Python and a
+            // caller-supplied one is encoded back, and canonical re-encoding
+            // cannot reproduce an overlong — so an overlong descriptor enumerated
+            // fine and then resolved to NOTHING everywhere, silently (a 3-byte
+            // class-hiding primitive). Rejecting the input at the single gate
+            // makes the decode/encode pair a genuine bijection over every dex
+            // that can load, and makes the smali "decode identifiers, don't
+            // escape them" argument structural rather than incidental: no
+            // multibyte sequence can decode to a structural character any more.
+            u2 v3 = static_cast<u2>(((b & 0x0F) << 12) | ((b2 & 0x3F) << 6) | (b3 & 0x3F));
+            if (v3 < 0x800) return Fail("string_data illegal MUTF-8 representation");
         } else {
             return Fail("string_data invalid MUTF-8 lead byte");
         }
@@ -952,8 +983,24 @@ bool DexVerifier::CheckInterSection() {
             return Fail("Out-of-order string_ids");
         }
     }
-    // type_ids: strictly increasing descriptor_idx (ART :2749).
-    for (u4 i = 1; i < header_->type_ids_size; ++i) {
+    // type_ids: per-item descriptor syntax (ART CheckInterTypeIdItem :2735), then
+    // strictly increasing descriptor_idx (ART :2749).
+    //
+    // dexllm#23 — the per-item half was missing. Descriptors were validated only
+    // where ANOTHER id table referenced them (field_id class/type, method_id
+    // class, class_def class/super/interfaces), so a type used ONLY as a proto
+    // return/parameter type or as an instruction operand (const-class,
+    // new-instance, check-cast, new-array, …) could hold arbitrary bytes and
+    // still pass. That is reachable in output: the smali renderer emits type
+    // names unescaped, so a same-length payload carrying `"` and newline forged a
+    // whole instruction line in a listing handed to an analyst or an LLM. ART has
+    // no leading-char constraint here — any valid descriptor shape will do.
+    for (u4 i = 0; i < header_->type_ids_size; ++i) {
+        if (!VerifyTypeDescriptor(i, "type_id: invalid type descriptor",
+                                  [](char) { return true; })) {
+            return false;
+        }
+        if (i == 0) continue;
         if (TableAt<dex::TypeId>(header_->type_ids_off, i - 1)->descriptor_idx >=
             TableAt<dex::TypeId>(header_->type_ids_off, i)->descriptor_idx) {
             return Fail("Out-of-order type_ids");

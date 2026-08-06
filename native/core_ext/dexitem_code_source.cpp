@@ -112,6 +112,16 @@ uint64_t ReadIntLE(const U1*& p, const U1* end, size_t nbytes) {
 // subset of characters DAD actually emits in field initializers. Printable
 // ASCII passes through except the standard backslash escapes; everything
 // else becomes \\xNN or \\uNNNN.
+//
+// dexllm#22 — with ONE deliberate divergence from `unicode-escape`: the DOUBLE
+// quote is escaped as well. Python's codec escapes `'` and not `"` because its
+// repr is single-quoted; the caller here wraps the result in DOUBLE quotes to
+// build a JAVA literal, so a `"` in the value TERMINATED that literal early —
+// 9 lines of real corpus output are invalid Java (`= "<?xml version="1.0" …>";`)
+// and a crafted value could append a whole fabricated field declaration to the
+// class body that `decompile_class` hands an analyst or an LLM. The method-body
+// emitter (`EscapeJavaString`) and the smali emitter (`EscapeSmaliString`) both
+// already escape it; this path was the outlier.
 std::string PythonUnicodeEscape(std::string_view s) {
     std::string out;
     out.reserve(s.size() + 2);
@@ -131,6 +141,7 @@ std::string PythonUnicodeEscape(std::string_view s) {
         uint8_t c = *p;
         if (c == '\\') { out += "\\\\"; ++p; continue; }
         if (c == '\'') { out += "\\'";  ++p; continue; }
+        if (c == '"')  { out += "\\\""; ++p; continue; }  // dexllm#22 — see above
         if (c == '\n') { out += "\\n";  ++p; continue; }
         if (c == '\r') { out += "\\r";  ++p; continue; }
         if (c == '\t') { out += "\\t";  ++p; continue; }

@@ -127,6 +127,77 @@ std::string Mutf8ToUtf8(std::string_view raw) {
     return Utf16ToUtf8(Mutf8ToUtf16(raw));
 }
 
+// dexllm#22 — the decoder the pybind boundary needs: like Mutf8ToUtf8 except that
+// anything with no UTF-8 form (a LONE surrogate, a malformed/truncated sequence)
+// collapses to U+FFFD instead of being emitted raw, so the result is ALWAYS valid
+// UTF-8 and pybind11's strict str conversion cannot raise. Body moved verbatim
+// from the binding's private DecodeMutf8ForPy so the smali renderer and the
+// binding decode identically (an identifier must read the same in a listing and
+// in list_classes()); the ASCII fast path is the only addition — identifiers are
+// overwhelmingly ASCII and this now runs per identifier, not per method.
+std::string Mutf8ToUtf8Lossy(std::string_view raw) {
+    bool ascii = true;
+    for (unsigned char c : raw) {
+        if (c >= 0x80) {
+            ascii = false;
+            break;
+        }
+    }
+    if (ascii) return std::string(raw);
+
+    std::string out;
+    out.reserve(raw.size());
+    const uint8_t* p = reinterpret_cast<const uint8_t*>(raw.data());
+    const uint8_t* end = p + raw.size();
+    auto emit_cp = [&](uint32_t cp) {
+        // Anything with no UTF-8 form becomes U+FFFD, so the "always valid UTF-8"
+        // contract holds unconditionally: a lone surrogate, and (review-hardened)
+        // a value above U+10FFFF, which the 4-byte branch below can still produce
+        // from a malformed lead. Unreachable from a dex pool — VerifyMutf8 rejects
+        // any lead >= 0xF0 in string_data — but this is a public codec entry with
+        // an absolute promise, so it must not depend on its callers.
+        if ((cp >= 0xD800 && cp <= 0xDFFF) || cp > 0x10FFFF) cp = 0xFFFD;
+        if (cp < 0x10000) {
+            AppendUtf8Bmp(out, cp);
+        } else {
+            out += static_cast<char>(0xF0 | (cp >> 18));
+            out += static_cast<char>(0x80 | ((cp >> 12) & 0x3F));
+            out += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
+            out += static_cast<char>(0x80 | (cp & 0x3F));
+        }
+    };
+    while (p < end) {
+        uint8_t c = *p;
+        if (c < 0x80) { out += static_cast<char>(c); ++p; continue; }
+        uint32_t cp = 0; size_t n = 0;
+        if ((c & 0xE0) == 0xC0) { cp = c & 0x1F; n = 2; }
+        else if ((c & 0xF0) == 0xE0) { cp = c & 0x0F; n = 3; }
+        else if ((c & 0xF8) == 0xF0) { cp = c & 0x07; n = 4; }
+        else { emit_cp(0xFFFD); ++p; continue; }
+        if (p + n > end) { emit_cp(0xFFFD); ++p; continue; }
+        bool bad = false;
+        for (size_t i = 1; i < n; ++i) {
+            if ((p[i] & 0xC0) != 0x80) { bad = true; break; }
+            cp = (cp << 6) | (p[i] & 0x3F);
+        }
+        if (bad) { emit_cp(0xFFFD); ++p; continue; }
+        if (cp >= 0xD800 && cp <= 0xDBFF && p + n + 3 <= end &&
+            (p[n] & 0xF0) == 0xE0 && (p[n + 1] & 0xC0) == 0x80 &&
+            (p[n + 2] & 0xC0) == 0x80) {
+            uint32_t lo = ((p[n] & 0x0F) << 12) | ((p[n + 1] & 0x3F) << 6) |
+                          (p[n + 2] & 0x3F);
+            if (lo >= 0xDC00 && lo <= 0xDFFF) {
+                emit_cp(0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00));
+                p += n + 3;
+                continue;
+            }
+        }
+        emit_cp(cp);
+        p += n;
+    }
+    return out;
+}
+
 std::string Utf8ToMutf8(std::string_view utf8) {
     // Fast path: MUTF-8 differs from UTF-8 only for NUL and for supplementary code
     // points (4-byte lead 0xF0-0xF4). Neither present → the bytes are already MUTF-8.

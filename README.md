@@ -118,7 +118,7 @@ spec-reference not runtime dep), turned to **crash-safety**, not execution trust
 |---|---|
 | `CheckHeader` / `CheckMap` | ✅ parity — magic/version/sizes/endian, section bounds, map ordering/alignment/required |
 | `CheckIntraSection` | ✅ parity — string_data MUTF-8, id indices, type_list, code_item, class_data, encoded_array · **⊕ plus `VerifyInsns`** (per-instruction operand bounds, which ART keeps in the *runtime* method verifier, not the structural one) |
-| `CheckInterSection` | ✅ parity — id ordering/uniqueness, descriptor + member-name syntax, class_def semantics (dup / self-inherit / definer-match) |
+| `CheckInterSection` | ✅ parity — id ordering/uniqueness, descriptor syntax for **every** `type_id` (`CheckInterTypeIdItem`) as well as the field/method/class_def references to one, member-name syntax, class_def semantics (dup / self-inherit / definer-match) |
 
 **Deliberately not checked** — execution-trust mechanics irrelevant to a read-only
 analyzer, or out of the structural scope: adler32/SHA-1 checksums, instruction

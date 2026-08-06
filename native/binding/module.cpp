@@ -24,60 +24,41 @@ namespace py = pybind11;
 namespace {
 
 // Decode dex MUTF-8 → standard UTF-8 so pybind11's strict UTF-8 str decode
-// accepts it. Lone surrogates (invalid in UTF-8) become U+FFFD.
-std::string DecodeMutf8ForPy(std::string_view raw) {
-    std::string out;
-    out.reserve(raw.size());
-    const uint8_t* p = reinterpret_cast<const uint8_t*>(raw.data());
-    const uint8_t* end = p + raw.size();
-    auto emit_cp = [&](uint32_t cp) {
-        if (cp >= 0xD800 && cp <= 0xDFFF) cp = 0xFFFD;  // lone surrogate
-        if (cp < 0x80) {
-            out += static_cast<char>(cp);
-        } else if (cp < 0x800) {
-            out += static_cast<char>(0xC0 | (cp >> 6));
-            out += static_cast<char>(0x80 | (cp & 0x3F));
-        } else if (cp < 0x10000) {
-            out += static_cast<char>(0xE0 | (cp >> 12));
-            out += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
-            out += static_cast<char>(0x80 | (cp & 0x3F));
-        } else {
-            out += static_cast<char>(0xF0 | (cp >> 18));
-            out += static_cast<char>(0x80 | ((cp >> 12) & 0x3F));
-            out += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
-            out += static_cast<char>(0x80 | (cp & 0x3F));
-        }
-    };
-    while (p < end) {
-        uint8_t c = *p;
-        if (c < 0x80) { out += static_cast<char>(c); ++p; continue; }
-        uint32_t cp = 0; size_t n = 0;
-        if ((c & 0xE0) == 0xC0) { cp = c & 0x1F; n = 2; }
-        else if ((c & 0xF0) == 0xE0) { cp = c & 0x0F; n = 3; }
-        else if ((c & 0xF8) == 0xF0) { cp = c & 0x07; n = 4; }
-        else { emit_cp(0xFFFD); ++p; continue; }
-        if (p + n > end) { emit_cp(0xFFFD); ++p; continue; }
-        bool bad = false;
-        for (size_t i = 1; i < n; ++i) {
-            if ((p[i] & 0xC0) != 0x80) { bad = true; break; }
-            cp = (cp << 6) | (p[i] & 0x3F);
-        }
-        if (bad) { emit_cp(0xFFFD); ++p; continue; }
-        if (cp >= 0xD800 && cp <= 0xDBFF && p + n + 3 <= end &&
-            (p[n] & 0xF0) == 0xE0 && (p[n + 1] & 0xC0) == 0x80 &&
-            (p[n + 2] & 0xC0) == 0x80) {
-            uint32_t lo = ((p[n] & 0x0F) << 12) | ((p[n + 1] & 0x3F) << 6) |
-                          (p[n + 2] & 0x3F);
-            if (lo >= 0xDC00 && lo <= 0xDFFF) {
-                emit_cp(0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00));
-                p += n + 3;
-                continue;
-            }
-        }
-        emit_cp(cp);
-        p += n;
-    }
+// accepts it. Lone surrogates (invalid in UTF-8) become U+FFFD. The body now
+// lives in the shared codec (dexllm#22) so the smali renderer decodes an
+// identifier exactly as this boundary does.
+inline std::string DecodeMutf8ForPy(std::string_view raw) {
+    return dexkit::dad::mutf8::Mutf8ToUtf8Lossy(raw);
+}
+
+// dexllm#22 — the two halves of the identifier boundary. An IDENTIFIER (a class
+// descriptor, a member name, a proto) is dex string-pool MUTF-8 exactly like a
+// string literal is, so handing it to pybind raw RAISES for the one form UTF-8
+// cannot express: a supplementary-plane character, which dex stores as a
+// SURROGATE PAIR and the verifier explicitly permits in a name. That is not a
+// corner case of one call — list_classes() is the entry point for the decompile
+// drivers, the sweep harness and the MCP tools, so the whole analysis of such a
+// sample died on an exception naming an encoding rather than a cause.
+//
+// Decoding alone would be worse than the crash: identifiers are also INPUT to
+// every identity API (decompile_method(descriptor), render_method_smali, …), and
+// the matchers compare against raw pool bytes, so a decoded descriptor handed
+// back in would silently miss instead of loudly failing. The two directions are
+// therefore applied as a PAIR, `ident_out` on the way out and `ident_in` on the
+// way in — the same pairing dexllm#19 established for string content. For every
+// identifier a verified dex can hold the two are exact inverses (a surrogate pair
+// decodes to one code point and re-encodes to the same pair), so the round trip
+// list_classes → list_class_methods → decompile/render holds.
+inline py::str ident_out(const std::string& raw) {
+    return py::str(DecodeMutf8ForPy(raw));
+}
+inline py::list ident_out(const std::vector<std::string>& raw) {
+    py::list out;
+    for (const auto& s : raw) out.append(py::str(DecodeMutf8ForPy(s)));
     return out;
+}
+inline std::string ident_in(const std::string& utf8) {
+    return dexkit::dad::mutf8::Utf8ToMutf8(utf8);
 }
 
 // Recursively convert a dad::AstValue into native Python objects (mirroring
@@ -164,10 +145,10 @@ public:
     const std::string& apk_path() const { return ext_.GetApkPath(); }
     std::vector<std::string> sources() const { return ext_.GetSources(); }
     int locate_class_dex(const std::string& descriptor) const {
-        return ext_.LocateClassDex(descriptor);
+        return ext_.LocateClassDex(ident_in(descriptor));
     }
-    std::vector<std::string> list_classes() const {
-        return ext_.ListClasses();
+    py::list list_classes() const {
+        return ident_out(ext_.ListClasses());
     }
     // Every distinct string the app loads AS DATA — const-string (0x1a/0x1b)
     // operands + static VALUE_STRING (0x17) initializers — MUTF-8 → UTF-8 decoded.
@@ -191,19 +172,18 @@ public:
         }
         return out;
     }
-    std::vector<std::string>
-    list_class_methods(const std::string& class_descriptor) const {
-        return ext_.ListClassMethods(class_descriptor);
+    py::list list_class_methods(const std::string& class_descriptor) const {
+        return ident_out(ext_.ListClassMethods(ident_in(class_descriptor)));
     }
 
     // Forward string accessors (the code→strings direction). Same MUTF-8 decode +
     // dedup-on-DECODED-text contract as list_value_strings, so two raw byte
     // sequences that decode alike collapse to one entry.
     py::list list_method_strings(const std::string& method_descriptor) {
-        return decoded_unique(ext_.ListMethodStrings(method_descriptor));
+        return decoded_unique(ext_.ListMethodStrings(ident_in(method_descriptor)));
     }
     py::list list_class_strings(const std::string& class_descriptor) {
-        return decoded_unique(ext_.ListClassStrings(class_descriptor));
+        return decoded_unique(ext_.ListClassStrings(ident_in(class_descriptor)));
     }
 
     std::vector<dexkit::ext::ExternalTypeRef>
@@ -221,38 +201,36 @@ public:
 
     std::vector<dexkit::ext::CallSite>
     find_call_sites_to_api(const std::string& api_descriptor) {
-        return ext_.FindCallSitesToApi(api_descriptor);
+        return ext_.FindCallSitesToApi(ident_in(api_descriptor));
     }
     std::vector<dexkit::ext::CallSite>
     find_call_sites_from_method(const std::string& method_descriptor) {
-        return ext_.FindCallSitesFromMethod(method_descriptor);
+        return ext_.FindCallSitesFromMethod(ident_in(method_descriptor));
     }
-    std::vector<std::string>
-    find_field_read_methods(const std::string& field_descriptor) {
-        return ext_.FindFieldReadMethods(field_descriptor);
+    py::list find_field_read_methods(const std::string& field_descriptor) {
+        return ident_out(ext_.FindFieldReadMethods(ident_in(field_descriptor)));
     }
-    std::vector<std::string>
-    find_field_write_methods(const std::string& field_descriptor) {
-        return ext_.FindFieldWriteMethods(field_descriptor);
+    py::list find_field_write_methods(const std::string& field_descriptor) {
+        return ident_out(ext_.FindFieldWriteMethods(ident_in(field_descriptor)));
     }
     dexkit::ext::TypeReferences
     find_type_references(const std::string& type_descriptor) {
-        return ext_.FindTypeReferences(type_descriptor);
+        return ext_.FindTypeReferences(ident_in(type_descriptor));
     }
-    std::vector<std::string> list_classes_in_dex(int dex_id) const {
-        return ext_.ListClassesInDex(dex_id);
+    py::list list_classes_in_dex(int dex_id) const {
+        return ident_out(ext_.ListClassesInDex(dex_id));
     }
-    std::vector<std::string> list_field_descriptors() const {
-        return ext_.ListFieldDescriptors();
+    py::list list_field_descriptors() const {
+        return ident_out(ext_.ListFieldDescriptors());
     }
-    std::vector<std::string> list_field_descriptors_in_dex(int dex_id) const {
-        return ext_.ListFieldDescriptorsInDex(dex_id);
+    py::list list_field_descriptors_in_dex(int dex_id) const {
+        return ident_out(ext_.ListFieldDescriptorsInDex(dex_id));
     }
-    std::vector<std::string> list_method_descriptors() const {
-        return ext_.ListMethodDescriptors();
+    py::list list_method_descriptors() const {
+        return ident_out(ext_.ListMethodDescriptors());
     }
-    std::vector<std::string> list_method_descriptors_in_dex(int dex_id) const {
-        return ext_.ListMethodDescriptorsInDex(dex_id);
+    py::list list_method_descriptors_in_dex(int dex_id) const {
+        return ident_out(ext_.ListMethodDescriptorsInDex(dex_id));
     }
     py::bytes extract_dex_bytes(int dex_id) const {
         const auto v = ext_.GetDexBytes(dex_id);
@@ -272,9 +250,9 @@ public:
             py::list rows;
             for (const auto& r : g.rows) {
                 py::dict rd;
-                rd["api"] = r.api;
-                rd["descriptors"] = py::cast(r.descriptors);
-                rd["callers"] = py::cast(r.callers);
+                rd["api"] = r.api;  // bundled AOSP table, not pool bytes
+                rd["descriptors"] = ident_out(r.descriptors);
+                rd["callers"] = ident_out(r.callers);
                 rows.append(rd);
             }
             gd["rows"] = rows;
@@ -285,7 +263,7 @@ public:
 
     dexkit::ext::ClassSummary
     get_class_summary(const std::string& descriptor) const {
-        return ext_.GetClassSummary(descriptor);
+        return ext_.GetClassSummary(ident_in(descriptor));
     }
 
     // L7 — Find/Match wrappers
@@ -293,7 +271,11 @@ public:
     find_classes_by_name(const std::string& name,
                          const std::string& match_type,
                          bool ignore_case) {
-        return ext_.FindClassesByName(name, match_type, ignore_case);
+        // dexllm#22: the NAME matchers compare against raw pool bytes too, so the
+        // query needs the same encode-IN as a descriptor. This is what closes the
+        // residual dexllm#19 recorded but could not fix — an astral identifier was
+        // unfindable because enumerating it raised before you could search for it.
+        return ext_.FindClassesByName(ident_in(name), match_type, ignore_case);
     }
     std::vector<dexkit::ext::ClassMatch>
     find_classes_using_strings(const std::vector<std::string>& strings,
@@ -330,23 +312,24 @@ public:
                          const std::string& match_type,
                          const std::string& declaring_class,
                          bool ignore_case) {
-        return ext_.FindMethodsByName(name, match_type, declaring_class, ignore_case);
+        return ext_.FindMethodsByName(ident_in(name), match_type,
+                                      ident_in(declaring_class), ignore_case);
     }
     std::vector<dexkit::ext::ClassMatch>
     find_classes_by_annotation(const std::string& a, const std::string& mt) {
-        return ext_.FindClassesByAnnotation(a, mt);
+        return ext_.FindClassesByAnnotation(ident_in(a), mt);
     }
     std::vector<dexkit::ext::MethodMatch>
     find_methods_by_annotation(const std::string& a, const std::string& mt) {
-        return ext_.FindMethodsByAnnotation(a, mt);
+        return ext_.FindMethodsByAnnotation(ident_in(a), mt);
     }
     std::vector<dexkit::ext::ClassMatch>
     find_classes_by_super(const std::string& s, const std::string& mt) {
-        return ext_.FindClassesBySuperclass(s, mt);
+        return ext_.FindClassesBySuperclass(ident_in(s), mt);
     }
     std::vector<dexkit::ext::ClassMatch>
     find_classes_implementing(const std::string& i, const std::string& mt) {
-        return ext_.FindClassesImplementing(i, mt);
+        return ext_.FindClassesImplementing(ident_in(i), mt);
     }
     std::vector<dexkit::ext::MethodMatch>
     find_methods_using_int_literals(const std::vector<int64_t>& vs) {
@@ -358,13 +341,17 @@ public:
     }
     std::vector<dexkit::ext::ResolvedCallSite>
     resolve_call_args(const std::string& api_descriptor) {
-        return ext_.ResolveCallArgs(api_descriptor);
+        return ext_.ResolveCallArgs(ident_in(api_descriptor));
     }
+    // The rendered listing decodes its identifiers inside the renderer (so a
+    // decoded identifier is escaped like every other character, not materialised
+    // into the assembled text afterwards — see EscapeSmaliString), hence no
+    // ident_out here: the returned text is already valid UTF-8.
     std::string render_method_smali(const std::string& descriptor) const {
-        return ext_.RenderMethodSmali(descriptor);
+        return ext_.RenderMethodSmali(ident_in(descriptor));
     }
     std::string render_class_smali(const std::string& descriptor) const {
-        return ext_.RenderClassSmali(descriptor);
+        return ext_.RenderClassSmali(ident_in(descriptor));
     }
     // Java text decompile via the dad_cpp Decompiler facade. These C++ members
     // keep their historical `_java` names; the PYTHON-visible spelling is
@@ -372,15 +359,16 @@ public:
     // (the `*_java` .def registrations below are deprecated aliases — dexllm#21).
     // GIL is released at the binding site for true parallel decompilation.
     std::string decompile_method_java(const std::string& descriptor) const {
-        return decompiler_->DecompileMethod(descriptor);
+        return decompiler_->DecompileMethod(ident_in(descriptor));
     }
     // D-3 (dexllm#1) — Java text + (line ↔ dex byte offset) map for smali
     // sync. Returns {"source": str, "pc_map": [[line, byte_off], ...]}.
     py::dict decompile_method_java_with_pc(const std::string& descriptor) const {
         dexkit::dad::Decompiler::DecompiledMethodWithMap r;
+        const std::string raw_desc = ident_in(descriptor);
         {
             py::gil_scoped_release release;  // as in the C++ decompile_method_java above
-            r = decompiler_->DecompileMethodWithPcMap(descriptor);
+            r = decompiler_->DecompileMethodWithPcMap(raw_desc);
         }
         py::dict out;
         out["source"] = r.source;
@@ -391,19 +379,22 @@ public:
         return out;
     }
     std::string decompile_class_java(const std::string& descriptor) const {
-        return decompiler_->DecompileClass(descriptor);
+        return decompiler_->DecompileClass(ident_in(descriptor));
     }
 
     py::dict decompile_method_ast(const std::string& descriptor,
                                   bool include_source) {
-        auto ast = decompiler_->DecompileMethodAst(descriptor, include_source);
+        auto ast = decompiler_->DecompileMethodAst(ident_in(descriptor),
+                                                   include_source);
         py::dict out;
         out["found"] = ast.found;
-        out["cls_name"] = ast.cls_name;
-        out["name"] = ast.name;
-        out["proto"] = ast.proto;
-        out["ret_type"] = ast.ret_type;
-        out["params_type"] = ast.params_type;
+        // Signature components are pool identifiers — decoded like every other
+        // identifier. (`source` is already sanitised by the decompiler.)
+        out["cls_name"] = ident_out(ast.cls_name);
+        out["name"] = ident_out(ast.name);
+        out["proto"] = ident_out(ast.proto);
+        out["ret_type"] = ident_out(ast.ret_type);
+        out["params_type"] = ident_out(ast.params_type);
         out["access"] = ast.access;
         out["source"] = ast.source;
         // Full nested AST (DAD dast.py get_ast): {triple, flags, ret, params,
@@ -482,86 +473,141 @@ PYBIND11_MODULE(_dexkit_core, m) {
         "source. Never throws: a malformed / unopenable / non-dex path is reported as "
         "a valid=False verdict. lenient=True skips VerifyInsns (ART-structural mode).");
 
+    // Every identifier-valued attribute below is exposed through ident_out
+    // (dexllm#22) rather than def_readonly: the field holds raw pool MUTF-8, and
+    // pybind's automatic std::string → str conversion is strict UTF-8, so a
+    // supplementary-plane identifier would RAISE on attribute access. Behaviour
+    // is unchanged for ASCII (the decoder's fast path returns the input as-is).
     py::class_<dexkit::ext::ExternalTypeRef>(m, "ExternalTypeRef")
-        .def_readonly("descriptor", &dexkit::ext::ExternalTypeRef::descriptor)
+        .def_property_readonly("descriptor",
+            [](const dexkit::ext::ExternalTypeRef& r) {
+                return ident_out(r.descriptor);
+            })
         .def_readonly("referenced_in_dex_ids",
                       &dexkit::ext::ExternalTypeRef::referenced_in_dex_ids)
         .def("__repr__", [](const dexkit::ext::ExternalTypeRef& r) {
-            return "ExternalTypeRef(" + r.descriptor + ")";
+            return "ExternalTypeRef(" + DecodeMutf8ForPy(r.descriptor) + ")";
         });
 
     py::class_<dexkit::ext::ExternalMethodRef>(m, "ExternalMethodRef")
-        .def_readonly("class_descriptor",
-                      &dexkit::ext::ExternalMethodRef::class_descriptor)
-        .def_readonly("name", &dexkit::ext::ExternalMethodRef::name)
-        .def_readonly("proto", &dexkit::ext::ExternalMethodRef::proto)
+        .def_property_readonly("class_descriptor",
+            [](const dexkit::ext::ExternalMethodRef& r) {
+                return ident_out(r.class_descriptor);
+            })
+        .def_property_readonly("name",
+            [](const dexkit::ext::ExternalMethodRef& r) {
+                return ident_out(r.name);
+            })
+        .def_property_readonly("proto",
+            [](const dexkit::ext::ExternalMethodRef& r) {
+                return ident_out(r.proto);
+            })
         .def_readonly("referenced_in_dex_ids",
                       &dexkit::ext::ExternalMethodRef::referenced_in_dex_ids)
+        // Decode each component, THEN join: decoding the concatenation could pair
+        // a trailing surrogate half with the next component's leading one.
         .def_property_readonly("signature",
             [](const dexkit::ext::ExternalMethodRef& r) {
-                return r.class_descriptor + "->" + r.name + r.proto;
+                return py::str(DecodeMutf8ForPy(r.class_descriptor) + "->" +
+                               DecodeMutf8ForPy(r.name) +
+                               DecodeMutf8ForPy(r.proto));
             })
         // The decomposed views below are computed in Python via descriptors.py
         // to keep parsing logic in one place; Python-side properties are added
         // by __init_subclass__ shim in __init__.py once the class is imported.
         .def("__repr__", [](const dexkit::ext::ExternalMethodRef& r) {
-            return "ExternalMethodRef(" + r.class_descriptor + "->" + r.name +
-                   r.proto + ")";
+            return "ExternalMethodRef(" + DecodeMutf8ForPy(r.class_descriptor) +
+                   "->" + DecodeMutf8ForPy(r.name) + DecodeMutf8ForPy(r.proto) +
+                   ")";
         });
 
     py::class_<dexkit::ext::ClassMatch>(m, "ClassMatch")
-        .def_readonly("descriptor", &dexkit::ext::ClassMatch::descriptor)
+        .def_property_readonly("descriptor",
+            [](const dexkit::ext::ClassMatch& c) {
+                return ident_out(c.descriptor);
+            })
         .def_readonly("dex_id", &dexkit::ext::ClassMatch::dex_id)
         .def_readonly("class_id", &dexkit::ext::ClassMatch::class_id)
         .def("__repr__", [](const dexkit::ext::ClassMatch& c) {
-            return "ClassMatch(" + c.descriptor + " in dex " +
+            return "ClassMatch(" + DecodeMutf8ForPy(c.descriptor) + " in dex " +
                    std::to_string(c.dex_id) + ")";
         });
 
     py::class_<dexkit::ext::MethodMatch>(m, "MethodMatch")
-        .def_readonly("descriptor", &dexkit::ext::MethodMatch::descriptor)
+        .def_property_readonly("descriptor",
+            [](const dexkit::ext::MethodMatch& m) {
+                return ident_out(m.descriptor);
+            })
         .def_readonly("dex_id", &dexkit::ext::MethodMatch::dex_id)
         .def_readonly("method_id", &dexkit::ext::MethodMatch::method_id)
         .def("__repr__", [](const dexkit::ext::MethodMatch& m) {
-            return "MethodMatch(" + m.descriptor + " in dex " +
+            return "MethodMatch(" + DecodeMutf8ForPy(m.descriptor) + " in dex " +
                    std::to_string(m.dex_id) + ")";
         });
 
     py::class_<dexkit::ext::FieldMatch>(m, "FieldMatch")
-        .def_readonly("descriptor", &dexkit::ext::FieldMatch::descriptor)
+        .def_property_readonly("descriptor",
+            [](const dexkit::ext::FieldMatch& f) {
+                return ident_out(f.descriptor);
+            })
         .def_readonly("dex_id", &dexkit::ext::FieldMatch::dex_id)
         .def_readonly("field_id", &dexkit::ext::FieldMatch::field_id);
 
     py::class_<dexkit::ext::ClassMemberField>(m, "ClassMemberField")
-        .def_readonly("name", &dexkit::ext::ClassMemberField::name)
-        .def_readonly("type", &dexkit::ext::ClassMemberField::type)
+        .def_property_readonly("name",
+            [](const dexkit::ext::ClassMemberField& f) {
+                return ident_out(f.name);
+            })
+        .def_property_readonly("type",
+            [](const dexkit::ext::ClassMemberField& f) {
+                return ident_out(f.type);
+            })
         .def_readonly("access_flags", &dexkit::ext::ClassMemberField::access_flags)
         .def("__repr__", [](const dexkit::ext::ClassMemberField& f) {
-            return "ClassMemberField(" + f.name + ":" + f.type + ")";
+            return "ClassMemberField(" + DecodeMutf8ForPy(f.name) + ":" +
+                   DecodeMutf8ForPy(f.type) + ")";
         });
 
     py::class_<dexkit::ext::ClassMemberMethod>(m, "ClassMemberMethod")
-        .def_readonly("name", &dexkit::ext::ClassMemberMethod::name)
-        .def_readonly("proto", &dexkit::ext::ClassMemberMethod::proto)
+        .def_property_readonly("name",
+            [](const dexkit::ext::ClassMemberMethod& mm) {
+                return ident_out(mm.name);
+            })
+        .def_property_readonly("proto",
+            [](const dexkit::ext::ClassMemberMethod& mm) {
+                return ident_out(mm.proto);
+            })
         .def_readonly("access_flags", &dexkit::ext::ClassMemberMethod::access_flags)
         .def("__repr__", [](const dexkit::ext::ClassMemberMethod& mm) {
-            return "ClassMemberMethod(" + mm.name + mm.proto + ")";
+            return "ClassMemberMethod(" + DecodeMutf8ForPy(mm.name) +
+                   DecodeMutf8ForPy(mm.proto) + ")";
         });
 
     py::class_<dexkit::ext::ClassSummary>(m, "ClassSummary")
-        .def_readonly("descriptor", &dexkit::ext::ClassSummary::descriptor)
+        .def_property_readonly("descriptor",
+            [](const dexkit::ext::ClassSummary& s) {
+                return ident_out(s.descriptor);
+            })
         .def_readonly("is_internal", &dexkit::ext::ClassSummary::is_internal)
         .def_readonly("dex_id", &dexkit::ext::ClassSummary::dex_id)
         .def_readonly("access_flags", &dexkit::ext::ClassSummary::access_flags)
-        .def_readonly("superclass_descriptor",
-                      &dexkit::ext::ClassSummary::superclass_descriptor)
-        .def_readonly("interface_descriptors",
-                      &dexkit::ext::ClassSummary::interface_descriptors)
+        .def_property_readonly("superclass_descriptor",
+            [](const dexkit::ext::ClassSummary& s) {
+                return ident_out(s.superclass_descriptor);
+            })
+        .def_property_readonly("interface_descriptors",
+            [](const dexkit::ext::ClassSummary& s) {
+                return ident_out(s.interface_descriptors);
+            })
         .def_readonly("fields", &dexkit::ext::ClassSummary::fields)
         .def_readonly("methods", &dexkit::ext::ClassSummary::methods)
-        .def_readonly("source_file", &dexkit::ext::ClassSummary::source_file)
+        // source_file is a pool string like any other identifier-adjacent entry.
+        .def_property_readonly("source_file",
+            [](const dexkit::ext::ClassSummary& s) {
+                return ident_out(s.source_file);
+            })
         .def("__repr__", [](const dexkit::ext::ClassSummary& s) {
-            return "ClassSummary(" + s.descriptor +
+            return "ClassSummary(" + DecodeMutf8ForPy(s.descriptor) +
                    (s.is_internal ? ", internal, dex=" + std::to_string(s.dex_id)
                                   : ", external") + ", fields=" +
                    std::to_string(s.fields.size()) + ", methods=" +
@@ -571,21 +617,36 @@ PYBIND11_MODULE(_dexkit_core, m) {
     py::class_<dexkit::ext::ArgOrigin>(m, "ArgOrigin")
         .def_readonly("kind",             &dexkit::ext::ArgOrigin::kind)
         .def_readonly("reg_num",          &dexkit::ext::ArgOrigin::reg_num)
-        .def_readonly("string_value",     &dexkit::ext::ArgOrigin::string_value)
+        // string_value is a const-string OPERAND — pool bytes exactly like an
+        // identifier, and it raised for the same reason (dexllm#22).
+        .def_property_readonly("string_value",
+            [](const dexkit::ext::ArgOrigin& a) {
+                return ident_out(a.string_value);
+            })
         .def_readonly("int_value",        &dexkit::ext::ArgOrigin::int_value)
-        .def_readonly("class_descriptor", &dexkit::ext::ArgOrigin::class_descriptor)
-        .def_readonly("field_signature",  &dexkit::ext::ArgOrigin::field_signature)
-        .def_readonly("method_signature", &dexkit::ext::ArgOrigin::method_signature)
+        .def_property_readonly("class_descriptor",
+            [](const dexkit::ext::ArgOrigin& a) {
+                return ident_out(a.class_descriptor);
+            })
+        .def_property_readonly("field_signature",
+            [](const dexkit::ext::ArgOrigin& a) {
+                return ident_out(a.field_signature);
+            })
+        .def_property_readonly("method_signature",
+            [](const dexkit::ext::ArgOrigin& a) {
+                return ident_out(a.method_signature);
+            })
         .def_readonly("parameter_index",  &dexkit::ext::ArgOrigin::parameter_index)
         .def_readonly("crossed_branch",   &dexkit::ext::ArgOrigin::crossed_branch)
         .def("__repr__", [](const dexkit::ext::ArgOrigin& a) {
             std::string body;
-            if      (a.kind == "ConstString") body = "\"" + a.string_value + "\"";
+            if      (a.kind == "ConstString")
+                body = "\"" + DecodeMutf8ForPy(a.string_value) + "\"";
             else if (a.kind == "ConstInt" || a.kind == "ConstWide") body = std::to_string(a.int_value);
             else if (a.kind == "ConstClass" || a.kind == "NewInstance" || a.kind == "NewArray")
-                body = a.class_descriptor;
-            else if (a.kind == "FieldRead")    body = a.field_signature;
-            else if (a.kind == "MethodReturn") body = a.method_signature;
+                body = DecodeMutf8ForPy(a.class_descriptor);
+            else if (a.kind == "FieldRead")    body = DecodeMutf8ForPy(a.field_signature);
+            else if (a.kind == "MethodReturn") body = DecodeMutf8ForPy(a.method_signature);
             else if (a.kind == "Parameter")    body = "#" + std::to_string(a.parameter_index);
             else if (a.crossed_branch)         body = "(varies per path)";
             return "ArgOrigin(" + a.kind + (body.empty() ? "" : " " + body) + ")";
@@ -594,34 +655,54 @@ PYBIND11_MODULE(_dexkit_core, m) {
     py::class_<dexkit::ext::ResolvedCallSite>(m, "ResolvedCallSite")
         .def_readonly("caller_dex_id",     &dexkit::ext::ResolvedCallSite::caller_dex_id)
         .def_readonly("caller_method_idx", &dexkit::ext::ResolvedCallSite::caller_method_idx)
-        .def_readonly("caller_descriptor", &dexkit::ext::ResolvedCallSite::caller_descriptor)
-        .def_readonly("callee_descriptor", &dexkit::ext::ResolvedCallSite::callee_descriptor)
+        .def_property_readonly("caller_descriptor",
+            [](const dexkit::ext::ResolvedCallSite& c) {
+                return ident_out(c.caller_descriptor);
+            })
+        .def_property_readonly("callee_descriptor",
+            [](const dexkit::ext::ResolvedCallSite& c) {
+                return ident_out(c.callee_descriptor);
+            })
         .def_readonly("bytecode_offset",   &dexkit::ext::ResolvedCallSite::bytecode_offset)
         .def_readonly("invoke_opcode",     &dexkit::ext::ResolvedCallSite::invoke_opcode)
         .def_readonly("args",              &dexkit::ext::ResolvedCallSite::args)
         .def("__repr__", [](const dexkit::ext::ResolvedCallSite& c) {
-            return "ResolvedCallSite(" + c.caller_descriptor + " -> " +
-                   c.callee_descriptor + ", args=" +
+            return "ResolvedCallSite(" + DecodeMutf8ForPy(c.caller_descriptor) +
+                   " -> " + DecodeMutf8ForPy(c.callee_descriptor) + ", args=" +
                    std::to_string(c.args.size()) + ")";
         });
 
     py::class_<dexkit::ext::CallSite>(m, "CallSite")
         .def_readonly("caller_dex_id", &dexkit::ext::CallSite::caller_dex_id)
         .def_readonly("caller_method_idx", &dexkit::ext::CallSite::caller_method_idx)
-        .def_readonly("caller_descriptor", &dexkit::ext::CallSite::caller_descriptor)
-        .def_readonly("callee_descriptor", &dexkit::ext::CallSite::callee_descriptor)
+        .def_property_readonly("caller_descriptor",
+            [](const dexkit::ext::CallSite& c) {
+                return ident_out(c.caller_descriptor);
+            })
+        .def_property_readonly("callee_descriptor",
+            [](const dexkit::ext::CallSite& c) {
+                return ident_out(c.callee_descriptor);
+            })
         .def_readonly("bytecode_offset", &dexkit::ext::CallSite::bytecode_offset)
         .def_readonly("invoke_opcode", &dexkit::ext::CallSite::invoke_opcode)
         .def("__repr__", [](const dexkit::ext::CallSite& c) {
-            return "CallSite(" + c.caller_descriptor + " -> " + c.callee_descriptor + ")";
+            return "CallSite(" + DecodeMutf8ForPy(c.caller_descriptor) + " -> " +
+                   DecodeMutf8ForPy(c.callee_descriptor) + ")";
         });
 
     py::class_<dexkit::ext::TypeReferences>(m, "TypeReferences")
-        .def_readonly("fields", &dexkit::ext::TypeReferences::fields)
-        .def_readonly("methods_returning",
-                      &dexkit::ext::TypeReferences::methods_returning)
-        .def_readonly("methods_with_param",
-                      &dexkit::ext::TypeReferences::methods_with_param)
+        .def_property_readonly("fields",
+            [](const dexkit::ext::TypeReferences& t) {
+                return ident_out(t.fields);
+            })
+        .def_property_readonly("methods_returning",
+            [](const dexkit::ext::TypeReferences& t) {
+                return ident_out(t.methods_returning);
+            })
+        .def_property_readonly("methods_with_param",
+            [](const dexkit::ext::TypeReferences& t) {
+                return ident_out(t.methods_with_param);
+            })
         .def("__repr__", [](const dexkit::ext::TypeReferences& t) {
             return "TypeReferences(fields=" + std::to_string(t.fields.size()) +
                    ", returning=" + std::to_string(t.methods_returning.size()) +
@@ -629,15 +710,24 @@ PYBIND11_MODULE(_dexkit_core, m) {
         });
 
     py::class_<dexkit::ext::ExternalFieldRef>(m, "ExternalFieldRef")
-        .def_readonly("class_descriptor",
-                      &dexkit::ext::ExternalFieldRef::class_descriptor)
-        .def_readonly("name", &dexkit::ext::ExternalFieldRef::name)
-        .def_readonly("type", &dexkit::ext::ExternalFieldRef::type)
+        .def_property_readonly("class_descriptor",
+            [](const dexkit::ext::ExternalFieldRef& r) {
+                return ident_out(r.class_descriptor);
+            })
+        .def_property_readonly("name",
+            [](const dexkit::ext::ExternalFieldRef& r) {
+                return ident_out(r.name);
+            })
+        .def_property_readonly("type",
+            [](const dexkit::ext::ExternalFieldRef& r) {
+                return ident_out(r.type);
+            })
         .def_readonly("referenced_in_dex_ids",
                       &dexkit::ext::ExternalFieldRef::referenced_in_dex_ids)
         .def("__repr__", [](const dexkit::ext::ExternalFieldRef& r) {
-            return "ExternalFieldRef(" + r.class_descriptor + "->" + r.name +
-                   ":" + r.type + ")";
+            return "ExternalFieldRef(" + DecodeMutf8ForPy(r.class_descriptor) +
+                   "->" + DecodeMutf8ForPy(r.name) + ":" +
+                   DecodeMutf8ForPy(r.type) + ")";
         });
 
     py::class_<PyDexKit>(m, "DexKit")

@@ -1021,20 +1021,66 @@ def test_smali_never_contains_raw_control_chars(loadable_apks):
     assert seen_candidate, "no control-bearing literal in the corpus — test vacuous"
 
 
-def test_smali_literals_cannot_be_broken_by_overlong_mutf8(tmp_path):
-    """dexllm#22: a verifier-ACCEPTED overlong sequence must not inject structure.
+def _find_two_byte_seq(buf):
+    """Offset of a substitutable 2-byte MUTF-8 sequence (same LCP rule as above)."""
+    import struct as _s
 
-    `VerifyMutf8` checks lead/continuation shape only (ART does the same), so a
-    non-NUL OVERLONG is legal input: `E0 80 A2` decodes to `"` and `E0 80 8A` to a
-    newline. Escaping raw BYTES let those through untouched, so anything decoding
-    the assembled text afterwards MATERIALISED a structural character inside the
-    quoted literal — ending it early or forging a whole instruction line. The
-    rendered listing is handed to an analyst / LLM, so that is a hostile-input
-    write into the analysis view. Escaping the DECODED characters closes it.
+    def _uleb(b, o):
+        r = sh = 0
+        while True:
+            x = b[o]
+            o += 1
+            r |= (x & 0x7F) << sh
+            sh += 7
+            if not (x & 0x80):
+                return r, o
+
+    n, off0 = _s.unpack_from("<II", buf, 56)
+    data = []
+    for i in range(n):
+        o = _s.unpack_from("<I", buf, off0 + 4 * i)[0]
+        _len, d = _uleb(buf, o)
+        data.append((d, bytes(buf[d : buf.index(0, d)])))
+
+    def lcp(a, b):
+        k = 0
+        while k < len(a) and k < len(b) and a[k] == b[k]:
+            k += 1
+        return k
+
+    for i, (d, s) in enumerate(data):
+        prev = data[i - 1][1] if i else b""
+        nxt = data[i + 1][1] if i + 1 < len(data) else b""
+        safe = max(lcp(s, prev), lcp(s, nxt)) + 1
+        for j in range(d + safe, d + len(s) - 1):
+            if 0xC2 <= buf[j] <= 0xDF and 0x80 <= buf[j + 1] <= 0xBF:
+                return j
+    return None
+
+
+def test_overlong_mutf8_is_rejected_at_the_verifier(tmp_path):
+    """An overlong sequence must never reach the renderer — it is REJECTED at load.
+
+    History, because the assertion here inverted. This guard was written when
+    `VerifyMutf8` checked lead/continuation shape only, on the belief that ART did
+    the same; a non-NUL OVERLONG was therefore legal input (`E0 80 A2` decodes to
+    `"`, `E0 80 8A` to a newline), and the guard proved that escaping the DECODED
+    characters stopped it from injecting structure into a rendered literal.
+
+    ART does NOT accept them: `CheckIntraStringDataItem` rejects both forms as an
+    "Illegal representation" (dex_file_verifier.cc:1897 / :1922). Porting those two
+    checks (dexllm#22) closed a worse hole — an overlong IDENTIFIER decodes to a
+    canonical character that cannot be re-encoded, so it enumerated fine and then
+    resolved to nothing, silently — and it dissolves this guard's premise. So the
+    assertion moves to where the contract now lives: such a dex does not load.
+
+    The escaping in `EscapeSmaliString` stays and is still exercised by
+    `test_smali_never_contains_raw_control_chars`; it is now defence in depth
+    rather than the only barrier.
 
     Crafts the input in place: a 3-byte MUTF-8 sequence is replaced by a 3-byte
-    overlong, so byte length, utf16_len and string_ids order are all unchanged and
-    the dex still verifies.
+    overlong, so byte length, utf16_len and string_ids order are all unchanged —
+    the ONLY thing that changes is the canonicality of the encoding.
     """
     import struct
 
@@ -1049,13 +1095,32 @@ def test_smali_literals_cannot_be_broken_by_overlong_mutf8(tmp_path):
                 return r, off
 
     def find_seq(buf):
-        """Offset of the first 3-byte MUTF-8 sequence inside any string_data."""
+        """Offset of a 3-byte MUTF-8 sequence that can be substituted in place.
+
+        The site must lie past the longest common prefix with BOTH `string_ids`
+        neighbours, so replacing it cannot reorder the pool — otherwise the
+        canonical-substitution control below could fail with `Out-of-order
+        string_ids`, a false failure attributable to the sample rather than the
+        code.
+        """
         n, off0 = struct.unpack_from("<II", buf, 56)
+        data = []
         for i in range(n):
             o = struct.unpack_from("<I", buf, off0 + 4 * i)[0]
             _len, d = uleb(buf, o)
-            e = buf.index(0, d)
-            for j in range(d, e - 2):
+            data.append((d, bytes(buf[d : buf.index(0, d)])))
+
+        def lcp(a, b):
+            k = 0
+            while k < len(a) and k < len(b) and a[k] == b[k]:
+                k += 1
+            return k
+
+        for i, (d, s) in enumerate(data):
+            prev = data[i - 1][1] if i else b""
+            nxt = data[i + 1][1] if i + 1 < len(data) else b""
+            safe = max(lcp(s, prev), lcp(s, nxt)) + 1
+            for j in range(d + safe, d + len(s) - 2):
                 if (
                     0xE0 <= buf[j] <= 0xEF
                     and 0x80 <= buf[j + 1] <= 0xBF
@@ -1087,33 +1152,35 @@ def test_smali_literals_cannot_be_broken_by_overlong_mutf8(tmp_path):
 
         f = tmp_path / "overlong.dex"
         f.write_bytes(bytes(b))
-        d2 = dexllm.DexKit(str(f))
-        assert d2.verify_report()[0]["valid"], "the crafted dex must still verify"
 
-        reached = 0
-        for cls in d2.list_classes():
-            for m in d2.list_class_methods(cls):
-                sm = d2.render_method_smali(m)  # must not raise
-                assert not any(ord(c) < 0x20 and c != "\n" for c in sm), what
-                for line in sm.split("\n"):
-                    if "const-string" not in line:
-                        continue
-                    body = line.split(", ", 1)[1] if ", " in line else ""
-                    bare, k = 0, 0
-                    while k < len(body):
-                        if body[k] == "\\":
-                            k += 2
-                            continue
-                        if body[k] == '"':
-                            bare += 1
-                        k += 1
-                    # exactly the opening and closing quote — an injected one would
-                    # make this odd and terminate the literal early
-                    assert bare == 2, (what, line[:120])
-                    # did the payload actually land in THIS literal, escaped?
-                    if '\\"' in body or "\\n" in body:
-                        reached += 1
-        # Without this the guard can go vacuous: find_seq scans all string_data,
-        # so on a different corpus it could patch an identifier instead, leaving
-        # no const-string line carrying the payload and nothing to balance.
-        assert reached, f"{what} never reached a const-string literal"
+        report = dexllm.verify(str(f))
+        assert not report[0]["valid"], f"{what} must be rejected at load"
+        assert "representation" in report[0]["reason"], (what, report[0]["reason"])
+        # …and the load path refuses it, so nothing downstream can ever see it.
+        with pytest.raises(Exception):
+            dexllm.DexKit(str(f))
+
+    # The 2-byte arm needs its own case: every payload above is 3-byte, so the
+    # `v2 != 0 && v2 < 0x80` check could be deleted and this guard would still
+    # pass. `C1 A9` decodes to 'i' — an overlong spelling of a 1-byte character.
+    # (Its `v2 != 0` exemption, the encoded NUL, is covered by the corpus itself:
+    # `C0 80` occurs 16,129 times in bundled string_data, so rejecting it would
+    # break test_type_id_check_does_not_false_reject_the_corpus.)
+    b2 = bytearray(open(src, "rb").read())
+    two = _find_two_byte_seq(b2)
+    if two is not None:
+        b2[two : two + 2] = b"\xc1\xa9"
+        f2 = tmp_path / "overlong2.dex"
+        f2.write_bytes(bytes(b2))
+        rep2 = dexllm.verify(str(f2))
+        assert not rep2[0]["valid"], "a 2-byte overlong must be rejected at load"
+        assert "representation" in rep2[0]["reason"], rep2[0]["reason"]
+
+    # Non-vacuity: the SAME patch site with a CANONICAL 3-byte sequence must
+    # still load. Otherwise this guard would also pass on a dex the verifier
+    # rejects for some unrelated reason, proving nothing about canonicality.
+    b = bytearray(open(src, "rb").read())
+    b[pos : pos + 3] = b"\xe2\x9c\x93"  # U+2713, canonical
+    f = tmp_path / "canonical.dex"
+    f.write_bytes(bytes(b))
+    assert dexllm.verify(str(f))[0]["valid"], dexllm.verify(str(f))[0]["reason"]

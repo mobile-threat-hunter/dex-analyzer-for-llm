@@ -153,6 +153,7 @@ Legend: ✅ ported (behavioural parity) · ⊕ beyond ART's *structural* verifie
 | ART check | VerifyDex |
 |---|---|
 | string / type / proto id ordering + uniqueness (verbatim UTF-16 comparator) | ✅ |
+| type_id — descriptor syntax for EVERY entry (`CheckInterTypeIdItem` :2735) | ✅ `VerifyTypeDescriptor` (added for dexllm#23 — previously a descriptor was checked only where another id table referenced it, so a proto-only or instruction-operand type could hold arbitrary bytes and forge a smali instruction line in the rendered listing) |
 | field_id — class `L`, type ≠ `V`, member-name, ordering | ✅ `VerifyTypeDescriptor` + `IsValidMemberName` |
 | method_id — class `L`/`[`, member-name, proto bound, ordering | ✅ |
 | class_def — class/super/interface `L`, dup, self-inherit, super-defined-before, dup interface, class_data definer-match | ✅ `VerifyClassDefs` (= ART `CheckInterClassDefItem` :2935) |
