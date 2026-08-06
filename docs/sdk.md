@@ -75,7 +75,10 @@ fields are `tuple`s; `Mapping` fields are read-only views. See
 - **`MethodAst`** `(found, class_name, name, proto, return_type, param_types,
   access_flags, source, ast, pc_map)` — the DAD nested-list AST. `ast` is a
   read-only mapping `{triple, flags, ret, params, comments, body}` **or `None`**
-  for a not-found method; `pc_map` is a tuple of `StatementLocation`.
+  for a not-found method; `pc_map` is a tuple of `StatementLocation`. Note
+  `access_flags` here is `tuple[str, ...]` — decoded modifier NAMES
+  (`('public', 'static')`) — unlike the `int` bit-field on `ClassInfo` /
+  `FieldInfo` that shares the name.
 
 ### Enumeration
 - **`ExternalMethodRef`** `(class_descriptor, name, proto, java_class,
@@ -106,6 +109,14 @@ needs (methods stay on `EnumerationPort.list_class_methods`).
   class (`dex_id == -1`).
 - **`FieldInfo`** `(name, type, access_flags)` — one declared field; its descriptor
   is `f"{cls}->{name}:{type}"`.
+
+`access_flags` on both is the **raw dex bit-field**, not normalized to
+`java.lang.reflect.Modifier`. Neither carries METHOD flags, so the
+`ACC_DECLARED_SYNCHRONIZED` (`0x20000`) vs `ACC_SYNCHRONIZED` (`0x20`)
+distinction that applies to the raw layer's `get_class_summary` (see
+[api.md](api.md#classsummary)) cannot arise here — a method's modifiers reach the
+SDK only as the decoded NAMES in `MethodAst.access_flags`, where a Java
+`synchronized` method reads `declared_synchronized`.
 
 ### Cross-reference
 - **`ArgOrigin`** `(kind, reg_num, string_value?, int_value?, class_descriptor?,

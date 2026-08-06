@@ -10,6 +10,10 @@ For a task-oriented walkthrough (the L1–L7 analysis levels), see
 The package is **[PEP 561](https://peps.python.org/pep-0561/) typed** — it ships
 `py.typed` + `.pyi` stubs (`_dexkit_core.pyi` / `__init__.pyi`), so every method
 and return type below is available to editors and type-checkers (mypy / pyright).
+The stubs also carry a **worked example on every `DexKit` method and module
+function**, so the same reference is available on hover without leaving the
+editor. Those examples are real captured output, machine-verified against the
+bundled corpus — not illustrative.
 
 Conventions:
 - **Descriptor** = a Dalvik type/method descriptor, e.g. class `Lcom/foo/Bar;`,
@@ -531,6 +535,10 @@ s.source_file             # 'Utils.java'
 s.fields                  # []                          (list[ClassMemberField])
 s.methods                 # [ClassMemberMethod(<init>()V), ClassMemberMethod(convertDpToPixel(...)I), ...]
 ```
+Every `access_flags` here — on the class and on each member — is the **raw dex
+bits**, with no `java.lang.reflect.Modifier` normalization; a method declared
+`synchronized` reads `0x20000`, not `0x20`. See
+[`ClassSummary`](#classsummary) for why.
 Render a summary as Java-source-style text (header + static→instance fields + methods):
 ```python
 dexllm.format_class(dk, 'Lcom/example/android/tvleanback/Utils;')   # str — fetch + format
