@@ -99,7 +99,7 @@ def test_get_class_summary_external_class_has_no_dex_name(dk):
 
 def test_find_call_sites_returns_clean_caller_descriptor(dk):
     api = "Landroid/util/Log;->d(Ljava/lang/String;Ljava/lang/String;)I"
-    out = tools.execute("find_call_sites_to", {"api_descriptor": api}, dk)
+    out = tools.execute("find_call_sites_to", {"method_descriptor": api}, dk)
     if not out["items"]:
         pytest.skip("fixture has no Log.d call sites")
     for item in out["items"]:
@@ -125,7 +125,7 @@ def test_resolve_call_args_shapes_compact_args(dk):
     """resolve_call_args yields JSON-safe {index, kind, value} args whose value
     matches the raw ArgOrigin, and the same call sites as find_call_sites_to."""
     api = "Landroid/util/Log;->d(Ljava/lang/String;Ljava/lang/String;)I"
-    out = tools.execute("resolve_call_args", {"api_descriptor": api}, dk)
+    out = tools.execute("resolve_call_args", {"method_descriptor": api}, dk)
     json.dumps(out)  # must be serialisable for the transport
     if not out["items"]:
         pytest.skip("fixture has no Log.d call sites")
@@ -159,7 +159,7 @@ def test_varies_by_path_reaches_the_tool_output(dk):
         "Landroid/util/Log;->d(Ljava/lang/String;Ljava/lang/String;)I",
     ):
         out = tools.execute(
-            "resolve_call_args", {"api_descriptor": api, "limit": 500}, dk
+            "resolve_call_args", {"method_descriptor": api, "limit": 500}, dk
         )
         for site in out.get("items", []):
             if any(a.get("varies_by_path") for a in site["args"]):
@@ -299,13 +299,13 @@ def test_identity_xref_tools_reject_non_descriptor_input(dk):
     # a called API in L-form works; the dotted member form errors
     api_l = "Landroid/util/Log;->d(Ljava/lang/String;Ljava/lang/String;)I"
     assert "error" not in tools.execute(
-        "resolve_call_args", {"api_descriptor": api_l}, dk
+        "resolve_call_args", {"method_descriptor": api_l}, dk
     )
     for form in (
         "android.util.Log->d(Ljava/lang/String;Ljava/lang/String;)I",
         "android/util/Log->d(Ljava/lang/String;Ljava/lang/String;)I",
     ):
-        r = tools.execute("resolve_call_args", {"api_descriptor": form}, dk)
+        r = tools.execute("resolve_call_args", {"method_descriptor": form}, dk)
         assert r.get("error", "").startswith(
             "ValueError"
         ), f"{form!r} not rejected: {r}"
@@ -595,8 +595,9 @@ def test_tool_catalog_carries_no_aliases(dk):
     An alias would not be transparent here — mcp validates arguments only for the
     names it ADVERTISES, so an unadvertised spelling silently loses schema
     validation. A renamed tool is therefore renamed outright, and the
-    catalog == impls invariant stays an exact set equality. Deprecated spellings
-    live on the Python API (raw DexKit / sdk adapter), not in this catalog.
+    catalog == impls invariant stays an exact set equality. Stage 4 then removed
+    the deprecated spellings from the Python API too, so no layer carries one —
+    this asserts the catalog never grows the alias mechanism back.
     """
     assert not hasattr(tools, "TOOL_ALIASES")
     for gone in (

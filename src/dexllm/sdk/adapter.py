@@ -384,12 +384,12 @@ class DexKitAdapter:
 
     # -- CrossReferencePort --
 
-    def find_call_sites_to(self, api_descriptor: str) -> tuple[CallSite, ...]:
-        """Return every call site invoking the given API descriptor (its callers).
+    def find_call_sites_to(self, method_descriptor: str) -> tuple[CallSite, ...]:
+        """Return every call site invoking the given method (its callers).
 
         Reverse edge: callee_descriptor is fixed, the caller_* fields vary.
         """
-        require_member_descriptor(api_descriptor)
+        require_member_descriptor(method_descriptor)
         return tuple(
             CallSite(
                 caller_descriptor=s.caller_descriptor,
@@ -399,7 +399,7 @@ class DexKitAdapter:
                 bytecode_offset=s.bytecode_offset,
                 invoke_opcode=s.invoke_opcode,
             )
-            for s in self._dk.find_call_sites_to(api_descriptor)
+            for s in self._dk.find_call_sites_to(method_descriptor)
         )
 
     def find_call_sites_from(self, method_descriptor: str) -> tuple[CallSite, ...]:
@@ -420,36 +420,9 @@ class DexKitAdapter:
             for s in self._dk.find_call_sites_from(method_descriptor)
         )
 
-    # Back-compat aliases for the names released before raw / SDK / MCP unified
-    # on find_call_sites_to / find_call_sites_from: find_call_sites was the SDK
-    # spelling, the _to_api / _from_method pair the raw + MCP one. Kept working,
-    # but deliberately NOT on CrossReferencePort — the port states the contract
-    # in the canonical names, so a port-annotated call to an alias is a type
-    # error that names its replacement.
-    #
-    # These DELEGATE rather than being class-attribute aliases
-    # (`find_call_sites = find_call_sites_to`): an attribute alias binds the base
-    # function object, so a subclass overriding one spelling would be silently
-    # bypassed by the other — and DexKitAdapter is the documented embedding
-    # surface (open_apk returns it), so subclassing is a supported pattern.
-
-    def find_call_sites(self, api_descriptor: str) -> tuple[CallSite, ...]:
-        """Return :meth:`find_call_sites_to` — deprecated alias, the former SDK name."""
-        return self.find_call_sites_to(api_descriptor)
-
-    def find_call_sites_to_api(self, api_descriptor: str) -> tuple[CallSite, ...]:
-        """Return :meth:`find_call_sites_to` — deprecated alias, the former raw name."""
-        return self.find_call_sites_to(api_descriptor)
-
-    def find_call_sites_from_method(
-        self, method_descriptor: str
-    ) -> tuple[CallSite, ...]:
-        """Return :meth:`find_call_sites_from` — deprecated alias, former raw name."""
-        return self.find_call_sites_from(method_descriptor)
-
-    def resolve_call_args(self, api_descriptor: str) -> tuple[ResolvedCallSite, ...]:
-        """Return call sites of the API with each argument's resolved origin."""
-        require_member_descriptor(api_descriptor)
+    def resolve_call_args(self, method_descriptor: str) -> tuple[ResolvedCallSite, ...]:
+        """Return call sites of the method with each argument's resolved origin."""
+        require_member_descriptor(method_descriptor)
         return tuple(
             ResolvedCallSite(
                 caller_descriptor=s.caller_descriptor,
@@ -460,7 +433,7 @@ class DexKitAdapter:
                 invoke_opcode=s.invoke_opcode,
                 args=tuple(_to_arg(a) for a in s.args),
             )
-            for s in self._dk.resolve_call_args(api_descriptor)
+            for s in self._dk.resolve_call_args(method_descriptor)
         )
 
     def find_methods_reading_field(self, field_descriptor: str) -> tuple[str, ...]:
@@ -472,14 +445,6 @@ class DexKitAdapter:
         """Return descriptors of methods that WRITE (iput*/sput*) the given field."""
         require_member_descriptor(field_descriptor)
         return tuple(self._dk.find_methods_writing_field(field_descriptor))
-
-    def find_field_readers(self, field_descriptor: str) -> tuple[str, ...]:
-        """Return :meth:`find_methods_reading_field` — deprecated alias."""
-        return self.find_methods_reading_field(field_descriptor)
-
-    def find_field_writers(self, field_descriptor: str) -> tuple[str, ...]:
-        """Return :meth:`find_methods_writing_field` — deprecated alias."""
-        return self.find_methods_writing_field(field_descriptor)
 
     def find_type_references(self, type_descriptor: str) -> TypeReferences:
         """Return signature-position references to the given type."""

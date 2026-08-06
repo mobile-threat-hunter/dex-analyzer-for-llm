@@ -230,8 +230,8 @@ much structure comes back for that *same* decompilation — bare = text,
 different verb: `render_*_smali`. The former `_java`-suffixed spellings
 (`decompile_method_java`, `decompile_class_java`, `decompile_method_java_with_pc`,
 plus `dexllm.safe_decompile_method_java` / `safe_decompile_class_java`) advertised a
-parallelism with `_ast` that does not exist; they still work as **deprecated
-aliases** but new code should use the names below — the ones the typed
+parallelism with `_ast` that does not exist. They were kept as deprecated aliases
+for one release and are **now removed** — use the names below, the ones the typed
 [`dexllm.sdk`](sdk.md) layer already used (all three) and the MCP tool catalog
 already used (`decompile_method` / `decompile_class`; it exposes no pc-map tool).
 
@@ -434,13 +434,16 @@ dk.find_call_sites_from('La2dp/Vol/ALauncher;->onCreate()V')
 
 **Naming.** `find_call_sites_to` / `find_call_sites_from` is one spelling across all
 four layers — raw `DexKit`, the typed [`dexllm.sdk`](sdk.md) port and its adapter, and
-the MCP tool catalog. The names released before that unification still work as
-**deprecated aliases** on the raw `DexKit` and on the SDK adapter (which also keeps
-its former `find_call_sites`). The **MCP catalog carries no aliases at all** — it
-advertises exactly one name per tool, and an unadvertised spelling returns
-`{"error": "unknown tool: ..."}`. That is deliberate: mcp validates arguments only
-against the schema of the tool it ADVERTISES, so an alias there would silently lose
-input validation. New code should use the canonical pair.
+the MCP tool catalog — and there is no longer any other: the pre-unification names
+(`find_call_sites`, `find_call_sites_to_api`, `find_call_sites_from_method`) were
+**removed**. The argument is `method_descriptor` in BOTH directions; the method name
+carries the role (`_to` = the callee whose callers you want, `_from` = the caller
+whose callees you want), so the parameter names what the value IS. It was
+`api_descriptor` on the `_to` side, which said "framework API" — only the common
+case, and not what the value is. The MCP catalog likewise advertises exactly one
+name per tool, and an unadvertised spelling returns `{"error": "unknown tool: ..."}`:
+mcp validates arguments only against the schema of the tool it ADVERTISES, so an
+alias there would silently lose input validation.
 
 ### Intra-method arg resolution → `list[ResolvedCallSite]`
 Same as call sites, plus the resolved origin of each argument (L4 dataflow).
@@ -480,9 +483,10 @@ for s in dk.resolve_call_args(API):
 Which methods READ (`iget*`/`sget*`) vs WRITE (`iput*`/`sput*`) a specific field
 (L2.5 reverse index). `field_descriptor` is the `Lcls;->name:Type` form; each returns
 plain method descriptors (`[]` if the field isn't declared in a loaded dex). The
-pre-rename spellings `find_field_read_methods` / `find_field_write_methods` remain
-as deprecated aliases — every other `find_*` names what it RETURNS right after
-`find_`, and these two named the queried field instead.
+pre-rename spellings `find_field_read_methods` / `find_field_write_methods` (and the
+SDK's `find_field_readers` / `find_field_writers`) are **removed** — every other
+`find_*` names what it RETURNS right after `find_`, and those named the queried
+field instead.
 ```python
 fd = 'La2dp/Vol/AppChooser$1;->this$0:La2dp/Vol/AppChooser;'
 dk.find_methods_reading_field(fd)   # ['La2dp/Vol/AppChooser$1;->onClick(Landroid/view/View;)V']   (readers)
@@ -666,9 +670,10 @@ dk.set_decompiler_cache_capacity(8192)  # None   (0 = unbounded)
 dk.clear_decompiler_cache()             # None
 ```
 An **action** is verb-first, a **read-only accessor** is a noun — the scheme the
-already-verb-first `warm_analysis_caches` was following. The pre-rename action spellings
-`decompiler_clear_cache` / `decompiler_set_cache_capacity` remain as deprecated
-aliases.
+already-verb-first `warm_analysis_caches` was following. The pre-rename action
+spellings `decompiler_clear_cache` / `decompiler_set_cache_capacity` are **removed**,
+and the setter's parameter is `capacity` (it was `cap`, the only abbreviation in the
+API and the one place raw disagreed with the SDK port).
 
 ---
 

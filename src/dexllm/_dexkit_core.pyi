@@ -462,7 +462,7 @@ class DexKit:
             (b'dex\\n', 5472720)
         """
     # class inspection / external refs
-    def get_class_summary(self, descriptor: str) -> ClassSummary:
+    def get_class_summary(self, class_descriptor: str) -> ClassSummary:
         """Class metadata + declared fields and methods in one call.
 
         For a class only REFERENCED (not declared) in a loaded dex, the result
@@ -517,7 +517,7 @@ class DexKit:
             'Landroid/app/Notification$Action;->actionIntent:Landroid/app/PendingIntent;'
         """
     # cross-reference
-    def find_call_sites_to(self, api_descriptor: str) -> list[CallSite]:
+    def find_call_sites_to(self, method_descriptor: str) -> list[CallSite]:
         """Call sites invoking the API — its CALLERS (callee fixed, caller varies).
 
         Example::
@@ -543,10 +543,8 @@ class DexKit:
             [('Landroid/content/Context;->getSystemService(Ljava/lang/String;)Ljava/lang/Object;', 6),
              ('Landroid/view/WindowManager;->getDefaultDisplay()Landroid/view/Display;', 18), ...]
         """
-    # deprecated aliases of the two above (pre-rename names)
-    def find_call_sites_to_api(self, api_descriptor: str) -> list[CallSite]: ...
-    def find_call_sites_from_method(self, method_descriptor: str) -> list[CallSite]: ...
-    def resolve_call_args(self, api_descriptor: str) -> list[ResolvedCallSite]:
+
+    def resolve_call_args(self, method_descriptor: str) -> list[ResolvedCallSite]:
         """``find_call_sites_to`` plus each argument's resolved origin.
 
         The analysis is join-aware: a definition is reported only if EVERY
@@ -586,9 +584,7 @@ class DexKit:
         ``find_methods_reading_field``. The field above has a single ``iput``, so
         its writer list holds one entry against the reader list's two.
         """
-    # deprecated aliases of the two above (pre-rename names)
-    def find_field_read_methods(self, field_descriptor: str) -> list[str]: ...
-    def find_field_write_methods(self, field_descriptor: str) -> list[str]: ...
+
     def find_type_references(self, type_descriptor: str) -> TypeReferences:
         """Where a TYPE appears: as a field type, a return type, a parameter type.
 
@@ -818,12 +814,7 @@ class DexKit:
             ...     "Lcom/example/android/tvleanback/Utils;").split("\\n")[:2]
             ['package com.example.android.tvleanback;', 'public class Utils {']
         """
-    # deprecated aliases of the three above (pre-rename names)
-    def decompile_method_java(self, method_descriptor: str) -> str: ...
-    def decompile_method_java_with_pc(
-        self, method_descriptor: str
-    ) -> _DecompiledMethodWithPc: ...
-    def decompile_class_java(self, class_descriptor: str) -> str: ...
+
     def decompile_method_ast(
         self, method_descriptor: str, include_source: bool = True
     ) -> _MethodAstResult:
@@ -892,7 +883,7 @@ class DexKit:
     def clear_decompiler_cache(self) -> None:
         """Drop every cached decompile result (frees memory; does not reset caps)."""
 
-    def set_decompiler_cache_capacity(self, cap: int) -> None:
+    def set_decompiler_cache_capacity(self, capacity: int) -> None:
         """LRU cap in methods. Default 4096; ``0`` means unbounded.
 
         Example: ``dk.set_decompiler_cache_capacity(0)`` before a whole-APK sweep.
@@ -912,6 +903,3 @@ class DexKit:
 
     def decompiler_cache_capacity(self) -> int:
         """Return the configured cap (``0`` = unbounded)."""
-    # deprecated aliases of the two ACTIONS above (clear / set_..._capacity)
-    def decompiler_clear_cache(self) -> None: ...
-    def decompiler_set_cache_capacity(self, cap: int) -> None: ...

@@ -70,9 +70,7 @@ from .safe import (
     DEFAULT_TIMEOUT_S,
     is_timeout_marker,
     safe_decompile_class,
-    safe_decompile_class_java,
     safe_decompile_method,
-    safe_decompile_method_java,
 )
 
 __all__ = [
@@ -110,9 +108,7 @@ __all__ = [
     "parse_proto",
     "pretty_proto",
     "safe_decompile_class",
-    "safe_decompile_class_java",
     "safe_decompile_method",
-    "safe_decompile_method_java",
     "signature",
     "summarize_capabilities",
     "verify",

@@ -117,6 +117,6 @@ def format_class_summary(summary: "ClassSummary", *, indent: str = "    ") -> st
     return "\n".join(out)
 
 
-def format_class(dk: DexKit, descriptor: str, **kwargs: str) -> str:
-    """Format the class summary for ``descriptor`` (fetch + format wrapper)."""
-    return format_class_summary(dk.get_class_summary(descriptor), **kwargs)
+def format_class(dk: DexKit, class_descriptor: str, **kwargs: str) -> str:
+    """Format the class summary for ``class_descriptor`` (fetch + format wrapper)."""
+    return format_class_summary(dk.get_class_summary(class_descriptor), **kwargs)

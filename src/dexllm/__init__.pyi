@@ -114,13 +114,7 @@ from .safe import (
     safe_decompile_class as safe_decompile_class,
 )
 from .safe import (
-    safe_decompile_class_java as safe_decompile_class_java,
-)
-from .safe import (
     safe_decompile_method as safe_decompile_method,
-)
-from .safe import (
-    safe_decompile_method_java as safe_decompile_method_java,
 )
 
 __version__: str
@@ -160,9 +154,7 @@ __all__ = [
     "parse_proto",
     "pretty_proto",
     "safe_decompile_class",
-    "safe_decompile_class_java",
     "safe_decompile_method",
-    "safe_decompile_method_java",
     "signature",
     "summarize_capabilities",
     "verify",

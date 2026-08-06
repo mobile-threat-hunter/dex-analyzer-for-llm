@@ -77,34 +77,22 @@ _HASHABLE_MODELS = [
 # models carrying a Mapping — frozen but NOT hashable (documented)
 _MAPPING_MODELS = [CapabilityReport, MethodAst]
 
-# dexllm#21: adapter-only back-compat spellings, deliberately absent from the ports
-_DEPRECATED_ALIASES = {
-    "find_call_sites",
-    "find_call_sites_to_api",
-    "find_call_sites_from_method",
-    "find_field_readers",
-    "find_field_writers",
-}
+# dexllm#21's adapter-only back-compat spellings were REMOVED (issue #24 resolved
+# by deletion, not by a warning policy). Kept as an empty set so the drift audit
+# below still states "no adapter method outside the ports except `.raw`" as an
+# explicit allowance rather than an implicit one.
+_DEPRECATED_ALIASES: set[str] = set()
 
 # ── the raw ↔ port name boundary (dexllm#21) ─────────────────────────────────
 # One operation, one spelling: a raw `DexKit` method and its port method share a
 # name. The whole dexllm#21 series existed because that had drifted and nothing
 # noticed. These are the ONLY licensed exceptions; anything else fails the audit.
 
-# raw-only, because they are deprecated spellings of a name that IS unified.
-# Declared alias → canonical so the list cannot be used to smuggle in an
-# unrelated new raw method: the canonical must exist on raw AND on a port.
-_RAW_DEPRECATED_ALIASES = {
-    "decompile_method_java": "decompile_method",
-    "decompile_class_java": "decompile_class",
-    "decompile_method_java_with_pc": "decompile_method_with_pc_map",
-    "find_call_sites_to_api": "find_call_sites_to",
-    "find_call_sites_from_method": "find_call_sites_from",
-    "find_field_read_methods": "find_methods_reading_field",
-    "find_field_write_methods": "find_methods_writing_field",
-    "decompiler_clear_cache": "clear_decompiler_cache",
-    "decompiler_set_cache_capacity": "set_decompiler_cache_capacity",
-}
+# raw-only deprecated spellings — now EMPTY: the nine pre-rename names were
+# removed rather than carried forever (issue #24). The mapping (alias → canonical)
+# stays as the declared shape, so re-introducing an alias is a conscious edit and
+# the audit still refuses to let one smuggle in an unrelated new raw method.
+_RAW_DEPRECATED_ALIASES: dict[str, str] = {}
 
 # raw-only, because the SDK deliberately DECOMPOSES it (ISP) — a different
 # operation shape, so a different name is correct. Maps raw name → port pieces.
@@ -712,10 +700,10 @@ def test_call_sites_from_method_callees(apk_path):
 
 def test_call_site_names_are_unified_across_layers(apk_path):
     """dexllm#21: raw DexKit, the SDK port/adapter and the MCP catalog all spell the
-    pair find_call_sites_to / find_call_sites_from. The names released before the
-    rename stay available as aliases on raw + the adapter (NOT in the MCP catalog —
-    stage 3 removed alias dispatch there) and return the identical result, but only
-    the canonical pair is on the port."""
+    pair find_call_sites_to / find_call_sites_from — and nothing spells it any other
+    way, now that the pre-rename aliases are removed on every layer. The argument is
+    `method_descriptor` in BOTH directions: the method name carries the role, the
+    parameter names what the value IS."""
     import dexllm
     from dexllm import tools
 
@@ -724,35 +712,63 @@ def test_call_site_names_are_unified_across_layers(apk_path):
         assert hasattr(CrossReferencePort, name)  # the port states the contract
         assert hasattr(dexllm.DexKit, name)  # raw agrees
         assert any(t["name"] == name for t in tools.TOOL_DEFINITIONS)  # MCP agrees
-    for alias in ("find_call_sites", "find_call_sites_to_api"):
-        assert not hasattr(CrossReferencePort, alias)
-    # the catalog carries no aliases at all (stage 3) — one name per tool
-    assert not hasattr(tools, "TOOL_ALIASES")
-    for gone in ("find_call_sites_to_api", "find_call_sites_from_method"):
+    # no layer carries any other spelling of the pair
+    assert not hasattr(tools, "TOOL_ALIASES")  # the catalog is one name per tool
+    for gone in (
+        "find_call_sites",
+        "find_call_sites_to_api",
+        "find_call_sites_from_method",
+    ):
+        assert not hasattr(CrossReferencePort, gone)
+        assert not hasattr(session, gone)
+        assert not hasattr(dexllm.DexKit, gone)
         assert gone not in tools.TOOL_IMPLS
+    # The unified ARGUMENT name, on every layer that DECLARES one, checked by
+    # SIGNATURE. The port needs an explicit check: a Protocol carries no runtime
+    # conformance for PARAMETER names, so reverting only ports.py passes mypy and
+    # every other assertion in this file (verified). `__code__.co_varnames` would
+    # also match a local, so use inspect.signature.
+    import inspect
+
+    from dexllm.sdk.adapter import DexKitAdapter
+
+    for layer, fn in (
+        ("port/to", CrossReferencePort.find_call_sites_to),
+        ("port/from", CrossReferencePort.find_call_sites_from),
+        ("port/resolve", CrossReferencePort.resolve_call_args),
+        ("adapter/to", DexKitAdapter.find_call_sites_to),
+        ("adapter/from", DexKitAdapter.find_call_sites_from),
+        ("adapter/resolve", DexKitAdapter.resolve_call_args),
+        ("mcp/to", tools.TOOL_IMPLS["find_call_sites_to"]),
+        ("mcp/resolve", tools.TOOL_IMPLS["resolve_call_args"]),
+    ):
+        assert "method_descriptor" in inspect.signature(fn).parameters, layer
+    for spec in tools.TOOL_DEFINITIONS:
+        if spec["name"] in (
+            "find_call_sites_to",
+            "find_call_sites_from",
+            "resolve_call_args",
+        ):
+            assert "method_descriptor" in spec["input_schema"]["properties"], spec[
+                "name"
+            ]
 
     for cls in session.list_classes():
         for m in session.list_class_methods(cls):
             callees = session.find_call_sites_from(m)
             if not callees:
                 continue
-            assert session.find_call_sites_from_method(m) == callees
             api = callees[0].callee_descriptor
             callers = session.find_call_sites_to(api)
             assert callers  # non-vacuous: m itself is among them
-            assert session.find_call_sites(api) == callers
-            assert session.find_call_sites_to_api(api) == callers
-            # raw aliases resolve to the same underlying binding — BOTH directions
-            # (the forward one is otherwise touched by no test at all)
+            # the unified kwarg resolves on both layers, both directions
+            assert session.find_call_sites_to(method_descriptor=api) == callers
             raw = session.raw
-            assert [c.caller_descriptor for c in raw.find_call_sites_to_api(api)] == [
-                c.caller_descriptor for c in raw.find_call_sites_to(api)
-            ]
-            raw_fwd = raw.find_call_sites_from(m)
             assert [
-                (c.callee_descriptor, c.bytecode_offset)
-                for c in raw.find_call_sites_from_method(m)
-            ] == [(c.callee_descriptor, c.bytecode_offset) for c in raw_fwd]
+                c.caller_descriptor
+                for c in raw.find_call_sites_to(method_descriptor=api)
+            ] == [c.caller_descriptor for c in raw.find_call_sites_to(api)]
+            raw_fwd = raw.find_call_sites_from(method_descriptor=m)
             # and the adapter's forward direction matches raw value-for-value
             assert [c.callee_descriptor for c in callees] == [
                 c.callee_descriptor for c in raw_fwd
@@ -835,65 +851,43 @@ def test_raw_and_port_share_one_spelling_per_operation():
         ), f"{name} is not a module-level dexllm function"
 
 
-def test_deprecated_adapter_aliases_delegate_not_rebind(apk_path):
-    """dexllm#21: the adapter's back-compat aliases must DELEGATE.
+def test_no_adapter_alias_survives(apk_path):
+    """The dexllm#21 adapter aliases are gone — and stay gone.
 
-    A class-attribute alias (``find_call_sites = find_call_sites_to``) binds the base
-    function object, so a subclass overriding the canonical name would be silently
-    bypassed when a caller uses the old spelling. DexKitAdapter is the documented
-    embedding surface (``open_apk`` returns it), so subclassing is supported.
+    They existed to keep the pre-unification spellings working; issue #24
+    resolved the silent-deprecation question by DELETING them. This guards the
+    removal from both sides: the old spellings must be absent, and the canonical
+    ones must still work — "absent" alone would pass if the whole class broke.
+
+    The names are enumerated here rather than derived from the (now empty)
+    allow-list, which would make the check vacuous.
     """
     from dexllm.sdk.adapter import DexKitAdapter
 
-    api = "Landroid/util/Log;->d(Ljava/lang/String;Ljava/lang/String;)I"
-    meth = "La/B;->c()V"
-    field = "La/B;->f:I"
-    seen: list[str] = []
-
-    class Audited(DexKitAdapter):
-        def find_call_sites_to(self, api_descriptor: str):
-            seen.append("to")
-            return super().find_call_sites_to(api_descriptor)
-
-        def find_call_sites_from(self, method_descriptor: str):
-            seen.append("from")
-            return super().find_call_sites_from(method_descriptor)
-
-        def find_methods_reading_field(self, field_descriptor: str):
-            seen.append("read")
-            return super().find_methods_reading_field(field_descriptor)
-
-        def find_methods_writing_field(self, field_descriptor: str):
-            seen.append("write")
-            return super().find_methods_writing_field(field_descriptor)
-
-    session = Audited(apk_path)
-    # EVERY deprecated spelling must route through the subclass override — all five,
-    # not just the call-site pair (the field aliases were added in stage 3).
-    session.find_call_sites(api)
-    session.find_call_sites_to_api(api)
-    session.find_call_sites_from_method(meth)
-    session.find_field_readers(field)
-    session.find_field_writers(field)
-    assert seen == ["to", "to", "from", "read", "write"]
-    # none may BE the canonical function object — that is what an attribute alias gives
-    for alias, canonical in (
-        ("find_call_sites", "find_call_sites_to"),
-        ("find_call_sites_to_api", "find_call_sites_to"),
-        ("find_call_sites_from_method", "find_call_sites_from"),
-        ("find_field_readers", "find_methods_reading_field"),
-        ("find_field_writers", "find_methods_writing_field"),
-    ):
-        assert getattr(DexKitAdapter, alias) is not getattr(DexKitAdapter, canonical)
-        assert getattr(Audited, alias) is not getattr(Audited, canonical)
-    # the guard must cover every alias the drift audit allows — no silent omission
-    assert _DEPRECATED_ALIASES == {
+    for gone in (
         "find_call_sites",
         "find_call_sites_to_api",
         "find_call_sites_from_method",
         "find_field_readers",
         "find_field_writers",
-    }
+    ):
+        assert not hasattr(DexKitAdapter, gone), f"{gone} is still on the adapter"
+
+    session = DexKitAdapter(apk_path)
+    api = "Landroid/util/Log;->d(Ljava/lang/String;Ljava/lang/String;)I"
+    session.find_call_sites_to(api)  # canonical spellings still resolve
+    session.resolve_call_args(api)
+    fd = next(
+        (
+            f
+            for f in session.raw.list_field_descriptors()
+            if session.find_methods_reading_field(f)
+        ),
+        None,
+    )
+    if fd is not None:
+        assert session.find_methods_reading_field(fd)
+        session.find_methods_writing_field(fd)
 
 
 def test_typed_analysis_surface(apk_path):

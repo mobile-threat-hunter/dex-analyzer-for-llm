@@ -774,24 +774,74 @@ def test_no_python_literals_in_output(dk):
             assert not pat.search(out), f"python literal leaked in {cls}"
 
 
-# ── regression: the decompile_* family dropped its redundant `_java` suffix ───
+# ── regression: the dexllm#21 back-compat aliases are GONE ───────────────────
 
 
-def test_deprecated_decompile_names_still_work(dk):
-    """dexllm#21 stage 2: the pre-rename spellings stay available as aliases.
+def test_deprecated_aliases_are_removed():
+    """Every pre-rename spelling from dexllm#21 is gone.
 
-    `_java` advertised a parallelism with decompile_method_ast that does not
-    exist — the AST call returns the SAME Java text in its `source` — so the
-    family is base-vs-enriched, not two output formats. Each old name must still
-    resolve and return byte-identical output; the names are hard-coded here (a
-    loop over a mapping would delete its own coverage if an entry were removed).
+    The 16 aliases shipped SILENT (no DeprecationWarning), which issue #24 tracked
+    as an unresolved policy; the resolution was to delete them rather than keep a
+    second spelling of every renamed operation forever.
+
+    Deliberately takes NO fixture: absence is a property of the CLASS and the
+    module, so it must hold in a checkout with no corpus at all — an earlier cut
+    put these loops after a `pytest.skip` and the two `safe.py` aliases could have
+    been re-introduced unnoticed on any APK without a decompilable method. The
+    canonical-still-works half is asserted separately, by the tests below that do
+    need an APK.
+
+    Names are hard-coded rather than looped over a mapping — a loop would delete
+    its own coverage the moment an entry were dropped from that mapping.
     """
     import dexllm
+    from dexllm.sdk.adapter import DexKitAdapter
 
-    # Search class and method JOINTLY: picking the first decompilable class and
-    # then requiring a decompilable method INSIDE it silently skips the whole
-    # test on a fixture whose first class is a marker interface / annotation
-    # (reproducible with DEXLLM_TEST_APK=test_apk/APK/hello-world.apk).
+    for gone in (
+        "decompile_method_java",
+        "decompile_class_java",
+        "decompile_method_java_with_pc",
+        "find_call_sites_to_api",
+        "find_call_sites_from_method",
+        "find_field_read_methods",
+        "find_field_write_methods",
+        "decompiler_clear_cache",
+        "decompiler_set_cache_capacity",
+    ):
+        assert not hasattr(dexllm.DexKit, gone), f"{gone} is still registered on DexKit"
+    for gone in ("safe_decompile_method_java", "safe_decompile_class_java"):
+        assert not hasattr(dexllm, gone) and gone not in dexllm.__all__, gone
+    for gone in (
+        "find_call_sites",
+        "find_call_sites_to_api",
+        "find_call_sites_from_method",
+        "find_field_readers",
+        "find_field_writers",
+    ):
+        assert not hasattr(DexKitAdapter, gone), f"{gone} is still on the adapter"
+
+    # non-vacuous: the canonical spellings the removals point at must EXIST, or
+    # the loops above would pass on a wholesale break of the surface.
+    for canonical in (
+        "decompile_method",
+        "decompile_class",
+        "decompile_method_with_pc_map",
+        "find_call_sites_to",
+        "find_call_sites_from",
+        "find_methods_reading_field",
+        "find_methods_writing_field",
+        "clear_decompiler_cache",
+        "set_decompiler_cache_capacity",
+    ):
+        assert hasattr(dexllm.DexKit, canonical), canonical
+    for canonical in ("safe_decompile_method", "safe_decompile_class"):
+        assert canonical in dexllm.__all__ and hasattr(dexllm, canonical)
+
+
+def test_canonical_decompile_names_produce(dk):
+    """The canonical decompile spellings still return output, on a real APK."""
+    import dexllm
+
     pair = next(
         (
             (c, x)
@@ -805,101 +855,58 @@ def test_deprecated_decompile_names_still_work(dk):
         pytest.skip("no decompilable method in the fixture")
     cls, m = pair
 
-    assert dk.decompile_method_java(m) == dk.decompile_method(m) != ""
-    assert dk.decompile_class_java(cls) == dk.decompile_class(cls) != ""
-    pc = dk.decompile_method_with_pc_map(m)
-    assert pc["source"]  # non-vacuous: both names failing alike must not pass
-    assert dk.decompile_method_java_with_pc(m) == pc
-    # the module-level hang-safe wrappers moved with them. They are the SAME
-    # function object, so comparing their output would be a tautology — state
-    # the real invariant, then check the output separately.
-    assert dexllm.safe_decompile_method_java is dexllm.safe_decompile_method
-    assert dexllm.safe_decompile_class_java is dexllm.safe_decompile_class
-    assert dexllm.safe_decompile_method_java(dk, m) == dk.decompile_method(m) != ""
-    # and every name is exported / advertised
-    for n in (
-        "safe_decompile_method",
-        "safe_decompile_class",
-        "safe_decompile_method_java",
-        "safe_decompile_class_java",
-    ):
-        assert n in dexllm.__all__ and hasattr(dexllm, n)
-
-
-def test_safe_wrappers_take_the_raw_dexkit(apk_path, dk):
-    """dexllm#21 stage 2: the safe wrappers' duck-typed contract, both ways.
-
-    They accept `dk: Any`, so the rename could have changed what they REQUIRE of
-    that argument. A stand-in implementing only the pre-rename spelling must keep
-    working (that is what the aliases are for), and a dexllm.sdk session — which
-    has a same-named `decompile_method` returning a typed model, not str — must
-    fail LOUDLY rather than return a non-str through a `-> str` signature.
-    """
-    import dexllm
-    from dexllm.sdk import open_apk
-
-    m = next(
-        x
-        for c in dk.list_classes()
-        for x in dk.list_class_methods(c)
-        if dk.decompile_method(x)
-    )
-
-    class LegacyStandIn:
-        def decompile_method_java(self, d):
-            return "// legacy\n"
-
-        def decompile_class_java(self, d):
-            return "// legacy class\n"
-
-    legacy = LegacyStandIn()
-    assert dexllm.safe_decompile_method(legacy, m) == "// legacy\n"
-    assert dexllm.safe_decompile_class(legacy, "La/B;") == "// legacy class\n"
-
-    with pytest.raises(TypeError, match="not str"):
-        dexllm.safe_decompile_method(open_apk(apk_path), m)
-    with pytest.raises(AttributeError, match="neither"):
-        dexllm.safe_decompile_method(object(), m)
-
-
-def test_ast_source_matches_the_text_decompile(dk):
-    """The claim the stage-2 rename rests on, over a bounded sample.
-
-    `_java` was dropped because decompile_method_ast is not a parallel output
-    FORMAT — it returns the same Java text in its `source` — so the family is
-    base-vs-enriched. Pinning that on one method would not catch an IR change
-    that desyncs the AST emitter from the text emitter on a subset (a <clinit>,
-    a float literal, ...), which is exactly what would invalidate the naming.
-    """
-    checked = 0
-    for c in dk.list_classes():
-        for m in dk.list_class_methods(c):
-            text = dk.decompile_method(m)
-            if not text:
-                continue
-            a = dk.decompile_method_ast(m)
-            assert a["source"] == text, m
-            assert dk.decompile_method_with_pc_map(m)["source"] == text, m
-            checked += 1
-            if checked >= 200:
-                # documented opt-out: the AST-only path carries no source
-                assert dk.decompile_method_ast(m, include_source=False)["source"] == ""
-                return
-    if checked == 0:
-        pytest.skip("no decompilable method in the fixture")
-
-    # the suffix claim itself: _ast carries the same Java text as the bare call
+    assert dk.decompile_method(m) != ""
+    assert dk.decompile_class(cls) != ""
+    assert dk.decompile_method_with_pc_map(m)["source"] != ""
+    assert dexllm.safe_decompile_method(dk, m) == dk.decompile_method(m)
+    # the claim the `_java` drop rested on: _ast carries the same Java text
     assert dk.decompile_method_ast(m)["source"] == dk.decompile_method(m)
 
 
-def test_stage3_deprecated_names_still_work(dk):
-    """dexllm#21 stage 3: field-xref and cache-action renames keep their aliases.
+def test_unified_argument_names_are_callable_as_keywords(dk):
+    """Every dexllm#21 stage-4 argument rename, exercised as a KEYWORD on raw.
+
+    A rename that no test passes by keyword is unguarded: reverting it would keep
+    the whole suite green, because every other call site is positional. That was
+    true of `get_class_summary(class_descriptor)` and of `resolve_call_args`'s
+    parameter until this test existed.
+    """
+    cls = next(iter(dk.list_classes()), None)
+    if cls is None:
+        pytest.skip("no class in the fixture")
+
+    assert dk.get_class_summary(class_descriptor=cls).descriptor == cls
+    assert dk.locate_class_dex(class_descriptor=cls) >= 0
+
+    ref = next(iter(dk.list_external_method_refs(False)), None)
+    if ref is not None:
+        sig = ref.signature
+        assert [
+            (c.caller_descriptor, c.bytecode_offset)
+            for c in dk.find_call_sites_to(method_descriptor=sig)
+        ] == [
+            (c.caller_descriptor, c.bytecode_offset) for c in dk.find_call_sites_to(sig)
+        ]
+        assert len(dk.resolve_call_args(method_descriptor=sig)) == len(
+            dk.resolve_call_args(sig)
+        )
+
+    original = dk.decompiler_cache_capacity()
+    try:
+        dk.set_decompiler_cache_capacity(capacity=77)
+        assert dk.decompiler_cache_capacity() == 77
+    finally:
+        dk.set_decompiler_cache_capacity(original)
+
+
+def test_canonical_field_xref_and_cache_actions_work(dk):
+    """The dexllm#21 stage-3 canonical names, now that the aliases are gone.
 
     The find_* family names what it RETURNS right after `find_` (find_classes_*,
     find_methods_*, find_call_sites_*); the field pair returned METHOD descriptors
     while naming the queried FIELD — the only inversion in the family. Cache
     control uses verb-first for ACTIONS and nouns for read-only accessors, which
-    `warm_analysis_caches` already did. Both old spellings stay as aliases.
+    `warm_analysis_caches` already did.
     """
     fd = next(
         (f for f in dk.list_field_descriptors() if dk.find_methods_reading_field(f)),
@@ -907,9 +914,8 @@ def test_stage3_deprecated_names_still_work(dk):
     )
     if fd is None:
         pytest.skip("no read field in the fixture")
-    assert dk.find_field_read_methods(fd) == dk.find_methods_reading_field(fd) != []
-    wr = dk.find_methods_writing_field(fd)
-    assert dk.find_field_write_methods(fd) == wr
+    assert dk.find_methods_reading_field(fd) != []
+    dk.find_methods_writing_field(fd)
 
     m = next(
         (
@@ -926,16 +932,15 @@ def test_stage3_deprecated_names_still_work(dk):
     # default) even if an assertion below fails.
     original = dk.decompiler_cache_capacity()
     try:
-        dk.set_decompiler_cache_capacity(64)  # canonical setter
+        dk.set_decompiler_cache_capacity(64)
         assert dk.decompiler_cache_capacity() == 64
-        dk.decompiler_set_cache_capacity(128)  # deprecated alias
+        dk.set_decompiler_cache_capacity(capacity=128)  # the unified kwarg name
         assert dk.decompiler_cache_capacity() == 128
-        for clear in (dk.clear_decompiler_cache, dk.decompiler_clear_cache):
-            clear()
-            dk.decompile_method(m)
-            assert dk.decompiler_cache_size() > 0  # non-vacuous: something to clear
-            clear()  # canonical on the first pass, deprecated alias on the second
-            assert dk.decompiler_cache_size() == 0
+        dk.clear_decompiler_cache()
+        dk.decompile_method(m)
+        assert dk.decompiler_cache_size() > 0  # non-vacuous: something to clear
+        dk.clear_decompiler_cache()
+        assert dk.decompiler_cache_size() == 0
     finally:
         dk.set_decompiler_cache_capacity(original)
 

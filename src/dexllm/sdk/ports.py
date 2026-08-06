@@ -209,8 +209,8 @@ class DexExtractionPort(Protocol):
 class CrossReferencePort(Protocol):
     """Caller ↔ callee (method) + read/write (field) cross-reference."""
 
-    def find_call_sites_to(self, api_descriptor: str) -> tuple[CallSite, ...]:
-        """Every call site invoking the given API descriptor — its CALLERS.
+    def find_call_sites_to(self, method_descriptor: str) -> tuple[CallSite, ...]:
+        """Every call site invoking the given method — its CALLERS.
 
         The REVERSE edge, so ``callee_descriptor`` is FIXED (the queried API) on
         every returned :class:`CallSite` and the ``caller_*`` fields vary. One
@@ -229,8 +229,8 @@ class CrossReferencePort(Protocol):
         """
         ...
 
-    def resolve_call_args(self, api_descriptor: str) -> tuple[ResolvedCallSite, ...]:
-        """Call sites of the API with each argument's resolved origin.
+    def resolve_call_args(self, method_descriptor: str) -> tuple[ResolvedCallSite, ...]:
+        """Call sites of the method with each argument's resolved origin.
 
         Same reverse direction (and same fixed/varying fields) as
         :meth:`find_call_sites_to`, plus ``args``.

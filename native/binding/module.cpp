@@ -355,8 +355,7 @@ public:
     }
     // Java text decompile via the dad_cpp Decompiler facade. These C++ members
     // keep their historical `_java` names; the PYTHON-visible spelling is
-    // `decompile_method` / `decompile_class` / `decompile_method_with_pc_map`
-    // (the `*_java` .def registrations below are deprecated aliases — dexllm#21).
+    // `decompile_method` / `decompile_class` / `decompile_method_with_pc_map`.
     // GIL is released at the binding site for true parallel decompilation.
     std::string decompile_method_java(const std::string& descriptor) const {
         return decompiler_->DecompileMethod(ident_in(descriptor));
@@ -804,7 +803,7 @@ PYBIND11_MODULE(_dexkit_core, m) {
              py::arg("framework_only") = true,
              "L1: enumerate field references whose declaring class is external.")
         .def("get_class_summary", &PyDexKit::get_class_summary,
-             py::arg("descriptor"),
+             py::arg("class_descriptor"),
              "L1.5: return ClassSummary with declared members + class header info "
              "(superclass/interfaces/source_file). Works for both internal and "
              "external classes; for external, members reflect aggregated refs "
@@ -878,7 +877,7 @@ PYBIND11_MODULE(_dexkit_core, m) {
              py::arg("values"),
              "Find methods whose body contains all of the given double literals.")
         .def("resolve_call_args", &PyDexKit::resolve_call_args,
-             py::arg("api_descriptor"),
+             py::arg("method_descriptor"),  // same value as find_call_sites_to
              "L4: for every call site invoking the given API, return a "
              "ResolvedCallSite whose .args list contains an ArgOrigin per "
              "argument register (ConstString / ConstInt / ConstClass / "
@@ -925,30 +924,6 @@ PYBIND11_MODULE(_dexkit_core, m) {
              py::arg("class_descriptor"),
              "Decompile a whole class to Java via DAD C++ port. "
              "Releases the GIL during execution.")
-        // Back-compat aliases for the pre-rename names. The `_java` suffix
-        // advertised a symmetry with decompile_method_ast that does not exist:
-        // the AST call returns this same Java text in its `source`, so the two
-        // are base-vs-enriched, not two parallel output formats (a genuinely
-        // different form uses a different verb — render_*_smali). Dropping it
-        // also puts raw on the spelling the SDK and MCP already used.
-        .def("decompile_method_java",
-             [](const PyDexKit& self, const std::string& desc) {
-                 py::gil_scoped_release release;
-                 return self.decompile_method_java(desc);
-             },
-             py::arg("method_descriptor"),
-             "Deprecated alias of decompile_method.")
-        .def("decompile_method_java_with_pc",
-             &PyDexKit::decompile_method_java_with_pc,
-             py::arg("method_descriptor"),
-             "Deprecated alias of decompile_method_with_pc_map.")
-        .def("decompile_class_java",
-             [](const PyDexKit& self, const std::string& desc) {
-                 py::gil_scoped_release release;
-                 return self.decompile_class_java(desc);
-             },
-             py::arg("class_descriptor"),
-             "Deprecated alias of decompile_class.")
         .def("decompile_method_ast", &PyDexKit::decompile_method_ast,
              py::arg("method_descriptor"), py::arg("include_source") = true,
              "Return a structured method dict: "
@@ -957,8 +932,13 @@ PYBIND11_MODULE(_dexkit_core, m) {
              "JSONWriter: {triple, flags, ret, params, comments, body}. "
              "`source` is the equivalent Java text — pass include_source=False "
              "to skip its (separate) pipeline run when only the AST is needed.")
+        // The argument is a METHOD descriptor in both directions — the method
+        // name carries the role (_to = the callee you are looking for callers of,
+        // _from = the caller whose callees you want), so the parameter names what
+        // it IS. `api_descriptor` said "framework API", which is only the common
+        // case and is not what the value is.
         .def("find_call_sites_to", &PyDexKit::find_call_sites_to_api,
-             py::arg("api_descriptor"),
+             py::arg("method_descriptor"),
              "L2 (reverse direction): every call site invoking the given API "
              "(\"Lpkg/Cls;->name(args)Ret;\") — its CALLERS. Each CallSite fixes "
              "callee_descriptor (the queried API) and varies the caller_* fields; "
@@ -971,15 +951,6 @@ PYBIND11_MODULE(_dexkit_core, m) {
              "methods it invokes (callees). Each CallSite fixes the caller_* fields "
              "(the queried method) and varies callee_descriptor. Empty for an "
              "external / bodyless / unresolved method.")
-        // Back-compat aliases for the pre-rename names. find_call_sites_to /
-        // find_call_sites_from are canonical across raw, SDK and MCP; the _api /
-        // _method suffixes were redundant with the parameter they name.
-        .def("find_call_sites_to_api", &PyDexKit::find_call_sites_to_api,
-             py::arg("api_descriptor"),
-             "Deprecated alias of find_call_sites_to.")
-        .def("find_call_sites_from_method", &PyDexKit::find_call_sites_from_method,
-             py::arg("method_descriptor"),
-             "Deprecated alias of find_call_sites_from.")
         .def("find_methods_reading_field", &PyDexKit::find_field_read_methods,
              py::arg("field_descriptor"),
              "L2.5: descriptors of every method that READS (iget*/sget*) the given "
@@ -991,16 +962,6 @@ PYBIND11_MODULE(_dexkit_core, m) {
              "L2.5: descriptors of every method that WRITES (iput*/sput*) the given "
              "field (\"Lpkg/Cls;->name:Type\"). Companion to "
              "find_methods_reading_field.")
-        // Back-compat aliases. The find_* family names what it RETURNS right after
-        // `find_` (find_classes_by_name, find_methods_using_strings,
-        // find_call_sites_to, ...); these two returned METHOD descriptors while
-        // naming the queried FIELD, the only inversion in the family — dexllm#21.
-        .def("find_field_read_methods", &PyDexKit::find_field_read_methods,
-             py::arg("field_descriptor"),
-             "Deprecated alias of find_methods_reading_field.")
-        .def("find_field_write_methods", &PyDexKit::find_field_write_methods,
-             py::arg("field_descriptor"),
-             "Deprecated alias of find_methods_writing_field.")
         .def("find_type_references", &PyDexKit::find_type_references,
              py::arg("type_descriptor"),
              "L2.5: signature-position type xref for \"Lpkg/Cls;\" — a TypeReferences "
@@ -1039,21 +1000,15 @@ PYBIND11_MODULE(_dexkit_core, m) {
              "dexllm.permission_api_callers.")
         // Cache control: an ACTION is verb-first, a read-only accessor is a noun —
         // the scheme the already-verb-first `warm_analysis_caches` was following.
-        // The `decompiler_`-prefixed action spellings are deprecated aliases (dexllm#21).
         .def("clear_decompiler_cache", &PyDexKit::decompiler_clear_cache,
              "Drop every cached decompiled method.")
         .def("set_decompiler_cache_capacity",
-             &PyDexKit::decompiler_set_cache_capacity, py::arg("cap"),
+             &PyDexKit::decompiler_set_cache_capacity, py::arg("capacity"),
              "Set the LRU cache capacity for decompiled methods (0 disables eviction).")
         .def("decompiler_cache_size", &PyDexKit::decompiler_cache_size)
         .def("decompiler_cache_capacity",
              &PyDexKit::decompiler_cache_capacity,
-             "Get the current LRU cache capacity.")
-        .def("decompiler_clear_cache", &PyDexKit::decompiler_clear_cache,
-             "Deprecated alias of clear_decompiler_cache.")
-        .def("decompiler_set_cache_capacity",
-             &PyDexKit::decompiler_set_cache_capacity, py::arg("cap"),
-             "Deprecated alias of set_decompiler_cache_capacity.");
+             "Get the current LRU cache capacity.");
 
     m.def("is_framework_descriptor", &dexkit::ext::IsFrameworkDescriptor,
           py::arg("descriptor"),

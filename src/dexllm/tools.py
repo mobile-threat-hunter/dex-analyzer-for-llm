@@ -269,10 +269,10 @@ def _t_find_methods_using_strings(
 
 
 def _t_find_call_sites_to(
-    dk: DexKit, api_descriptor: str, limit: int = 50, offset: int = 0
+    dk: DexKit, method_descriptor: str, limit: int = 50, offset: int = 0
 ) -> dict:
-    require_member_descriptor(api_descriptor)
-    sites = dk.find_call_sites_to(api_descriptor)
+    require_member_descriptor(method_descriptor)
+    sites = dk.find_call_sites_to(method_descriptor)
     items = []
     for s in sites:
         items.append(
@@ -455,10 +455,10 @@ def _arg_to_compact(index: int, a: Any) -> dict:
 
 
 def _t_resolve_call_args(
-    dk: DexKit, api_descriptor: str, limit: int = 50, offset: int = 0
+    dk: DexKit, method_descriptor: str, limit: int = 50, offset: int = 0
 ) -> dict:
-    require_member_descriptor(api_descriptor)
-    sites = dk.resolve_call_args(api_descriptor)
+    require_member_descriptor(method_descriptor)
+    sites = dk.resolve_call_args(method_descriptor)
     items = [
         {
             "caller": s.caller_descriptor,
@@ -969,11 +969,11 @@ TOOL_DEFINITIONS: list[dict] = [
         "input_schema": {
             "type": "object",
             "properties": {
-                "api_descriptor": {"type": "string"},
+                "method_descriptor": {"type": "string"},
                 "limit": {"type": "integer", "default": 50},
                 "offset": {"type": "integer", "default": 0},
             },
-            "required": ["api_descriptor"],
+            "required": ["method_descriptor"],
         },
     },
     {
@@ -993,11 +993,11 @@ TOOL_DEFINITIONS: list[dict] = [
         "input_schema": {
             "type": "object",
             "properties": {
-                "api_descriptor": {"type": "string"},
+                "method_descriptor": {"type": "string"},
                 "limit": {"type": "integer", "default": 50},
                 "offset": {"type": "integer", "default": 0},
             },
-            "required": ["api_descriptor"],
+            "required": ["method_descriptor"],
         },
     },
     {

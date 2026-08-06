@@ -52,22 +52,19 @@ def _run_with_deadline(
     return result[0]
 
 
-def _bound_decompile(dk: Any, name: str, legacy_name: str) -> Callable[..., Any]:
-    """Resolve ``dk``'s decompile entry point, tolerating the pre-rename name.
+def _bound_decompile(dk: Any, name: str) -> Callable[..., Any]:
+    """Resolve ``dk``'s decompile entry point, or raise a message that names it.
 
-    ``dk`` is duck-typed, so the raw ``DexKit`` is not the only thing callers
-    pass: an out-of-tree stand-in or test double may still implement only the
-    legacy ``*_java`` spelling. Falling back keeps those working — without it,
-    the very back-compat aliases below would be name-compatible but NOT
-    contract-compatible, which is what an alias exists to prevent.
+    ``dk`` is duck-typed, so a stand-in or test double can be passed instead of
+    the raw ``DexKit``. This used to fall back to the pre-rename ``*_java``
+    spelling; that fallback went with the aliases themselves, so a stand-in must
+    now implement the canonical name.
     """
     fn = getattr(dk, name, None)
     if fn is None:
-        fn = getattr(dk, legacy_name, None)
-    if fn is None:
         raise AttributeError(
-            f"{type(dk).__name__} has neither {name} nor {legacy_name}; pass the "
-            "raw DexKit (a dexllm.sdk session exposes it as `.raw`)"
+            f"{type(dk).__name__} has no {name}; pass the raw DexKit "
+            "(a dexllm.sdk session exposes it as `.raw`)"
         )
     return fn
 
@@ -102,7 +99,7 @@ def safe_decompile_class(
     raw ``DexKit`` (a ``dexllm.sdk`` session exposes it as ``.raw``).
     """
     marker = f"// TIMEOUT after {timeout:.1f}s: {class_descriptor}\n"
-    fn = _bound_decompile(dk, "decompile_class", "decompile_class_java")
+    fn = _bound_decompile(dk, "decompile_class")
     return _require_text(
         _run_with_deadline(
             fn,
@@ -123,7 +120,7 @@ def safe_decompile_method(
 ) -> str:
     """Return the method-level counterpart of `safe_decompile_class`."""
     marker = f"// TIMEOUT after {timeout:.1f}s: {method_descriptor}\n"
-    fn = _bound_decompile(dk, "decompile_method", "decompile_method_java")
+    fn = _bound_decompile(dk, "decompile_method")
     return _require_text(
         _run_with_deadline(
             fn,
@@ -134,14 +131,6 @@ def safe_decompile_method(
         dk,
         "decompile_method",
     )
-
-
-# Back-compat aliases for the names released before the decompile_* family
-# dropped its redundant `_java` suffix. Plain module-level aliases are safe here
-# (unlike the class-attribute case in sdk/adapter.py) — these are functions, not
-# methods, so there is no subclass-override dispatch to bypass.
-safe_decompile_class_java = safe_decompile_class
-safe_decompile_method_java = safe_decompile_method
 
 
 def is_timeout_marker(text: str) -> bool:
