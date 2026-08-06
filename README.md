@@ -230,6 +230,9 @@ androguard's multi-second whole-program analysis.
 pip install dexllm
 # + LLM backends (MCP + FastAPI):
 pip install "dexllm[all]"
+# upgrading from an older install? plain `install` is a no-op once dexllm is
+# present ("Requirement already satisfied") — you need -U:
+pip install -U dexllm
 ```
 
 Pre-built wheels for **Linux** (`manylinux_2_28` x86_64) and **macOS** (x86_64 + arm64,
@@ -237,10 +240,19 @@ requires macOS 13.3+), CPython 3.9–3.13, are published to
 [PyPI](https://pypi.org/p/dexllm). `pip` picks the wheel matching your platform/Python —
 no C++ compiler needed.
 
-The same wheels are mirrored on this repo's
+To pin a version, use a version specifier — **not** `--find-links`, which *adds* a
+source rather than replacing PyPI, so `pip` still resolves to the highest version it
+can see anywhere:
+
+```bash
+pip install "dexllm==0.8.2"
+# ≤0.8.1 predates PyPI and lives only on Releases — point pip at that tag's assets:
+pip install "dexllm==0.8.1" --find-links https://github.com/mobile-threat-hunter/dex-analyzer-for-llm/releases/expanded_assets/v0.8.1
+```
+
+The wheels are also mirrored on this repo's
 [Releases](https://github.com/mobile-threat-hunter/dex-analyzer-for-llm/releases) — download a
-specific `.whl` and `pip install ./that-file.whl`, or pin to one release with
-`--find-links https://github.com/mobile-threat-hunter/dex-analyzer-for-llm/releases/expanded_assets/vX.Y.Z`.
+specific `.whl` and `pip install ./that-file.whl` if you'd rather not go through an index.
 
 On a platform with no matching wheel (Windows, musllinux, PyPy, aarch64) `pip` falls back to
 the sdist and builds from source — see below for the toolchain that needs.

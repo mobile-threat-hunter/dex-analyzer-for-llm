@@ -70,13 +70,20 @@ tag without re-pushing.
 ```bash
 pip install dexllm
 pip install "dexllm[all]"    # + MCP server + FastAPI backend
+pip install -U dexllm        # upgrade — plain `install` no-ops if dexllm is present
 ```
 
 `pip` picks the wheel matching the platform/Python from PyPI. The GitHub Release
 remains a mirror — grab a specific `.whl` from the
 [Releases page](https://github.com/mobile-threat-hunter/dex-analyzer-for-llm/releases)
-and `pip install ./that-file.whl`, or pin to one release with
-`pip install dexllm --find-links https://github.com/mobile-threat-hunter/dex-analyzer-for-llm/releases/expanded_assets/vX.Y.Z`.
+and `pip install ./that-file.whl`.
+
+Pinning takes a version specifier, **not** `--find-links`: that flag adds a source
+alongside PyPI instead of replacing it, so `pip install dexllm --find-links <v0.8.1
+assets>` resolves to the newest version on PyPI, not to 0.8.1. Use
+`pip install "dexllm==0.8.1" --find-links <v0.8.1 assets>` (the `--find-links` is
+needed only for ≤0.8.1, which predate PyPI), or add `--no-index` to cut PyPI out
+entirely.
 
 ### Platforms with no wheel
 
