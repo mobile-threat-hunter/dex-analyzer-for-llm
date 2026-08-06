@@ -42,7 +42,8 @@ class _VerifyStatus(TypedDict):
 
 class _ExtractedDex(TypedDict):
     bytes: bytes
-    dex_id: int  # -1 when dex_id was out of range
+    dex_id: int  # -1 ONLY when out of range; an in-range dex the core could
+    #              not construct keeps its id with empty bytes (check `size`)
     source: str  # the path handed to the constructor
     entry: str  # zip member; "" when the source IS the dex
     offset: int  # start within the LOADED IMAGE (the decompressed `entry`
@@ -477,6 +478,19 @@ class DexKit:
             >>> d = dk.extract_dex(0)
             >>> d["bytes"][:4], d["size"], d["entry"]
             (b'dex\\n', 5472720, 'classes.dex')
+        """
+
+    def extract_dexes(self) -> list[_ExtractedDex]:
+        """Every loaded dex in ``dex_id`` order — the dump-the-container form.
+
+        ``len()`` equals ``dex_count()``. Separate PLURAL name rather than an
+        optional ``dex_id``, so the return type never depends on the argument.
+        COPIES every dex's bytes; use ``extract_dex(i)`` for one.
+
+        Example::
+
+            >>> [(d["dex_id"], d["entry"], d["size"]) for d in dk.extract_dexes()]
+            [(0, 'classes.dex', 5472720)]
         """
     # class inspection / external refs
     def get_class_summary(self, class_descriptor: str) -> ClassSummary:

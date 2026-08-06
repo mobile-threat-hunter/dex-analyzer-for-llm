@@ -764,6 +764,67 @@ def test_extract_dex_slices_concatenated_container(apk_path, tmp_path):
     assert len(dk.verify_report()) == 1  # the row-per-dex_id assumption does NOT hold
 
 
+def test_extract_dexes_is_every_dex_and_agrees_with_the_singular_form():
+    """`extract_dexes()` == [extract_dex(i) for i in range(dex_count())].
+
+    The plural form exists so the whole container can be dumped without the
+    caller knowing the id range; it must not be a second, drifting implementation
+    of the same thing. Asserted against a MULTI-SOURCE session, where dex_id
+    ordering and provenance both matter.
+    """
+    apks = [
+        p
+        for p in sorted(glob.glob(str(REPO_ROOT / "test_apk" / "APK" / "*.apk")))
+        if dexllm.identify(p).get("dex_count", 0) > 0
+    ]
+    if len(apks) < 2:
+        pytest.skip("need two loadable apks")
+    dk = dexllm.DexKit(apks[:2])
+
+    alls = dk.extract_dexes()
+    assert len(alls) == dk.dex_count() >= 2
+    assert alls == [dk.extract_dex(i) for i in range(dk.dex_count())]
+    assert [d["dex_id"] for d in alls] == list(range(len(alls)))
+    # non-vacuous: it really carries the bytes, not just the metadata. Qualified
+    # by `size` — a logical dex the core could not construct is a legitimate row
+    # with EMPTY bytes (see the test below), so an unconditional magic check would
+    # assert something that is false on a loadable input.
+    assert all(len(d["bytes"]) == d["size"] for d in alls)
+    assert all(d["bytes"][:4] == b"dex\n" for d in alls if d["size"])
+    assert any(d["size"] for d in alls)  # …and at least one really has bytes
+
+
+def test_extract_dexes_row_for_an_unreadable_dex_keeps_its_own_id(tmp_path):
+    """A logical dex the core could not construct still gets an HONEST row.
+
+    The packer shape: a dump whose second logical dex has an intact header but an
+    undecrypted body. `ParseLogicalDexOffsets` splits on the size field without a
+    magic check, so `dex_count()` counts it, but its `DexItem` throws and stays
+    null. Reporting that row as `dex_id == -1` made it read as "you asked for an
+    out-of-range id" — in the MIDDLE of the list — and broke the contiguous-id
+    contract `extract_dexes()` documents. It now carries its real id with empty
+    bytes; `-1` means out-of-range and nothing else.
+    """
+    one = (REPO_ROOT / "test_apk" / "APK" / "StringTests.dex").read_bytes()
+    p = tmp_path / "partial.dex"
+    # header intact (so the split sees it), body zeroed (so construction fails)
+    p.write_bytes(one + one[:112] + b"\x00" * (len(one) - 112))
+    try:
+        dk = dexllm.DexKit(str(p), lenient=True)
+    except Exception:  # noqa: BLE001
+        pytest.skip("the crafted dump did not load")
+    if dk.dex_count() < 2:
+        pytest.skip("core did not split the crafted dump")
+
+    rows = dk.extract_dexes()
+    assert [d["dex_id"] for d in rows] == list(range(dk.dex_count()))
+    assert rows[0]["size"] and rows[0]["bytes"][:4] == b"dex\n"
+    # the unreadable one: real id, no bytes — NOT the -1 out-of-range sentinel
+    assert rows[1]["dex_id"] == 1 and rows[1]["size"] == 0 and rows[1]["bytes"] == b""
+    # …and -1 still means exactly that
+    assert dk.extract_dex(dk.dex_count())["dex_id"] == -1
+
+
 def test_extract_dex_offset_is_within_the_loaded_image_not_the_source(tmp_path):
     """`offset` indexes the LOADED IMAGE — for a zip member, the DECOMPRESSED entry.
 

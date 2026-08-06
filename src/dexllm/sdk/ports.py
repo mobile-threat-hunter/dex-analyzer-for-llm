@@ -209,6 +209,17 @@ class DexExtractionPort(Protocol):
         """
         ...
 
+    def extract_dexes(self) -> tuple[ExtractedDex, ...]:
+        """Return every loaded dex, in ``dex_id`` order — the dump-the-container form.
+
+        ``len()`` equals ``dex_count()``. A separate PLURAL name rather than an
+        optional ``dex_id``: a signature whose RETURN TYPE changes with its
+        argument forces every caller to branch, and this is the same all-vs-one
+        axis ``list_classes()`` / ``list_classes_in_dex(dex_id)`` already draws.
+        It COPIES every dex's bytes, so prefer :meth:`extract_dex` for one.
+        """
+        ...
+
 
 @runtime_checkable
 class CrossReferencePort(Protocol):

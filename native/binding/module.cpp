@@ -254,6 +254,17 @@ public:
         d["size"] = o.size;
         return d;
     }
+    // Every loaded dex, in dex_id order — the "dump the whole container" verb.
+    // A separate PLURAL name rather than an optional dex_id: a signature whose
+    // RETURN TYPE changes with its argument (dict vs list) forces every caller to
+    // branch, and it is the same all-vs-one axis `list_classes()` /
+    // `list_classes_in_dex(dex_id)` already draws. Copies every dex's bytes, so
+    // prefer extract_dex(i) when one is wanted.
+    py::list extract_dexes() const {
+        py::list out;
+        for (int i = 0; i < ext_.DexCount(); ++i) out.append(extract_dex(i));
+        return out;
+    }
     void warm_analysis_caches() { ext_.WarmAnalysisCaches(); }
 
     // Issue #13 — engine-side permission→API→callers join (bundled data). Mirrors
@@ -1017,6 +1028,13 @@ PYBIND11_MODULE(_dexkit_core, m) {
              "concatenated / packer-dump container, which the core splits into "
              "several dex_ids over one image. "
              "`bytes` is empty and dex_id is -1 if dex_id is out of range.")
+        .def("extract_dexes", &PyDexKit::extract_dexes,
+             "Every loaded dex, in dex_id order — the same dict as extract_dex(i) "
+             "per entry, so len() == dex_count(). The 'dump the whole container' "
+             "form; it COPIES every dex's bytes, so use extract_dex(i) for one. "
+             "A logical dex the core could not construct (a packer dump whose "
+             "second dex has an intact header but an undecrypted body) still gets "
+             "its row, with its real dex_id and EMPTY bytes — check `size`.")
         .def("warm_analysis_caches", &PyDexKit::warm_analysis_caches,
              "Eagerly warm upstream caches needed for L2/L4 (otherwise lazy).")
         .def("permission_callers", &PyDexKit::permission_callers,

@@ -225,11 +225,18 @@ d = dk.extract_dex(0)
 | key | meaning |
 |---|---|
 | `bytes` | the dex image; `b""` for an out-of-range id |
-| `dex_id` | echoes the argument; `-1` when out of range |
+| `dex_id` | echoes the argument; `-1` when out of range, and only then. A logical dex the core could not construct (a packer dump whose second dex has an intact header but an undecrypted body) keeps its own id with empty `bytes` — check `size` |
 | `source` | the path handed to the constructor |
 | `entry` | the member inside it (`classes2.dex`); `""` when the source IS the dex |
 | `offset` | this logical dex's start within the **loaded image** — the decompressed `entry` when `entry` is set, otherwise the file at `source`. Nonzero only for a concatenated / packer-dump container. A packer apk whose `classes.dex` is two concatenated dexes has `entry` set **and** a nonzero `offset`, so slicing the `.apk` at it is meaningless |
 | `size` | `len(bytes)` |
+
+`dk.extract_dexes()` is the whole-container form — every loaded dex in `dex_id`
+order, the same dict per entry, so `len()` equals `dex_count()`. It is a separate
+PLURAL name rather than an optional `dex_id` so the return type never depends on
+the argument (the same all-vs-one axis as `list_classes()` /
+`list_classes_in_dex(dex_id)`); it copies every dex's bytes, so use
+`extract_dex(i)` when one is wanted.
 
 **Why provenance is part of the return** (dexllm#26 — this was `extract_dex_bytes`,
 returning only the bytes). Nothing else could answer "which file did this come

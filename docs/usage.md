@@ -231,7 +231,7 @@ all-dexes form is exactly the per-dex concatenation: `dk.list_classes` /
 `dk.list_classes_in_dex(dex_id)` (declared classes), `dk.list_field_descriptors` /
 `dk.list_field_descriptors_in_dex(dex_id)`, `dk.list_method_descriptors` /
 `dk.list_method_descriptors_in_dex(dex_id)` (id-table references), and
-`dk.extract_dex(dex_id)` (raw dex image bytes **plus** where they came from — `source` / `entry` / `offset`).
+`dk.extract_dex(dex_id)` (raw dex image bytes **plus** where they came from — `source` / `entry` / `offset`), or `dk.extract_dexes()` for the whole container at once.
 
 ---
 

@@ -379,9 +379,17 @@ class DexKitAdapter:
 
     # -- DexExtractionPort --
 
+    def extract_dexes(self) -> tuple[ExtractedDex, ...]:
+        """Return every loaded dex in dex_id order (copies all of their bytes)."""
+        return tuple(self._to_extracted(d) for d in self._dk.extract_dexes())
+
     def extract_dex(self, dex_id: int) -> ExtractedDex:
         """Return one loaded dex's bytes together with where it came from."""
-        d = self._dk.extract_dex(dex_id)
+        return self._to_extracted(self._dk.extract_dex(dex_id))
+
+    @staticmethod
+    def _to_extracted(d: Mapping[str, Any]) -> ExtractedDex:
+        """Convert one raw extract_dex dict to the typed model."""
         return ExtractedDex(
             dex_id=d["dex_id"],
             data=d["bytes"],

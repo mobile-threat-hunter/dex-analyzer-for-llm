@@ -2039,10 +2039,18 @@ std::vector<uint8_t> DexKitExt::GetDexBytes(int dex_id) const {
 // image — 0 for the ordinary one-dex-per-source case.
 DexOrigin DexKitExt::GetDexOrigin(int dex_id) const {
     DexOrigin o;
+    // dex_id == -1 must mean OUT OF RANGE and nothing else — that is what the
+    // model documents, and what a caller branches on. So stamp it as soon as the
+    // id is in range, BEFORE the null-item bail: a logical dex whose DexItem
+    // failed to construct (a packer dump whose second dex has an intact header
+    // but an undecrypted body) is a real, in-range dex we simply cannot read, and
+    // reporting it as -1 made extract_dexes() emit a row that read as "you asked
+    // for a bad id" in the MIDDLE of the list. It now identifies itself, with
+    // empty bytes and unknown source.
     if (dex_id < 0 || dex_id >= core_->GetDexNum()) return o;
+    o.dex_id = dex_id;
     auto* item = core_->GetDexItem(static_cast<uint16_t>(dex_id));
     if (item == nullptr) return o;
-    o.dex_id = dex_id;
     auto* img = item->GetImage();
     if (img == nullptr) return o;
     auto it = image_origin_.find(img);

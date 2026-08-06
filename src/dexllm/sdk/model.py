@@ -86,7 +86,12 @@ class ExtractedDex:
     ``bytes: bytes`` dataclass field would shadow the builtin inside its own
     annotation scope, so the typed model renames it.
 
-    ``data`` is empty and ``dex_id`` is ``-1`` for an out-of-range id.
+    ``data`` is empty and ``dex_id`` is ``-1`` for an out-of-range id — and
+    ONLY for that. A logical dex the core could not construct (a packer dump
+    whose second dex has an intact header but an undecrypted body) is a real,
+    in-range dex: it keeps its own ``dex_id`` with empty ``data`` and unknown
+    ``source``, so check ``size`` rather than treating an empty row as an
+    argument error.
 
     Example (real)::
 
