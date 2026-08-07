@@ -754,15 +754,20 @@ def test_extract_dex_slices_concatenated_container(apk_path, tmp_path):
     assert a[:4] == b"dex\n" and b[:4] == b"dex\n"  # each starts at its own magic
     assert len(a) == len(one) and len(b) == len(one)  # each is one dex, not the pair
 
-    # dexllm#26 — provenance for the case that had NONE: the core split one file
-    # into two dex_ids, so verify_report has a single row and cannot describe the
-    # second. `offset` is what separates them.
+    # dexllm#26 — provenance for a source one file backs two dex_ids of; `offset`
+    # is what separates them.
     d0, d1 = dk.extract_dex(0), dk.extract_dex(1)
     assert d0["source"] == d1["source"] == str(cat)
     assert d0["entry"] == d1["entry"] == ""  # the source IS the dex
     assert (d0["offset"], d1["offset"]) == (0, len(one))
     assert d0["size"] == d1["size"] == len(one)
-    assert len(dk.verify_report()) == 1  # the row-per-dex_id assumption does NOT hold
+
+    # dexllm#25/#27 — one verdict row per LOGICAL dex, carrying its real dex_id.
+    # This assertion used to read `== 1`, pinning the bug: the gate ran once per
+    # FILE, so the second logical dex was both unverified and undescribed.
+    rows = dk.verify_report()
+    assert [r["dex_id"] for r in rows] == [0, 1]
+    assert all(r["valid"] and r["source"] == str(cat) for r in rows)
 
 
 def test_extract_dexes_is_every_dex_and_agrees_with_the_singular_form():

@@ -15,6 +15,7 @@
 #include "dex_verifier.h"  // VerifyDex — load-boundary structural gate
 #include "dexitem_code_source.h"  // for GetCodeSource()
 #include "mmap.h"  // dexkit::MemMap (raw-dex load path)
+#include "slicer/dex_format.h"  // dex::Header (logical-dex split mirror)
 #include "schema/querys_generated.h"
 #include "zip_archive.h"  // dexkit::ZipArchive (PK/central-dir container probe)
 #include "schema/matchers_generated.h"
@@ -325,6 +326,137 @@ Probe ProbeContainer(const std::string& path) {
     return p;
 }
 
+// One logical dex inside an image, with its load-boundary verdict.
+struct LogicalSlice {
+    uint32_t offset = 0;
+    uint32_t size = 0;
+    bool ok = false;
+    // A v41 CONTAINER dex addresses a data section shared with its siblings, so
+    // it is only meaningful as part of the whole image — it cannot be copied out
+    // on its own the way a v35-40 dex can.
+    bool self_contained = true;
+    std::string reason;
+};
+
+// MIRROR of the core's ParseLogicalDexOffsets (vendor/dexkit_core/Core/dexkit/
+// dexkit.cpp) — the rule AddImage will apply to this image. The gate must split
+// the image exactly the way the core does, or a dex the core parses is one the
+// verifier never saw (dexllm#25). The mirror is checked at run time by
+// AssertLoadedDexesWereVerified, which refuses the load if the two disagree.
+//
+// Note it does NOT require the "dex\n" magic at each offset — trailing garbage
+// after a short file_size can therefore produce a bogus slice. That is fine here
+// precisely because every slice is now verified: VerifyDex's CheckHeader rejects
+// it on the magic.
+std::vector<LogicalSlice> LogicalDexSlices(const uint8_t* base, size_t n) {
+    std::vector<LogicalSlice> slices;
+    size_t off = 0;
+    while (true) {
+        if (off + sizeof(dex::Header) > n) break;
+        const auto* header = reinterpret_cast<const dex::Header*>(base + off);
+        uint32_t sz = header->file_size;
+        if (sz < sizeof(dex::Header) || off + sz > n) break;
+        LogicalSlice s;
+        s.offset = static_cast<uint32_t>(off);
+        s.size = sz;
+        s.self_contained = header->header_size < dex::Header::kV41Size;
+        slices.push_back(s);
+        off += sz;
+        if (off >= n) break;
+    }
+    return slices;
+}
+
+// The verdict for every logical dex of one image. Shared by the load path
+// (CollectImage) and the load-free Verify(), which is documented to produce
+// byte-identical rows — so every rule that decides a verdict lives HERE, not in
+// one of the two callers.
+std::vector<LogicalSlice> ClassifyImageSlices(const uint8_t* base, size_t n,
+                                              bool check_insns) {
+    auto slices = LogicalDexSlices(base, n);
+    size_t rejected = 0;
+    for (auto& s : slices) {
+        // The WHOLE image plus this dex's header offset — a v41 container dex
+        // addresses a data section shared with its siblings, so the verifier
+        // needs the container, not the slice (see VerifyDex).
+        auto vr = VerifyDex(base, n, check_insns, s.offset);
+        s.ok = vr.ok;
+        s.reason = vr.reason;
+        if (!s.ok) ++rejected;
+    }
+    if (rejected != 0) {
+        // A rejected slice means the image cannot be handed to the core whole —
+        // the survivors have to be copied out (CollectImage), and a container dex
+        // does not survive that: its offsets address the container. Reject it too
+        // rather than load one that would read its siblings' bytes.
+        for (auto& s : slices) {
+            if (s.ok && !s.self_contained) {
+                s.ok = false;
+                s.reason =
+                    "another dex in this v41 container failed verification, and a "
+                    "container dex cannot be loaded apart from its siblings";
+            }
+        }
+    }
+    return slices;
+}
+
+// How many dexes a session can address at all. `DexKit::GetDexItem(uint16_t)` —
+// and the core's dex_id plumbing generally — is uint16_t, so 65535 is the last
+// reachable id. Refusing the excess here is what keeps "an accepted row is a dex
+// the session really loaded" true: an id past the range WRAPS on every later
+// lookup and silently reaches a DIFFERENT dex, which is how a null DexItem slipped
+// past AssertLoadedDexesWereVerified and still SEGV'd (adversarial review,
+// CONFIRMED with 65536 valid dexes plus one the parser rejects). Same
+// bounded-refusal posture as kMaxDeclaredIds / gt_budget — unreachable for real
+// input, deterministic and loud for crafted input.
+constexpr int kMaxLoadedDexes = 1 << 16;
+
+// One verdict row per logical dex, giving each accepted one the next real dex_id.
+// Returns how many were accepted, and downgrades any slice it had to refuse so
+// the caller's salvage path cannot load one anyway.
+size_t EmitSliceVerdicts(std::vector<LogicalSlice>& slices,
+                         const std::string& name, const std::string& source,
+                         int& next_dex_id, std::vector<DexVerifyStatus>& report) {
+    if (slices.empty()) {
+        // Too short to hold a header, or a file_size that does not fit — the core
+        // would build no DexItem at all, so this is a rejection with a reason
+        // rather than a silent empty load.
+        report.push_back({-1, name, false,
+                          "no logical dex in image (truncated header or a "
+                          "file_size that does not fit the image)",
+                          source});
+        return 0;
+    }
+    size_t accepted = 0;
+    for (auto& s : slices) {
+        if (s.ok && next_dex_id >= kMaxLoadedDexes) {
+            s.ok = false;
+            s.reason =
+                "too many logical dexes in this session (the core addresses a "
+                "dex_id as uint16_t, so at most 65536 can be loaded)";
+        }
+        if (s.ok) {
+            report.push_back({next_dex_id++, name, true, {}, source});
+            ++accepted;
+        } else {
+            report.push_back({-1, name, false, s.reason, source});
+        }
+    }
+    return accepted;
+}
+
+// Copy one logical dex out of a shared image into an image of its own, so the
+// core can be handed the survivors of a partially-bad container without also
+// being handed the rejected slice. Only reached when a slice failed — an
+// all-verified image is moved through untouched.
+std::unique_ptr<dexkit::MemMap> CopySlice(const uint8_t* base, uint32_t size) {
+    auto mm = std::make_unique<dexkit::MemMap>(size);
+    if (!mm->ok()) return nullptr;  // allocation failed
+    std::memcpy(mm->data(), base, size);
+    return mm;
+}
+
 }  // namespace
 
 ContainerInfo DexKitExt::Identify(const std::string& path) {
@@ -362,9 +494,9 @@ std::vector<DexVerifyStatus> DexKitExt::Verify(const std::string& path,
     }
 
     if (p.format == "dex") {
-        auto vr = VerifyDex(reinterpret_cast<const uint8_t*>(p.map->data()),
-                            p.map->len(), check_insns);
-        report.push_back({vr.ok ? accepted : -1, path, vr.ok, vr.reason, path});
+        const auto* base = reinterpret_cast<const uint8_t*>(p.map->data());
+        auto slices = ClassifyImageSlices(base, p.map->len(), check_insns);
+        EmitSliceVerdicts(slices, path, path, accepted, report);
         return report;
     }
 
@@ -389,19 +521,95 @@ std::vector<DexVerifyStatus> DexKitExt::Verify(const std::string& path,
             report.push_back({-1, name, false, "decompression failed", path});
             continue;
         }
-        auto vr = VerifyDex(reinterpret_cast<const uint8_t*>(mm.data()), mm.len(),
-                            check_insns);
-        if (vr.ok) {
-            report.push_back({accepted++, name, true, {}, path});
-        } else {
-            report.push_back({-1, name, false, vr.reason, path});
-        }
+        const auto* base = reinterpret_cast<const uint8_t*>(mm.data());
+        auto slices = ClassifyImageSlices(base, mm.len(), check_insns);
+        EmitSliceVerdicts(slices, name, path, accepted, report);
     }
     return report;
 }
 
-void DexKitExt::CollectSource(const std::string& path, bool check_insns,
-                             std::vector<std::unique_ptr<dexkit::MemMap>>& out) {
+size_t DexKitExt::CollectImage(std::unique_ptr<dexkit::MemMap> image,
+                               const std::string& source, const std::string& entry,
+                               const std::string& name, bool check_insns,
+                               std::vector<std::unique_ptr<dexkit::MemMap>>& out,
+                               std::string* first_reject_reason) {
+    const auto* base = reinterpret_cast<const uint8_t*>(image->data());
+    const size_t n = image->len();
+
+    auto slices = ClassifyImageSlices(base, n, check_insns);
+    // Rows are emitted here, so the accepted dex_ids are handed out in load
+    // order across every source of the session.
+    const size_t accepted =
+        EmitSliceVerdicts(slices, name, source, next_dex_id_, verify_status_);
+
+    if (first_reject_reason != nullptr && first_reject_reason->empty()) {
+        for (const auto& s : slices) {
+            if (!s.ok) { *first_reject_reason = s.reason; break; }
+        }
+        if (slices.empty()) *first_reject_reason = verify_status_.back().reason;
+    }
+    if (accepted == 0) return 0;
+
+    if (accepted == slices.size()) {
+        // Every logical dex verified — hand the image over whole. This is the
+        // ordinary path (one dex per image, and a fully-valid concatenated
+        // container), and it copies nothing.
+        image_origin_[image.get()] = {source, entry, 0};
+        out.push_back(std::move(image));
+        return accepted;
+    }
+
+    // A slice failed. The image cannot be handed over as-is (the core would
+    // parse the rejected slice too), so copy the survivors out. `base_offset`
+    // keeps the reported provenance offset the same value it would have had if
+    // the whole container had verified.
+    for (const auto& s : slices) {
+        if (!s.ok) continue;
+        auto copy = CopySlice(base + s.offset, s.size);
+        if (copy == nullptr) {
+            // Out of memory. Throwing rather than dropping the slice keeps the
+            // verdict rows (already emitted, with their dex_ids) true: a dex
+            // reported as accepted is one the session actually loaded.
+            throw std::runtime_error(
+                "dexllm: cannot allocate " + std::to_string(s.size) +
+                " bytes to salvage the verified dex at offset " +
+                std::to_string(s.offset) + " of '" + name + "'");
+        }
+        image_origin_[copy.get()] = {source, entry, s.offset};
+        out.push_back(std::move(copy));
+    }
+    return accepted;
+}
+
+void DexKitExt::AssertLoadedDexesWereVerified(size_t accepted) const {
+    const int n = core_->GetDexNum();
+    // Bounded by EmitSliceVerdicts' kMaxLoadedDexes, so the uint16_t below cannot
+    // wrap. Checked rather than assumed: a wrap would make the null-item scan read
+    // a DIFFERENT dex and hand back a false all-clear.
+    if (n < 0 || n > kMaxLoadedDexes) {
+        throw std::runtime_error(
+            "dexllm: internal error — " + std::to_string(n) +
+            " dexes loaded, past the addressable range");
+    }
+    if (n != static_cast<int>(accepted)) {
+        throw std::runtime_error(
+            "dexllm: internal error — the core parsed " + std::to_string(n) +
+            " dex(es) but " + std::to_string(accepted) +
+            " were verified at the load boundary; refusing to run on an "
+            "unverified dex");
+    }
+    auto& mut = const_cast<dexkit::DexKit&>(*core_);
+    for (int i = 0; i < n; ++i) {
+        if (mut.GetDexItem(static_cast<uint16_t>(i)) == nullptr) {
+            throw std::runtime_error(
+                "dexllm: dex " + std::to_string(i) +
+                " passed structural verification but could not be parsed");
+        }
+    }
+}
+
+size_t DexKitExt::CollectSource(const std::string& path, bool check_insns,
+                                std::vector<std::unique_ptr<dexkit::MemMap>>& out) {
     Probe p = ProbeContainer(path);  // one content-based classification
 
     if (p.format == "unknown") {
@@ -417,17 +625,15 @@ void DexKitExt::CollectSource(const std::string& path, bool check_insns,
     if (p.format == "dex") {
         // Structural gate (DexVerifier) BEFORE the core parses the image — a
         // malformed dex is screened out here so the core/slicer never touch it.
-        auto vr = VerifyDex(reinterpret_cast<const uint8_t*>(p.map->data()),
-                            p.map->len(), check_insns);
-        verify_status_.push_back(
-            {static_cast<int>(out.size()), path, vr.ok, vr.reason, path});
-        if (!vr.ok) {
+        // Per LOGICAL dex, not per file: see CollectImage (dexllm#25).
+        std::string reason;
+        const size_t accepted = CollectImage(std::move(p.map), path, std::string{},
+                                             path, check_insns, out, &reason);
+        if (accepted == 0) {
             throw std::runtime_error(
-                "dexllm: '" + path + "' failed dex verification: " + vr.reason);
+                "dexllm: '" + path + "' failed dex verification: " + reason);
         }
-        image_origin_[p.map.get()] = {path, std::string{}};
-        out.push_back(std::move(p.map));
-        return;
+        return accepted;
     }
 
     // p.format == "zip": extract each classes*.dex, verify at the load boundary,
@@ -441,7 +647,7 @@ void DexKitExt::CollectSource(const std::string& path, bool check_insns,
             "dexllm: zip container '" + path + "' has no classes*.dex to decompile "
             "(AndroidManifest.xml " + (p.has_manifest ? "present" : "absent") + ")");
     }
-    const size_t before = out.size();
+    size_t accepted = 0;
     for (int idx = 1; idx <= p.dex_count; ++idx) {
         auto name = "classes" + (idx == 1 ? std::string() : std::to_string(idx)) + ".dex";
         const auto* entry = p.za->Find(name);
@@ -451,30 +657,25 @@ void DexKitExt::CollectSource(const std::string& path, bool check_insns,
             verify_status_.push_back({-1, name, false, "decompression failed", path});
             continue;
         }
-        auto vr = VerifyDex(reinterpret_cast<const uint8_t*>(mm.data()), mm.len(),
-                            check_insns);
-        if (!vr.ok) {
-            verify_status_.push_back({-1, name, false, vr.reason, path});
-            continue;
-        }
-        verify_status_.push_back({static_cast<int>(out.size()), name, true, {}, path});
         auto owned = std::make_unique<dexkit::MemMap>(std::move(mm));
-        image_origin_[owned.get()] = {path, name};
-        out.push_back(std::move(owned));
+        accepted += CollectImage(std::move(owned), path, name, name, check_insns,
+                                 out, nullptr);
     }
-    if (out.size() == before) {
+    if (accepted == 0) {
         throw std::runtime_error(
             "dexllm: all " + std::to_string(p.dex_count) + " dex(es) in '" + path +
             "' failed verification");
     }
+    return accepted;
 }
 
 DexKitExt::DexKitExt(const std::string& apk_path, bool lenient)
     : apk_path_(apk_path), sources_{apk_path} {
     core_ = std::make_unique<dexkit::DexKit>();
     std::vector<std::unique_ptr<dexkit::MemMap>> valid_dexes;
-    CollectSource(apk_path, /*check_insns=*/!lenient, valid_dexes);
+    const size_t accepted = CollectSource(apk_path, /*check_insns=*/!lenient, valid_dexes);
     core_->AddImage(std::move(valid_dexes));
+    AssertLoadedDexesWereVerified(accepted);
 }
 
 DexKitExt::DexKitExt(const std::vector<std::string>& sources, bool lenient)
@@ -487,10 +688,12 @@ DexKitExt::DexKitExt(const std::vector<std::string>& sources, bool lenient)
     // Load sources in order — earlier sources get lower dex_ids, so first-wins
     // resolution prefers them (load a decrypted/dumped dex first to win).
     std::vector<std::unique_ptr<dexkit::MemMap>> valid_dexes;
+    size_t accepted = 0;
     for (const auto& src : sources) {
-        CollectSource(src, /*check_insns=*/!lenient, valid_dexes);
+        accepted += CollectSource(src, /*check_insns=*/!lenient, valid_dexes);
     }
     core_->AddImage(std::move(valid_dexes));
+    AssertLoadedDexesWereVerified(accepted);
 }
 
 DexKitExt::~DexKitExt() = default;
@@ -2053,15 +2256,20 @@ DexOrigin DexKitExt::GetDexOrigin(int dex_id) const {
     if (item == nullptr) return o;
     auto* img = item->GetImage();
     if (img == nullptr) return o;
+    uint32_t base_offset = 0;
     auto it = image_origin_.find(img);
     if (it != image_origin_.end()) {
-        o.source = it->second.first;
-        o.entry = it->second.second;
+        o.source = it->second.source;
+        o.entry = it->second.entry;
+        base_offset = it->second.base_offset;
     }
     const uint8_t* base = nullptr;
     std::size_t n = 0;
     if (!LogicalDexSpan(*item, *img, base, n)) return o;
-    o.offset = static_cast<uint32_t>(
+    // Offset in the container this dex was READ FROM. `base_offset` is 0 unless
+    // the image is a salvaged single-slice copy (a sibling logical dex failed
+    // verification), which makes the two cases agree.
+    o.offset = base_offset + static_cast<uint32_t>(
         base - reinterpret_cast<const uint8_t*>(img->data()));
     o.size = static_cast<uint32_t>(n);
     return o;

@@ -92,6 +92,22 @@ dk.verify_report()
 | `reason` | `str` (empty when valid; byte-level reason when rejected) |
 | `source` | `str` — the path handed to the constructor. `name` alone is ambiguous: it is the file path for a bare `.dex` but only the entry name for a zip member, so two sources both report `classes.dex` (dexllm#26) |
 
+**Rows ↔ dex_ids** (dexllm#25/#27). One row per **logical** dex, not per file: a
+concatenated / packer-dump container is split by the loader into several logical
+dexes and each is verified on its own, so such a source contributes several rows
+that share a `name` and are told apart by `dex_id` (and by
+`extract_dex(dex_id)["offset"]`). An **accepted** row's `dex_id` is the real
+`dex_id` of that dex in this session — the accepted rows are exactly
+`0 … dex_count()-1`, in order. A **rejected** row has `dex_id == -1`: it occupies
+no id, contributed no classes, and its `reason` names the first structural
+violation. Before v0.9.1 the field was the load-order *image* index, which drifted
+by the split count as soon as one source was concatenated.
+
+At most **65536** dexes can be loaded in one session (the core addresses a dex by
+`uint16_t`); the excess is refused with that reason, counted across *all* sources.
+Real containers are nowhere near this — it exists so an unaddressable `dex_id` is
+never handed out.
+
 ### `dk.warm_analysis_caches() -> None`
 One-time (~200 ms on a 50-dex APK) eager warm of all analysers; otherwise they
 warm lazily on first access.
@@ -242,9 +258,10 @@ the argument (the same all-vs-one axis as `list_classes()` /
 returning only the bytes). Nothing else could answer "which file did this come
 from": `verify_report()['name']` is the file path for a bare `.dex` but only the
 entry name for a zip member, so two sources in one session both report
-`classes.dex`; and a concatenated source, which the core splits into several
-`dex_id` over one image, has **no `verify_report` row at all** for its second
-logical dex. `verify_report()` now also carries `source` for the same reason.
+`classes.dex`. `verify_report()` now also carries `source` for the same reason.
+(It also once had **no row at all** for a concatenated source's second logical
+dex — fixed separately in dexllm#25, see the rows↔dex_ids note above — but
+`offset` remains the only thing that says WHERE in the container a dex starts.)
 
 ---
 

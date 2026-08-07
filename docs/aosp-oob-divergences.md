@@ -72,6 +72,45 @@ keep-vs-remove decision.
   primitive (the third-party slicer) whose internal reads we don't audit. Lowest
   removal priority.
 
+### A3. Data-range base — refuse the `header_offset` underflow
+
+- **Where:** [`native/core_ext/dex_verifier.cpp`](../native/core_ext/dex_verifier.cpp)
+  `DexVerifier::ComputeDataRange` (added for dexllm#25).
+- **AOSP reference:** `art/libdexfile/dex/dex_file.cc:240 DexFile::GetDataRange`,
+  which for a v41 container does `data -= headerV41->header_offset_;` with the
+  comment *"Allow underflow and later overflow"* and clamps afterwards with
+  `std::min<size_t>(size, container->End() - data)`. That clamp does not restore
+  the LOW end: a `header_offset` larger than the header's own position in the
+  container leaves `data` **before** the container start.
+- **Our divergence:** we are handed the image base explicitly, so the underflow is
+  a rejection (`"Dex container starts before the image"`) instead of a pointer
+  outside the mapping. ART reaches an equivalent verdict one phase later
+  (`CheckHeader`'s `container_size_ <= header_offset_` block, `:670`, which we also
+  port), but only after `GetDataRange` has already produced the bad pointer.
+- **Output impact:** none on any dex the ART check would accept — the two reject
+  the same inputs, ours just refuses before constructing the pointer.
+- **Assessment:** leaf self-defense, same family as A1/A2. **KEPT.**
+
+### A4. Data-range size — reject an over-long `container_size` instead of clamping
+
+- **Where:** [`native/core_ext/dex_verifier.cpp`](../native/core_ext/dex_verifier.cpp)
+  `DexVerifier::ComputeDataRange` (added for dexllm#25).
+- **AOSP reference:** the same `GetDataRange`, which ends with
+  `std::min<size_t>(size, container->End() - data)` — a v41 `container_size`
+  pointing past the file is silently **clamped** to what is there.
+- **Our divergence:** we reject it (`"Dex container size is past the image"`).
+- **Why, and why this one is NOT just belt-and-braces:** the slicer — the parser
+  that actually reads our dexes — does **not** clamp. `Reader::ValidateHeader`
+  asserts `SLICER_CHECK_LE(ContainerSize() - ContainerOff(), size)`. So a clamped
+  accept means `verify()` reports a dex as loadable and the loader then throws on
+  it, breaking the documented `verify()` ≡ `verify_report()` equality. Found by
+  adversarial review with `container_size = 0xFFFFFF00`.
+- **Output impact:** none on a well-formed container (`container_size` never
+  exceeds the container). AOSP's `art/test/dexdump/multidex-container.dex` still
+  verifies and loads both dexes.
+- **Assessment:** deliberate, motivated by the parser we actually pair with rather
+  than by ART's. **KEPT.**
+
 ---
 
 ## Type B — validation ADDED beyond AOSP's structural scope

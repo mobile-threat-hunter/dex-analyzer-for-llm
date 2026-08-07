@@ -118,9 +118,17 @@ struct DexVerifyResult {
     std::string reason;  // empty when ok; first structural violation otherwise
 };
 
-// Verify one logical dex image [data, data+size). Offsets in the dex are taken
-// relative to `data` (a standard v35–40 dex, or one classes*.dex extracted from
-// an apk). Never reads outside [data, data+size); never crashes.
+// Verify ONE logical dex inside the image [data, data+size). `header_off` is
+// where that dex's header sits in the image — 0 for a standalone dex or one
+// classes*.dex extracted from an apk, nonzero for a later dex of a concatenated
+// / packer-dump container or of a v41 multi-dex container. Never reads outside
+// [data, data+size); never crashes.
+//
+// The image is passed WHOLE (rather than a pre-sliced sub-range) because the
+// span a dex's offsets are relative to is not always the dex itself: a v41
+// container dex addresses a data section SHARED with its siblings, so its base
+// is the container. The verifier derives that span the way ART's
+// DexFile::GetDataRange does — see ComputeDataRange.
 //
 // `check_insns` (default true) gates the ONE deliberate non-port: VerifyInsns
 // (instruction-operand bounds), which ART's *structural* DexFileVerifier does not
@@ -130,6 +138,7 @@ struct DexVerifyResult {
 // methods are decrypted. ART loads such a dex (it defers instruction validity to
 // the runtime method_verifier, which packers skip); this lets the analyzer do the
 // same WITHOUT relaxing any header/structure/bounds check.
-DexVerifyResult VerifyDex(const uint8_t* data, size_t size, bool check_insns = true);
+DexVerifyResult VerifyDex(const uint8_t* data, size_t size, bool check_insns = true,
+                          size_t header_off = 0);
 
 }  // namespace dexkit::ext

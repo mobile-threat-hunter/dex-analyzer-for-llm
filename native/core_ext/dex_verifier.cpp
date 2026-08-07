@@ -256,14 +256,24 @@ bool IsValidDescriptor(const char* s) {
 // ─────────────────────────────────────────────────────────────────────────────
 class DexVerifier {
 public:
-    DexVerifier(const u1* data, size_t size, bool check_insns = true)
-        : begin_(data), size_(size), check_insns_(check_insns) {}
+    DexVerifier(const u1* image, size_t image_size, size_t header_off,
+                bool check_insns = true)
+        : image_(image), image_size_(image_size), header_off_(header_off),
+          check_insns_(check_insns) {}
 
     bool Verify() {
-        if (begin_ == nullptr || size_ < dex::Header::kV40Size) {
+        if (image_ == nullptr || header_off_ > image_size_) {
             return Fail("Empty or truncated file");
         }
-        header_ = reinterpret_cast<const dex::Header*>(begin_);
+        // ART CheckHeader (:619) computes its `size` as
+        // `container->End() - dex_file_->Begin()` — the bytes from THIS dex's
+        // header to the end of the file. That is the bound for `file_size`; the
+        // bound for section OFFSETS is the data range below, which is a different
+        // span for a v41 container.
+        avail_ = image_size_ - header_off_;
+        if (avail_ < dex::Header::kV40Size) return Fail("Empty or truncated file");
+        header_ = reinterpret_cast<const dex::Header*>(image_ + header_off_);
+        if (!ComputeDataRange()) return false;
         return CheckHeader() && CheckMap() && CheckIntraSection() &&
                CheckInterSection();
     }
@@ -271,6 +281,50 @@ public:
     const std::string& reason() const { return reason_; }
 
 private:
+    // ART DexFile::GetDataRange (dex_file.cc :240) — the byte range every dex
+    // offset in this header is relative to, and the bound `size_` all the
+    // CheckValidOffsetAndSize / CheckListSize checks use (ART's DataBegin() /
+    // DataSize(), which is what its verifier is constructed with).
+    //
+    // A standard v35-40 dex: the dex itself, bounded by its own file_size — so a
+    // section may not reach past this dex even when more bytes follow it in the
+    // container (that is what let a concatenated dex's tail go unchecked).
+    //
+    // A v41 CONTAINER dex: the whole container, with this header sitting at
+    // `container_off` inside it — sibling dexes deliberately SHARE one data
+    // section, so `string_ids_off` legitimately points past this dex's file_size.
+    // Verifying such a dex against its own slice would reject a well-formed file
+    // (AOSP art/test/dexdump/multidex-container.dex), and verifying the second
+    // one against its own header would resolve every offset in the wrong place.
+    bool ComputeDataRange() {
+        if (avail_ >= dex::Header::kV41Size &&
+            header_->header_size >= dex::Header::kV41Size) {
+            const u4 hoff = header_->ContainerOff();
+            // ART lets `data -= header_offset` underflow and clamps after. We are
+            // handed the image base explicitly, so an underflow is a rejection:
+            // a container that begins before the image cannot be verified.
+            if (hoff > header_off_) return Fail("Dex container starts before the image");
+            const size_t base_off = header_off_ - hoff;
+            // ART CLAMPS a container_size that runs past the file
+            // (`std::min(size, container->End() - data)`); we reject it. Clamping
+            // would let a crafted `container_size` pass the gate and then be
+            // refused by the slicer's own ValidateHeader
+            // (`SLICER_CHECK_LE(ContainerSize() - ContainerOff(), size)`) — i.e.
+            // `verify()` would call a dex loadable that the loader then throws on,
+            // breaking the documented verify()/verify_report() equality. A real
+            // container_size never exceeds the container.
+            if (header_->ContainerSize() > image_size_ - base_off) {
+                return Fail("Dex container size is past the image");
+            }
+            begin_ = image_ + base_off;
+            size_ = header_->ContainerSize();
+        } else {
+            begin_ = image_ + header_off_;
+            size_ = std::min<size_t>(header_->file_size, avail_);
+        }
+        return true;
+    }
+
     // ── helpers ───────────────────────────────────────────────────────────────
     bool Fail(std::string m) {
         if (reason_.empty()) reason_ = std::move(m);
@@ -398,8 +452,12 @@ private:
         return off == 0 ? nullptr : reinterpret_cast<const dex::TypeList*>(begin_ + off);
     }
 
-    const u1* begin_;
-    size_t size_;
+    const u1* image_;      // the whole loaded image (a file, or one zip entry)
+    size_t image_size_;
+    size_t header_off_;    // where THIS logical dex's header sits in the image
+    size_t avail_ = 0;     // image_size_ - header_off_ (ART CheckHeader's `size`)
+    const u1* begin_ = nullptr;  // ART DataBegin() — the base every offset is off
+    size_t size_ = 0;            // ART DataSize()  — and the bound for them
     bool check_insns_ = true;  // false = ART-structural-equivalent (skip VerifyInsns)
     const dex::Header* header_ = nullptr;
     std::string reason_;
@@ -417,10 +475,23 @@ bool DexVerifier::CheckHeader() {
         (version >= dex::Header::kV41) ? dex::Header::kV41Size : dex::Header::kV40Size;
     const u4 file_size = header_->file_size;
     if (file_size < header_size) return Fail("Bad file size (too small)");
-    if (file_size > size_) return Fail("Bad file size (past image)");
+    // ART bounds file_size by the bytes remaining from this header to the end of
+    // the file (`container->End() - Begin()`), NOT by the data range — for a v41
+    // container those differ.
+    if (file_size > avail_) return Fail("Bad file size (past image)");
     if (header_->header_size != header_size) return Fail("Bad header size");
     if (header_->endian_tag != dex::kEndianConstant) return Fail("Unexpected endian_tag");
     // adler32: intentionally not verified (policy).
+
+    // ART :670 — the v41 container fields must be self-consistent.
+    if (version >= dex::Header::kV41) {
+        const u4 container_size = header_->ContainerSize();
+        const u4 container_off = header_->ContainerOff();
+        if (container_size <= container_off) return Fail("Dex container is too small");
+        if (file_size > container_size - container_off) {
+            return Fail("Header file_size is past multi-dex size");
+        }
+    }
 
     // Every section offset/size inside the file (ART CheckHeader section block).
     // CheckValidOffsetAndSize validates each ID table's offset alignment + that
@@ -1143,9 +1214,10 @@ bool DexVerifier::FindFirstClassDataDefiner(u4 off, u4* out) {
 
 }  // namespace
 
-DexVerifyResult VerifyDex(const u1* data, size_t size, bool check_insns) {
+DexVerifyResult VerifyDex(const u1* data, size_t size, bool check_insns,
+                          size_t header_off) {
     try {
-        DexVerifier v(data, size, check_insns);
+        DexVerifier v(data, size, header_off, check_insns);
         if (v.Verify()) return {true, {}};
         return {false, v.reason()};
     } catch (const std::exception& e) {

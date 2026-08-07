@@ -41,9 +41,11 @@ flowchart TB
 ## 2. Load and verify
 
 The constructor identifies the container by **content, not filename**, then gates
-**every** dex through the structural verifier before the core parses it. A
-malformed dex is rejected with a byte-level reason; siblings in the same apk still
-load. The load is lazy — no method is decompiled yet.
+**every** dex through the structural verifier before the core parses it — every
+*logical* dex, so a concatenated / packer-dump image is checked at each embedded
+header rather than only at offset 0. A malformed dex is rejected with a byte-level
+reason; siblings in the same apk (and the other logical dexes of the same image)
+still load. The load is lazy — no method is decompiled yet.
 
 ```mermaid
 sequenceDiagram

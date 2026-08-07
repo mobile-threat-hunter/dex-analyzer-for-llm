@@ -104,7 +104,11 @@ verifier, `VerifyDex` ([native/core_ext/dex_verifier.h](../native/core_ext/inclu
 `DexKitExt` runs it on every raw `.dex` and every `classes*.dex` extracted from an
 apk **before** `AddImage` hands the bytes to the DexKit Core / slicer — a reject
 throws with a byte-level reason (surfaced by `dk.verify_report()`), so malformed or
-crafted input never reaches the parser.
+crafted input never reaches the parser. It runs once per **logical** dex, not per
+file: `AddImage` splits a concatenated / packer-dump image into one `DexItem` per
+embedded header, so verifying the image once (at offset 0) would let every later
+dex through unchecked (dexllm#25). `AssertLoadedDexesWereVerified` re-checks after
+the load that the core parsed exactly the dexes the gate accepted.
 
 It mirrors the boundary invariant from the input side: like `dad_cpp`, the verifier
 depends only on the slicer dex value types (`slicer/dex_format.h`, `dex_bytecode.h`)

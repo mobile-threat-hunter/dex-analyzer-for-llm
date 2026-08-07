@@ -95,7 +95,13 @@ This is the **trust boundary**, and it is **skipped entirely** when a matching
 load-time gate, `dexkit::ext::VerifyDex` (`native/core_ext/dex_verifier.{h,cpp}`),
 run by `DexKitExt` before the slicer parses any dex (raw `.dex` and each
 `classes*.dex`; reject → throw with a byte-level reason, surfaced by
-`dk.verify_report()`). It is a readable 1:1 port of all four ART phases
+`dk.verify_report()`). It gates each **logical** dex: one image can carry several
+(a concatenated / packer dump, or a v041 container), and it derives the byte range
+a dex's offsets are relative to the way ART's `DexFile::GetDataRange`
+(`dex_file.cc:240`) does — a standard v035–040 dex is bounded by its own
+`file_size`, while a v041 container dex is based at the container and bounded by
+`container_size`, because container dexes deliberately **share** one data section.
+It is a readable 1:1 port of all four ART phases
 (`// ART :NNNN` anchors) — header/map/intra (incl. code_item, MUTF-8,
 encoded_array) / inter (id ordering+uniqueness, descriptor + member-name syntax,
 class_def semantics) — **plus** `VerifyInsns`, an instruction-operand bounds pass
@@ -217,7 +223,10 @@ by extracting the raw `.dex` and loading it individually.
 ## 6. Versions & encoding — mostly aligned, dexllm just emits more
 
 - **Versions**: slicer `kMinVersion=35, kMaxVersion=41` → **v041 container support**,
-  same range as AOSP android16 (`035–041`).
+  same range as AOSP android16 (`035–041`). `VerifyDex` matches: it checks ART's
+  v041 header self-consistency block (`dex_file_verifier.cc:670`) and verifies
+  *every* dex of a container against the container's shared data range (before
+  dexllm#25 only the first one was verified at all).
 - **MUTF-8**: AOSP validates then stores as-is; dexllm **decodes to the exact UTF-16
   code units ART builds in a `mirror::String`** (shared decoder ported 1:1 from
   `art/libdexfile/dex/utf-inl.h GetUtf16FromUtf8` — see

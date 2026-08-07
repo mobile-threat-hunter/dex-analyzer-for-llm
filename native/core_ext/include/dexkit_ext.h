@@ -44,6 +44,13 @@ struct ContainerInfo {
 // classes/methods; `reason` names the first structural violation (ART
 // DexFileVerifier-style). `name` is the source entry (e.g. "classes2.dex") or
 // the file path for a raw .dex.
+//
+// One verdict per LOGICAL dex, not per file (dexllm#25): a concatenated /
+// packer-dump container is split by the core into several logical dexes over one
+// image, and each is verified on its own slice — so such a source contributes
+// several rows that share a `name` and are told apart by `dex_id` (and by
+// `extract_dex(dex_id)["offset"]`). `dex_id` is the real dex_id an accepted dex
+// gets in the loaded session; a rejected one is -1 and never occupies an id.
 struct DexVerifyStatus {
     int dex_id = 0;
     std::string name;
@@ -65,11 +72,14 @@ struct DexOrigin {
     int dex_id = -1;
     std::string source;
     std::string entry;
-    // Byte offset of this logical dex within the LOADED IMAGE — the
+    // Byte offset of this logical dex within the thing it was READ FROM — the
     // decompressed `entry` when `entry` is non-empty, otherwise the file at
     // `source`. NOT an offset into `source` for a zip member: a packer apk
     // whose classes.dex is two concatenated dexes yields entry="classes.dex"
     // AND a nonzero offset, and slicing the .apk at that offset is garbage.
+    // (Read-from, not "within the loaded image": when a sibling logical dex
+    // fails verification the survivors are copied into images of their own, and
+    // this stays the offset in the original container either way.)
     uint32_t offset = 0;
     uint32_t size = 0;    // its own header->file_size
 };
@@ -392,8 +402,33 @@ private:
     // zip/apk) onto the end of `out`, recording per-dex verdicts in verify_status_
     // with the running combined dex_id. Throws if the source can't be opened or
     // isn't a dex/zip container; per-dex verify failures are recorded and skipped.
-    void CollectSource(const std::string& path, bool check_insns,
-                       std::vector<std::unique_ptr<dexkit::MemMap>>& out);
+    // Returns how many logical dexes it accepted.
+    size_t CollectSource(const std::string& path, bool check_insns,
+                         std::vector<std::unique_ptr<dexkit::MemMap>>& out);
+
+    // The load gate for ONE image (a raw .dex file, or one decompressed zip
+    // entry). Verifies every LOGICAL dex the core would split the image into and
+    // appends only verified ones to `out`; returns how many were accepted.
+    //
+    // dexllm#25: the core's AddImage runs ParseLogicalDexOffsets, so ONE image can
+    // become several dexes — verifying the image once (at offset 0) let every
+    // later logical dex reach the core unverified, which is exactly the input a
+    // packer dump produces. When every slice verifies the image is handed over
+    // whole (no copy, byte-for-byte the previous behaviour). When some slice
+    // fails, the survivors are copied into images of their own so the rejected
+    // one cannot be reached — per-logical-dex rejection, mirroring the zip
+    // branch's per-entry rejection.
+    size_t CollectImage(std::unique_ptr<dexkit::MemMap> image,
+                        const std::string& source, const std::string& entry,
+                        const std::string& name, bool check_insns,
+                        std::vector<std::unique_ptr<dexkit::MemMap>>& out,
+                        std::string* first_reject_reason);
+
+    // Post-load invariant: the core parsed exactly the dexes we verified, and
+    // every one of them produced a DexItem. Cheap, and it is what keeps the gate
+    // honest — CollectImage mirrors the core's split rule, and a drift between
+    // the two would silently reopen dexllm#25.
+    void AssertLoadedDexesWereVerified(size_t accepted) const;
 
     // Lazily build api_resolve_index_ (one ApiResolveIndex per dex) for O(1) target
     // resolution in the caller reverse-index path. Idempotent (guarded by the flag).
@@ -428,13 +463,22 @@ private:
     bool declared_string_index_disabled_ = false;
     std::unique_ptr<DexItemCodeSource> code_source_;  // lazy-constructed
     std::vector<DexVerifyStatus> verify_status_;      // load-boundary verdicts
-    // MemMap* -> (source path, zip entry), recorded in CollectSource BEFORE the
-    // image is moved into the core. Keyed by image rather than by dex_id because
-    // the core splits a concatenated image into several logical dexes, so the
+    int next_dex_id_ = 0;  // running dex_id handed out to accepted LOGICAL dexes
+    // Provenance of one loaded image, recorded in CollectImage BEFORE the image
+    // is moved into the core. Keyed by image rather than by dex_id because the
+    // core splits a concatenated image into several logical dexes, so the
     // dex_id -> source relation is only knowable after the load; DexItem keeps the
     // image alive for the session, so these pointers stay valid.
-    std::unordered_map<const dexkit::MemMap*, std::pair<std::string, std::string>>
-        image_origin_;
+    struct ImageOrigin {
+        std::string source;
+        std::string entry;
+        // Where this image started in the container it was read from. 0 unless
+        // the image is a salvaged copy of one slice of a concatenated source, in
+        // which case adding it keeps DexOrigin::offset the same value an
+        // all-verified load of that container would have reported.
+        uint32_t base_offset = 0;
+    };
+    std::unordered_map<const dexkit::MemMap*, ImageOrigin> image_origin_;
 };
 
 // Public for testing/customisation: returns true if the descriptor is a
