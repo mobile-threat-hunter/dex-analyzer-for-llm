@@ -64,16 +64,20 @@ std::string Mutf8ToUtf8Lossy(std::string_view raw);
 // untouched (and the implementation returns the input unchanged when it contains
 // neither, which is the overwhelming majority).
 //
-// Not every pool string can be reconstructed, and the two residuals of dexllm#19 are
-// both crafted-only (0 occurrences across the corpus's 292,157 raw string_data
-// entries):
-//   * a LONE surrogate. Not because a Python `str` cannot hold one — `"\ud800"` is
-//     a legal str — but because pybind11 encodes arguments as STRICT UTF-8, which
-//     rejects an unpaired surrogate (the call raises), and in the other direction the
-//     binding's decode replaces it with U+FFFD, which cannot be encoded back. Passing
-//     the raw MUTF-8 as `bytes` DOES match: the fast path is the identity there. (The
-//     codec itself round-trips it — Utf16ToUtf8 keeps the raw 3-byte form — so the
-//     loss is at the pybind boundary, not here.)
+// Every string a LOADABLE dex can hold round-trips: `Utf8ToMutf8(Mutf8ToUtf8(x)) == x`
+// for every verifier-legal pool string, which is what makes the decode/encode pairs at
+// the binding genuine bijections. Both residuals dexllm#19 recorded here are now closed,
+// for different reasons — one at the verifier, one at the boundary — and each is kept
+// below because the reasoning is what stops them being reintroduced:
+//   * a LONE surrogate — NO LONGER A RESIDUAL (dexllm#29). The codec always
+//     round-tripped it (Utf16ToUtf8 keeps the raw 3-byte form, and this function's
+//     fast path passes it through); the loss was pybind11's STRICT UTF-8 codec on
+//     both sides of the boundary, which rejects an unpaired surrogate on the way in
+//     and forced the U+FFFD replacement on the way out. The binding now does those
+//     two conversions itself with CPython's `surrogatepass` handler for string
+//     CONTENT, so a literal carrying one round-trips. Identifiers keep the lossy
+//     decode: the verifier rejects a lone surrogate in a NAME, so the case cannot
+//     arise there.
 //   * a non-NUL OVERLONG encoding (`C0 81`, `E0 80 81`, …). NO LONGER REACHABLE:
 //     VerifyMutf8 used to accept these — documented as "ART does the same", which
 //     was simply wrong (ART's CheckIntraStringDataItem rejects both forms as an

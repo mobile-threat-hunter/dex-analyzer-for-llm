@@ -152,6 +152,14 @@ async def _call_tool(name: str, arguments: dict[str, Any]) -> list[types.TextCon
     # dispatch_tool is blocking (APK load, decompile, GIL-held searches). Run it
     # off the event loop so a long job can't stall the stdio server / heartbeats.
     result = await asyncio.to_thread(dispatch_tool, name, arguments or {})
+    # The json.dumps here is load-bearing beyond formatting: a string LITERAL may
+    # carry a lone surrogate (dexllm#29 — legal, verifier-permitted input that the
+    # string accessors now preserve instead of replacing with U+FFFD), and the
+    # transport's own serializer cannot encode one — a TextContent holding the raw
+    # value fails with PydanticSerializationError. Serializing here at the default
+    # ensure_ascii=True escapes it to \uXXXX, so the payload is pure ASCII by the
+    # time mcp touches it. Do NOT "simplify" this by handing `result` to the
+    # transport as structured content without re-establishing that guarantee.
     return [
         types.TextContent(type="text", text=json.dumps(result, indent=2, default=str))
     ]

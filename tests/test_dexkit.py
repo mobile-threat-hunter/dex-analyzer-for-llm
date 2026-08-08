@@ -104,8 +104,28 @@ def _smali_strings(dk, method_descriptor):
 
 def test_method_strings_match_smali_ground_truth(dk):
     """list_method_strings ≡ the const-string operands of the method's smali,
-    deduplicated in first-occurrence order — over a real sample, not one method."""
-    checked = with_strings = 0
+    deduplicated in first-occurrence order — over a real sample, not one method.
+
+    SCOPE (dexllm#29): the two routes deliberately diverge on a LONE SURROGATE —
+    the accessor preserves it, the smali listing is display text and folds it to
+    U+FFFD. Strings carrying one are therefore EXCLUDED from both sides below, so
+    what remains is an unconditional invariant rather than a corpus fact: scoping
+    this in the docstring alone left the assertion failing on legitimate input
+    (a verifier-valid dex passed via $DEXLLM_TEST_APK), which is the same
+    "corpus dependency must SKIP, never fail" trap the access-flags guard hit.
+    tests/test_lone_surrogate.py pins the divergence itself.
+    """
+
+    def _printable(xs):
+        # Symmetric: the accessor spells the divergence as a surrogate and smali
+        # spells it as U+FFFD, so BOTH have to go or the filter only empties one
+        # side. (A genuine U+FFFD literal is dropped too — conservative, and the
+        # corpus has none.)
+        return [
+            x for x in xs if not any(0xD800 <= ord(c) <= 0xDFFF or c == "�" for c in x)
+        ]
+
+    checked = with_strings = compared = 0
     for cls in dk.list_classes():
         for m in dk.list_class_methods(cls):
             got = dk.list_method_strings(m)
@@ -116,12 +136,16 @@ def test_method_strings_match_smali_ground_truth(dk):
             # by itself reach an affected one — test_render_smali_decodes_mutf8
             # and test_smali_never_contains_raw_control_chars are the real guards.
             expected = _smali_strings(dk, m)
-            assert got == expected, m
+            assert _printable(got) == _printable(expected), m
             checked += 1
             with_strings += bool(got)
+            compared += len(_printable(got))
         if with_strings >= 25:
             break
-    assert checked > 0 and with_strings > 0  # the oracle actually saw strings
+    # Count elements that SURVIVED the filter, not methods: on a dex whose strings
+    # are all filtered out the method counters stay positive while the oracle
+    # compares nothing, so only this makes the "invariant" claim non-vacuous.
+    assert checked > 0 and with_strings > 0 and compared > 0
 
 
 def test_class_strings_are_method_union_then_static_init(dk):
@@ -242,15 +266,21 @@ def test_non_ascii_literals_round_trip():
     # none declared as a constant in this corpus — the four above already ran
 
 
-def test_lone_surrogate_query_is_rejected_not_silently_wrong(dk):
-    """dexllm#19 residual, pinned: a lone surrogate cannot be queried as a `str`.
+def test_lone_surrogate_query_is_accepted(dk):
+    """dexllm#29 closed the last dexllm#19 residual — this guard is INVERTED.
 
-    Not because Python forbids it (a ``str`` may hold U+D800) but because pybind11
-    encodes arguments as strict UTF-8 and rejects an unpaired surrogate — a LOUD
-    failure, not a silent miss, which is the property worth keeping.
+    It used to pin the rejection as the desirable LOUD failure, on the premise
+    that a lone surrogate could not cross the boundary. The premise was wrong:
+    Python holds one fine and CPython's ``surrogatepass`` handler encodes it to
+    the exact 3 bytes the pool stores, so the rejection was pybind11's strict
+    codec, not a property worth keeping — and it made a value this library had
+    just returned unqueryable.
+
+    Only ACCEPTANCE is asserted — a result LIST rather than a `TypeError`. Pinning
+    it to `[]` would assert a corpus fact (that no literal is exactly U+D800), not
+    the property. The round trip on a crafted dex is tests/test_lone_surrogate.py.
     """
-    with pytest.raises(TypeError):
-        dk.find_methods_using_strings(["\ud800"], "equals")
+    assert isinstance(dk.find_methods_using_strings(["\ud800"], "equals"), list)
 
 
 def test_forward_strings_empty_for_bodyless_and_unknown(dk):

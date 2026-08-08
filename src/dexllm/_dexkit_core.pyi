@@ -651,7 +651,7 @@ class DexKit:
 
     def find_classes_using_strings(
         self,
-        strings: Sequence[str],
+        strings: Sequence[str | bytes | bytearray],
         match_type: str = "contains",
         ignore_case: bool = False,
     ) -> list[ClassMatch]:
@@ -669,7 +669,7 @@ class DexKit:
 
     def find_classes_declaring_strings(
         self,
-        strings: Sequence[str],
+        strings: Sequence[str | bytes | bytearray],
         match_type: str = "contains",
         ignore_case: bool = False,
     ) -> list[ClassMatch]:
@@ -687,7 +687,7 @@ class DexKit:
 
     def find_methods_using_strings(
         self,
-        strings: Sequence[str],
+        strings: Sequence[str | bytes | bytearray],
         match_type: str = "contains",
         ignore_case: bool = False,
     ) -> list[MethodMatch]:
@@ -701,7 +701,7 @@ class DexKit:
 
     def batch_find_classes_using_strings(
         self,
-        query_map: Mapping[str, Sequence[str]],
+        query_map: Mapping[str, Sequence[str | bytes | bytearray]],
         match_type: str = "contains",
         ignore_case: bool = False,
     ) -> dict[str, list[ClassMatch]]:
@@ -716,7 +716,7 @@ class DexKit:
 
     def batch_find_methods_using_strings(
         self,
-        query_map: Mapping[str, Sequence[str]],
+        query_map: Mapping[str, Sequence[str | bytes | bytearray]],
         match_type: str = "contains",
         ignore_case: bool = False,
     ) -> dict[str, list[MethodMatch]]:

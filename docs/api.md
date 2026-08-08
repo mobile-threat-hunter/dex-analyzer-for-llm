@@ -205,14 +205,59 @@ dk.list_class_strings('Lcom/example/android/tvleanback/Utils;')
   `find_classes_declaring_strings` for those. (A second cause — a supplementary-plane
   or NUL-bearing literal never matching because the query was compared as UTF-8
   against MUTF-8 pool bytes — accounted for 63 more until dexllm#19; the query is now
-  encoded to MUTF-8 at the binding boundary. One crafted-only residual remains,
-  absent from the corpus: a pool string carrying a LONE surrogate — pybind11 encodes
-  arguments as strict UTF-8, which rejects an unpaired surrogate, and the decode
-  direction replaces it with U+FFFD, though passing the raw MUTF-8 as `bytes` does
-  match. The other former residual, a non-NUL OVERLONG encoding, is gone: it was
-  listed as "the verifier accepts it, as ART does", which was wrong on both counts —
-  ART rejects it, and dexllm#22 ported that check, so such a dex no longer loads.)
+  encoded to MUTF-8 at the binding boundary. The two former residuals are both gone.
+  A non-NUL OVERLONG encoding was listed as "the verifier accepts it, as ART does",
+  which was wrong on both counts — ART rejects it, and dexllm#22 ported that check,
+  so such a dex no longer loads. A LONE surrogate is closed by dexllm#29, below.)
   Both directions are individually correct — do not assume set equality.
+- **Lone surrogates survive the boundary (dexllm#29).** A string LITERAL may legally
+  hold an unpaired surrogate — `VerifyMutf8` checks sequence shape and canonicality,
+  not surrogate PAIRING, exactly as ART's `CheckIntraStringDataItem` does. (An
+  identifier cannot: `IsValidPartOfMemberNameUtf8Slow` accepts a leading surrogate
+  only when a trailing one follows. The asymmetry is deliberate.) The value used to
+  come back as U+FFFD and every reverse query on it then returned nothing, silently.
+  Both directions now use CPython's `surrogatepass` handler instead of pybind11's
+  strict UTF-8 codec, so the pool's 3-byte form survives OUT (`list_value_strings`,
+  `list_class_strings`, `list_method_strings`, `ArgOrigin.string_value`, AST string
+  values) and IN (the five content matchers — which still accept `bytes` and
+  `bytearray` unchanged, so the former `bytes` workaround keeps working).
+  The rule for what stays LOSSY is **display vs query**, not identifier vs
+  content: a surface whose value is fed back as a query is lossless; one that
+  exists to be shown keeps U+FFFD, because printing a lone surrogate raises. That
+  covers the NAME matchers (where a lone surrogate is also unreachable — the
+  verifier rejects it in a name), every `__repr__`, the smali renderer, and
+  `ClassSummary.source_file` — which is NOT verifier-protected the way a name is
+  (`CheckClassDefItem` only range-checks `source_file_idx`), so it can carry one
+  and deliberately shows it as U+FFFD.
+  **Cost, stated plainly:** a `str` carrying a lone surrogate RAISES at any strict
+  UTF-8 **encode** of it — `str.encode()`, a text-mode file write, `print()` to a
+  UTF-8 stream, `json.dump(fp)`. It is safe through `==`, `in`, `re`, and
+  `json.dumps` at its default `ensure_ascii=True`, which is what the MCP and HTTP
+  servers use. (`json.dumps(..., ensure_ascii=False)` does **not** raise — it
+  returns a `str`; the raise comes when that result is encoded.) The failure this
+  can produce is loud and local; the one it replaces was a silent miss in the
+  reverse lookup of a crafted sample. Corpus incidence is 0.
+- **Known ambiguity, inherent to MUTF-8 and not introduced by the above.** The pool
+  stores an astral character as a **surrogate pair** (CESU-8), so `"\U000dfffd"`
+  and the two-half string `"󟿽"` — different Python strings — have
+  IDENTICAL pool bytes. A byte-comparing matcher cannot separate them: a
+  half-surrogate query matches *inside* a legitimately-paired literal under
+  `contains`, and `equals` on the split form finds the paired one. Symmetrically,
+  the listing always reports the pair as the combined character, so you cannot tell
+  from the output which the dex held. Passing the halves as `bytes` always did
+  this; making a `str` query work is what puts it in reach of a `str`. Pinned by
+  `tests/test_lone_surrogate.py::test_half_surrogate_query_matches_inside_a_paired_literal`.
+- **Over MCP the value is readable but not requeryable.** The rule above holds
+  inside the Python API. A lone surrogate comes OUT of a tool safely (the server
+  serializes at `ensure_ascii=True`, so the wire payload is ASCII), but sending it
+  back IN as a tool argument is rejected while the request is PARSED — mcp's JSON
+  parser refuses a lone-surrogate escape that stdlib `json.loads` accepts. Use the
+  Python API for that round trip.
+- **Batch KEYS are still strict UTF-8.** `batch_find_*` converts the query VALUES,
+  not the dict key, which is a caller-chosen label rather than pool content (and
+  comes back as a `str` key in the result). So `{s: [s] for s in
+  dk.list_value_strings()}` raises `TypeError` if `s` holds a lone surrogate — use
+  any label (`{"g": [s]}`). Loud, and unchanged from before.
 
 ### Per-dex enumeration (uniform scope axis)
 The bare form is all loaded dexes; the `…_in_dex(dex_id)` form is one dex (empty for
@@ -352,7 +397,9 @@ Whole-class smali.
 surrogate PAIR becomes one code point (an astral character renders as itself — the
 Java text path escapes it as `\uXXXX` code units instead, a deliberate difference:
 that path claims ART code-unit fidelity, this one is a readable listing); a LONE
-surrogate collapses to U+FFFD (lossy, absent from the corpus); every **C0** control
+surrogate collapses to U+FFFD (lossy, absent from the corpus — the smali listing is
+display text, so it keeps the lossy decode even though the VALUE accessors stopped
+using it in dexllm#29); every **C0** control
 character (`cp < 0x20`) — including a NUL, which arrives as `C0 80` — escapes as
 `\xNN`. Escaping the DECODED characters (rather than the raw bytes) is what stopped
 an OVERLONG sequence (`E0 80 A2` = `"`, `E0 80 8A` = newline) from injecting

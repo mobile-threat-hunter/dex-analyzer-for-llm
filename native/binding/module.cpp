@@ -21,7 +21,121 @@
 
 namespace py = pybind11;
 
+// dexllm#29 — a string LITERAL may legally hold a LONE SURROGATE (VerifyMutf8
+// checks sequence shape and canonicality, not surrogate PAIRING, which is what
+// ART's CheckIntraStringDataItem does; the asymmetry is correct — an identifier
+// cannot hold one, IsValidPartOfMemberNameUtf8Slow accepts a leading surrogate
+// only when a trailing one follows). Such a literal could not round-trip: the
+// listing accessors returned U+FFFD for it and `find_*_using_strings` then
+// missed, silently.
+//
+// The loss was never Python's — `"\ud800"` is a legal `str`, and CPython's
+// `surrogatepass` error handler encodes/decodes it as the standard 3-byte form
+// `ED A0 80`, which is exactly what the dex pool holds. The loss was pybind11's
+// STRICT UTF-8 codec on both sides of the boundary. So the fix is to do the two
+// conversions ourselves with that handler, for string CONTENT only:
+//
+//   * IN  — `QueryStr` below, on the five content matchers.
+//   * OUT — `content_out`, on the value accessors (list_*_strings,
+//           ArgOrigin.string_value, AST string values).
+//
+// What stays LOSSY, and the real rule for it: a surface is lossless when its
+// value is meant to be fed BACK as a query, and lossy when it exists to be
+// DISPLAYED (printing a lone surrogate raises, so a display surface must not
+// carry one). That covers the NAME/descriptor matchers — `ident_out`/`ident_in`,
+// where the case is also unreachable because the verifier rejects a lone
+// surrogate in a name — the `__repr__` bodies, the smali renderer, and
+// `ClassSummary.source_file`. Note source_file is NOT protected by the verifier
+// the way a name is: `CheckClassDefItem` only range-checks `source_file_idx`, so
+// a lone surrogate IS reachable there and is deliberately shown as U+FFFD. It
+// takes no query counterpart (nothing accepts a source_file back), so the
+// display rule governs. An earlier version of this comment justified the split
+// as "identifiers only", which was wrong for exactly that field.
+//
+// Cost, stated plainly: a `str` carrying a lone surrogate raises at any strict
+// UTF-8 ENCODE of it — `str.encode()`, a text-mode file write, `print()` to a
+// UTF-8 stream, `json.dump(fp)`. It is safe through equality, containment, `re`,
+// and `json.dumps` at its default `ensure_ascii=True`, which is what the MCP and
+// HTTP servers use. (`json.dumps(..., ensure_ascii=False)` does NOT raise — it
+// returns a `str`; the raise comes later, when that result is encoded.) So the
+// failure this can produce is loud and local, where the one it replaces was a
+// silent miss in the reverse lookup of a crafted sample.
+//
+// KNOWN AMBIGUITY, inherent to the storage format and NOT introduced here: the
+// pool encodes an astral character as a SURROGATE PAIR (CESU-8), so the bytes of
+// `"\U000dfffd"` and of the two-half string `"󟿽"` are IDENTICAL. A
+// byte-comparing matcher therefore cannot separate them, and a half-surrogate
+// query (`"\udb3f"`) matches INSIDE a legitimately-paired literal under
+// `contains`. Symmetrically the OUT direction always reports the pair as the
+// combined character. Passing the halves as `bytes` always did this; making a
+// `str` query work is what puts it within reach of a `str`. Pinned by
+// tests/test_lone_surrogate.py so it is an asserted property, not a surprise.
+namespace dexllm_bind {
+struct QueryStr {
+    // The caller's bytes, as standard UTF-8 with lone surrogates kept in their
+    // 3-byte form. NOT yet pool encoding — `to_mutf8_query` applies that.
+    std::string utf8;
+};
+}  // namespace dexllm_bind
+
+namespace pybind11::detail {
+template <>
+struct type_caster<dexllm_bind::QueryStr> {
+    PYBIND11_TYPE_CASTER(dexllm_bind::QueryStr,
+                         const_name("Union[str, bytes, bytearray]"));
+
+    bool load(handle src, bool) {
+        // pybind11's string_caster opens with this; unreachable today (QueryStr is
+        // only loaded as an element of a list/map caster, which never yields a null
+        // handle), but the comments below claim equivalence with it, so make that
+        // claim true rather than nearly true.
+        if (!src) return false;
+        if (PyUnicode_Check(src.ptr())) {
+            // `surrogatepass` where pybind11's own caster uses strict UTF-8:
+            // the only difference is that an unpaired surrogate survives as the
+            // 3 bytes the pool stores, instead of raising.
+            // Held by an owning handle BEFORE anything that can throw: the
+            // assign below may raise bad_alloc, and a raw PyObject* would leak.
+            // (pybind11's own string_caster uses the same reinterpret_steal.)
+            object enc = reinterpret_steal<object>(
+                PyUnicode_AsEncodedString(src.ptr(), "utf-8", "surrogatepass"));
+            if (!enc) {
+                // Report as an argument-type mismatch, not a raise — the same
+                // thing pybind11's string_caster does on an encode failure. With
+                // `surrogatepass` no `str` is actually unencodable, so this arm
+                // is effectively resource-exhaustion only. It stays a `return
+                // false` rather than a rethrow because pybind11's dispatcher
+                // expects load() to report failure, not to throw.
+                PyErr_Clear();
+                return false;
+            }
+            value.utf8.assign(PyBytes_AS_STRING(enc.ptr()),
+                              static_cast<size_t>(PyBytes_GET_SIZE(enc.ptr())));
+            return true;
+        }
+        if (PyBytes_Check(src.ptr())) {
+            // Raw pool bytes, the documented workaround before this change.
+            // Passed through untouched, exactly as pybind11's caster did.
+            value.utf8.assign(PyBytes_AS_STRING(src.ptr()),
+                              static_cast<size_t>(PyBytes_GET_SIZE(src.ptr())));
+            return true;
+        }
+        if (PyByteArray_Check(src.ptr())) {
+            // pybind11's own std::string caster accepts a bytearray, so this one
+            // must too — replacing it with a TypeError would narrow the accepted
+            // argument types, which is a regression independent of dexllm#29.
+            value.utf8.assign(PyByteArray_AS_STRING(src.ptr()),
+                              static_cast<size_t>(PyByteArray_GET_SIZE(src.ptr())));
+            return true;
+        }
+        return false;
+    }
+};
+}  // namespace pybind11::detail
+
 namespace {
+
+using dexllm_bind::QueryStr;
 
 // Decode dex MUTF-8 → standard UTF-8 so pybind11's strict UTF-8 str decode
 // accepts it. Lone surrogates (invalid in UTF-8) become U+FFFD. The body now
@@ -61,6 +175,37 @@ inline std::string ident_in(const std::string& utf8) {
     return dexkit::dad::mutf8::Utf8ToMutf8(utf8);
 }
 
+// dexllm#29 — the OUT half for string CONTENT. `Mutf8ToUtf8` (unlike its Lossy
+// sibling) already keeps a lone surrogate in its raw 3-byte form, so all that is
+// needed is to build the `str` with the handler that accepts it. Everything else
+// is byte-identical to the lossy path: for any input a verified dex can hold
+// that contains no lone surrogate the two decoders agree, and a malformed
+// sequence cannot occur here (VerifyMutf8 rejects it at load).
+inline py::str utf8_to_pystr(std::string_view utf8) {
+    PyObject* s = PyUnicode_DecodeUTF8(utf8.data(),
+                                       static_cast<Py_ssize_t>(utf8.size()),
+                                       "surrogatepass");
+    if (s == nullptr) throw py::error_already_set();
+    return py::reinterpret_steal<py::str>(s);
+}
+// MUTF-8 → UTF-8 for string CONTENT, with the ASCII fast path Mutf8ToUtf8Lossy
+// has (mutf8.cpp) and the non-lossy decoder lacks — the decoder is ~3x the cost
+// of a passthrough on short strings, and these paths run once per POOL STRING.
+// It must be shared by BOTH content consumers: `decoded_unique` (the listing
+// accessors) needs the decoded text for its dedup key, and switching it off the
+// lossy decoder is what would otherwise have dropped the fast path exactly where
+// it mattered — a delta review caught the first cut adding it only to
+// `content_out`, whose callers are the two per-VALUE surfaces.
+inline std::string decode_content(std::string_view raw) {
+    for (unsigned char c : raw) {
+        if (c >= 0x80) return dexkit::dad::mutf8::Mutf8ToUtf8(raw);
+    }
+    return std::string(raw);
+}
+inline py::str content_out(std::string_view raw) {
+    return utf8_to_pystr(decode_content(raw));
+}
+
 // Recursively convert a dad::AstValue into native Python objects (mirroring
 // DAD's nested-list AST: lists/tuples → list, None → None, ints, bools, strs).
 py::object AstToPy(const dexkit::dad::AstValue& v) {
@@ -69,7 +214,17 @@ py::object AstToPy(const dexkit::dad::AstValue& v) {
         case K::Null: return py::none();
         case K::Bool: return py::bool_(v.as_bool());
         case K::Int:  return py::int_(v.as_int());
-        case K::Str:  return py::str(DecodeMutf8ForPy(v.as_str()));
+        // dexllm#29: an AST string is a VALUE, so it gets the lossless boundary
+        // too. Note the tree MIXES two provenances — dast.cpp already decodes a
+        // string LITERAL with the non-lossy Mutf8ToUtf8, while identifier-valued
+        // nodes (triples, names, types) are still raw pool bytes — so this must
+        // decode, and on a literal it decodes an already-decoded value. That is
+        // safe only because Mutf8ToUtf8 is IDEMPOTENT (a re-combined 4-byte
+        // sequence decodes back to the same pair; a lone surrogate's 3 bytes and
+        // a raw NUL are fixed points), which is a property of the decoder, not a
+        // documented contract: hardening it to assume pool-only input would break
+        // this path. Verified over 400k verifier-legal streams (review round 3).
+        case K::Str:  return content_out(v.as_str());
         case K::Arr: {
             py::list out;
             for (const auto& e : v.as_arr()) out.append(AstToPy(e));
@@ -97,30 +252,40 @@ py::object AstToPy(const dexkit::dad::AstValue& v) {
 // UnicodeDecodeError in `list_classes()`, so the whole name path is broken for it
 // independently of this. Recorded as a known residual, not as a fixed case; the
 // corpus has 0 non-ASCII identifiers.
-std::vector<std::string> to_mutf8_query(const std::vector<std::string>& q) {
+//
+// dexllm#29 closed the third and last case: the query arrives as a `QueryStr`,
+// whose caster uses `surrogatepass`, so a lone surrogate reaches here as the
+// 3-byte form the pool holds and passes through `Utf8ToMutf8` untouched (that
+// function rewrites only NUL and 4-byte sequences). A `bytes` argument is still
+// taken verbatim, so the documented workaround keeps working unchanged.
+std::vector<std::string> to_mutf8_query(const std::vector<QueryStr>& q) {
     std::vector<std::string> out;
     out.reserve(q.size());
-    for (const auto& s : q) out.push_back(dexkit::dad::mutf8::Utf8ToMutf8(s));
+    for (const auto& s : q) out.push_back(dexkit::dad::mutf8::Utf8ToMutf8(s.utf8));
     return out;
 }
 std::map<std::string, std::vector<std::string>> to_mutf8_query(
-    const std::map<std::string, std::vector<std::string>>& q) {
+    const std::map<std::string, std::vector<QueryStr>>& q) {
     std::map<std::string, std::vector<std::string>> out;
     for (const auto& [k, v] : q) out.emplace(k, to_mutf8_query(v));
     return out;
 }
 
 // MUTF-8 → UTF-8 decode a raw string list, preserving order and dropping
-// duplicates of the DECODED text (two byte sequences that decode alike — e.g.
-// both → U+FFFD via the lone-surrogate fallback — collapse). Shared by every
-// string-listing accessor so they honour one "deduplicated" contract.
+// duplicates of the DECODED text. Shared by every string-listing accessor so
+// they honour one "deduplicated" contract.
+//
+// dexllm#29: the decode is the LOSSLESS one, so two distinct pool strings no
+// longer collapse into one U+FFFD entry — the dedup key is now the value the
+// caller receives, which is the only key for which "deduplicated" and "the
+// result can be passed back to find_*_using_strings" are both true.
 py::list decoded_unique(const std::vector<std::string>& raw) {
     py::list out;
     std::unordered_set<std::string> seen;
     for (const auto& s : raw) {
-        std::string decoded = DecodeMutf8ForPy(s);
+        std::string decoded = decode_content(s);
         if (seen.insert(decoded).second) {
-            out.append(py::str(decoded));
+            out.append(utf8_to_pystr(decoded));
         }
     }
     return out;
@@ -307,32 +472,32 @@ public:
         return ext_.FindClassesByName(ident_in(name), match_type, ignore_case);
     }
     std::vector<dexkit::ext::ClassMatch>
-    find_classes_using_strings(const std::vector<std::string>& strings,
+    find_classes_using_strings(const std::vector<QueryStr>& strings,
                                const std::string& match_type,
                                bool ignore_case) {
         return ext_.FindClassesUsingStrings(to_mutf8_query(strings), match_type, ignore_case);
     }
     std::vector<dexkit::ext::ClassMatch>
-    find_classes_declaring_strings(const std::vector<std::string>& strings,
+    find_classes_declaring_strings(const std::vector<QueryStr>& strings,
                                    const std::string& match_type,
                                    bool ignore_case) {
         return ext_.FindClassesDeclaringStrings(to_mutf8_query(strings), match_type, ignore_case);
     }
     std::vector<dexkit::ext::MethodMatch>
-    find_methods_using_strings(const std::vector<std::string>& strings,
+    find_methods_using_strings(const std::vector<QueryStr>& strings,
                                const std::string& match_type,
                                bool ignore_case) {
         return ext_.FindMethodsUsingStrings(to_mutf8_query(strings), match_type, ignore_case);
     }
     std::map<std::string, std::vector<dexkit::ext::ClassMatch>>
     batch_find_classes_using_strings(
-        const std::map<std::string, std::vector<std::string>>& q,
+        const std::map<std::string, std::vector<QueryStr>>& q,
         const std::string& match_type, bool ignore_case) {
         return ext_.BatchFindClassesUsingStrings(to_mutf8_query(q), match_type, ignore_case);
     }
     std::map<std::string, std::vector<dexkit::ext::MethodMatch>>
     batch_find_methods_using_strings(
-        const std::map<std::string, std::vector<std::string>>& q,
+        const std::map<std::string, std::vector<QueryStr>>& q,
         const std::string& match_type, bool ignore_case) {
         return ext_.BatchFindMethodsUsingStrings(to_mutf8_query(q), match_type, ignore_case);
     }
@@ -630,7 +795,11 @@ PYBIND11_MODULE(_dexkit_core, m) {
             })
         .def_readonly("fields", &dexkit::ext::ClassSummary::fields)
         .def_readonly("methods", &dexkit::ext::ClassSummary::methods)
-        // source_file is a pool string like any other identifier-adjacent entry.
+        // source_file is arbitrary pool CONTENT, not a name: CheckClassDefItem
+        // only range-checks source_file_idx, so unlike a descriptor or a member
+        // name it CAN carry a lone surrogate. It stays on the lossy decode
+        // deliberately (dexllm#29) — it is display metadata that no API takes
+        // back as input, and a display surface must stay printable.
         .def_property_readonly("source_file",
             [](const dexkit::ext::ClassSummary& s) {
                 return ident_out(s.source_file);
@@ -647,10 +816,12 @@ PYBIND11_MODULE(_dexkit_core, m) {
         .def_readonly("kind",             &dexkit::ext::ArgOrigin::kind)
         .def_readonly("reg_num",          &dexkit::ext::ArgOrigin::reg_num)
         // string_value is a const-string OPERAND — pool bytes exactly like an
-        // identifier, and it raised for the same reason (dexllm#22).
+        // identifier, and it raised for the same reason (dexllm#22). It is
+        // CONTENT, not an identifier, so dexllm#29 gives it the lossless decode:
+        // it is a value a caller feeds straight back to find_*_using_strings.
         .def_property_readonly("string_value",
             [](const dexkit::ext::ArgOrigin& a) {
-                return ident_out(a.string_value);
+                return content_out(a.string_value);
             })
         .def_readonly("int_value",        &dexkit::ext::ArgOrigin::int_value)
         .def_property_readonly("class_descriptor",

@@ -247,6 +247,12 @@ by extracting the raw `.dex` and loading it individually.
   - This diverges from androguard/Python, which collapses the pair to one code point,
     and from DAD, which ASCII-escapes everything (`unicode-escape`). dexllm matches
     **ART's in-memory representation**.
+  - Scope: the above is the **Java TEXT** path, which claims ART code-unit fidelity.
+    The string **VALUE** accessors (`list_*_strings`, `ArgOrigin.string_value`, AST
+    string values) are a different axis — a value the caller feeds back as a query —
+    so they return the combined code point for a pair and, since dexllm#29, preserve
+    a LONE surrogate instead of replacing it with U+FFFD. The smali listing is a
+    third: display text, so it keeps the lossy decode. See docs/api.md.
 - **EncodedValue**: AOSP reads per spec and stores; dexllm **decodes IEEE754 float/
   double and null/true/false into spec-correct Java literals** for decompiler output
   (a vs-androguard fix, but the intent — Java-source correctness — is dexllm-specific).
