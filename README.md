@@ -164,13 +164,21 @@ semantic-equivalent (variable-name suffixes) or cases where dexllm emits spec-co
 androguard gets wrong:
 
 - **Unicode strings/identifiers** — dexllm decodes dex MUTF-8 to the exact UTF-16 code units
-  ART builds in a `mirror::String` (decoder ported 1:1 from `art/libdexfile/dex/utf-inl.h`),
-  emitting readable UTF-8 for BMP text (한글/CJK) and a `\uXXXX` escape only for surrogates/control
-  chars. A supplementary (astral) char is kept as a **surrogate pair**, exactly like ART. androguard
-  DAD instead emits one `\u` followed by the full codepoint hex — e.g. a real-corpus `U+DFFFD` comes
-  out as `"\udfffd"` (**5 hex digits → invalid Java**: the lexer reads `\udfff` + a literal `d`,
-  silently corrupting the string), where dexllm emits the valid `"\udb3f\udffd"`. (Verified against
-  the actual AOSP source — see [docs/dexkit-vs-art-dex-handling.md](docs/dexkit-vs-art-dex-handling.md).)
+  ART builds in a `mirror::String` (decoder ported 1:1 from `art/libdexfile/dex/utf-inl.h`). In a
+  **string literal** it then renders those units one by one — readable UTF-8 for BMP text
+  (한글/CJK), a `\uXXXX` escape for a surrogate or control unit — so a supplementary (astral) char
+  stays a **surrogate pair**, exactly like ART. androguard DAD instead emits one `\u` followed by
+  the full codepoint hex — e.g. a real-corpus `U+DFFFD` comes out as `"\udfffd"` (**5 hex digits →
+  invalid Java**: the lexer reads `\udfff` + a literal `d`, silently corrupting the string), where
+  dexllm emits the valid `"\udb3f\udffd"`. (Verified against the actual AOSP source — see
+  [docs/dexkit-vs-art-dex-handling.md](docs/dexkit-vs-art-dex-handling.md).)
+  An **IDENTIFIER** is rendered readably instead (dexllm#28): a class named `A𐀀sTest` reads the
+  same in decompiled Java, in the smali listing and in `list_classes()`, rather than splitting into
+  `A\ud800\udc00sTest` in the Java pane alone. Code-unit fidelity is a claim about string CONTENT —
+  what `mirror::String` actually holds — while an identifier is a source symbol; the split spelling
+  broke correlation for anyone reading two views of the same class side by side, or pasting a class
+  name into a hooking script. A BMP identifier (`A한ysisTest`) always rendered readably, so the old
+  behaviour was inconsistent as well: it survived by unit count rather than by rule.
 - **Literals** — boolean `return false/true` (not `return 0/1`), `return null` for a null reference,
   IEEE-754 `float`/`double` literals (`1.0f`, `Double.NaN`) where androguard prints the raw integer
   bits, and `null`/`true`/`false` field initializers (not Python `None`/`True`/`False`).

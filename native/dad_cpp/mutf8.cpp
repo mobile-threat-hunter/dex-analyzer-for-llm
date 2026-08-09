@@ -97,6 +97,14 @@ inline void AppendUtf8Bmp(std::string& out, uint32_t cp) {
         out += static_cast<char>(0x80 | (cp & 0x3F));
     }
 }
+// Append one SUPPLEMENTARY code point (>= 0x10000) as 4-byte UTF-8. Used by all
+// three sites that recombine a surrogate pair, so the encoders cannot drift.
+inline void AppendUtf8Astral(std::string& out, uint32_t cp) {
+    out += static_cast<char>(0xF0 | (cp >> 18));
+    out += static_cast<char>(0x80 | ((cp >> 12) & 0x3F));
+    out += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
+    out += static_cast<char>(0x80 | (cp & 0x3F));
+}
 }  // namespace
 
 std::string Utf16ToUtf8(const std::vector<uint16_t>& units) {
@@ -109,10 +117,7 @@ std::string Utf16ToUtf8(const std::vector<uint16_t>& units) {
             units[i + 1] >= 0xDC00 && units[i + 1] <= 0xDFFF) {
             const uint32_t cp =
                 0x10000 + ((u - 0xD800) << 10) + (units[i + 1] - 0xDC00);
-            out += static_cast<char>(0xF0 | (cp >> 18));
-            out += static_cast<char>(0x80 | ((cp >> 12) & 0x3F));
-            out += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
-            out += static_cast<char>(0x80 | (cp & 0x3F));
+            AppendUtf8Astral(out, cp);
             ++i;
             continue;
         }
@@ -160,10 +165,7 @@ std::string Mutf8ToUtf8Lossy(std::string_view raw) {
         if (cp < 0x10000) {
             AppendUtf8Bmp(out, cp);
         } else {
-            out += static_cast<char>(0xF0 | (cp >> 18));
-            out += static_cast<char>(0x80 | ((cp >> 12) & 0x3F));
-            out += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
-            out += static_cast<char>(0x80 | (cp & 0x3F));
+            AppendUtf8Astral(out, cp);
         }
     };
     while (p < end) {
@@ -259,6 +261,26 @@ void AppendUtf16Escaped(std::string& out, uint16_t unit) {
         out += buf;
     } else {
         AppendUtf8Bmp(out, unit);
+    }
+}
+
+void AppendUtf16AsIdentifier(std::string& out, const std::vector<uint16_t>& units) {
+    for (size_t i = 0; i < units.size(); ++i) {
+        const uint16_t u = units[i];
+        // The one difference from the per-unit escaper: a VALID surrogate pair is
+        // combined into its code point and emitted readably, so an astral
+        // identifier reads the same in Java text as in the smali listing and in
+        // list_classes(). A LONE surrogate cannot be combined (and has no UTF-8
+        // form), so it still escapes — as does a control char.
+        if (u >= 0xD800 && u <= 0xDBFF && i + 1 < units.size() &&
+            units[i + 1] >= 0xDC00 && units[i + 1] <= 0xDFFF) {
+            const uint32_t cp =
+                0x10000 + ((u - 0xD800) << 10) + (units[i + 1] - 0xDC00);
+            AppendUtf8Astral(out, cp);
+            ++i;
+            continue;
+        }
+        AppendUtf16Escaped(out, u);
     }
 }
 

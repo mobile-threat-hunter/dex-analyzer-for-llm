@@ -308,6 +308,113 @@ int main() {
         }
     }
 
+    // 8. AppendUtf16AsIdentifier (dexllm#28) — the identifier renderer. It differs
+    // from the per-unit AppendUtf16Escaped in EXACTLY one way: a valid surrogate
+    // PAIR is combined into its readable code point. Everything else must be
+    // byte-identical, which is what makes the whole-corpus a/b a property rather
+    // than a one-off measurement (the corpus has no non-ASCII identifier at all,
+    // so it cannot exercise this on its own).
+    {
+        auto per_unit = [](const std::vector<uint16_t>& u) {
+            std::string s;
+            for (uint16_t x : u) m::AppendUtf16Escaped(s, x);
+            return s;
+        };
+        auto ident = [](const std::vector<uint16_t>& u) {
+            std::string s;
+            m::AppendUtf16AsIdentifier(s, u);
+            return s;
+        };
+        // Same predicate section 7 uses: well-formed UTF-8 with NO raw surrogate.
+        auto ok_utf8 = [](const std::string& s) {
+            const auto* p = reinterpret_cast<const uint8_t*>(s.data());
+            const auto* e = p + s.size();
+            while (p < e) {
+                uint32_t cp; size_t n;
+                if (*p < 0x80) { ++p; continue; }
+                else if ((*p & 0xE0) == 0xC0) { cp = *p & 0x1F; n = 2; }
+                else if ((*p & 0xF0) == 0xE0) { cp = *p & 0x0F; n = 3; }
+                else if ((*p & 0xF8) == 0xF0) { cp = *p & 0x07; n = 4; }
+                else return false;
+                if (p + n > e) return false;
+                for (size_t i = 1; i < n; ++i) {
+                    if ((p[i] & 0xC0) != 0x80) return false;
+                    cp = (cp << 6) | (p[i] & 0x3F);
+                }
+                if (cp > 0x10FFFF) return false;
+                if (cp >= 0xD800 && cp <= 0xDFFF) return false;
+                p += n;
+            }
+            return true;
+        };
+
+        // 8a. A valid pair combines; the per-unit path escapes it.
+        {
+            std::vector<uint16_t> pair{0xD800, 0xDC00};
+            check("identifier: a valid pair becomes the readable code point",
+                  ident(pair) == "\xF0\x90\x80\x80");
+            check("identifier: the per-unit path still escapes it",
+                  per_unit(pair) == "\\ud800\\udc00");
+        }
+
+        // 8b. Everything a pair is NOT must render exactly as before. A lone
+        // surrogate has no UTF-8 form, so it must keep escaping — the verifier
+        // makes it unreachable through a name, so this is the only coverage.
+        {
+            const std::vector<std::vector<uint16_t>> cases = {
+                {0xD800},                  // lone high
+                {0xDC00},                  // lone low
+                {0xDC00, 0xD800},          // low then high — NOT a pair
+                {0xD800, 0xD800},          // high then high
+                {0xD800, 0x0041},          // high then ASCII
+                {0xD800, 0xD800, 0xDC00},  // lone high, then a real pair
+                {0x0000}, {0x001F}, {0x0020}, {0x007F},
+                {0xAC00}, {0x4E2D}, {0xFFFF},
+                {},
+            };
+            int mism = 0;
+            for (const auto& c : cases) {
+                std::string a = ident(c), b = per_unit(c);
+                // Identical unless the case contains a valid pair (only the last
+                // two of the surrogate cases do).
+                bool has_pair = false;
+                for (size_t i = 0; i + 1 < c.size(); ++i)
+                    if (c[i] >= 0xD800 && c[i] <= 0xDBFF &&
+                        c[i + 1] >= 0xDC00 && c[i + 1] <= 0xDFFF) has_pair = true;
+                if (!has_pair && a != b) ++mism;
+                if (has_pair && a == b) ++mism;
+            }
+            check("identifier: differs from per-unit ONLY where a valid pair exists",
+                  mism == 0);
+        }
+
+        // 8c. Randomised: over streams with no valid pair the two are identical,
+        // and every output is well-formed UTF-8 (no raw surrogate can escape).
+        {
+            std::mt19937 r(0x1DEA28);
+            std::uniform_int_distribution<int> len(0, 12);
+            std::uniform_int_distribution<uint32_t> unit(0, 0xFFFF);
+            int mism = 0, invalid = 0, pairs = 0;
+            for (int iter = 0; iter < 20000; ++iter) {
+                std::vector<uint16_t> u;
+                for (int k = 0, n = len(r); k < n; ++k)
+                    u.push_back(static_cast<uint16_t>(unit(r)));
+                bool has_pair = false;
+                for (size_t i = 0; i + 1 < u.size(); ++i)
+                    if (u[i] >= 0xD800 && u[i] <= 0xDBFF &&
+                        u[i + 1] >= 0xDC00 && u[i + 1] <= 0xDFFF) has_pair = true;
+                const std::string a = ident(u);
+                if (has_pair) { ++pairs; } else if (a != per_unit(u)) { ++mism; }
+                if (!ok_utf8(a)) ++invalid;
+            }
+            char b[128];
+            std::snprintf(b, sizeof(b),
+                          "identifier: byte-identical on no-pair streams (20000, %d mismatch, "
+                          "%d with a pair, %d invalid UTF-8)", mism, pairs, invalid);
+            check(b, mism == 0 && invalid == 0 && pairs > 0);
+        }
+    }
+
     std::printf("\n%s — %d failure(s)\n", g_fail ? "FAIL" : "PASS", g_fail);
     return g_fail ? 1 : 0;
 }

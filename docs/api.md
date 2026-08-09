@@ -144,6 +144,18 @@ round trip therefore holds — a descriptor from `list_classes()` resolves throu
 family — and the same encoding is applied to the NAME matchers, which closes the
 residual dexllm#19 recorded (an astral identifier was unfindable).
 
+An identifier also **renders readably in decompiled Java** (dexllm#28), not as
+`\uXXXX` code units: a class named `A𐀀sTest` reads the same in
+`decompile_class`, in `render_class_smali` and in `list_classes()`. The ART
+code-unit-fidelity claim is about string CONTENT — what `mirror::String` holds —
+and a string LITERAL still honours it. An identifier is a source symbol, and the
+split spelling meant one class read two ways in a single session, which breaks
+naive correlation between the Java and smali views and the copy-paste of a class
+name into a hooking script. A BMP identifier (`A한ysisTest`) always rendered
+readably, so the old rule held by unit count rather than by principle. A LONE
+surrogate still escapes — it has no UTF-8 form — but the verifier rejects one in a
+name, so it cannot occur there.
+
 The two directions are exact inverses for **everything a loadable dex can hold**,
 and that is enforced rather than assumed. Two encodings would break it — a LONE
 surrogate and a non-NUL OVERLONG both decode to something that cannot be encoded
@@ -394,9 +406,10 @@ Whole-class smali.
 
 **Encoding contract (dexllm#22).** A pool string used as a **string literal** (a
 `const-string` operand, and `.source`) is MUTF-8-**decoded before it is escaped**. A
-surrogate PAIR becomes one code point (an astral character renders as itself — the
-Java text path escapes it as `\uXXXX` code units instead, a deliberate difference:
-that path claims ART code-unit fidelity, this one is a readable listing); a LONE
+surrogate PAIR becomes one code point (an astral character renders as itself — as it
+now does in decompiled Java too for an IDENTIFIER, since dexllm#28; the Java text
+path still escapes it as `\uXXXX` code units inside a string LITERAL, which is where
+the ART code-unit-fidelity claim applies); a LONE
 surrogate collapses to U+FFFD (lossy, absent from the corpus — the smali listing is
 display text, so it keeps the lossy decode even though the VALUE accessors stopped
 using it in dexllm#29); every **C0** control

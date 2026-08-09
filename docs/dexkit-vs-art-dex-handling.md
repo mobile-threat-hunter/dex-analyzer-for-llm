@@ -247,12 +247,18 @@ by extracting the raw `.dex` and loading it individually.
   - This diverges from androguard/Python, which collapses the pair to one code point,
     and from DAD, which ASCII-escapes everything (`unicode-escape`). dexllm matches
     **ART's in-memory representation**.
-  - Scope: the above is the **Java TEXT** path, which claims ART code-unit fidelity.
-    The string **VALUE** accessors (`list_*_strings`, `ArgOrigin.string_value`, AST
-    string values) are a different axis — a value the caller feeds back as a query —
-    so they return the combined code point for a pair and, since dexllm#29, preserve
-    a LONE surrogate instead of replacing it with U+FFFD. The smali listing is a
-    third: display text, so it keeps the lossy decode. See docs/api.md.
+  - Scope: the code-unit claim is about a **string LITERAL** in the Java TEXT path —
+    `mirror::String` CONTENT, where reproducing ART's exact units is the point. Three
+    other axes deliberately differ. An **IDENTIFIER** in that same Java text renders
+    readably (dexllm#28): it is a source symbol rather than string content, and the
+    code-unit spelling made one class read two ways across the Java, smali and
+    `list_classes()` views — a correlation failure for anyone reading them side by
+    side or pasting a class name into a hooking script, and one a BMP identifier
+    never had. The string **VALUE** accessors (`list_*_strings`,
+    `ArgOrigin.string_value`, AST string values) return the combined code point for a
+    pair and, since dexllm#29, preserve a LONE surrogate rather than replacing it with
+    U+FFFD, because a caller feeds those values back as queries. The smali listing is
+    display text and keeps the lossy decode. See docs/api.md.
 - **EncodedValue**: AOSP reads per spec and stores; dexllm **decodes IEEE754 float/
   double and null/true/false into spec-correct Java literals** for decompiler output
   (a vs-androguard fix, but the intent — Java-source correctness — is dexllm-specific).

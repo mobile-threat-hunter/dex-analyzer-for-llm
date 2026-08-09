@@ -300,10 +300,13 @@ def test_astral_type_in_a_field_initializer_decompiles(tmp_path):
     rendered = 0
     for c in dk.list_classes():
         text = dk.decompile_class(c)  # raised before the initializer was sanitised
-        if "\\ud800\\udc00" in text:
+        if "\U00010000" in text:
             rendered += 1
-    # Non-vacuous: the astral type must actually appear in an initializer, as the
-    # \uXXXX code units the Java-text path promises.
+    # Non-vacuous: the astral type must actually appear in an initializer. Matched
+    # as the readable CHARACTER, not `\ud800\udc00`: a field TYPE is an IDENTIFIER,
+    # and dexllm#28 renders those readably so one symbol has one spelling across
+    # the Java, smali and list_classes() views. What this test guards is unchanged
+    # — that the initializer append site is sanitised at all, which is what raised.
     assert rendered, "the crafted initializer never reached the output"
 
 

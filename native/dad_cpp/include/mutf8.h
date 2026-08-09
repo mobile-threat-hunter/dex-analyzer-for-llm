@@ -99,6 +99,21 @@ std::string Utf8ToMutf8(std::string_view utf8);
 // `😀` — exactly the pair ART keeps in memory.
 void AppendUtf16Escaped(std::string& out, uint16_t unit);
 
+// Append a whole UTF-16 run as an IDENTIFIER in Java source text (dexllm#28).
+// Same rules as AppendUtf16Escaped except that a VALID surrogate pair is combined
+// into its code point and emitted readably, so `𐀀` renders as `𐀀` rather than as
+// `𐀀`. A lone surrogate and a control char still escape.
+//
+// The split is deliberate and is the scope of the ART code-unit-fidelity claim:
+// a string LITERAL is `mirror::String` CONTENT, where reproducing ART's exact
+// units is the point, and it keeps the per-unit escaper. An identifier is a
+// source SYMBOL, not string content — and the code-unit rendering made the same
+// class read two ways across the Java, smali and list_classes() views, which
+// breaks correlation for the analyst/LLM consuming them side by side. It was also
+// arbitrary: a BMP identifier (`한`) already rendered readably, surviving by unit
+// count rather than by rule.
+void AppendUtf16AsIdentifier(std::string& out, const std::vector<uint16_t>& units);
+
 }  // namespace dexkit::dad::mutf8
 
 #endif  // DEXKIT_DAD_MUTF8_H_

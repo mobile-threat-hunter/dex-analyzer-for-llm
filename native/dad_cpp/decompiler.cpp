@@ -20,12 +20,36 @@ namespace {
 // decoder, WITHOUT mangling readable text. Identifiers (class/method/field
 // names) reach the output as raw dex MUTF-8 — not routed through the Writer's
 // string escaper — so a whole-output pass cleans them here. We decode to the
-// SAME UTF-16 code units ART builds (mutf8::Mutf8ToUtf16) and render each unit
-// as text: BMP non-surrogate → readable UTF-8 (so 연결 / 中文 stay legible),
-// surrogate/control → `\uXXXX` (supplementary chars stay surrogate PAIRS,
-// matching ART's mirror::String, and never the raw 0xED bytes pybind11's strict
-// decode rejects). Already-emitted ASCII and the Writer's proper-UTF-8 string
-// bytes decode 1:1, so this is idempotent over them.
+// SAME UTF-16 code units ART builds (mutf8::Mutf8ToUtf16) and render the run as
+// IDENTIFIER text: BMP non-surrogate → readable UTF-8 (so 연결 / 中文 stay
+// legible), a valid surrogate PAIR → its combined code point, also readable
+// (dexllm#28), and a lone surrogate or control → `\uXXXX` (never the raw 0xED
+// bytes pybind11's strict decode rejects).
+//
+// The pair combining is what this pass does NOT share with the Writer's string
+// escaper, deliberately: a string LITERAL keeps ART's exact code units, because
+// reproducing what `mirror::String` holds is the claim there. An identifier is a
+// source symbol, and rendering it as `\ud800\udc00` made the same class read two
+// ways across the Java text, the smali listing and `list_classes()` — a
+// correlation failure for the analyst or LLM reading them side by side, and one
+// that a BMP identifier never had.
+//
+// WHY THIS PASS CANNOT CHANGE A LITERAL — the invariant is NOT "literals are
+// already ASCII by the time they get here". They are not: `EscapeJavaString`
+// emits every BMP non-surrogate unit as READABLE UTF-8, so literal text reaches
+// this function as raw non-ASCII bytes and IS decoded and re-encoded by it (one
+// real corpus method carries 602 such characters, U+00A0 through U+D7FF among
+// them). What actually holds is that the Writer escapes every SURROGATE unit to
+// ASCII first, so no surrogate unit can exist in the byte stream — and the only
+// other way one could appear, a 4-byte UTF-8 lead, has no producer before this
+// pass (`AppendUtf8Bmp` tops out at 0xEF, and VerifyMutf8 rejects a >= 0xF0 lead
+// in the pool). So the pair branch can only ever fire on raw pool CESU-8, which
+// is exactly the identifier append sites. A change to `EscapeJavaString` that let
+// a surrogate unit or a 4-byte sequence through would silently break that, which
+// is why the real invariant is written out rather than assumed.
+//
+// Already-emitted ASCII and the Writer's proper-UTF-8 string bytes decode 1:1,
+// so this is idempotent over them.
 std::string SanitizeUtf8(std::string_view in) {
     std::string out;
     out.reserve(in.size());
@@ -48,9 +72,8 @@ std::string SanitizeUtf8(std::string_view in) {
         // BMP → readable UTF-8).
         const size_t start = i;
         while (i < len && p[i] >= 0x80) ++i;
-        for (uint16_t u : mutf8::Mutf8ToUtf16(in.substr(start, i - start))) {
-            mutf8::AppendUtf16Escaped(out, u);
-        }
+        mutf8::AppendUtf16AsIdentifier(out,
+                                       mutf8::Mutf8ToUtf16(in.substr(start, i - start)));
     }
     return out;
 }
