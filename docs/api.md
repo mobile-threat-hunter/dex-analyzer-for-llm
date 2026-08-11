@@ -123,7 +123,7 @@ dk.list_classes()          # len 4135
 # ['Landroid/arch/core/internal/FastSafeIterableMap;', 'Landroid/arch/core/internal/SafeIterableMap$1;', ...]
 ```
 
-### `dk.list_class_methods(cls_desc: str) -> list[str]`
+### `dk.list_class_methods(class_descriptor: str) -> list[str]`
 Every declared method's full Dalvik descriptor.
 ```python
 dk.list_class_methods('Lcom/example/android/tvleanback/Utils;')     # len 5
@@ -174,7 +174,7 @@ dk.list_value_strings()    # len 4939
 # ['An entry modification is not supported', '=', ...]
 ```
 
-### `dk.list_class_strings(cls_desc: str) -> list[str]` / `dk.list_method_strings(method_desc: str) -> list[str]`
+### `dk.list_class_strings(class_descriptor: str) -> list[str]` / `dk.list_method_strings(method_descriptor: str) -> list[str]`
 The **forward** direction of `find_classes_using_strings` / `find_methods_using_strings`
 ("which strings does *this* code load", vs "which code uses string S"), and the
 code-scoped counterpart of `list_value_strings()`. MUTF-8→UTF-8, deduplicated,
@@ -336,7 +336,7 @@ for one release and are **now removed** — use the names below, the ones the ty
 [`dexllm.sdk`](sdk.md) layer already used (all three) and the MCP tool catalog
 already used (`decompile_method` / `decompile_class`; it exposes no pc-map tool).
 
-### `dk.decompile_method(desc: str) -> str`
+### `dk.decompile_method(method_descriptor: str) -> str`
 Java text for a single method. GIL released. Empty string for external refs.
 ```python
 dk.decompile_method('Lcom/example/android/tvleanback/Utils;->convertDpToPixel(Landroid/content/Context;I)I')
@@ -349,7 +349,7 @@ public static int convertDpToPixel(android.content.Context p2, int p3)
 }
 ```
 
-### `dk.decompile_method_with_pc_map(desc: str) -> dict`
+### `dk.decompile_method_with_pc_map(method_descriptor: str) -> dict`
 **D-3** — Java text + a source-line ↔ dex bytecode-offset map for smali sync.
 ```python
 dk.decompile_method_with_pc_map(M)
@@ -361,7 +361,7 @@ dk.decompile_method_with_pc_map(M)
 | `source` | `str` | same bytes as `decompile_method` |
 | `pc_map` | `list[tuple[int, int]]` | `(line_1based, byte_off)`; one entry per emitted line that maps to a dex op; `line` = 1-based index into `source.split("\n")` (**use `\n`, not `splitlines()`**) |
 
-### `dk.decompile_class(cls_desc: str) -> str`
+### `dk.decompile_class(class_descriptor: str) -> str`
 Full Java class text — `package`, class header (access + extends + implements),
 static→instance field declarations with decoded EncodedValue initializers, then
 method bodies. The header+fields region matches androguard `DvClass.get_source()`
@@ -371,7 +371,7 @@ whose repr is single-quoted, then wraps it in DOUBLE quotes to form a Java
 literal — so an embedded `"` ends the literal early. 9 lines of the bundled
 corpus are affected; all of them were invalid Java before.
 
-### `dk.decompile_method_ast(desc: str, include_source: bool = True) -> dict`
+### `dk.decompile_method_ast(method_descriptor: str, include_source: bool = True) -> dict`
 Signature components + Java `source` + the full DAD nested-list AST + D-3 pc_map.
 `include_source=False` skips the text-emit pipeline (~1.7× faster, AST only).
 ```python
@@ -395,13 +395,13 @@ dk.decompile_method_ast(M).keys()
 
 ## 4. Smali rendering (baksmali-style, no JVM)
 
-### `dk.render_method_smali(desc: str) -> str`
+### `dk.render_method_smali(method_descriptor: str) -> str`
 ```python
 dk.render_method_smali(M)
 # 'Lcom/.../Utils;->convertDpToPixel(...)I\n    .registers 4\n    0x0: invoke-virtual {v2}, ...'
 ```
 
-### `dk.render_class_smali(cls_desc: str) -> str`
+### `dk.render_class_smali(class_descriptor: str) -> str`
 Whole-class smali.
 
 **Encoding contract (dexllm#22).** A pool string used as a **string literal** (a
@@ -660,7 +660,7 @@ Python-side filter helpers: `dexllm.filter_method_refs(refs, ...)`,
 
 ## 7. Class summary & capabilities
 
-### `dk.get_class_summary(cls_desc: str) -> ClassSummary`
+### `dk.get_class_summary(class_descriptor: str) -> ClassSummary`
 Works on internal AND external classes.
 ```python
 s = dk.get_class_summary('Lcom/example/android/tvleanback/Utils;')
@@ -729,19 +729,21 @@ dataset URI is a hit iff it occurs as a substring of some value-string.
 ## 9. Dangerous permission APIs (Python)
 
 Joins AOSP's `@RequiresPermission` map against the APK's external refs →
-signature-precise (overload-disambiguated).
+signature-precise (overload-disambiguated). All three take a keyword-only
+`dataset_path=` (else `$DEXLLM_AOSP_DATASET`, else the bundled tables) pointing at
+a checkout of the full AOSP dataset.
 
-### `dexllm.dangerous_permission_apis(dk) -> dict[str, list[str]]`
+### `dexllm.dangerous_permission_apis(dk, *, dataset_path=None) -> dict[str, list[str]]`
 ```python
 dexllm.dangerous_permission_apis(dk)
 # {'android.permission.ACCESS_COARSE_LOCATION': ['android.location.LocationManager#getLastKnownLocation(String)'],
 #  'android.permission.ACCESS_FINE_LOCATION':   ['android.location.LocationManager#getLastKnownLocation(String)', ...]}
 ```
 
-### `dexllm.dangerous_permission_api_callers(dk, app_only=True) -> dict`
+### `dexllm.dangerous_permission_api_callers(dk, *, dataset_path=None, app_only=True) -> dict`
 Same, plus the calling methods (default drops bundled framework/library callers).
 
-### `dexllm.permission_api_callers(dk, *, app_only=True, levels=None) -> list`
+### `dexllm.permission_api_callers(dk, *, app_only=True, levels=None, dataset_path=None) -> list`
 The full-surface generalisation (issue #14): **all** protection levels, not just the
 dangerous slice. Returns `[{"perm", "protectionLevel", "rows": [{"api", "descriptors",
 "callers"}]}]` sorted by permission, each group with its real `protectionLevel` bucket
