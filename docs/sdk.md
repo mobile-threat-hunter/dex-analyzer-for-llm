@@ -191,7 +191,9 @@ SDK only as the decoded NAMES in `MethodAst.access_flags`, where a Java
 ### Content providers
 - **`ContentProviderUse`** `(uri, family, methods)` — a `content://` provider URI
   the app references (the runtime-assembled surface the `@RequiresPermission` map
-  misses). `family` ∈ sms / contacts / call-log / calendar / …
+  misses). `family` ∈ `sms` / `contacts` / `calllog` / `calendar` / `telephony` /
+  `browser` / `settings` / `media` / `provider` — the last being the catch-all for
+  URIs no family fits yet (issue #31 is retiring it).
 
 ---
 
