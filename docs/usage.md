@@ -243,23 +243,56 @@ report = dexllm.summarize_capabilities(dk)
 # Top permissions touched (via API usage)
 for perm, count in report.top_permissions(10):
     print(f"{count:>5}× {perm}")
-# → 3 × android.permission.CAMERA
-# → 2 × android.permission.ACCESS_FINE_LOCATION
+# →     3 × android.permission.INTERNET
+# →     1 × android.permission.ACCESS_FINE_LOCATION
 
 # Top categories
 for cat, count in report.top_categories(10):
     print(f"{count:>5}× {cat}")
-# → 3476 × REFLECTION
-# →  202 × CRYPTO
-# →   45 × RISKY
+# →    73 × REFLECTION
+# →     4 × CRYPTO
+# →     3 × STORAGE
+
+# Cross-domain concerns (today only IDENTIFIER)
+report.flags            # Counter() on this APK; Counter({'IDENTIFIER': 2}) on one
+                        # calling both getDeviceId overloads. IDENTIFIER also covers
+                        # getSubscriberId / getSimSerialNumber / getLine1Number /
+                        # BluetoothAdapter.getAddress
 
 # Filter to a subset (only crypto-related APIs)
-crypto = dexllm.summarize_capabilities(dk, only_categories={"CRYPTO", "HASH"})
-for hit in crypto.hits:
-    print(hit.api, "→", hit.permission, hit.categories)
+crypto = dexllm.summarize_capabilities(dk, only_categories={"CRYPTO"})
+for hit in crypto.api_hits:
+    print(hit.api_signature, "→", hit.permissions, hit.categories, hit.flags)
 ```
 
-The catalog is JSON; extend it to taste at `src/dexllm/data/android_api_map.json`.
+The catalog carries **two axes**, kept apart so the counters stay meaningful:
+
+- `categories` — one axis (domain / behaviour), no tag implied by another, so one
+  call site is never counted twice under two names for the same concern. A second
+  tag is only correct when the API genuinely spans two domains
+  (`WifiManager.getScanResults` → `WIFI` + `LOCATION`) — and then it does count
+  once in each, so `sum(report.categories.values()) >= total_call_sites`, with
+  equality exactly when every matched entry carries a single tag.
+- `flags` — the orthogonal, cross-domain concerns a domain tag cannot express.
+  Today only `IDENTIFIER`, which rolls up across TELEPHONY / BLUETOOTH / … and is
+  not recoverable from the domain axis.
+
+`only_categories=` matches **either** axis, so a tag keeps working as a filter
+whichever axis it lives on — `only_categories={"IDENTIFIER"}` selects the
+identifier-returning APIs. A tag the catalog does not declare (one the 0.2
+normalisation removed, or a typo) raises `ValueError`: a silently empty report
+would be indistinguishable from "this APK does none of that".
+
+Facts the key already states (`IMSI` for `getSubscriberId`), severity judgements
+(`RISKY`) and argument-dependent guesses (`POTENTIAL_ANDROID_ID` — [L4
+`resolve_call_args`](#l4--intra-method-dataflow-whats-actually-passed-at-each-call-site)
+answers that properly) are deliberately **not** tags.
+
+The catalog is JSON (`android_api_map.json` in the installed `dexllm/data/`);
+extend it to taste, keeping the two axes and the closed vocabulary that
+`tests/test_capability_catalog.py` enforces. Catalog keys must be **method**
+descriptors — a field descriptor resolves nothing, since the lookup is
+`find_call_sites_to`.
 
 ---
 
@@ -510,8 +543,10 @@ buckets (`perm_api.json` / `perm_levels.json`, all protection levels) and the pr
 URIs (`content_uris.json`) — is a committed snapshot of
 [aosp_data_set](https://github.com/mobile-threat-hunter/aosp_data_set) (metalava
 permission table + content-URI CSVs), verified in sync with upstream as of the
-2026-07-04 dataset revision. (`android_api_map.json` is a separate hand-seed catalog
-for `summarize_capabilities`, extend at will.)
+2026-07-04 dataset revision. (`android_api_map.json` is a separate hand-curated
+catalog for `summarize_capabilities` — not part of that snapshot; see
+[L3](#l3--what-permissions--categories-does-this-apk-exercise) for its two-axis
+schema before extending it.)
 
 ---
 
@@ -697,7 +732,7 @@ for g in session.permission_callers(app_only=True):       # -> tuple[PermissionC
     for row in g.rows: row.api, row.callers                 # PermissionCallerRow
 
 ioc = session.extract_iocs()                              # -> IocReport; ioc.domains: tuple[Indicator(value, methods, declared_in)]
-cap = session.summarize_capabilities()                   # -> CapabilityReport(api_hits, permissions, categories, ...)
+cap = session.summarize_capabilities()                   # -> CapabilityReport(api_hits, permissions, categories, flags, ...)
 prov = session.detect_content_providers()                # -> tuple[ContentProviderUse(uri, family, methods)]
 
 session.raw       # the underlying dexllm.DexKit (escape hatch for L7 search etc.)

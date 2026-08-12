@@ -141,10 +141,12 @@ def test_mapping_backed_models_are_immutable_but_not_hashable():
         total_call_sites=0,
         permissions={"A": 1},
         categories={},
+        flags={},
         api_hits=(),
         by_caller={},
     )
     assert isinstance(cr.permissions, MappingProxyType)
+    assert isinstance(cr.flags, MappingProxyType)
     with pytest.raises(TypeError):  # in-place mutation blocked
         cr.permissions["INJECT"] = 9  # type: ignore[index]
     with pytest.raises(TypeError):  # not hashable (documented)

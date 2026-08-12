@@ -684,13 +684,28 @@ dexllm.format_class(dk, 'Lcom/example/android/tvleanback/Utils;')   # str — fe
 dexllm.format_class_summary(s, indent='    ')                       # str — format an already-fetched ClassSummary
 ```
 
-### `dexllm.summarize_capabilities(dk) -> CapabilityReport`
-Aggregate permission + category profile.
+### `dexllm.summarize_capabilities(dk, *, only_categories=None) -> CapabilityReport`
+Aggregate permission + capability profile over the bundled catalog.
 ```python
 r = dexllm.summarize_capabilities(dk)
 r.permissions   # Counter({'android.permission.INTERNET': 3, 'android.permission.ACCESS_FINE_LOCATION': 1, ...})
-r.categories    # Counter({'REFLECTION': 3476, 'CRYPTO': 202, 'RISKY': 45, ...})
+r.categories    # Counter({'REFLECTION': 73, 'CRYPTO': 4, 'STORAGE': 3, ...})
+r.flags         # Counter() on this APK; Counter({'IDENTIFIER': 2}) on one calling
+                # both getDeviceId overloads (IDENTIFIER also covers getSubscriberId,
+                # getSimSerialNumber, getLine1Number, BluetoothAdapter.getAddress)
 ```
+The catalog keeps two axes apart: `categories` is a single axis (domain /
+behaviour) with no tag implied by another, so one call site is never counted
+twice under two names for the same concern (an API that genuinely spans two
+domains does count once in each, so `sum(r.categories.values()) >=
+r.total_call_sites`); `flags` is the orthogonal axis a domain tag cannot express
+(today only `IDENTIFIER` — the API provably returns a device/user identifier,
+rolling up across TELEPHONY / BLUETOOTH / …).
+
+`only_categories=` matches **either** axis, so `{"IDENTIFIER"}` selects the
+identifier-returning APIs even though it is a flag. A tag the catalog does not
+declare raises `ValueError` rather than returning an empty report.
+
 The `dexllm.capability` module also exposes `ApiHit` / `CapabilityReport` types.
 
 ---
@@ -892,7 +907,8 @@ form, so one method described itself two ways.) The same bits drive the
 `decompile_method_ast(...)["access"]`.
 
 ### `CapabilityReport`
-`permissions: collections.Counter[str]`, `categories: collections.Counter[str]`.
+`permissions: collections.Counter[str]`, `categories: collections.Counter[str]`,
+`flags: collections.Counter[str]`.
 
 ---
 

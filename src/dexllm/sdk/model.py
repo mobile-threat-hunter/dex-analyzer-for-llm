@@ -7,7 +7,7 @@ against *types* — not against dict keys or C++ struct attributes.
 
 Immutability: ``frozen=True`` blocks attribute rebinding; sequence fields are
 tuples and the ``Mapping`` fields (``CapabilityReport.permissions/categories/
-by_caller``, ``MethodAst.ast``) are wrapped in a read-only ``MappingProxyType`` at
+flags/by_caller``, ``MethodAst.ast``) are wrapped in a read-only ``MappingProxyType`` at
 construction, so a model can't be mutated in place. (``MethodAst.ast`` is a
 read-only view of the DAD nested-list AST; the *nested* structure inside it is the
 engine's own data.)
@@ -624,7 +624,9 @@ class IocReport:
 class CapabilityHit:
     """One capability-catalog API the app exercises.
 
-    Carries its call-site count and the permissions / categories it maps to.
+    Carries its call-site count, the permissions it maps to, and the catalog's two
+    metadata axes: ``categories`` (domain / behaviour) and ``flags`` (cross-domain
+    concerns a domain tag cannot express, today only ``IDENTIFIER``).
 
     Example (real, a2dp.Vol)::
 
@@ -634,13 +636,14 @@ class CapabilityHit:
             call_site_count=1,
             permissions=('android.permission.ACCESS_FINE_LOCATION',
                          'android.permission.ACCESS_COARSE_LOCATION'),
-            categories=('LOCATION',), callers=(...))
+            categories=('LOCATION',), flags=(), callers=(...))
     """
 
     api_signature: str
     call_site_count: int
     permissions: tuple[str, ...]
     categories: tuple[str, ...]
+    flags: tuple[str, ...]
     callers: tuple[str, ...]
 
 
@@ -648,18 +651,23 @@ class CapabilityHit:
 class CapabilityReport:
     """The app's capability profile.
 
-    Matched catalog APIs, aggregate permission / category counts, and a caller →
-    permissions map. Holds ``Mapping`` fields, so this model is immutable (the
-    mappings are read-only views) but NOT hashable.
+    Matched catalog APIs, aggregate permission / category / flag counts, and a
+    caller → permissions map. Holds ``Mapping`` fields, so this model is immutable
+    (the mappings are read-only views) but NOT hashable.
 
-    Example (real, a2dp.Vol)::
+    ``categories`` is a single axis (domain / behaviour), so one call site is never
+    counted twice under two names for the same concern; ``flags`` is the orthogonal
+    cross-domain axis (``IDENTIFIER``).
 
-        CapabilityReport(catalog_version='0.1-seed', catalog_size=45,
-                         matched_apis=10, total_call_sites=56,
-                         permissions={'android.permission.ACCESS_FINE_LOCATION': 1, ...},
-                         categories={'LOCATION': 1, ...},
+    Example (real, tvleanback)::
+
+        CapabilityReport(catalog_version='0.2', catalog_size=42,
+                         matched_apis=10, total_call_sites=86,
+                         permissions={'android.permission.INTERNET': 3, ...},
+                         categories={'REFLECTION': 73, ...}, flags={},
                          api_hits=(CapabilityHit(...), ...),
-                         by_caller={'La2dp/Vol/StoreLoc;->grabGPS()V': (...)})
+                         by_caller={'Landroid/support/v7/app/TwilightManager;->'
+                                    'getLastKnownLocationForProvider(...)': (...)})
     """
 
     catalog_version: str
@@ -668,12 +676,13 @@ class CapabilityReport:
     total_call_sites: int
     permissions: Mapping[str, int]
     categories: Mapping[str, int]
+    flags: Mapping[str, int]
     api_hits: tuple[CapabilityHit, ...]
     by_caller: Mapping[str, tuple[str, ...]]
 
     def __post_init__(self) -> None:
         """Wrap the mapping fields in read-only views so the model is immutable."""
-        for f in ("permissions", "categories", "by_caller"):
+        for f in ("permissions", "categories", "flags", "by_caller"):
             v = getattr(self, f)
             if not isinstance(v, MappingProxyType):
                 object.__setattr__(self, f, MappingProxyType(dict(v)))

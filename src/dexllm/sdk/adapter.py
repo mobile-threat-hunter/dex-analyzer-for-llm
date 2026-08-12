@@ -713,12 +713,14 @@ class DexKitAdapter:
             total_call_sites=c.total_call_sites,
             permissions=dict(c.permissions),
             categories=dict(c.categories),
+            flags=dict(c.flags),
             api_hits=tuple(
                 CapabilityHit(
                     api_signature=h.api_signature,
                     call_site_count=h.call_site_count,
                     permissions=tuple(h.permissions),
                     categories=tuple(h.categories),
+                    flags=tuple(h.flags),
                     callers=tuple(h.callers),
                 )
                 for h in c.api_hits

@@ -178,10 +178,15 @@ SDK only as the decoded NAMES in `MethodAst.access_flags`, where a Java
 
 ### Capabilities
 - **`CapabilityHit`** `(api_signature, call_site_count, permissions, categories,
-  callers)` — one catalog API the app exercises.
+  flags, callers)` — one catalog API the app exercises.
 - **`CapabilityReport`** `(catalog_version, catalog_size, matched_apis,
-  total_call_sites, permissions, categories, api_hits, by_caller)` — the app's
-  capability profile (holds `Mapping`s → immutable, **not hashable**).
+  total_call_sites, permissions, categories, flags, api_hits, by_caller)` — the
+  app's capability profile (holds `Mapping`s → immutable, **not hashable**).
+  `categories` is one axis (domain / behaviour), so one call site is never counted
+  twice under two names for the same concern — an API that genuinely spans two
+  domains does count once in each, so `sum(categories.values()) >=
+  total_call_sites`. `flags` is the orthogonal cross-domain axis (today only
+  `IDENTIFIER`).
 
 ### Content providers
 - **`ContentProviderUse`** `(uri, family, methods)` — a `content://` provider URI
@@ -254,7 +259,7 @@ alone.
 ### Immutability & hashability
 - All models are `frozen=True` (no attribute rebinding).
 - Sequence fields are `tuple`s; `Mapping` fields
-  (`CapabilityReport.permissions/categories/by_caller`, `MethodAst.ast`) are wrapped
+  (`CapabilityReport.permissions/categories/flags/by_caller`, `MethodAst.ast`) are wrapped
   in a read-only `MappingProxyType` — so no model can be mutated in place.
 - **Hashable:** the value-object models (only tuple/scalar fields) are hashable.
   The two that carry a `Mapping` — `CapabilityReport`, `MethodAst` — are frozen but

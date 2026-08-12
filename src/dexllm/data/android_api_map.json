@@ -1,39 +1,65 @@
 {
-  "version": "0.1-seed",
-  "source": "manual-seed (2026-05-25)",
-  "notes": "Initial high-value Android framework API → permission/category mapping. Curated from AOSP @RequiresPermission annotations and PScout-style mappings. Extend with PScout/Axplorer data for full coverage.",
+  "version": "0.2",
+  "source": "manual-seed (2026-05-25), taxonomy normalised 2026-08-12",
+  "notes": "Android framework API -> permission/capability metadata for summarize_capabilities. TWO AXES, kept separate so the aggregate Counter stays meaningful: `categories` is ONE axis (domain / behaviour) and no tag may be implied by another, so one call site is never counted twice under two names for the SAME concern -- a second tag is only correct when the API genuinely spans two domains (e.g. WifiManager.getScanResults -> WIFI + LOCATION), and then it does count once in each. `flags` carries the orthogonal, cross-domain concerns a domain tag cannot express (today only IDENTIFIER: the API provably returns a device/user identifier). Facts already stated by the key (IMSI for getSubscriberId, MAC_ADDRESS for getAddress, ...), severity judgements (RISKY) and argument-dependent guesses (POTENTIAL_ANDROID_ID -- resolve_call_args answers that properly) are deliberately NOT tags. Keys must be METHOD descriptors: a field descriptor silently matches nothing (find_call_sites_to resolves methods). The two vocabularies below are the CLOSED sets summarize_capabilities validates `only_categories` against, so a tag that is not here is a loud error instead of a silently empty report; a replacement catalog must declare its own.",
+  "category_vocabulary": [
+    "ACCOUNTS",
+    "BLUETOOTH",
+    "CAMERA",
+    "CRYPTO",
+    "DYNAMIC_LOAD",
+    "LOCATION",
+    "MICROPHONE",
+    "NATIVE_CODE",
+    "NETWORK_IO",
+    "PACKAGE_INFO",
+    "PROCESS_EXEC",
+    "REFLECTION",
+    "SETTINGS",
+    "SMS",
+    "STORAGE",
+    "TELEPHONY",
+    "WEBVIEW",
+    "WIFI"
+  ],
+  "flag_vocabulary": ["IDENTIFIER"],
   "entries": {
     "Landroid/telephony/TelephonyManager;->getDeviceId()Ljava/lang/String;": {
       "permissions": ["android.permission.READ_PHONE_STATE"],
-      "categories": ["TELEPHONY", "DEVICE_ID", "IDENTIFIER"],
+      "categories": ["TELEPHONY"],
+      "flags": ["IDENTIFIER"],
       "since_api": 1, "deprecated_since": 29
     },
     "Landroid/telephony/TelephonyManager;->getDeviceId(I)Ljava/lang/String;": {
       "permissions": ["android.permission.READ_PHONE_STATE"],
-      "categories": ["TELEPHONY", "DEVICE_ID", "IDENTIFIER"],
+      "categories": ["TELEPHONY"],
+      "flags": ["IDENTIFIER"],
       "since_api": 23, "deprecated_since": 29
     },
     "Landroid/telephony/TelephonyManager;->getSubscriberId()Ljava/lang/String;": {
       "permissions": ["android.permission.READ_PHONE_STATE"],
-      "categories": ["TELEPHONY", "IMSI", "IDENTIFIER"]
+      "categories": ["TELEPHONY"],
+      "flags": ["IDENTIFIER"]
     },
     "Landroid/telephony/TelephonyManager;->getSimSerialNumber()Ljava/lang/String;": {
       "permissions": ["android.permission.READ_PHONE_STATE"],
-      "categories": ["TELEPHONY", "ICCID", "IDENTIFIER"]
+      "categories": ["TELEPHONY"],
+      "flags": ["IDENTIFIER"]
     },
     "Landroid/telephony/TelephonyManager;->getLine1Number()Ljava/lang/String;": {
       "permissions": ["android.permission.READ_PHONE_NUMBERS", "android.permission.READ_SMS"],
-      "categories": ["TELEPHONY", "PHONE_NUMBER"]
+      "categories": ["TELEPHONY"],
+      "flags": ["IDENTIFIER"]
     },
     "Landroid/telephony/TelephonyManager;->getNetworkOperator()Ljava/lang/String;": {
-      "categories": ["TELEPHONY", "NETWORK_INFO"]
+      "categories": ["TELEPHONY"]
     },
     "Landroid/telephony/TelephonyManager;->getNetworkOperatorName()Ljava/lang/String;": {
-      "categories": ["TELEPHONY", "NETWORK_INFO"]
+      "categories": ["TELEPHONY"]
     },
     "Landroid/telephony/SmsManager;->sendTextMessage(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Landroid/app/PendingIntent;Landroid/app/PendingIntent;)V": {
       "permissions": ["android.permission.SEND_SMS"],
-      "categories": ["SMS", "SEND_SMS"]
+      "categories": ["SMS"]
     },
     "Landroid/telephony/SmsManager;->getDefault()Landroid/telephony/SmsManager;": {
       "categories": ["SMS"]
@@ -63,15 +89,15 @@
     },
     "Landroid/media/AudioRecord;-><init>(IIIII)V": {
       "permissions": ["android.permission.RECORD_AUDIO"],
-      "categories": ["MICROPHONE", "AUDIO_RECORD"]
+      "categories": ["MICROPHONE"]
     },
     "Landroid/media/MediaRecorder;->setAudioSource(I)V": {
       "permissions": ["android.permission.RECORD_AUDIO"],
-      "categories": ["MICROPHONE", "AUDIO_RECORD"]
+      "categories": ["MICROPHONE"]
     },
     "Landroid/net/wifi/WifiManager;->getConnectionInfo()Landroid/net/wifi/WifiInfo;": {
       "permissions": ["android.permission.ACCESS_WIFI_STATE"],
-      "categories": ["WIFI", "NETWORK_INFO"]
+      "categories": ["WIFI"]
     },
     "Landroid/net/wifi/WifiManager;->getScanResults()Ljava/util/List;": {
       "permissions": ["android.permission.ACCESS_WIFI_STATE", "android.permission.ACCESS_FINE_LOCATION"],
@@ -82,7 +108,8 @@
     },
     "Landroid/bluetooth/BluetoothAdapter;->getAddress()Ljava/lang/String;": {
       "permissions": ["android.permission.BLUETOOTH_CONNECT", "android.permission.LOCAL_MAC_ADDRESS"],
-      "categories": ["BLUETOOTH", "MAC_ADDRESS", "IDENTIFIER"]
+      "categories": ["BLUETOOTH"],
+      "flags": ["IDENTIFIER"]
     },
     "Landroid/accounts/AccountManager;->getAccounts()[Landroid/accounts/Account;": {
       "permissions": ["android.permission.GET_ACCOUNTS"],
@@ -91,18 +118,6 @@
     "Landroid/accounts/AccountManager;->getAccountsByType(Ljava/lang/String;)[Landroid/accounts/Account;": {
       "permissions": ["android.permission.GET_ACCOUNTS"],
       "categories": ["ACCOUNTS"]
-    },
-    "Landroid/provider/ContactsContract$CommonDataKinds$Phone;->CONTENT_URI:Landroid/net/Uri;": {
-      "permissions": ["android.permission.READ_CONTACTS"],
-      "categories": ["CONTACTS"]
-    },
-    "Landroid/provider/CallLog$Calls;->CONTENT_URI:Landroid/net/Uri;": {
-      "permissions": ["android.permission.READ_CALL_LOG"],
-      "categories": ["CALL_LOG"]
-    },
-    "Landroid/provider/CalendarContract$Events;->CONTENT_URI:Landroid/net/Uri;": {
-      "permissions": ["android.permission.READ_CALENDAR"],
-      "categories": ["CALENDAR"]
     },
     "Landroid/os/Environment;->getExternalStorageDirectory()Ljava/io/File;": {
       "categories": ["STORAGE"]
@@ -114,7 +129,7 @@
       "categories": ["WEBVIEW", "NETWORK_IO"]
     },
     "Landroid/webkit/WebView;->addJavascriptInterface(Ljava/lang/Object;Ljava/lang/String;)V": {
-      "categories": ["WEBVIEW", "JS_INTERFACE", "RISKY"]
+      "categories": ["WEBVIEW"]
     },
     "Ljava/net/URL;->openConnection()Ljava/net/URLConnection;": {
       "permissions": ["android.permission.INTERNET"],
@@ -122,37 +137,37 @@
     },
     "Ljava/net/Socket;-><init>(Ljava/lang/String;I)V": {
       "permissions": ["android.permission.INTERNET"],
-      "categories": ["NETWORK_IO", "SOCKET"]
+      "categories": ["NETWORK_IO"]
     },
     "Ljavax/crypto/Cipher;->getInstance(Ljava/lang/String;)Ljavax/crypto/Cipher;": {
       "categories": ["CRYPTO"]
     },
     "Ljava/security/MessageDigest;->getInstance(Ljava/lang/String;)Ljava/security/MessageDigest;": {
-      "categories": ["CRYPTO", "HASH"]
+      "categories": ["CRYPTO"]
     },
     "Ljava/lang/Class;->forName(Ljava/lang/String;)Ljava/lang/Class;": {
-      "categories": ["REFLECTION", "DYNAMIC"]
+      "categories": ["REFLECTION"]
     },
     "Ljava/lang/reflect/Method;->invoke(Ljava/lang/Object;[Ljava/lang/Object;)Ljava/lang/Object;": {
-      "categories": ["REFLECTION", "DYNAMIC"]
+      "categories": ["REFLECTION"]
     },
     "Ldalvik/system/DexClassLoader;-><init>(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/ClassLoader;)V": {
-      "categories": ["DYNAMIC_LOAD", "RISKY"]
+      "categories": ["DYNAMIC_LOAD"]
     },
     "Ldalvik/system/PathClassLoader;-><init>(Ljava/lang/String;Ljava/lang/ClassLoader;)V": {
       "categories": ["DYNAMIC_LOAD"]
     },
     "Ljava/lang/Runtime;->exec(Ljava/lang/String;)Ljava/lang/Process;": {
-      "categories": ["PROCESS_EXEC", "RISKY"]
+      "categories": ["PROCESS_EXEC"]
     },
     "Ljava/lang/Runtime;->exec([Ljava/lang/String;)Ljava/lang/Process;": {
-      "categories": ["PROCESS_EXEC", "RISKY"]
+      "categories": ["PROCESS_EXEC"]
     },
     "Ljava/lang/System;->loadLibrary(Ljava/lang/String;)V": {
       "categories": ["NATIVE_CODE"]
     },
     "Ljava/lang/System;->load(Ljava/lang/String;)V": {
-      "categories": ["NATIVE_CODE", "RISKY"]
+      "categories": ["NATIVE_CODE"]
     },
     "Landroid/content/pm/PackageManager;->getInstalledPackages(I)Ljava/util/List;": {
       "permissions": ["android.permission.QUERY_ALL_PACKAGES"],
@@ -163,7 +178,7 @@
       "categories": ["PACKAGE_INFO"]
     },
     "Landroid/provider/Settings$Secure;->getString(Landroid/content/ContentResolver;Ljava/lang/String;)Ljava/lang/String;": {
-      "categories": ["SETTINGS", "POTENTIAL_ANDROID_ID"]
+      "categories": ["SETTINGS"]
     }
   }
 }

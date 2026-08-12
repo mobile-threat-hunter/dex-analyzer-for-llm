@@ -322,10 +322,17 @@ def _t_render_method_smali(
 def _t_capability_report(dk: DexKit, limit: int = 50) -> dict:
     """Bounded, LLM-friendly capability summary.
 
-    Returns top permissions/categories and the `limit` most-invoked APIs. The
-    raw report's per-caller sets (`by_caller`, `ApiHit.callers`) can be huge on
-    a large APK, so they are intentionally omitted here to keep the response
-    within the model's context.
+    Returns top permissions/categories, the cross-domain `flags` rollup, and the
+    `limit` most-invoked APIs. The raw report's per-caller sets (`by_caller`,
+    `ApiHit.callers`) can be huge on a large APK, so they are intentionally
+    omitted here to keep the response within the model's context.
+
+    `categories` is one axis (domain / behaviour), so one call site is never
+    counted twice under two names for the same concern — an API that genuinely
+    spans two domains does count once in each. `flags` is the orthogonal axis a
+    domain tag cannot express (today only `IDENTIFIER` — the API provably returns
+    a device/user identifier), and it rolls up across domains, so it answers
+    "does this app harvest identifiers" in a way no single category can.
     """
     from .capability import summarize_capabilities
 
@@ -336,13 +343,18 @@ def _t_capability_report(dk: DexKit, limit: int = 50) -> dict:
         "total_call_sites": rep.total_call_sites,
         "matched_apis": rep.matched_apis,
         "catalog_size": rep.catalog_size,
+        # The tag vocabulary is versioned and has changed (0.2 normalised it), so a
+        # model that learned the old names needs the signal that it did.
+        "catalog_version": rep.catalog_version,
         "top_permissions": rep.top_permissions(20),
         "top_categories": rep.top_categories(20),
+        "flags": dict(rep.flags),
         "api_hits": [
             {
                 "api": h.api_signature,
                 "permissions": h.permissions,
                 "categories": h.categories,
+                "flags": h.flags,
                 "call_sites": h.call_site_count,
             }
             for h in hits[:limit]
@@ -1141,7 +1153,13 @@ TOOL_DEFINITIONS: list[dict] = [
             "High-level capability summary for the APK — what permissions, "
             "network endpoints, crypto APIs, dynamic-loading patterns, "
             "and sensitive system APIs the app touches. Good first probe "
-            "to orient analysis before drilling into specific classes."
+            "to orient analysis before drilling into specific classes. "
+            "Results carry two independent axes: `top_categories` / per-hit "
+            "`categories` is the domain-or-behaviour axis (TELEPHONY, REFLECTION, "
+            "PROCESS_EXEC, …), and `flags` is the cross-domain concern axis "
+            "(today only IDENTIFIER — the API returns a device/user identifier), "
+            "which rolls up across domains. `catalog_version` identifies the tag "
+            "vocabulary: it changed at 0.2, so do not assume pre-0.2 tag names."
         ),
         "input_schema": {
             "type": "object",
