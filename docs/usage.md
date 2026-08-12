@@ -288,11 +288,19 @@ Facts the key already states (`IMSI` for `getSubscriberId`), severity judgements
 `resolve_call_args`](#l4--intra-method-dataflow-whats-actually-passed-at-each-call-site)
 answers that properly) are deliberately **not** tags.
 
-The catalog is JSON (`android_api_map.json` in the installed `dexllm/data/`);
-extend it to taste, keeping the two axes and the closed vocabulary that
-`tests/test_capability_catalog.py` enforces. Catalog keys must be **method**
-descriptors — a field descriptor resolves nothing, since the lookup is
-`find_call_sites_to`.
+The catalog is JSON (`android_api_map.json`). To use your own, copy the bundled
+file, edit it, and point dexllm at the containing **directory** — do not edit the
+copy inside `site-packages`, which `pip install -U` discards:
+
+```python
+dexllm.summarize_capabilities(dk, data_dir="/etc/dexllm")   # or $DEXLLM_DATA_DIR
+```
+
+See [Overriding the bundled data](#overriding-the-bundled-data). Keep the two axes
+and declare your own `category_vocabulary` / `flag_vocabulary` — `only_categories`
+validates against **your** catalog's, so a custom taxonomy stays filterable.
+Catalog keys must be **method** descriptors — a field descriptor resolves nothing,
+since the lookup is `find_call_sites_to`.
 
 ---
 
@@ -516,7 +524,7 @@ The `content://` URIs a `ContentResolver` reads are the real handles for
 SMS / contacts / call-log / calendar — the surface `READ_SMS` / `READ_CONTACTS`
 gate, and invisible to the `@RequiresPermission` map (the `Uri` is assembled at
 runtime). `detect_content_providers` matches the app's value-strings against a
-bundled AOSP provider-URI dataset (`src/dexllm/data/content_uris.json`):
+bundled AOSP provider-URI dataset (`content_uris.json`):
 
 ```python
 for hit in dexllm.detect_content_providers(dk):
@@ -524,12 +532,59 @@ for hit in dexllm.detect_content_providers(dk):
 # content://sms sms <- ['Lb/g/a/m/f;->run()V']
 ```
 
+### Overriding the bundled data
+
+Two of the four data files carry **hand judgement** rather than mechanical AOSP
+extraction — the capability catalog (`android_api_map.json`) and the `family`
+labels in `content_uris.json` — so they take a per-call `data_dir=` argument, or
+`$DEXLLM_DATA_DIR` for process-wide use (the form that also reaches the MCP and
+HTTP servers, which take no such argument):
+
+```python
+dexllm.summarize_capabilities(dk, data_dir="/etc/dexllm")
+dexllm.detect_content_providers(dk, data_dir="/etc/dexllm")
+```
+
+(Both paths above are real directories on your machine — a named directory that
+does not exist raises, so substitute your own.)
+
+Resolution is **arg → `$DEXLLM_DATA_DIR` → bundled**, and replacement is **per
+file**: a directory holding only `content_uris.json` still serves the bundled
+catalog, so overriding one file does not oblige you to copy the other. A file is
+replaced whole rather than merged — both are small enough to copy and edit, and a
+merge would need a per-key precedence rule neither schema expresses.
+
+A `data_dir` that is named but does not exist raises `NotADirectoryError` (a typo
+must not silently serve bundled data), and a file that is present but malformed
+raises `ValueError` naming the path. An **empty** value means "not configured"
+through both spellings, not the current directory. Parsed data is cached per
+resolved path, so switching `data_dir` between calls is honoured; call
+`dexllm.clear_data_caches()` after editing a file in place in a long-running
+process. Resolution runs before the cache lookup, so a `data_dir` that later
+disappears fails loudly rather than serving a stale copy — while a single *file*
+vanishing from a still-valid directory falls back to the bundled one, per the
+rule above.
+
+The permission tables (`perm_api.json` / `perm_levels.json`) are **not** in this
+channel: they are mechanical extraction with no hand content, and `dataset_path=`
+/ `$DEXLLM_AOSP_DATASET` already serve their real use case — a fresher AOSP
+snapshot. See [Dangerous-permission API usage](#dangerous-permission-api-usage).
+
 ### Engine C++ port — permission callers (shared with the WASM binding)
 
 `permission_api_callers` has a byte-identical **C++ engine port**,
 `dk.permission_callers()` (all protection levels), so the WASM (embind) binding and
 pybind run **one implementation over the engine-bundled AOSP dataset** (issue #14).
 The pybind/SDK permission surface uses this C++ join directly.
+
+> **The byte-identity holds for the bundled data.** The C++ dataset is a
+> build-time blob compiled into the extension, so it cannot be overridden at
+> runtime. Under `dataset_path=` / `$DEXLLM_AOSP_DATASET` the **Python**
+> `permission_api_callers` follows your dataset while `dk.permission_callers()`
+> keeps the bundled one. Measured over the test corpus with the bundled tables:
+> identical on all 32 loadable sources (5 of which produce a non-empty result);
+> divergent as soon as an override is set. Use one or the other under an
+> override, not both.
 
 The IoC / content-provider / capability analyses are **pure Python**
 (`dexllm.extract_iocs` / `detect_content_providers` / `summarize_capabilities`) —

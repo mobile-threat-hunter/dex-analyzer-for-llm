@@ -285,25 +285,36 @@ def test_flags_are_counted_per_call_site_like_categories():
     assert r.api_hits[0].flags == ["IDENTIFIER"]
 
 
-def test_a_repeated_tag_is_not_counted_twice():
+def test_a_repeated_tag_is_not_counted_twice(tmp_path):
     """The emitter dedupes a malformed entry rather than inflating its count.
 
     A duplicate is not a fact to count twice — counting it reproduces exactly the
     `REFLECTION`/`DYNAMIC` double-count that motivated the 0.2 taxonomy.
+
+    The malformed catalog is injected through the ``data_dir`` override channel
+    (issue #33) rather than by assigning the module's cache global, which is the
+    unsupported pattern that channel exists to replace.
+
+    The sentinel ``version`` assertion is what keeps that substitution honest: the
+    BUNDLED catalog also yields ``{"REFLECTION": 1}`` here, so if the override
+    silently fell back to it every assertion below would still pass and the test
+    would prove nothing about the dedupe (verified by sabotaging
+    ``resolve_data_file`` to ignore ``data_dir`` — it passed).
     """
     import dexllm.capability as cap
 
-    original = cap._CATALOG_CACHE
-    try:
-        catalog = _catalog()
-        catalog["entries"][_FOR_NAME]["categories"] = ["REFLECTION", "REFLECTION"]
-        cap._CATALOG_CACHE = catalog
-        r = cap.summarize_capabilities(_StubDk({_FOR_NAME: ["La/B;->n()V"]}))
-        assert r.total_call_sites == 1
-        assert r.categories == {"REFLECTION": 1}
-        assert r.api_hits[0].categories == ["REFLECTION"]
-    finally:
-        cap._CATALOG_CACHE = original
+    catalog = _catalog()
+    catalog["version"] = "dedupe-fixture"
+    catalog["entries"][_FOR_NAME]["categories"] = ["REFLECTION", "REFLECTION"]
+    (tmp_path / "android_api_map.json").write_text(json.dumps(catalog))
+
+    r = cap.summarize_capabilities(
+        _StubDk({_FOR_NAME: ["La/B;->n()V"]}), data_dir=str(tmp_path)
+    )
+    assert r.catalog_version == "dedupe-fixture", "the override did not take effect"
+    assert r.total_call_sites == 1
+    assert r.categories == {"REFLECTION": 1}
+    assert r.api_hits[0].categories == ["REFLECTION"]
 
 
 def test_flags_survive_the_sdk_and_mcp_layers():

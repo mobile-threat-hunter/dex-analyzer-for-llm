@@ -48,6 +48,7 @@ from .dangerous_api import (
     dangerous_permission_apis,
     permission_api_callers,
 )
+from .datadir import clear_data_caches
 from .descriptors import (
     descriptor_to_java,
     java_to_descriptor,
@@ -85,6 +86,7 @@ __all__ = [
     "ExternalTypeRef",
     "ResolvedCallSite",
     "add_dumped_dexes",
+    "clear_data_caches",
     "descriptor_to_java",
     "descriptors",
     "filter_field_refs",

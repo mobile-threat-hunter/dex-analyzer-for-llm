@@ -684,8 +684,10 @@ dexllm.format_class(dk, 'Lcom/example/android/tvleanback/Utils;')   # str — fe
 dexllm.format_class_summary(s, indent='    ')                       # str — format an already-fetched ClassSummary
 ```
 
-### `dexllm.summarize_capabilities(dk, *, only_categories=None) -> CapabilityReport`
-Aggregate permission + capability profile over the bundled catalog.
+### `dexllm.summarize_capabilities(dk, *, only_categories=None, data_dir=None) -> CapabilityReport`
+Aggregate permission + capability profile over the catalog. `data_dir=` (else
+`$DEXLLM_DATA_DIR`, else bundled) points at a directory holding a replacement
+`android_api_map.json` — see [§14](#14-overriding-the-bundled-data).
 ```python
 r = dexllm.summarize_capabilities(dk)
 r.permissions   # Counter({'android.permission.INTERNET': 3, 'android.permission.ACCESS_FINE_LOCATION': 1, ...})
@@ -731,13 +733,17 @@ Both are populated independently, so an empty `methods` with a non-empty `declar
 means exactly "declared but never loaded". Both are `[]` when `with_xref=False`.
 `dexllm.IOC_CATEGORIES == ('urls', 'ips', 'domains', 'emails', 'onion')`.
 
-### `dexllm.detect_content_providers(dk, *, with_xref=True, xref_limit=300) -> list`
+### `dexllm.detect_content_providers(dk, *, with_xref=True, xref_limit=300, data_dir=None) -> list`
 The `content://` provider query-URIs (SMS / contacts / call-log / calendar handles
 that `ContentResolver` takes — the surface `READ_SMS`/`READ_CONTACTS` gate, invisible
 to the `@RequiresPermission` signature map because the `Uri` is assembled at runtime)
 referenced by the app's value-strings, matched against a bundled AOSP-derived dataset
 (`data/content_uris.json`). Returns `[{'uri', 'family', 'methods'}]` sorted by URI; a
 dataset URI is a hit iff it occurs as a substring of some value-string.
+`family` ∈ `sms` / `contacts` / `calllog` / `calendar` / `telephony` / `browser` /
+`settings` / `media` / `provider` (the last is the catch-all for URIs no family
+fits yet — issue #31 is retiring it). `data_dir=` (else `$DEXLLM_DATA_DIR`) points
+at a replacement `content_uris.json` — see [§14](#14-overriding-the-bundled-data).
 
 ---
 
@@ -763,8 +769,11 @@ The full-surface generalisation (issue #14): **all** protection levels, not just
 dangerous slice. Returns `[{"perm", "protectionLevel", "rows": [{"api", "descriptors",
 "callers"}]}]` sorted by permission, each group with its real `protectionLevel` bucket
 (`dexllm.PERM_LEVELS = (dangerous, signature, internal, normal, other)`); pass `levels=`
-to filter. `dk.permission_callers(app_only)` is the byte-identical C++ engine port
-shared with the WASM binding. The bundled `perm_api.json` (571 perms — metalava
+to filter. `dk.permission_callers(app_only)` is the C++ engine port shared with the
+WASM binding, byte-identical **over the bundled data** — its dataset is compiled
+into the extension, so under `dataset_path=` / `$DEXLLM_AOSP_DATASET` this Python
+function follows the override and `dk.permission_callers()` does not.
+The bundled `perm_api.json` (571 perms — metalava
 `@RequiresPermission` + the AOSP runtime-enforcement bridge) + `perm_levels.json`
 are the single source of truth; the dangerous variants derive from them.
 
@@ -909,6 +918,38 @@ form, so one method described itself two ways.) The same bits drive the
 ### `CapabilityReport`
 `permissions: collections.Counter[str]`, `categories: collections.Counter[str]`,
 `flags: collections.Counter[str]`.
+
+---
+
+## 14. Overriding the bundled data
+
+Two of the four files in `dexllm/data/` carry **hand judgement** rather than
+mechanical AOSP extraction, so they take an override: the capability catalog
+(`android_api_map.json`) and the `family` labels in `content_uris.json`.
+
+```python
+dexllm.summarize_capabilities(dk, data_dir="/etc/dexllm")
+dexllm.detect_content_providers(dk, data_dir="/etc/dexllm")
+```
+
+| | |
+|---|---|
+| resolution | `data_dir=` → `$DEXLLM_DATA_DIR` → bundled; an **empty** value means "not configured" through either spelling |
+| granularity | **per file** — a directory holding only one of the two still serves the bundled other |
+| semantics | whole-file **replacement**, not a merge |
+| bad directory | `NotADirectoryError` naming which of the two spellings supplied it — checked per call, so a vanished directory fails loudly instead of serving a stale cache |
+| malformed file | `ValueError` naming the path (invalid JSON, non-UTF-8 bytes, or a wrong shape — including a tag list written as a bare string) |
+| caching | per `resolve()`d path, bounded; `dexllm.clear_data_caches()` re-reads a file edited in place |
+
+`$DEXLLM_DATA_DIR` is the form that also reaches the MCP and HTTP servers, which
+take no such argument. The permission tables (`perm_api.json` / `perm_levels.json`)
+are deliberately **not** here — they are mechanical extraction with no hand
+content, and [`dataset_path=`](#9-dangerous-permission-apis-python) /
+`$DEXLLM_AOSP_DATASET` already serve a fresher AOSP snapshot.
+
+### `dexllm.clear_data_caches() -> None`
+Drop the parsed-data cache. Not needed to switch `data_dir` (the cache is keyed by
+resolved path) — only to pick up a file edited in place.
 
 ---
 

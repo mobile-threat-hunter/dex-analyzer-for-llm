@@ -49,24 +49,63 @@ keeps a bulk load from re-introducing an unnormalised taxonomy.
 
 from __future__ import annotations
 
-import json
+import os
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Dict, List, Optional, Set
+from typing import TYPE_CHECKING, Dict, List, Optional, Set, Union
+
+from .datadir import load_data_json
 
 if TYPE_CHECKING:
     from ._dexkit_core import DexKit
 
-_CATALOG_PATH = Path(__file__).parent / "data" / "android_api_map.json"
-_CATALOG_CACHE: dict | None = None
+_CATALOG_FILE = "android_api_map.json"
 
 
-def _load_catalog() -> dict:
-    global _CATALOG_CACHE
-    if _CATALOG_CACHE is None:
-        _CATALOG_CACHE = json.loads(_CATALOG_PATH.read_text())
-    return _CATALOG_CACHE
+def _validate_catalog(obj: object, path: Path) -> None:
+    """Reject a malformed override loudly, naming the file (issue #33).
+
+    Only the shape :func:`summarize_capabilities` relies on is checked — an
+    ``entries`` mapping of API signature to metadata, whose three tag lists must be
+    lists of strings. A user-supplied catalog is untrusted input on the analysis
+    path, and the alternative is a bare ``KeyError`` / ``TypeError`` raised from
+    inside a cached loader.
+
+    The tag-list check is not pedantry — it is the difference between a named error
+    and a SILENTLY WRONG report. The aggregator iterates each list, so a bare
+    string (the commonest hand-edit slip, ``"categories": "REFLECTION"``) is
+    perfectly iterable and counts each CHARACTER as a category; a non-iterable
+    raises ``TypeError`` deep inside the walk, which ``tools.execute`` then reports
+    to an LLM as "bad arguments" — sending it to retry its own call forever while
+    the real cause, this file, is never mentioned.
+    """
+    if not isinstance(obj, dict):
+        raise ValueError(f"{path} must be a JSON object")
+    entries = obj.get("entries")
+    if not isinstance(entries, dict):
+        raise ValueError(f"{path} must carry an 'entries' object mapping API -> meta")
+    for sig, meta in entries.items():
+        if not isinstance(meta, dict):
+            raise ValueError(f"{path}: entry {sig!r} must be an object")
+        for key in ("permissions", "categories", "flags"):
+            value = meta.get(key)
+            if value is None:
+                continue
+            if isinstance(value, str) or not isinstance(value, list):
+                raise ValueError(
+                    f"{path}: entry {sig!r} has a non-list {key!r} "
+                    f"({type(value).__name__}) — it must be a list of strings"
+                )
+            if not all(isinstance(tag, str) for tag in value):
+                raise ValueError(
+                    f"{path}: entry {sig!r} has a non-string item in {key!r}"
+                )
+
+
+def _load_catalog(data_dir: Union[str, os.PathLike, None] = None) -> dict:
+    """Return the capability catalog, honouring the ``data_dir`` override channel."""
+    return load_data_json(_CATALOG_FILE, data_dir=data_dir, validate=_validate_catalog)
 
 
 @dataclass
@@ -121,7 +160,10 @@ def _catalog_vocabulary(catalog: dict) -> Set[str]:
 
 
 def summarize_capabilities(
-    dk: DexKit, *, only_categories: Optional[Set[str]] = None
+    dk: DexKit,
+    *,
+    only_categories: Optional[Set[str]] = None,
+    data_dir: Union[str, os.PathLike, None] = None,
 ) -> CapabilityReport:
     """Walk the catalog, look up each API's call sites via dk, aggregate.
 
@@ -131,14 +173,23 @@ def summarize_capabilities(
             these tags on **either** axis (e.g. ``{"LOCATION", "TELEPHONY"}``, or
             ``{"IDENTIFIER"}`` — a flag). Matching both axes is what keeps a tag
             usable as a filter regardless of which axis it lives on.
+        data_dir: directory holding a replacement ``android_api_map.json`` (else
+            ``$DEXLLM_DATA_DIR``, else the bundled catalog) — see
+            :mod:`dexllm.datadir`. The vocabulary validated below is the
+            REPLACEMENT's, so a custom catalog brings its own taxonomy — and a
+            catalog declaring NEITHER vocabulary key switches the check below off
+            entirely (see the module docstring), so an override that wants the
+            loud failure must declare them.
 
     Raises:
         ValueError: if ``only_categories`` holds a tag the catalog does not
             declare. Silently returning an empty report would be indistinguishable
             from "the APK exercises none of this", so a stale tag (one the 0.2
-            taxonomy normalisation removed, or a typo) fails loudly instead.
+            taxonomy normalisation removed, or a typo) fails loudly instead. The
+            bundled catalog declares both vocabularies; a replacement that omits
+            them is exempt, as above.
     """
-    catalog = _load_catalog()
+    catalog = _load_catalog(data_dir)
     entries = catalog["entries"]
 
     want = set(only_categories) if only_categories else None

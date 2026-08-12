@@ -19,6 +19,26 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 _SMALI_OFF = re.compile(r"^\s*0x([0-9a-fA-F]+):")
 
 
+@pytest.fixture(autouse=True)
+def _no_ambient_data_override(monkeypatch):
+    """Neutralise ``$DEXLLM_DATA_DIR`` for every test unless one opts in.
+
+    The data-override channel (issue #33) is process-wide and resolved per call,
+    so a developer who exports it for their own triage would otherwise make the
+    catalog and provider-dataset tests read THEIR files — and those tests assert
+    on bundled values, so the suite goes red with hard AssertionErrors that read
+    as real regressions. An environment fact must produce a skip or no effect,
+    never a failure; the corpus fixtures below follow the same rule.
+
+    A test that wants an override sets it itself (``monkeypatch.setenv``), which
+    still works — this only removes what was inherited from the shell.
+    """
+    monkeypatch.delenv("DEXLLM_DATA_DIR", raising=False)
+    from dexllm import datadir
+
+    datadir.clear_data_caches()
+
+
 def _candidate_apks():
     """Candidate APK paths, best-effort. $DEXLLM_TEST_APK wins; otherwise scan
     test_apk/APK/ (skipping empty placeholders)."""
