@@ -144,7 +144,7 @@ for ref in dk.list_external_method_refs(framework_only=True):
 
 # Types
 for ref in dk.list_external_type_refs(framework_only=True):
-    print(ref.java_class)
+    print(ref.java_name)
     # → android.app.Activity
     # → android.util.Log
 
@@ -173,7 +173,7 @@ hits = filter_method_refs(
 
 ```python
 summary = dk.get_class_summary("Lcom/ss/android/agilelogger/ALog;")
-print(summary.internal, summary.dex_id, summary.super_descriptor)
+print(summary.is_internal, summary.dex_id, summary.superclass_descriptor)
 print("methods:", len(summary.methods))
 print("fields:", len(summary.fields))
 ```

@@ -814,7 +814,7 @@ API and the one place raw disagreed with the SDK port).
 dexllm.descriptor_to_java('Lcom/foo/Bar;')     # 'com.foo.Bar'
 dexllm.java_to_descriptor('com.foo.Bar')       # 'Lcom/foo/Bar;'
 dexllm.is_framework_descriptor('Landroid/app/Activity;')   # True
-dexllm.method_ref_java('Lcom/foo/Bar;->baz(I)V')           # human-readable form
+dexllm.method_ref_java('Lcom/foo/Bar;', 'baz', '(I)V')     # 'com.foo.Bar.baz(int) -> void'
 dexllm.parse_proto('(ILjava/lang/String;)Z')  # (['I', 'Ljava/lang/String;'], 'Z')  — (param descriptors, return)
 dexllm.pretty_proto('(ILjava/lang/String;)Z') # '(int, java.lang.String) -> boolean'
 ```
@@ -864,7 +864,7 @@ are read-only attributes.
 
 ### `ExternalFieldRef` / `ExternalTypeRef`
 Field: class/name/type descriptors + `signature`. Type: `descriptor` +
-`java_class` + `referenced_in_dex_ids`.
+`java_name` + `referenced_in_dex_ids`.
 
 ### `CallSite`
 | field | type | meaning |

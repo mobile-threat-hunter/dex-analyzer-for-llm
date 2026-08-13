@@ -303,7 +303,7 @@ import dexllm
 dexllm.identify("/path/to/suspect")   # → {format, is_apk, has_manifest, dex_count}
 
 # Structurally verify a dex/apk without loading — never raises (the verify() sibling of identify())
-dexllm.verify("/path/to/suspect")     # → [{dex_id, name, valid, reason}, …] (per dex)
+dexllm.verify("/path/to/suspect")     # → [{dex_id, name, valid, reason, source}, …] (per dex)
 
 dk = dexllm.DexKit("/path/to/app.apk")   # .apk/.jar/.zip, a bare .dex, or a disguised container
 
