@@ -323,7 +323,9 @@ def test_validation_is_not_disabled_by_an_earlier_unvalidated_load(tmp_path):
     """
     (tmp_path / "android_api_map.json").write_text(json.dumps({"no": "entries"}))
 
-    datadir.load_data_json("android_api_map.json", data_dir=str(tmp_path))  # no validator
+    datadir.load_data_json(
+        "android_api_map.json", data_dir=str(tmp_path)
+    )  # no validator
     with pytest.raises(ValueError, match="entries"):
         capability._load_catalog(str(tmp_path))
 
@@ -384,9 +386,7 @@ def test_a_tag_list_written_as_a_bare_string_is_rejected(tmp_path):
     """
     for bad in ("REFLECTION", 5, [["ACME"]], [None]):
         (tmp_path / "android_api_map.json").write_text(
-            json.dumps(
-                {"version": "v", "entries": {"Lx;->y()V": {"categories": bad}}}
-            )
+            json.dumps({"version": "v", "entries": {"Lx;->y()V": {"categories": bad}}})
         )
         with pytest.raises(ValueError, match="categories"):
             capability._load_catalog(str(tmp_path))
