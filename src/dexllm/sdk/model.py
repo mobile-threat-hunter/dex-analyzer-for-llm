@@ -342,11 +342,33 @@ class MethodMatch:
     dex_id: int
 
 
+@dataclass(frozen=True)
+class FieldMatch:
+    """One field hit from a search query: descriptor + dex location.
+
+    The field arm of the search family. Its raw counterpart was a registered but
+    UNPRODUCIBLE type until dexllm#37 built ``find_fields_by_name`` — so unlike
+    :class:`ClassMatch` / :class:`MethodMatch` this model is new rather than a
+    rename.
+
+    Example (real, a2dp.Vol_137.apk)::
+
+        FieldMatch(field_id=520,
+                   descriptor='La2dp/Vol/StoreLoc;->DB:La2dp/Vol/DeviceDB;',
+                   dex_id=0)
+    """
+
+    field_id: int
+    descriptor: str
+    dex_id: int
+
+
 # ── class inspection ─────────────────────────────────────────────────────────
 # Fine-grained decomposition of a class (the C++ get_class_summary bundles all of
 # these — class metadata + fields + methods — into one object; the SDK layer
-# splits it so a consumer depends only on what it needs). Methods stay on
-# EnumerationPort.list_class_methods.
+# splits it so a consumer depends only on what it needs) — metadata, fields and
+# methods are three queries. EnumerationPort.list_class_methods remains the
+# descriptor-only view of the same members.
 
 
 @dataclass(frozen=True)
@@ -362,6 +384,44 @@ class FieldInfo:
 
     name: str
     type: str
+    access_flags: int
+
+
+@dataclass(frozen=True)
+class MethodInfo:
+    """One declared method of a class: name, proto, access flags.
+
+    The symmetric twin of :class:`FieldInfo`, and the reason
+    :meth:`ClassInspectionPort.class_methods` exists — before dexllm#37 a
+    consumer needing a method modifier (``ACC_NATIVE``, ``ACC_ABSTRACT``,
+    ``ACC_SYNTHETIC``, ``ACC_DECLARED_SYNCHRONIZED``) had to leave the SDK for
+    the raw ``get_class_summary``, even though the identical question about a
+    FIELD was already served.
+
+    ``access_flags`` is the **raw dex bit-field**: a Java ``synchronized`` method
+    reads ``0x20000`` (``ACC_DECLARED_SYNCHRONIZED``), not ``0x20`` — see
+    [api.md](../../../docs/api.md#classsummary). That is the whole point of exposing
+    it here rather than the decoded names, which
+    :attr:`MethodAst.access_flags` already carries.
+
+    **On an EXTERNAL class (one no loaded dex declares) ``access_flags`` is 0**,
+    because there is no ``class_data`` to read them from — the members are
+    reconstructed from the ``method_ids`` references other classes make. Zero is
+    not "package-private and nothing else"; it means UNKNOWN. Check
+    ``ClassInfo.is_internal`` before reading a modifier. ``class_methods`` also
+    reports members for an external class where
+    :meth:`EnumerationPort.list_class_methods` returns nothing, so the two agree
+    only for internal classes.
+
+    Its full descriptor is ``f"{class_descriptor}->{name}{proto}"``.
+
+    Example (real, a2dp.Vol AppChooser)::
+
+        MethodInfo(name='onCreate', proto='(Landroid/os/Bundle;)V', access_flags=4)
+    """
+
+    name: str
+    proto: str
     access_flags: int
 
 

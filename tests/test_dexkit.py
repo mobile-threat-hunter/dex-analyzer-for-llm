@@ -748,12 +748,12 @@ def test_enumeration_companions(dk):
     # would drop them; concatenation is the correct invariant here).
     f_concat, m_concat = [], []
     for d in range(dk.dex_count()):
-        f_concat += dk.list_field_descriptors_in_dex(d)
-        m_concat += dk.list_method_descriptors_in_dex(d)
-    assert f_concat == dk.list_field_descriptors() and len(f_concat) > 0
-    assert m_concat == dk.list_method_descriptors() and len(m_concat) > 0
-    assert dk.list_field_descriptors_in_dex(9999) == []
-    assert dk.list_method_descriptors_in_dex(-1) == []
+        f_concat += dk.list_fields_in_dex(d)
+        m_concat += dk.list_methods_in_dex(d)
+    assert f_concat == dk.list_fields() and len(f_concat) > 0
+    assert m_concat == dk.list_methods() and len(m_concat) > 0
+    assert dk.list_fields_in_dex(9999) == []
+    assert dk.list_methods_in_dex(-1) == []
     raw = dk.extract_dex(0)["bytes"]
     assert isinstance(raw, bytes) and raw[:4] == b"dex\n"
     # the slice is THIS dex only — length == the header's file_size, not the map len
@@ -1108,7 +1108,7 @@ def test_canonical_field_xref_and_cache_actions_work(dk):
     `warm_analysis_caches` already did.
     """
     fd = next(
-        (f for f in dk.list_field_descriptors() if dk.find_methods_reading_field(f)),
+        (f for f in dk.list_fields() if dk.find_methods_reading_field(f)),
         None,
     )
     if fd is None:

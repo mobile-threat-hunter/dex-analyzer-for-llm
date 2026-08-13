@@ -74,6 +74,20 @@ std::vector<MethodMatch> ParseMethodMetaArray(
     return out;
 }
 
+std::vector<FieldMatch> ParseFieldMetaArray(
+    const dexkit::schema::FieldMetaArrayHolder* holder) {
+    std::vector<FieldMatch> out;
+    if (holder == nullptr || holder->fields() == nullptr) return out;
+    for (const auto* f : *holder->fields()) {
+        FieldMatch fm;
+        fm.dex_id = f->dex_id();
+        fm.field_id = f->id();
+        if (f->dex_descriptor()) fm.descriptor = f->dex_descriptor()->str();
+        out.push_back(std::move(fm));
+    }
+    return out;
+}
+
 }  // namespace
 
 namespace {
@@ -998,7 +1012,7 @@ void FillInternalClassSummary(const dexkit::DexItem& item,
     const auto& method_flags = item.GetMethodAccessFlags();
     for (uint32_t method_idx : item.GetClassMethodIds(type_idx)) {
         const auto& m = method_ids[method_idx];
-        ClassMemberMethod cm;
+        MethodInfo cm;
         cm.name = std::string(strings[m.name_idx]);
         cm.proto = BuildProtoDescriptor(item, proto_ids[m.proto_idx]);
         cm.access_flags = (method_idx < method_flags.size())
@@ -1010,7 +1024,7 @@ void FillInternalClassSummary(const dexkit::DexItem& item,
     const auto& field_flags = item.GetFieldAccessFlags();
     for (uint32_t field_idx : item.GetClassFieldIds(type_idx)) {
         const auto& f = field_ids[field_idx];
-        ClassMemberField cf;
+        FieldInfo cf;
         cf.name = std::string(strings[f.name_idx]);
         cf.type = std::string(type_names[f.type_idx]);
         cf.access_flags = (field_idx < field_flags.size())
@@ -1055,13 +1069,13 @@ void FillExternalClassSummary(const dexkit::DexKit& core,
         }
     }
     for (auto& [name, proto] : method_keys) {
-        ClassMemberMethod cm;
+        MethodInfo cm;
         cm.name = name;
         cm.proto = proto;
         out.methods.push_back(std::move(cm));
     }
     for (auto& [name, type] : field_keys) {
-        ClassMemberField cf;
+        FieldInfo cf;
         cf.name = name;
         cf.type = type;
         out.fields.push_back(std::move(cf));
@@ -1426,6 +1440,42 @@ DexKitExt::FindMethodsByName(std::string_view name,
     auto holder = ::flatbuffers::GetRoot<dexkit::schema::MethodMetaArrayHolder>(
         result->GetBufferPointer());
     return ParseMethodMetaArray(holder);
+}
+
+std::vector<FieldMatch>
+DexKitExt::FindFieldsByName(std::string_view name,
+                            std::string_view match_type,
+                            std::string_view declaring_class,
+                            bool ignore_case) {
+    flatbuffers::FlatBufferBuilder fbb;
+    auto type = ParseStringMatchType(match_type);
+
+    auto name_matcher = dexkit::schema::CreateStringMatcher(
+        fbb, fbb.CreateString(std::string(name)), type, ignore_case);
+
+    flatbuffers::Offset<dexkit::schema::ClassMatcher> declaring_offset = 0;
+    if (!declaring_class.empty()) {
+        auto cls_name_matcher = dexkit::schema::CreateStringMatcher(
+            fbb, fbb.CreateString(NormaliseClassNamePattern(declaring_class)),
+            dexkit::schema::StringMatchType::Equal, false);
+        declaring_offset = dexkit::schema::CreateClassMatcher(
+            fbb, 0, cls_name_matcher);
+    }
+
+    // FieldMatcher positional args: field_name, access_flags, declaring_class, …
+    auto field_matcher = dexkit::schema::CreateFieldMatcher(
+        fbb, name_matcher, 0, declaring_offset);
+    // FindField positional args: search_packages, exclude_packages,
+    // ignore_packages_case, in_classes, in_fields, find_first, matcher
+    auto find = dexkit::schema::CreateFindField(
+        fbb, 0, 0, false, 0, 0, false, field_matcher);
+    fbb.Finish(find);
+    auto query = ::flatbuffers::GetRoot<dexkit::schema::FindField>(
+        fbb.GetBufferPointer());
+    auto result = core_->FindField(query);
+    auto holder = ::flatbuffers::GetRoot<dexkit::schema::FieldMetaArrayHolder>(
+        result->GetBufferPointer());
+    return ParseFieldMetaArray(holder);
 }
 
 // Build a single-element AnnotationsMatcher whose annotation type's class_name

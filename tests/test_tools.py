@@ -196,7 +196,7 @@ def test_new_xref_tools_execute_without_error(dk):
     fd = next(
         (
             x
-            for x in dk.list_field_descriptors()
+            for x in dk.list_fields()
             if tools.execute("find_methods_reading_field", {"field_descriptor": x}, dk)[
                 "items"
             ]
@@ -232,7 +232,7 @@ def test_literal_tools_reject_empty_values(dk):
     # a real value still matches
     assert tools.execute("find_methods_using_int_literals", {"values": [2]}, dk)[
         "total"
-    ] < len(dk.list_method_descriptors())
+    ] < len(dk.list_methods())
 
 
 def test_arg_compact_covers_every_arg_kind():
@@ -482,7 +482,7 @@ def test_batch_find_methods_bounded_and_bad_shapes(dk):
     — or an empty group (C++ vacuous match-all, like the single find tool) — can't
     dump the whole method table while `total` stays honest; a bare-string value is a
     clean error; a `['']` edge query is a real query (not silently stripped)."""
-    tot = len(dk.list_method_descriptors())
+    tot = len(dk.list_methods())
     # empty group = match-all but BOUNDED by limit (not a 3-9 MB dump), total honest
     out = tools.execute(
         "batch_find_methods_using_strings",

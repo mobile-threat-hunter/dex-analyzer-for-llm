@@ -228,9 +228,9 @@ tr.methods_with_param  # methods taking it as a param
 Per-dex enumeration follows a uniform scope axis — the bare form is all loaded
 dexes, the `…_in_dex(dex_id)` form is one dex (empty if out of range), and the
 all-dexes form is exactly the per-dex concatenation: `dk.list_classes` /
-`dk.list_classes_in_dex(dex_id)` (declared classes), `dk.list_field_descriptors` /
-`dk.list_field_descriptors_in_dex(dex_id)`, `dk.list_method_descriptors` /
-`dk.list_method_descriptors_in_dex(dex_id)` (id-table references), and
+`dk.list_classes_in_dex(dex_id)` (declared classes), `dk.list_fields` /
+`dk.list_fields_in_dex(dex_id)`, `dk.list_methods` /
+`dk.list_methods_in_dex(dex_id)` (id-table references), and
 `dk.extract_dex(dex_id)` (raw dex image bytes **plus** where they came from — `source` / `entry` / `offset`), or `dk.extract_dexes()` for the whole container at once.
 
 ---
@@ -425,6 +425,7 @@ silent empty result — copy the descriptor straight from a search or list resul
 dk.find_classes_by_name("Activity", "ends_with")       # match mode: equals / starts_with / ends_with / contains / regex
 dk.find_methods_by_name("onCreate", "equals",
                         declaring_class="Landroid/app/Activity;")
+dk.find_fields_by_name("mTitle", "equals")             # the field arm (dexllm#37)
 
 # String literal usage — which code LOADS the string
 dk.find_classes_using_strings(["android.permission.READ_CONTACTS"])
@@ -780,7 +781,8 @@ session.find_type_references("Lcom/x/Y;")                 # -> TypeReferences(fi
 
 info = session.class_info("Lcom/x/Y;")                    # -> ClassInfo(superclass, interfaces, access_flags, ...)
 fields = session.class_fields("Lcom/x/Y;")                # -> tuple[FieldInfo(name, type, access_flags)]
-methods = session.list_class_methods("Lcom/x/Y;")         # class members are separate fine-grained queries
+methods = session.class_methods("Lcom/x/Y;")              # -> tuple[MethodInfo(name, proto, access_flags)]
+descs = session.list_class_methods("Lcom/x/Y;")           # -> the descriptor-only view of the same members
 
 for g in session.permission_callers(app_only=True):       # -> tuple[PermissionCallerGroup, ...]
     g.permission, g.protection_level                        # dangerous|signature|internal|normal|other

@@ -45,12 +45,12 @@ struct CallSite {
 //     ClassDef + class_data
 //   - external: declared in no loaded dex; member list reflects only the
 //     entries observed across all dexes' MethodIds/FieldIds tables
-struct ClassMemberMethod {
+struct MethodInfo {
     std::string name;
     std::string proto;
     uint32_t access_flags = 0;             // 0 for external
 };
-struct ClassMemberField {
+struct FieldInfo {
     std::string name;
     std::string type;
     uint32_t access_flags = 0;             // 0 for external
@@ -62,8 +62,8 @@ struct ClassSummary {
     uint32_t access_flags = 0;             // 0 for external
     std::string superclass_descriptor;     // empty for external / java.lang.Object
     std::vector<std::string> interface_descriptors;
-    std::vector<ClassMemberField> fields;
-    std::vector<ClassMemberMethod> methods;
+    std::vector<FieldInfo> fields;
+    std::vector<MethodInfo> methods;
     std::string source_file;               // empty if absent
 };
 

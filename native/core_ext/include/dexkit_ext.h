@@ -309,6 +309,16 @@ public:
                       std::string_view declaring_class = "",
                       bool ignore_case = false);
 
+    // Find fields by name (optionally scoped to a declaring class). The field
+    // arm of the L7 search family — `FieldMatch` was declared for it in
+    // api_ref.h and registered in the binding, but nothing produced one until
+    // dexllm#37.
+    [[nodiscard]] std::vector<FieldMatch>
+    FindFieldsByName(std::string_view name,
+                     std::string_view match_type = "contains",
+                     std::string_view declaring_class = "",
+                     bool ignore_case = false);
+
     // Annotation-based search. annotation_class is matched against the
     // annotation's declared class descriptor (e.g. "Lkotlin/Metadata;").
     [[nodiscard]] std::vector<ClassMatch>

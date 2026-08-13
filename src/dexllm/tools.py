@@ -254,6 +254,24 @@ def _t_find_methods_by_name(
     return _paginate([_match_to_desc(h) for h in hits], offset, limit)
 
 
+def _t_find_fields_by_name(
+    dk: DexKit,
+    name: str,
+    match_type: str = "contains",
+    declaring_class: str = "",
+    ignore_case: bool = False,
+    limit: int = 50,
+    offset: int = 0,
+) -> dict:
+    hits = dk.find_fields_by_name(
+        name,
+        match_type=match_type,
+        declaring_class=declaring_class,
+        ignore_case=ignore_case,
+    )
+    return _paginate([_match_to_desc(h) for h in hits], offset, limit)
+
+
 def _t_find_methods_using_strings(
     dk: DexKit,
     strings: list[str],
@@ -741,6 +759,7 @@ TOOL_IMPLS: dict[str, Callable] = {
     "find_classes_using_strings": _t_find_classes_using_strings,
     "find_classes_declaring_strings": _t_find_classes_declaring_strings,
     "find_methods_by_name": _t_find_methods_by_name,
+    "find_fields_by_name": _t_find_fields_by_name,
     "find_methods_using_strings": _t_find_methods_using_strings,
     "find_call_sites_to": _t_find_call_sites_to,
     "resolve_call_args": _t_resolve_call_args,
@@ -940,6 +959,22 @@ TOOL_DEFINITIONS: list[dict] = [
     {
         "name": "find_methods_by_name",
         "description": "Find methods whose name matches a query (optionally constrained to a declaring class).",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "match_type": {"type": "string", "default": "contains"},
+                "declaring_class": {"type": "string", "default": ""},
+                "ignore_case": {"type": "boolean", "default": False},
+                "limit": {"type": "integer", "default": 50},
+                "offset": {"type": "integer", "default": 0},
+            },
+            "required": ["name"],
+        },
+    },
+    {
+        "name": "find_fields_by_name",
+        "description": "Find fields whose name matches a query (optionally constrained to a declaring class).",
         "input_schema": {
             "type": "object",
             "properties": {

@@ -239,7 +239,7 @@ def test_field_xref_is_per_instruction_not_per_method(loadable_apks):
             dk = dexllm.DexKit(apk)
         except Exception:
             continue
-        for fd in dk.list_field_descriptors()[:4000]:
+        for fd in dk.list_fields()[:4000]:
             readers = dk.find_methods_reading_field(fd)
             if len(readers) > len(set(readers)):
                 # the repeat must be a genuine multi-access method, and the

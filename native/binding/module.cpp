@@ -390,16 +390,16 @@ public:
     py::list list_classes_in_dex(int dex_id) const {
         return ident_out(ext_.ListClassesInDex(dex_id));
     }
-    py::list list_field_descriptors() const {
+    py::list list_fields() const {
         return ident_out(ext_.ListFieldDescriptors());
     }
-    py::list list_field_descriptors_in_dex(int dex_id) const {
+    py::list list_fields_in_dex(int dex_id) const {
         return ident_out(ext_.ListFieldDescriptorsInDex(dex_id));
     }
-    py::list list_method_descriptors() const {
+    py::list list_methods() const {
         return ident_out(ext_.ListMethodDescriptors());
     }
-    py::list list_method_descriptors_in_dex(int dex_id) const {
+    py::list list_methods_in_dex(int dex_id) const {
         return ident_out(ext_.ListMethodDescriptorsInDex(dex_id));
     }
     // dexllm#26 — bytes PLUS provenance. `extract_dex_bytes` returned the bytes
@@ -508,6 +508,14 @@ public:
                          bool ignore_case) {
         return ext_.FindMethodsByName(ident_in(name), match_type,
                                       ident_in(declaring_class), ignore_case);
+    }
+    std::vector<dexkit::ext::FieldMatch>
+    find_fields_by_name(const std::string& name,
+                        const std::string& match_type,
+                        const std::string& declaring_class,
+                        bool ignore_case) {
+        return ext_.FindFieldsByName(ident_in(name), match_type,
+                                     ident_in(declaring_class), ignore_case);
     }
     std::vector<dexkit::ext::ClassMatch>
     find_classes_by_annotation(const std::string& a, const std::string& mt) {
@@ -745,35 +753,39 @@ PYBIND11_MODULE(_dexkit_core, m) {
                 return ident_out(f.descriptor);
             })
         .def_readonly("dex_id", &dexkit::ext::FieldMatch::dex_id)
-        .def_readonly("field_id", &dexkit::ext::FieldMatch::field_id);
+        .def_readonly("field_id", &dexkit::ext::FieldMatch::field_id)
+        .def("__repr__", [](const dexkit::ext::FieldMatch& f) {
+            return "FieldMatch(" + DecodeMutf8ForPy(f.descriptor) + " in dex " +
+                   std::to_string(f.dex_id) + ")";
+        });
 
-    py::class_<dexkit::ext::ClassMemberField>(m, "ClassMemberField")
+    py::class_<dexkit::ext::FieldInfo>(m, "FieldInfo")
         .def_property_readonly("name",
-            [](const dexkit::ext::ClassMemberField& f) {
+            [](const dexkit::ext::FieldInfo& f) {
                 return ident_out(f.name);
             })
         .def_property_readonly("type",
-            [](const dexkit::ext::ClassMemberField& f) {
+            [](const dexkit::ext::FieldInfo& f) {
                 return ident_out(f.type);
             })
-        .def_readonly("access_flags", &dexkit::ext::ClassMemberField::access_flags)
-        .def("__repr__", [](const dexkit::ext::ClassMemberField& f) {
-            return "ClassMemberField(" + DecodeMutf8ForPy(f.name) + ":" +
+        .def_readonly("access_flags", &dexkit::ext::FieldInfo::access_flags)
+        .def("__repr__", [](const dexkit::ext::FieldInfo& f) {
+            return "FieldInfo(" + DecodeMutf8ForPy(f.name) + ":" +
                    DecodeMutf8ForPy(f.type) + ")";
         });
 
-    py::class_<dexkit::ext::ClassMemberMethod>(m, "ClassMemberMethod")
+    py::class_<dexkit::ext::MethodInfo>(m, "MethodInfo")
         .def_property_readonly("name",
-            [](const dexkit::ext::ClassMemberMethod& mm) {
+            [](const dexkit::ext::MethodInfo& mm) {
                 return ident_out(mm.name);
             })
         .def_property_readonly("proto",
-            [](const dexkit::ext::ClassMemberMethod& mm) {
+            [](const dexkit::ext::MethodInfo& mm) {
                 return ident_out(mm.proto);
             })
-        .def_readonly("access_flags", &dexkit::ext::ClassMemberMethod::access_flags)
-        .def("__repr__", [](const dexkit::ext::ClassMemberMethod& mm) {
-            return "ClassMemberMethod(" + DecodeMutf8ForPy(mm.name) +
+        .def_readonly("access_flags", &dexkit::ext::MethodInfo::access_flags)
+        .def("__repr__", [](const dexkit::ext::MethodInfo& mm) {
+            return "MethodInfo(" + DecodeMutf8ForPy(mm.name) +
                    DecodeMutf8ForPy(mm.proto) + ")";
         });
 
@@ -1051,6 +1063,12 @@ PYBIND11_MODULE(_dexkit_core, m) {
              py::arg("ignore_case") = false,
              "Find methods by name, optionally scoped to a declaring class "
              "descriptor (e.g. 'Lcom/x/Y;').")
+        .def("find_fields_by_name", &PyDexKit::find_fields_by_name,
+             py::arg("name"), py::arg("match_type") = "contains",
+             py::arg("declaring_class") = "",
+             py::arg("ignore_case") = false,
+             "Find fields by name, optionally scoped to a declaring class "
+             "descriptor (e.g. 'Lcom/x/Y;'). Returns FieldMatch objects.")
         .def("find_classes_by_annotation", &PyDexKit::find_classes_by_annotation,
              py::arg("annotation_class"), py::arg("match_type") = "equals",
              "Find classes annotated with the given annotation class. "
@@ -1172,22 +1190,22 @@ PYBIND11_MODULE(_dexkit_core, m) {
              py::arg("dex_id"),
              "Descriptors of every class DECLARED in the given loaded dex (0-based). "
              "list_classes() is the union across all dexes; this is one dex.")
-        .def("list_field_descriptors", &PyDexKit::list_field_descriptors,
+        .def("list_fields", &PyDexKit::list_fields,
              "Every field descriptor (\"Lcls;->name:Type\") across all loaded dexes "
              "(the dex id-table references: declared + referenced). Exactly the "
-             "concatenation of list_field_descriptors_in_dex over every dex.")
-        .def("list_field_descriptors_in_dex",
-             &PyDexKit::list_field_descriptors_in_dex, py::arg("dex_id"),
+             "concatenation of list_fields_in_dex over every dex.")
+        .def("list_fields_in_dex",
+             &PyDexKit::list_fields_in_dex, py::arg("dex_id"),
              "Field descriptors of ONE loaded dex (0-based); empty if out of range. "
-             "The per-dex form of list_field_descriptors().")
-        .def("list_method_descriptors", &PyDexKit::list_method_descriptors,
+             "The per-dex form of list_fields().")
+        .def("list_methods", &PyDexKit::list_methods,
              "Every method descriptor (\"Lcls;->name(proto)ret\") across all loaded "
              "dexes (the dex id-table references: declared + referenced). Exactly the "
-             "concatenation of list_method_descriptors_in_dex over every dex.")
-        .def("list_method_descriptors_in_dex",
-             &PyDexKit::list_method_descriptors_in_dex, py::arg("dex_id"),
+             "concatenation of list_methods_in_dex over every dex.")
+        .def("list_methods_in_dex",
+             &PyDexKit::list_methods_in_dex, py::arg("dex_id"),
              "Method descriptors of ONE loaded dex (0-based); empty if out of range. "
-             "The per-dex form of list_method_descriptors().")
+             "The per-dex form of list_methods().")
         .def("extract_dex", &PyDexKit::extract_dex, py::arg("dex_id"),
              "Raw bytes of one loaded dex PLUS where it came from: "
              "{bytes, dex_id, source, entry, offset, size}. `source` is the path "

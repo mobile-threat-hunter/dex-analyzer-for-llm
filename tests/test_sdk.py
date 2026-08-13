@@ -96,7 +96,37 @@ _RAW_DEPRECATED_ALIASES: dict[str, str] = {}
 
 # raw-only, because the SDK deliberately DECOMPOSES it (ISP) — a different
 # operation shape, so a different name is correct. Maps raw name → port pieces.
-_RAW_DECOMPOSED = {"get_class_summary": ("class_info", "class_fields")}
+_RAW_DECOMPOSED = {"get_class_summary": ("class_info", "class_fields", "class_methods")}
+
+# SDK-only record types (dexllm#37's type axis). Each is genuinely SDK-side: a
+# composite the raw layer has no single object for, or a raw dict/tuple return
+# given a type. None of them is a second name for a registered pybind class —
+# that is exactly what the audit refuses.
+_SDK_ONLY_MODELS = {
+    # raw returns a plain dict
+    "ContainerInfo",
+    "DexVerifyStatus",
+    "ExtractedDex",
+    "DecompiledMethod",
+    "DecompiledClass",
+    "MethodAst",
+    "SourceLocation",
+    "StatementLocation",
+    # raw returns nested dicts / lists from a module-level python function
+    "IocReport",
+    "Indicator",
+    "ContentProviderUse",
+    "CapabilityReport",
+    "CapabilityHit",
+    "PermissionCallerGroup",
+    "PermissionCallerRow",
+    # the ISP split of raw's ClassSummary (see _RAW_DECOMPOSED)
+    "ClassInfo",
+}
+
+# raw-only record types. `ClassSummary` is the god-object the SDK decomposes into
+# ClassInfo + FieldInfo + MethodInfo, so it correctly has no single SDK twin.
+_RAW_ONLY_MODELS = {"ClassSummary"}
 
 # port-only, because the raw layer exposes them as MODULE-level dexllm functions
 # rather than DexKit methods — a location difference, not a naming drift.
@@ -499,8 +529,8 @@ def test_enumeration_companions_typed(apk_path):
     assert per_dex == all_classes
     assert session.list_classes_in_dex(9999) == ()
 
-    fields = session.list_field_descriptors()
-    methods = session.list_method_descriptors()
+    fields = session.list_fields()
+    methods = session.list_methods()
     assert isinstance(fields, tuple) and isinstance(methods, tuple)
     assert fields and methods
     assert all(":" in f and "->" in f for f in fields[:50])
@@ -509,11 +539,11 @@ def test_enumeration_companions_typed(apk_path):
     f_concat: tuple[str, ...] = ()
     m_concat: tuple[str, ...] = ()
     for d in range(session.dex_count()):
-        f_concat += session.list_field_descriptors_in_dex(d)
-        m_concat += session.list_method_descriptors_in_dex(d)
+        f_concat += session.list_fields_in_dex(d)
+        m_concat += session.list_methods_in_dex(d)
     assert f_concat == fields and m_concat == methods
-    assert session.list_field_descriptors_in_dex(9999) == ()
-    assert session.list_method_descriptors_in_dex(-1) == ()
+    assert session.list_fields_in_dex(9999) == ()
+    assert session.list_methods_in_dex(-1) == ()
 
     raw = session.extract_dex(0).data
     assert isinstance(raw, bytes) and raw[:4] == b"dex\n"
@@ -571,16 +601,16 @@ def test_enumeration_companions_multidex():
     # single-dex fixture can't exercise: assert the aggregate carries a genuine
     # cross-dex duplicate (so a union-based impl would drop it and FAIL the concat
     # equality below — the assertion is non-vacuous here).
-    m_agg = session.list_method_descriptors()
+    m_agg = session.list_methods()
     m_concat: tuple[str, ...] = ()
     for d in range(session.dex_count()):
-        m_concat += session.list_method_descriptors_in_dex(d)
+        m_concat += session.list_methods_in_dex(d)
     assert m_concat == m_agg
     assert len(m_agg) > len(set(m_agg)), "expected cross-dex method recurrence"
-    f_agg = session.list_field_descriptors()
+    f_agg = session.list_fields()
     f_concat: tuple[str, ...] = ()
     for d in range(session.dex_count()):
-        f_concat += session.list_field_descriptors_in_dex(d)
+        f_concat += session.list_fields_in_dex(d)
     assert f_concat == f_agg
 
 
@@ -853,6 +883,83 @@ def test_raw_and_port_share_one_spelling_per_operation():
         ), f"{name} is not a module-level dexllm function"
 
 
+def test_raw_and_sdk_share_one_spelling_per_record_type():
+    """dexllm#37: the same axis as above, for TYPE names.
+
+    `test_raw_and_port_share_one_spelling_per_operation` locks METHOD names, so
+    the type axis was unexamined — and `ClassMemberField` (raw) / `FieldInfo`
+    (SDK) turned out to be one field-for-field identical record under two names,
+    exactly the defect #21 spent three releases removing, on an axis nothing
+    checked. Reverting a type rename in `model.py` passed every assertion.
+
+    The rule is the one the nine already-shared names establish: a record type
+    that exists on both layers uses ONE name. It is set equality against a
+    declared exception list, so adding an SDK-only model is a conscious edit.
+    """
+    import dexllm.sdk.model as model
+    from dexllm import _dexkit_core as core
+
+    def _types(mod):
+        return {
+            n
+            for n in dir(mod)
+            if not n.startswith("_") and isinstance(getattr(mod, n), type)
+        }
+
+    raw_types = _types(core) - {"DexKit"}
+    sdk_types = {
+        n for n in _types(model) if hasattr(getattr(model, n), "__dataclass_fields__")
+    }
+
+    # Every shared name must describe the SAME record — a name shared by two
+    # different shapes would be worse than two names for one shape. EQUALITY, not
+    # subset: a subset check sees only fields the SDK added, and silently passes an
+    # attribute raw has that the SDK dropped, which is equally "two shapes".
+    for name in sorted(raw_types & sdk_types):
+        sdk_fields = set(getattr(model, name).__dataclass_fields__)
+        raw_attrs = {a for a in dir(getattr(core, name)) if not a.startswith("_")}
+        assert sdk_fields == raw_attrs, (
+            f"{name} is one name for two shapes: SDK-only "
+            f"{sorted(sdk_fields - raw_attrs)}, raw-only {sorted(raw_attrs - sdk_fields)}"
+        )
+
+    # No floor on len(shared): the two set equalities below already pin it exactly
+    # (shared == raw_types - _RAW_ONLY_MODELS), so a floor would be unreachable
+    # dead code — verified by simulating a full revert of the #37 type unification,
+    # which drops `shared` to 10 and is caught by the equalities, not by a floor.
+
+    # An SDK model with no raw counterpart is fine only when it is genuinely
+    # SDK-side — a composite, a dict-return made typed, or a value the raw layer
+    # returns as a plain tuple/dict rather than a registered pybind class.
+    assert sdk_types - raw_types == _SDK_ONLY_MODELS, (
+        f"undeclared SDK-only models: {(sdk_types - raw_types) - _SDK_ONLY_MODELS} | "
+        f"stale exceptions: {_SDK_ONLY_MODELS - (sdk_types - raw_types)}"
+    )
+    # …and the other direction, so a raw type the SDK never models (the thing
+    # `FieldMatch` WAS before #37) cannot appear unnoticed either.
+    assert raw_types - sdk_types == _RAW_ONLY_MODELS, (
+        f"undeclared raw-only models: {(raw_types - sdk_types) - _RAW_ONLY_MODELS} | "
+        f"stale exceptions: {_RAW_ONLY_MODELS - (raw_types - sdk_types)}"
+    )
+
+    # An exception must be JUSTIFIED, not merely listed — the same defence the
+    # sibling method audit applies to its alias/decomposition lists. Without it the
+    # cheapest way past a failure is to add BOTH names to the two lists, which
+    # absorbs the exact defect this test exists for (constructed: renaming SDK
+    # `MethodMatch` to `MethodHit` goes green that way, and the assertion messages
+    # above name the entries to add). A raw-only type that is field-identical to an
+    # SDK-only model is not two records — it is one record under two names.
+    for raw_name in sorted(_RAW_ONLY_MODELS):
+        raw_attrs = {a for a in dir(getattr(core, raw_name)) if not a.startswith("_")}
+        for sdk_name in sorted(_SDK_ONLY_MODELS):
+            sdk_fields = set(getattr(model, sdk_name).__dataclass_fields__)
+            assert sdk_fields != raw_attrs, (
+                f"{raw_name} (raw) and {sdk_name} (SDK) have identical fields "
+                f"{sorted(raw_attrs)} — that is one record under two names, not "
+                f"two records; unify the name instead of listing both"
+            )
+
+
 def test_no_adapter_alias_survives(apk_path):
     """The dexllm#21 adapter aliases are gone — and stay gone.
 
@@ -880,11 +987,7 @@ def test_no_adapter_alias_survives(apk_path):
     session.find_call_sites_to(api)  # canonical spellings still resolve
     session.resolve_call_args(api)
     fd = next(
-        (
-            f
-            for f in session.raw.list_field_descriptors()
-            if session.find_methods_reading_field(f)
-        ),
+        (f for f in session.raw.list_fields() if session.find_methods_reading_field(f)),
         None,
     )
     if fd is not None:

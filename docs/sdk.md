@@ -24,7 +24,7 @@ Three components, three files:
 
 | Component | File | What it is |
 |---|---|---|
-| **Domain models** | [`model.py`](../src/dexllm/sdk/model.py) | 25 frozen dataclasses — the typed values every port returns/accepts. |
+| **Domain models** | [`model.py`](../src/dexllm/sdk/model.py) | 28 frozen dataclasses — the typed values every port returns/accepts. |
 | **Ports** | [`ports.py`](../src/dexllm/sdk/ports.py) | 12 `@runtime_checkable` Protocol use cases + the composite `DexAnalysisUseCase`. |
 | **Adapter** | [`adapter.py`](../src/dexllm/sdk/adapter.py) | `DexKitAdapter` (implements the ports over `DexKit`) + `ContainerProbe` + `open_apk` / `identify` / `verify` factories. |
 
@@ -107,25 +107,33 @@ is a light match record; `MatchType` is the name-match mode.
 - **`ClassMatch`** `(class_id, descriptor, dex_id)` — one class hit.
 - **`MethodMatch`** `(method_id, descriptor, dex_id)` — one method hit. The `batch_*`
   searches return `Mapping[str, tuple[Match, ...]]` keyed by the query key.
+- **`FieldMatch`** `(field_id, descriptor, dex_id)` — one field hit, from
+  `find_fields_by_name`. Unlike its two siblings this model is NEW rather than a
+  rename: the raw type existed but nothing produced one until dexllm#37.
 
 ### Class inspection
 The C++ `get_class_summary` bundles class metadata + fields + methods into one
 object; the SDK layer splits it (ISP) so a consumer depends only on what it
-needs (methods stay on `EnumerationPort.list_class_methods`).
+needs — metadata, fields and methods are three queries.
 - **`ClassInfo`** `(descriptor, dex_id, is_internal, access_flags, superclass,
   interfaces, source_file, dex_name)` — class metadata, no members. `dex_name` is the
   declaring dex's file name (`classes.dex` / `classes2.dex` / …); `""` for an external
   class (`dex_id == -1`).
 - **`FieldInfo`** `(name, type, access_flags)` — one declared field; its descriptor
   is `f"{cls}->{name}:{type}"`.
+- **`MethodInfo`** `(name, proto, access_flags)` — one declared method, returned by
+  `class_methods`; its descriptor is `f"{cls}->{name}{proto}"`. Both names are
+  shared verbatim with the raw layer (dexllm#37 renamed raw's `ClassMemberField` /
+  `ClassMemberMethod`, which were a second name for the same records).
 
-`access_flags` on both is the **raw dex bit-field**, not normalized to
-`java.lang.reflect.Modifier`. Neither carries METHOD flags, so the
-`ACC_DECLARED_SYNCHRONIZED` (`0x20000`) vs `ACC_SYNCHRONIZED` (`0x20`)
-distinction that applies to the raw layer's `get_class_summary` (see
-[api.md](api.md#classsummary)) cannot arise here — a method's modifiers reach the
-SDK only as the decoded NAMES in `MethodAst.access_flags`, where a Java
-`synchronized` method reads `declared_synchronized`.
+`access_flags` on all three is the **raw dex bit-field**, not normalized to
+`java.lang.reflect.Modifier`. Since dexllm#37 that includes METHOD flags via
+`MethodInfo`, so the `ACC_DECLARED_SYNCHRONIZED` (`0x20000`) vs
+`ACC_SYNCHRONIZED` (`0x20`) distinction documented for the raw layer's
+`get_class_summary` (see [api.md](api.md#classsummary)) applies here too: a Java
+`synchronized` method reads `0x20000`. The decoded NAMES remain available on
+`MethodAst.access_flags` (`declared_synchronized`) — that is the same fact in the
+other spelling, and the reason `MethodInfo` exposes the bits instead.
 
 ### Cross-reference
 - **`ArgOrigin`** `(kind, reg_num, string_value?, int_value?, class_descriptor?,
@@ -208,11 +216,11 @@ so a consumer depends on just what it needs:
 |---|---|
 | **`ContainerProbePort`** | `identify(path) -> ContainerInfo`, `verify(path, *, lenient=False) -> tuple[DexVerifyStatus, …]` (load-free) |
 | **`DecompilationPort`** | `decompile_method`, `decompile_method_with_pc_map`, `decompile_class`, `decompile_method_ast`, `render_method_smali`, `render_class_smali` |
-| **`EnumerationPort`** | `list_classes` / `list_classes_in_dex`, `list_class_methods`, `list_field_descriptors` / `list_field_descriptors_in_dex`, `list_method_descriptors` / `list_method_descriptors_in_dex`, `list_value_strings` / `list_class_strings` / `list_method_strings` (app-wide, class-scoped, method-scoped — the forward direction of `find_*_using_strings`), `list_external_method_refs` / `list_external_field_refs` / `list_external_type_refs`, `verify_report` (uniform scope axis: bare = all dexes, `…_in_dex(dex_id)` = one dex) |
+| **`EnumerationPort`** | `list_classes` / `list_classes_in_dex`, `list_class_methods`, `list_fields` / `list_fields_in_dex`, `list_methods` / `list_methods_in_dex`, `list_value_strings` / `list_class_strings` / `list_method_strings` (app-wide, class-scoped, method-scoped — the forward direction of `find_*_using_strings`), `list_external_method_refs` / `list_external_field_refs` / `list_external_type_refs`, `verify_report` (uniform scope axis: bare = all dexes, `…_in_dex(dex_id)` = one dex) |
 | **`DexExtractionPort`** | `extract_dex` → `ExtractedDex` / `extract_dexes` → all of them in `dex_id` order (bytes + provenance: `source` / `entry` / `offset`; the packer/dump primitive). Provenance is not derivable elsewhere — the verify report's `name` is only the entry name for a zip member, so two sources both report `classes.dex`, and only `offset` says where in a concatenated container a dex starts |
-| **`ClassInspectionPort`** | `class_info`, `class_fields`, `locate_class_dex` (metadata + fields split out; methods via `list_class_methods`; `locate_class_dex` = cheap declaring-dex lookup, vs the heavy `class_info().dex_id`) |
+| **`ClassInspectionPort`** | `class_info`, `class_fields`, `class_methods`, `locate_class_dex` (the ISP split of raw's `get_class_summary`; `class_methods` is the structured twin of `class_fields` — `EnumerationPort.list_class_methods` returns descriptors, which carry no access flags, so before dexllm#37 a method modifier was reachable only by dropping to `.raw`; `locate_class_dex` = cheap declaring-dex lookup, vs the heavy `class_info().dex_id`) |
 | **`CrossReferencePort`** | `find_call_sites_to` (a target's callers — the reverse edge) / `find_call_sites_from` (a method's callees — the forward edge), `resolve_call_args`, `find_methods_reading_field`, `find_methods_writing_field`, `find_type_references`. `find_call_sites_to` / `find_call_sites_from` is the same pair the raw `DexKit` and the MCP catalog use — one spelling across all three layers, and the only one: the pre-unification adapter aliases (`find_call_sites`, `find_call_sites_to_api`, `find_call_sites_from_method`, `find_field_readers`, `find_field_writers`) were removed. Both call-site directions and `resolve_call_args` take `method_descriptor` |
-| **`SearchPort`** | `find_classes_by_name` / `by_super` / `implementing` / `by_annotation` / `using_strings` / `declaring_strings` (the declaration side — static-field constants the `using` index cannot see), `find_methods_by_name` / `by_annotation` / `using_strings` / `using_int_literals` / `using_double_literals`, `batch_find_{classes,methods}_using_strings` (DexKit's L1–L7 search; `match_type` ∈ `MatchType`) |
+| **`SearchPort`** | `find_classes_by_name` / `by_super` / `implementing` / `by_annotation` / `using_strings` / `declaring_strings` (the declaration side — static-field constants the `using` index cannot see), `find_methods_by_name` / `by_annotation` / `using_strings` / `using_int_literals` / `using_double_literals`, `find_fields_by_name` (the field arm, dexllm#37 — `FieldMatch` was a public type nothing could produce), `batch_find_{classes,methods}_using_strings` (DexKit's L1–L7 search; `match_type` ∈ `MatchType`) |
 | **`PermissionAnalysisPort`** | `permission_callers` (all protection levels) |
 | **`IndicatorExtractionPort`** | `extract_iocs` |
 | **`CapabilityPort`** | `summarize_capabilities` |

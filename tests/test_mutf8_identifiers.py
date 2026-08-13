@@ -66,11 +66,17 @@ def _codepoints(raw):
             units.append(((c & 0x1F) << 6) | (raw[p + 1] & 0x3F))
             p += 2
         else:
-            units.append(((c & 0x0F) << 12) | ((raw[p + 1] & 0x3F) << 6) | (raw[p + 2] & 0x3F))
+            units.append(
+                ((c & 0x0F) << 12) | ((raw[p + 1] & 0x3F) << 6) | (raw[p + 2] & 0x3F)
+            )
             p += 3
     out, i = [], 0
     while i < len(units):
-        if 0xD800 <= units[i] <= 0xDBFF and i + 1 < len(units) and 0xDC00 <= units[i + 1] <= 0xDFFF:
+        if (
+            0xD800 <= units[i] <= 0xDBFF
+            and i + 1 < len(units)
+            and 0xDC00 <= units[i + 1] <= 0xDFFF
+        ):
             out.append(0x10000 + ((units[i] - 0xD800) << 10) + (units[i + 1] - 0xDC00))
             i += 2
         else:
@@ -102,7 +108,9 @@ def _craft_astral_class(src, dst):
     cds_size, cds_off = struct.unpack_from("<II", buf, 0x60)
     _ti_size, ti_off = struct.unpack_from("<II", buf, 64)
     declared = {
-        struct.unpack_from("<I", buf, ti_off + 4 * struct.unpack_from("<I", buf, cds_off + i * 32)[0])[0]
+        struct.unpack_from(
+            "<I", buf, ti_off + 4 * struct.unpack_from("<I", buf, cds_off + i * 32)[0]
+        )[0]
         for i in range(cds_size)
     }
 
@@ -127,6 +135,91 @@ def _craft_astral_class(src, dst):
         open(dst, "wb").write(bytes(buf))
         return raw.decode(), new
     return None, None
+
+
+def _craft_astral_field_name(src, dst):
+    """Give a FIELD an astral character in its name, in place.
+
+    The sibling of :func:`_craft_astral_class`, same length-preserving trick and
+    same sort-order care — only the target differs: a string_id reached through
+    ``field_ids[i].name_idx`` (header 0x50) rather than through a class_def.
+
+    Returns (old_name, new_name_bytes) or (None, None).
+    """
+    buf = bytearray(open(src, "rb").read())
+    tbl = _strings(buf)
+    fi_size, fi_off = struct.unpack_from("<II", buf, 0x50)
+    # field_id_item: class_idx(2) type_idx(2) name_idx(4)
+    named = {
+        struct.unpack_from("<I", buf, fi_off + i * 8 + 4)[0] for i in range(fi_size)
+    }
+
+    for k, (idx, o, ln, d, raw) in enumerate(tbl):
+        if idx not in named:
+            continue
+        if any(c >= 0x80 for c in raw) or ln > 0x7F or ln - 4 <= 0:
+            continue
+        prev = tbl[k - 1][4] if k else b""
+        nxt = tbl[k + 1][4] if k + 1 < len(tbl) else None
+        start = max(_lcp(raw, prev), _lcp(raw, nxt) if nxt is not None else 0) + 1
+        if start + 6 > len(raw):
+            continue
+        new = raw[:start] + _PAIR + raw[start + 6 :]
+        if _codepoints(prev) >= _codepoints(new):
+            continue
+        if nxt is not None and _codepoints(new) >= _codepoints(nxt):
+            continue
+        buf[d : d + len(raw)] = new
+        buf[o] = ln - 4
+        open(dst, "wb").write(bytes(buf))
+        return raw.decode(), new
+    return None, None
+
+
+@pytest.fixture(scope="module")
+def astral_field_dex(tmp_path_factory):
+    """A verify-valid dex whose FIELD name carries a supplementary-plane char."""
+    out = tmp_path_factory.mktemp("astralf") / "astral_field.dex"
+    for cand in sorted(glob.glob(str(REPO_ROOT / "test_apk" / "APK" / "*.dex"))):
+        if open(cand, "rb").read(4) != b"dex\n":
+            continue
+        old, _new = _craft_astral_field_name(cand, str(out))
+        if old is not None:
+            return str(out)
+    pytest.skip("no bare .dex in the corpus could carry an astral field name")
+
+
+def test_astral_field_name_is_findable_by_name(astral_field_dex):
+    """`find_fields_by_name` encodes its query, like every other NAME matcher.
+
+    The field arm joined the L7 family in dexllm#37, and a new matcher joining it
+    WITHOUT the MUTF-8 encode-in is a silent miss, not an error — exactly the
+    round-trip defect dexllm#19/#22 exist for. The sibling guard above covers only
+    the CLASS matcher, so deleting `ident_in` from the field binding leaves every
+    field-search test green; this is the one that goes red.
+    """
+    dk = dexllm.DexKit(astral_field_dex)
+    assert dk.verify_report()[0]["valid"], "the crafted fixture must load"
+
+    fields = [
+        f
+        for c in dk.list_classes()
+        for f in dk.get_class_summary(c).fields
+        if _CHAR in f.name
+    ]
+    assert fields, "fixture carries no astral field name"
+    name = fields[0].name
+
+    hits = [h.descriptor for h in dk.find_fields_by_name(name, match_type="equals")]
+    assert hits, "an astral field name did not round-trip through the matcher"
+    assert all(_CHAR in h for h in hits)
+
+    # …and a substring query that STRADDLES the astral character
+    i = name.index(_CHAR)
+    frag = name[max(0, i - 1) : i + 2]
+    assert hits[0] in [
+        h.descriptor for h in dk.find_fields_by_name(frag, match_type="contains")
+    ]
 
 
 @pytest.fixture(scope="module")
@@ -180,7 +273,7 @@ def test_astral_class_enumerates_and_round_trips(astral_dex):
         assert dk.decompile_method_ast(m, False)["cls_name"] == cls
 
     # …and the descriptor must appear decoded in the whole-dex listings too.
-    assert any(_CHAR in d for d in dk.list_method_descriptors())
+    assert any(_CHAR in d for d in dk.list_methods())
 
 
 def test_astral_identifier_is_findable_by_name(astral_dex):
@@ -194,10 +287,14 @@ def test_astral_identifier_is_findable_by_name(astral_dex):
     dk = dexllm.DexKit(astral_dex)
     cls = next(c for c in dk.list_classes() if _CHAR in c)
 
-    assert [m.descriptor for m in dk.find_classes_by_name(cls, "equals", False)] == [cls]
+    assert [m.descriptor for m in dk.find_classes_by_name(cls, "equals", False)] == [
+        cls
+    ]
     # a substring query that STRADDLES the astral character
     frag = cls[1 : cls.index(_CHAR) + 2]
-    assert cls in [m.descriptor for m in dk.find_classes_by_name(frag, "contains", False)]
+    assert cls in [
+        m.descriptor for m in dk.find_classes_by_name(frag, "contains", False)
+    ]
 
 
 def test_astral_dex_sweeps_is_productive_not_merely_quiet(astral_dex):
@@ -330,7 +427,9 @@ def test_overlong_identifier_is_rejected_not_silently_canonicalised(tmp_path):
             if s.startswith(b"L") and s.endswith(b";") and len(s) > 8 and ln <= 0x7F:
                 if any(c >= 0x80 for c in s):
                     continue
-                raw[d + 2 : d + 5] = b"\xe0\x83\xa9"  # overlong U+00E9 (canonical: C3 A9)
+                raw[d + 2 : d + 5] = (
+                    b"\xe0\x83\xa9"  # overlong U+00E9 (canonical: C3 A9)
+                )
                 raw[o] = ln - 2  # 3 bytes collapse to 1 code unit
                 src = raw
                 break
@@ -362,7 +461,9 @@ def test_const_string_arg_origin_decodes(loadable_apks):
     for p in sources:
         try:
             dk = dexllm.DexKit(p)
-        except Exception:  # noqa: BLE001 - unloadable containers are not this test's subject
+        except (
+            Exception
+        ):  # noqa: BLE001 - unloadable containers are not this test's subject
             continue
         for ref in dk.list_external_method_refs(False)[:40]:
             for site in dk.resolve_call_args(ref.signature):  # raised before the fix

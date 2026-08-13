@@ -30,8 +30,10 @@ from .model import (
     ExternalTypeRef,
     ExtractedDex,
     FieldInfo,
+    FieldMatch,
     IocReport,
     MethodAst,
+    MethodInfo,
     MethodMatch,
     PermissionCallerGroup,
     ResolvedCallSite,
@@ -113,27 +115,27 @@ class EnumerationPort(Protocol):
         """Every declared method descriptor of the given class."""
         ...
 
-    def list_field_descriptors(self) -> tuple[str, ...]:
+    def list_fields(self) -> tuple[str, ...]:
         """Every field descriptor (``Lcls;->name:Type``) across all loaded dexes.
 
         The dex id-table references (declared + referenced) — exactly the
-        concatenation of :meth:`list_field_descriptors_in_dex` over every dex.
+        concatenation of :meth:`list_fields_in_dex` over every dex.
         """
         ...
 
-    def list_field_descriptors_in_dex(self, dex_id: int) -> tuple[str, ...]:
+    def list_fields_in_dex(self, dex_id: int) -> tuple[str, ...]:
         """Every field descriptor of one specific loaded dex (empty if out of range)."""
         ...
 
-    def list_method_descriptors(self) -> tuple[str, ...]:
+    def list_methods(self) -> tuple[str, ...]:
         """Every method descriptor (``Lcls;->name(proto)ret``) across all loaded dexes.
 
         The dex id-table references (declared + referenced) — exactly the
-        concatenation of :meth:`list_method_descriptors_in_dex` over every dex.
+        concatenation of :meth:`list_methods_in_dex` over every dex.
         """
         ...
 
-    def list_method_descriptors_in_dex(self, dex_id: int) -> tuple[str, ...]:
+    def list_methods_in_dex(self, dex_id: int) -> tuple[str, ...]:
         """Every method descriptor of one specific loaded dex (empty if out of range)."""
         ...
 
@@ -358,6 +360,17 @@ class SearchPort(Protocol):
         """Find methods by name, optionally scoped to a declaring class."""
         ...
 
+    def find_fields_by_name(
+        self,
+        name: str,
+        *,
+        match_type: MatchType = "contains",
+        declaring_class: str = "",
+        ignore_case: bool = False,
+    ) -> tuple[FieldMatch, ...]:
+        """Find fields by name, optionally scoped to a declaring class."""
+        ...
+
     def find_methods_by_annotation(
         self, annotation_class: str, *, match_type: MatchType = "equals"
     ) -> tuple[MethodMatch, ...]:
@@ -411,9 +424,10 @@ class SearchPort(Protocol):
 class ClassInspectionPort(Protocol):
     """Fine-grained per-class inspection (the decomposition of a class summary).
 
-    Split by concern — metadata, fields, and methods
-    (:meth:`EnumerationPort.list_class_methods`) are separate queries, so a consumer
-    that only wants one does not pull the whole class blob.
+    Split by concern — metadata, fields and methods are separate queries, so a
+    consumer that only wants one does not pull the whole class blob.
+    :meth:`EnumerationPort.list_class_methods` remains the descriptor-only view of
+    the same members.
     """
 
     def class_info(self, class_descriptor: str) -> ClassInfo:
@@ -422,6 +436,23 @@ class ClassInspectionPort(Protocol):
 
     def class_fields(self, class_descriptor: str) -> tuple[FieldInfo, ...]:
         """Return the class's declared fields (name, type, access flags)."""
+        ...
+
+    def class_methods(self, class_descriptor: str) -> tuple[MethodInfo, ...]:
+        """Return the class's declared methods (name, proto, access flags).
+
+        The symmetric twin of :meth:`class_fields`, and the only way to reach a
+        method's MODIFIERS without leaving the SDK:
+        :meth:`EnumerationPort.list_class_methods` returns descriptors, which
+        carry no access flags (dexllm#37).
+
+        On an EXTERNAL class the two diverge: this reports the members
+        reconstructed from other classes' ``method_ids`` references (with
+        ``access_flags == 0``, meaning UNKNOWN — there is no ``class_data`` to read
+        them from), while ``list_class_methods`` returns nothing because the class
+        declares nothing here. Check :attr:`ClassInfo.is_internal` before reading a
+        modifier.
+        """
         ...
 
     def locate_class_dex(self, class_descriptor: str) -> int:

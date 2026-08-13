@@ -277,11 +277,11 @@ an out-of-range id), and the all-dexes form is exactly the per-dex concatenation
 Classes are DECLARED (union == all); field/method descriptors are the dex id-table
 references (declared + referenced), so a cross-dex reference recurs once per dex.
 ```python
-dk.list_classes_in_dex(0)                 # classes DECLARED in dex 0        (len 4135)
-dk.list_field_descriptors()               # every 'Lcls;->name:Type'         (len 32824)
-dk.list_field_descriptors_in_dex(0)       # …of one dex
-dk.list_method_descriptors()              # every 'Lcls;->name(proto)ret'    (len 36876)
-dk.list_method_descriptors_in_dex(0)      # …of one dex
+dk.list_classes_in_dex(0)      # classes DECLARED in dex 0       (len 4135)
+dk.list_fields()               # every 'Lcls;->name:Type'        (len 32824)
+dk.list_fields_in_dex(0)       # …of one dex
+dk.list_methods()              # every 'Lcls;->name(proto)ret'   (len 36876)
+dk.list_methods_in_dex(0)      # …of one dex
 dk.locate_class_dex('La2dp/Vol/ALauncher;')   # 0  (declaring dex id, -1 if external; cheaper than get_class_summary().dex_id)
 ```
 
@@ -451,11 +451,17 @@ anchors, NOT full regex** (`"^com/foo"`, `"Activity$"`); an unrecognised
 `match_type` falls back to `contains`. (The typed `dexllm.sdk` layer narrows this
 to a `Literal` of the five canonical values — see [sdk.md](sdk.md).)
 
-### Name search → `list[ClassMatch]` / `list[MethodMatch]`
+### Name search → `list[ClassMatch]` / `list[MethodMatch]` / `list[FieldMatch]`
 ```python
 dk.find_classes_by_name('Utils')      # list[ClassMatch]  len 19
 dk.find_methods_by_name('onCreate')   # list[MethodMatch] len 296
+dk.find_fields_by_name('DB')          # list[FieldMatch]  len 8
 ```
+`find_methods_by_name` and `find_fields_by_name` also take
+`declaring_class=` (a class descriptor) to scope the search, plus `match_type=` /
+`ignore_case=`. The field arm completes the class/method/field symmetry: before
+dexllm#37 `FieldMatch` was a registered public type that **no call could
+produce**.
 
 ### String search → `list[ClassMatch]` / `list[MethodMatch]`
 ```python
@@ -671,8 +677,8 @@ s.access_flags            # 1
 s.superclass_descriptor   # 'Ljava/lang/Object;'
 s.interface_descriptors   # []                          (list[str])
 s.source_file             # 'Utils.java'
-s.fields                  # []                          (list[ClassMemberField])
-s.methods                 # [ClassMemberMethod(<init>()V), ClassMemberMethod(convertDpToPixel(...)I), ...]
+s.fields                  # []                          (list[FieldInfo])
+s.methods                 # [MethodInfo(<init>()V), MethodInfo(convertDpToPixel(...)I), ...]
 ```
 Every `access_flags` here — on the class and on each member — is the **raw dex
 bits**, with no `java.lang.reflect.Modifier` normalization; a method declared
@@ -832,7 +838,7 @@ dexllm.DEFAULT_TIMEOUT_S    # 10.0
 
 ### MCP tool definitions
 ```python
-dexllm.tools.tool_definitions()    # list of 35 MCP tool schemas
+dexllm.tools.tool_definitions()    # list of 36 MCP tool schemas
 ```
 
 ---
@@ -854,6 +860,16 @@ are read-only attributes.
 |---|---|
 | `descriptor` | `str` |
 | `method_id` | `int` |
+| `dex_id` | `int` |
+
+### `FieldMatch`
+Returned by `find_fields_by_name` (dexllm#37 — the type existed from the start but
+had no producer until then).
+
+| field | type |
+|---|---|
+| `descriptor` | `str` (`Lcls;->name:Type`) |
+| `field_id` | `int` |
 | `dex_id` | `int` |
 
 ### `ExternalMethodRef`
@@ -901,8 +917,8 @@ Where one argument came from (intra-method).
 ### `ClassSummary`
 `descriptor`, `superclass_descriptor`, `source_file` (`str`); `dex_id`,
 `access_flags` (`int`); `is_internal` (`bool`); `interface_descriptors`
-(`list[str]`); `fields` (`list[ClassMemberField]`); `methods`
-(`list[ClassMemberMethod]`).
+(`list[str]`); `fields` (`list[FieldInfo]`); `methods`
+(`list[MethodInfo]`).
 
 **Access flags are the RAW dex bits** — the values as stored in the file, with no
 `java.lang.reflect.Modifier` normalization, on the class and on every member. In

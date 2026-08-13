@@ -34,9 +34,11 @@ from .model import (
     ExternalTypeRef,
     ExtractedDex,
     FieldInfo,
+    FieldMatch,
     Indicator,
     IocReport,
     MethodAst,
+    MethodInfo,
     MethodMatch,
     PermissionCallerGroup,
     PermissionCallerRow,
@@ -149,6 +151,15 @@ def _to_method_match(r: object) -> MethodMatch:
     """Convert a pybind MethodMatch to the typed model."""
     return MethodMatch(
         method_id=r.method_id,  # type: ignore[attr-defined]
+        descriptor=r.descriptor,  # type: ignore[attr-defined]
+        dex_id=r.dex_id,  # type: ignore[attr-defined]
+    )
+
+
+def _to_field_match(r: object) -> FieldMatch:
+    """Convert a pybind FieldMatch to the typed model."""
+    return FieldMatch(
+        field_id=r.field_id,  # type: ignore[attr-defined]
         descriptor=r.descriptor,  # type: ignore[attr-defined]
         dex_id=r.dex_id,  # type: ignore[attr-defined]
     )
@@ -317,21 +328,21 @@ class DexKitAdapter:
         require_type_descriptor(class_descriptor)
         return tuple(self._dk.list_class_methods(class_descriptor))
 
-    def list_field_descriptors(self) -> tuple[str, ...]:
+    def list_fields(self) -> tuple[str, ...]:
         """Return every field descriptor across all loaded dexes."""
-        return tuple(self._dk.list_field_descriptors())
+        return tuple(self._dk.list_fields())
 
-    def list_field_descriptors_in_dex(self, dex_id: int) -> tuple[str, ...]:
+    def list_fields_in_dex(self, dex_id: int) -> tuple[str, ...]:
         """Return every field descriptor of one specific loaded dex."""
-        return tuple(self._dk.list_field_descriptors_in_dex(dex_id))
+        return tuple(self._dk.list_fields_in_dex(dex_id))
 
-    def list_method_descriptors(self) -> tuple[str, ...]:
+    def list_methods(self) -> tuple[str, ...]:
         """Return every method descriptor across all loaded dexes."""
-        return tuple(self._dk.list_method_descriptors())
+        return tuple(self._dk.list_methods())
 
-    def list_method_descriptors_in_dex(self, dex_id: int) -> tuple[str, ...]:
+    def list_methods_in_dex(self, dex_id: int) -> tuple[str, ...]:
         """Return every method descriptor of one specific loaded dex."""
-        return tuple(self._dk.list_method_descriptors_in_dex(dex_id))
+        return tuple(self._dk.list_methods_in_dex(dex_id))
 
     def list_value_strings(self) -> tuple[str, ...]:
         """Return every distinct string the app loads as a value."""
@@ -561,6 +572,22 @@ class DexKitAdapter:
             )
         )
 
+    def find_fields_by_name(
+        self,
+        name: str,
+        *,
+        match_type: MatchType = "contains",
+        declaring_class: str = "",
+        ignore_case: bool = False,
+    ) -> tuple[FieldMatch, ...]:
+        """Find fields by name, optionally scoped to a declaring class."""
+        return tuple(
+            _to_field_match(f)
+            for f in self._dk.find_fields_by_name(
+                name, match_type, declaring_class, ignore_case
+            )
+        )
+
     def find_methods_by_annotation(
         self, annotation_class: str, *, match_type: MatchType = "equals"
     ) -> tuple[MethodMatch, ...]:
@@ -657,6 +684,15 @@ class DexKitAdapter:
         return tuple(
             FieldInfo(name=f.name, type=f.type, access_flags=f.access_flags)
             for f in s.fields
+        )
+
+    def class_methods(self, class_descriptor: str) -> tuple[MethodInfo, ...]:
+        """Return the class's declared methods (name, proto, access flags)."""
+        require_type_descriptor(class_descriptor)
+        s = self._dk.get_class_summary(class_descriptor)
+        return tuple(
+            MethodInfo(name=m.name, proto=m.proto, access_flags=m.access_flags)
+            for m in s.methods
         )
 
     def locate_class_dex(self, class_descriptor: str) -> int:

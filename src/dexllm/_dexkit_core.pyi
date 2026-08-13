@@ -192,7 +192,7 @@ class FieldMatch:
     @property
     def field_id(self) -> int: ...
 
-class ClassMemberField:
+class FieldInfo:
     @property
     def name(self) -> str: ...
     @property
@@ -200,7 +200,7 @@ class ClassMemberField:
     @property
     def access_flags(self) -> int: ...
 
-class ClassMemberMethod:
+class MethodInfo:
     @property
     def name(self) -> str: ...
     @property
@@ -228,9 +228,9 @@ class ClassSummary:
     @property
     def interface_descriptors(self) -> list[str]: ...
     @property
-    def fields(self) -> list[ClassMemberField]: ...
+    def fields(self) -> list[FieldInfo]: ...
     @property
-    def methods(self) -> list[ClassMemberMethod]: ...
+    def methods(self) -> list[MethodInfo]: ...
     @property
     def source_file(self) -> str: ...
 
@@ -398,29 +398,29 @@ class DexKit:
              'Lcom/example/android/tvleanback/Utils;->convertDpToPixel(Landroid/content/Context;I)I']
         """
 
-    def list_field_descriptors(self) -> list[str]:
+    def list_fields(self) -> list[str]:
         """Every field descriptor in the field_ids pool (declared AND referenced).
 
         Example::
 
-            >>> dk.list_field_descriptors()[:1]
+            >>> dk.list_fields()[:1]
             ['Landroid/app/Notification$Action;->actionIntent:Landroid/app/PendingIntent;']
         """
 
-    def list_field_descriptors_in_dex(self, dex_id: int) -> list[str]:
-        """``list_field_descriptors`` scoped to one dex."""
+    def list_fields_in_dex(self, dex_id: int) -> list[str]:
+        """``list_fields`` scoped to one dex."""
 
-    def list_method_descriptors(self) -> list[str]:
+    def list_methods(self) -> list[str]:
         """Every method descriptor in the method_ids pool (declared AND referenced).
 
         Example::
 
-            >>> dk.list_method_descriptors()[:1]
+            >>> dk.list_methods()[:1]
             ['Landroid/accessibilityservice/AccessibilityServiceInfo;->getCanRetrieveWindowContent()Z']
         """
 
-    def list_method_descriptors_in_dex(self, dex_id: int) -> list[str]:
-        """``list_method_descriptors`` scoped to one dex."""
+    def list_methods_in_dex(self, dex_id: int) -> list[str]:
+        """``list_methods`` scoped to one dex."""
 
     def list_value_strings(self) -> list[str]:
         """Every distinct string the app LOADS as a value — the IOC feed.
@@ -735,6 +735,25 @@ class DexKit:
 
             >>> [m.descriptor for m in dk.find_methods_by_name("getDisplaySize")][:1]
             ['Lcom/example/android/tvleanback/Utils;->getDisplaySize(Landroid/content/Context;)Landroid/graphics/Point;']
+        """
+
+    def find_fields_by_name(
+        self,
+        name: str,
+        match_type: str = "contains",
+        declaring_class: str = "",
+        ignore_case: bool = False,
+    ) -> list[FieldMatch]:
+        """Search field NAMES, optionally narrowed to a declaring class.
+
+        The field arm of the L7 search family, completing the class/method/field
+        symmetry the match types already named (dexllm#37: ``FieldMatch`` was a
+        public type nothing could produce).
+
+        Example::
+
+            >>> [f.descriptor for f in dk.find_fields_by_name("mTitle", match_type="equals")][:1]
+            ['Landroid/support/app/recommendation/ContentRecommendation;->mTitle:Ljava/lang/String;']
         """
 
     def find_classes_by_annotation(
