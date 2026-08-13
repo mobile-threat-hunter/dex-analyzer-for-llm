@@ -258,7 +258,9 @@ def test_env_override_reaches_the_sdk_and_mcp_layers(tmp_path, monkeypatch):
     adapter = DexKitAdapter.__new__(DexKitAdapter)
     adapter._dk = _Dk()  # type: ignore[attr-defined]
     assert DexKitAdapter.summarize_capabilities(adapter).catalog_version == "env-1"
-    assert tools.execute("capability_report", {}, _Dk())["catalog_version"] == "env-1"
+    assert (
+        tools.execute("summarize_capabilities", {}, _Dk())["catalog_version"] == "env-1"
+    )
 
 
 # --- failure modes ----------------------------------------------------------

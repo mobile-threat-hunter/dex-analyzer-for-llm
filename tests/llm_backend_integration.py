@@ -4,7 +4,7 @@ What this covers
 ----------------
 1. **tools.py** — every TOOL_DEFINITIONS entry has a matching impl, and
    `execute()` round-trips on a real APK.
-2. **mcp_server.py** — registers 15 tools whose exposed `inputSchema` carries
+2. **mcp_server.py** — registers every catalog tool, whose exposed `inputSchema` carries
    the real typed params + `apk_path` (not an opaque kwargs blob), and
    `dispatch_tool` hits DexKit and returns the result dict.
 3. **server.py** (FastAPI) — static endpoints (`/health`, `/tools`,
@@ -45,7 +45,10 @@ def test_tools_module() -> None:
 
     defs = dxtools.tool_definitions()
     impls = dxtools.TOOL_IMPLS
-    assert len(defs) == 15, f"expected 15 tools, got {len(defs)}"
+    # NOT a hard-coded count: this file is not collected by pytest (its name is
+    # outside the `test_*.py` pattern), so a pinned number rots unnoticed — it sat
+    # at 15 against a catalog of 36, failing before it reached anything else.
+    assert len(defs) == len(impls) and defs, f"catalog/impl mismatch: {len(defs)}"
     for spec in defs:
         assert spec["name"] in impls, f"missing impl for {spec['name']}"
         assert "description" in spec
@@ -54,11 +57,11 @@ def test_tools_module() -> None:
     dk = dexllm.DexKit(str(TEST_APK))
     r = dxtools.execute("list_classes", {"limit": 5}, dk)
     assert isinstance(r.get("items"), list) and len(r["items"]) == 5, r
-    r = dxtools.execute("capability_report", {}, dk)
+    r = dxtools.execute("summarize_capabilities", {}, dk)
     assert isinstance(r, dict) and "error" not in r, r
     r = dxtools.execute("does_not_exist", {}, dk)
     assert "error" in r, r
-    print("[OK] tools.py — 15 tools, list_classes/cap_report/unknown all good")
+    print(f"[OK] tools.py — {len(defs)} tools, list_classes/summarize/unknown all good")
 
 
 # ─── Part 2: mcp_server.py ───────────────────────────────────────────────
@@ -70,7 +73,9 @@ def test_mcp_server() -> None:
     # The exposed inputSchema must carry the real typed parameters + apk_path —
     # NOT a single opaque kwargs blob (the FastMCP-**kwargs regression).
     specs = mcp_server.list_tool_specs()
-    assert len(specs) == 15, f"expected 15 MCP tools, got {len(specs)}"
+    from dexllm import tools as dxtools
+
+    assert len(specs) == len(dxtools.tool_definitions()), len(specs)
     by_name = {s["name"]: s for s in specs}
 
     for s in specs:
@@ -96,7 +101,8 @@ def test_mcp_server() -> None:
     assert r.get("error", "").startswith("apk_path"), r
 
     print(
-        "[OK] mcp_server.py — 15 tools expose typed schemas (apk_path + params), dispatch good"
+        f"[OK] mcp_server.py — {len(specs)} tools expose typed schemas "
+        "(apk_path + params), dispatch good"
     )
 
 
@@ -111,10 +117,12 @@ def test_fastapi_static() -> None:
     c = TestClient(app)
 
     h = c.get("/health").json()
-    assert h["ok"] is True and h["tools"] == 15, h
+    from dexllm import tools as dxtools
+
+    assert h["ok"] is True and h["tools"] == len(dxtools.tool_definitions()), h
 
     tools = c.get("/tools").json()["tools"]
-    assert len(tools) == 15, len(tools)
+    assert len(tools) == len(dxtools.tool_definitions()), len(tools)
 
     with open(TEST_APK, "rb") as f:
         r = c.post(
@@ -164,7 +172,7 @@ def test_fastapi_live_agent() -> None:
 
     prompt = (
         "Use the dexkit tools to give me a 3-bullet capability summary of this APK. "
-        "Start with capability_report. Keep the final answer under 200 words."
+        "Start with summarize_capabilities. Keep the final answer under 200 words."
     )
     seen = {"tool_use": 0, "tool_result": 0, "text": 0, "error": 0, "done": False}
     with c.stream(

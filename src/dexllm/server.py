@@ -207,7 +207,7 @@ def drop_session(sid: str) -> dict:
 SYSTEM_PROMPT = (
     "You are an Android APK security analyst. The user has uploaded an APK; "
     "use the provided dexkit tools to investigate it. Be methodical: "
-    "1) start with `capability_report` or `list_classes` to orient, "
+    "1) start with `summarize_capabilities` or `list_classes` to orient, "
     "2) drill into suspicious areas with `find_*` tools, "
     "3) use `decompile_method` / `decompile_class` to confirm hypotheses. "
     "Reference specific class/method descriptors when you make claims. "

@@ -7,7 +7,9 @@ caller_method). These pin the corrected field reads.
 """
 
 import glob
+import inspect
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -587,6 +589,94 @@ def test_sdk_identity_apis_reject_non_descriptor(dk):
         session.list_class_methods("java.lang.String")
     # L-form still works
     assert session.find_type_references("Ljava/lang/String;") is not None
+
+
+# MCP tools naming an operation no other layer names. Empty by design — such a
+# tool would be a new operation invented at the transport layer. Module-level like
+# its siblings in tests/test_sdk.py, so it is discoverable without reading the test.
+_MCP_ONLY_TOOLS: set[str] = set()
+
+
+def test_every_mcp_tool_name_exists_on_another_layer():
+    """The MCP axis of the one-operation-one-spelling rule (dexllm#21/#37).
+
+    The drift audits in `tests/test_sdk.py` lock raw ↔ port for METHOD names and
+    raw ↔ SDK for TYPE names. The MCP catalog was locked only to its own impl
+    registry, so it could name an operation whatever it liked — and it did:
+    `capability_report` was the raw/port/module `summarize_capabilities` under a
+    second name, the exact shape #21 spent three releases removing, on the one
+    axis nothing checked.
+
+    So: every advertised tool must carry the name THAT operation already has on
+    the raw `DexKit`, on a port, or as a module-level `dexllm` function. Two
+    assertions are needed for that, because name-existence alone is the weaker
+    claim "…the name SOME operation has" — under which renaming the
+    `get_class_summary` tool to `class_info` (a real but DIFFERENT operation)
+    passes silently, which is the mirror of the defect this exists to stop:
+
+    1. every tool name appears on some layer (catches a wholly invented spelling);
+    2. every tool's impl is `_t_<name>` and CALLS an identically-named operation
+       (catches a name borrowed from a different operation).
+
+    Both are real constraints, not tautologies: the registry is a hand-written
+    dict of string keys, so nothing else makes a key agree with a Python name, and
+    nothing else makes the impl body agree with the key.
+    """
+    import dexllm
+    import dexllm.sdk.ports as ports_mod
+
+    raw = {n for n in dir(dexllm.DexKit) if not n.startswith("_")}
+    ports: set[str] = set()
+    for name in dir(ports_mod):
+        obj = getattr(ports_mod, name)
+        if isinstance(obj, type) and (
+            name.endswith("Port") or name == "DexAnalysisUseCase"
+        ):
+            ports |= {
+                m
+                for m, v in vars(obj).items()
+                if not m.startswith("_") and inspect.isfunction(v)
+            }
+    # …and a module function only counts when it ANALYSES a session: the first
+    # parameter is the DexKit. That drops the pure descriptor/format helpers
+    # (`signature`, `pretty_proto`, `format_class`, `is_timeout_marker`, …), which
+    # are not operations a tool could legitimately be named after.
+    module = set()
+    for n in dexllm.__all__:
+        fn = getattr(dexllm, n, None)
+        if not callable(fn) or isinstance(fn, type):
+            continue
+        try:
+            first = next(iter(inspect.signature(fn).parameters), None)
+        except (TypeError, ValueError):
+            continue
+        if first == "dk":
+            module.add(n)
+
+    advertised = {d["name"] for d in tools.tool_definitions()}
+    orphans = advertised - raw - ports - module
+    assert orphans == _MCP_ONLY_TOOLS, (
+        f"MCP tools naming an operation nothing else names: "
+        f"{sorted(orphans - _MCP_ONLY_TOOLS)} | stale exceptions: "
+        f"{sorted(_MCP_ONLY_TOOLS - orphans)}"
+    )
+
+    for name, impl in sorted(tools.TOOL_IMPLS.items()):
+        assert impl.__name__ == f"_t_{name}", (
+            f"tool {name!r} is implemented by {impl.__name__} — the impl name ties "
+            f"the registry key to the operation, so they must agree"
+        )
+        # `safe_` covers the two decompile tools, which go through the documented
+        # hang-guarded wrapper (`safe_decompile_method`) rather than calling `dk`
+        # directly. That is the same operation, so it satisfies the rule.
+        called = re.search(
+            rf"(?:\bdk\.|\bdexllm\.|\b)(?:safe_)?{re.escape(name)}\s*\(",
+            inspect.getsource(impl),
+        )
+        assert called, (
+            f"tool {name!r} does not call an operation of the same name — it is "
+            f"borrowing another operation's name"
+        )
 
 
 def test_tool_catalog_carries_no_aliases(dk):

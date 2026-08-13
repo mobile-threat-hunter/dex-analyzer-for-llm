@@ -102,7 +102,7 @@ flowchart LR
 
 | Level | Question it answers | Entry point |
 |---|---|---|
-| L1 | which Android framework APIs does this APK touch? | `find_used_apis` / class summary |
+| L1 | which Android framework APIs does this APK touch? | `list_external_method_refs` / class summary |
 | L2 | where is a specific API called? | `find_call_sites_to_ref` |
 | L3 | which permissions / categories are exercised? | permission mapping |
 | L4 | what is actually passed at each call site? | intra-method dataflow |

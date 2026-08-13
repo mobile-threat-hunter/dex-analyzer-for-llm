@@ -337,7 +337,7 @@ def _t_render_method_smali(
     return {"descriptor": method_descriptor, **_truncate(out, max_chars)}
 
 
-def _t_capability_report(dk: DexKit, limit: int = 50) -> dict:
+def _t_summarize_capabilities(dk: DexKit, limit: int = 50) -> dict:
     """Bounded, LLM-friendly capability summary.
 
     Returns top permissions/categories, the cross-domain `flags` rollup, and the
@@ -771,7 +771,7 @@ TOOL_IMPLS: dict[str, Callable] = {
     "find_methods_using_double_literals": _t_find_methods_using_double_literals,
     "get_class_summary": _t_get_class_summary,
     "render_method_smali": _t_render_method_smali,
-    "capability_report": _t_capability_report,
+    "summarize_capabilities": _t_summarize_capabilities,
 }
 
 # NOTE: the tool catalog carries NO deprecated aliases. An alias would not be a
@@ -1183,7 +1183,7 @@ TOOL_DEFINITIONS: list[dict] = [
         },
     },
     {
-        "name": "capability_report",
+        "name": "summarize_capabilities",
         "description": (
             "High-level capability summary for the APK — what permissions, "
             "network endpoints, crypto APIs, dynamic-loading patterns, "
@@ -1391,9 +1391,12 @@ TOOL_DEFINITIONS: list[dict] = [
     {
         "name": "identify",
         "description": (
-            "Content-based container probe of the loaded APK: "
-            "{format, is_apk, has_manifest, dex_count}. Quick orientation on what "
-            "kind of file is loaded and how many dexes it carries."
+            "Content-based container probe of the loaded SESSION: "
+            "{format, is_apk, has_manifest, dex_count, source_count}. Quick "
+            "orientation on what kind of file is loaded and how many dexes it "
+            "carries. Note dex_count is the LOADED TOTAL across all sources, not "
+            "the primary source's own count — unlike the load-free "
+            "dexllm.identify(path), which probes one path."
         ),
         "input_schema": {"type": "object", "properties": {}},
     },

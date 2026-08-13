@@ -345,7 +345,7 @@ def test_flags_survive_the_sdk_and_mcp_layers():
 
     from dexllm.tools import TOOL_IMPLS
 
-    out = TOOL_IMPLS["capability_report"](dk)
+    out = TOOL_IMPLS["summarize_capabilities"](dk)
     assert out["flags"] == {"IDENTIFIER": 2}
     assert out["api_hits"][0]["flags"] == ["IDENTIFIER"]
     assert out["catalog_version"] == raw.catalog_version

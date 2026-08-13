@@ -1,6 +1,6 @@
 """Regression for the MCP server surface (dexllm.mcp_server).
 
-Locks the tool-spec catalog (32 tools, ``dexllm_`` prefix, injected ``apk_path``), the
+Locks the tool-spec catalog (every catalog tool, ``dexllm_`` prefix, injected ``apk_path``), the
 ``dispatch_tool`` open-and-run path, the async ``list_tools`` / ``call_tool`` handlers,
 and — most importantly — that the descriptor-identity contract (identity strict, name
 search lenient) is preserved when a call flows through the server, not just the raw
