@@ -652,17 +652,37 @@ def _t_detect_content_providers(
 
 
 def _t_identify(dk: DexKit) -> dict:
-    """Container probe of the loaded APK + its LOADED dex/source counts.
+    """Content probe of the session's primary source, plus the loaded totals.
 
-    `format` / `is_apk` / `has_manifest` come from a content probe of the primary
-    source; `dex_count` / `source_count` reflect the ACTUAL loaded state across ALL
-    sources (a multi-source / packer-unpack load carries more than the primary
-    source alone — see verify_report for the per-dex list).
+    Every key here means what it means on ``dexllm.identify(path)`` — including
+    ``dex_count``, which is the PRIMARY SOURCE's own dex count. The loaded totals
+    are separate keys that say so (dexllm#38).
+
+    Before that, this tool overwrote ``dex_count`` with the union across all
+    LOADED dexes, so one key carried two meanings depending on which layer you
+    read it from: `dexllm.identify(x)` said 1 while the tool said 2. It agreed
+    whenever the loader produced exactly one dex per source, which is the common
+    case and why it went unnoticed — and it disagreed for a multi-source load AND
+    for a single CONCATENATED source, i.e. a packer dump, the case the field
+    matters most for.
+
+    The probe keys are read from DISK at call time, so a source deleted after the
+    load (a dump in a temp dir) reports `format: "unknown", dex_count: 0` for a
+    session that still works — `loaded_dex_count` is what stays true. Pre-existing;
+    the tool always re-probed.
     """
     from ._dexkit_core import identify
 
     info = dict(identify(dk.apk_path()))
-    info["dex_count"] = dk.dex_count()  # loaded total, not just the primary source
+    # WHICH source those keys describe. Without it the shared keys name an unnamed
+    # one of N — `add_dumped_dexes` puts the DUMP first, so a packer session probes
+    # a bare dex and reports `is_apk: False` for a session whose real subject is an
+    # APK. dexllm#26 drew the same lesson for `extract_dex`: bytes alone cannot say
+    # which file they came from.
+    info["source"] = dk.apk_path()
+    # ...and the session-level facts, under names that cannot be mistaken for the
+    # per-container ones. `verify_report` carries the per-dex list, with sources.
+    info["loaded_dex_count"] = dk.dex_count()
     info["source_count"] = len(dk.sources())
     return info
 
@@ -1391,12 +1411,15 @@ TOOL_DEFINITIONS: list[dict] = [
     {
         "name": "identify",
         "description": (
-            "Content-based container probe of the loaded SESSION: "
-            "{format, is_apk, has_manifest, dex_count, source_count}. Quick "
-            "orientation on what kind of file is loaded and how many dexes it "
-            "carries. Note dex_count is the LOADED TOTAL across all sources, not "
-            "the primary source's own count — unlike the load-free "
-            "dexllm.identify(path), which probes one path."
+            "Content-based container probe of the session's primary source: "
+            "{format, is_apk, has_manifest, dex_count} plus source (which of the "
+            "session's sources those describe) — identical in meaning to "
+            "dexllm.identify(path), so dex_count is THAT container's own count — "
+            "plus loaded_dex_count (dexes actually loaded — differs from "
+            "dex_count only for a multi-source load or a concatenated / packer "
+            "dump) and source_count (how many sources the session was built "
+            "from). Quick orientation on what is loaded and how much of it; "
+            "verify_report lists the dexes individually, with their source."
         ),
         "input_schema": {"type": "object", "properties": {}},
     },

@@ -437,8 +437,14 @@ def test_container_verify_ast_batch_tools(dk):
     """The 4 completeness tools (identify / verify_report / decompile_method_ast /
     batch_find_methods_using_strings) return clean JSON-safe shapes."""
     idf = tools.execute("identify", {}, dk)
-    # dex_count reflects the LOADED total (== dk.dex_count()), not just the primary probe
-    assert idf["dex_count"] == dk.dex_count() and idf["format"] in ("dex", "zip")
+    # Every key shared with `dexllm.identify(path)` means the SAME thing (dexllm#38);
+    # the loaded totals are separate keys. This assertion used to read
+    # `idf["dex_count"] == dk.dex_count()` with a comment calling that "the LOADED
+    # total" — the old contract, which passed here only because this file's fixture
+    # is a single-source 1-dex APK, and which a concatenated source makes false.
+    assert idf["dex_count"] == dexllm.identify(dk.apk_path())["dex_count"]
+    assert idf["format"] in ("dex", "zip")
+    assert idf["loaded_dex_count"] == dk.dex_count()
     assert idf["source_count"] == len(dk.sources())
     json.dumps(idf)
 
@@ -595,6 +601,91 @@ def test_sdk_identity_apis_reject_non_descriptor(dk):
 # tool would be a new operation invented at the transport layer. Module-level like
 # its siblings in tests/test_sdk.py, so it is discoverable without reading the test.
 _MCP_ONLY_TOOLS: set[str] = set()
+
+
+def test_identify_means_the_same_thing_on_every_layer(tmp_path):
+    """dexllm#38: a shared key must not carry two meanings across layers.
+
+    The tool used to overwrite `dex_count` with the union across all LOADED dexes
+    while `dexllm.identify(path)` reports the probed container's own count. Same
+    name, same key, different answer — the mirror of the one-operation-two-names
+    defect, and the one case `test_every_mcp_tool_name_exists_on_another_layer`
+    structurally CANNOT catch, because the impl really does call `identify`.
+
+    Driven by a CONCATENATED single source rather than two sources: the divergence
+    needs `dk.dex_count() != identify(path)["dex_count"]`, and a packer dump —
+    one file the loader splits into several logical dexes — produces exactly that
+    from ONE source. Two sources also work but need a corpus with two loadable
+    ones, so the guard would SKIP on a single-APK `$DEXLLM_TEST_APK`; crafting the
+    concatenation makes it run wherever there is a corpus at all, and it is the
+    shape the field actually matters for.
+    """
+    import dexllm
+
+    # The corpus is gitignored, so a hardcoded path would FAIL in a clean checkout
+    # where the rule is SKIP — the same care tests/test_dexkit.py takes.
+    src = next(iter(sorted(glob.glob(str(REPO / "test_apk" / "APK" / "*.dex")))), None)
+    if src is None:
+        pytest.skip("no bare .dex in the corpus to concatenate")
+    one = Path(src).read_bytes()
+    if one[:4] != b"dex\n":
+        pytest.skip("first bare .dex is not usable as a template")
+    concat = tmp_path / "concat.dex"
+    concat.write_bytes(one * 2)
+
+    dk = dexllm.DexKit(str(concat))
+    probe = dexllm.identify(str(concat))
+    out = tools.execute("identify", {}, dk)
+
+    # the fixture must actually discriminate — if the loader did not split the
+    # concatenation, both readings coincide and this proves nothing
+    assert dk.dex_count() != probe["dex_count"], (
+        f"the crafted source did not split: dex_count()={dk.dex_count()} "
+        f"vs probe {probe['dex_count']} — the two readings coincide, so this "
+        f"fixture cannot expose the divergence"
+    )
+
+    # every key the module function defines means the same thing here
+    for key, value in probe.items():
+        assert out[key] == value, f"{key} diverges: tool {out[key]!r} vs {value!r}"
+
+    # …and the session totals are separate keys that say what they are
+    assert out["loaded_dex_count"] == dk.dex_count()
+    assert out["source_count"] == 1
+    assert out["loaded_dex_count"] != out["source_count"], (
+        "the fixture must give the two session keys DIFFERENT values, or a swap "
+        "between them passes unnoticed"
+    )
+    # …and the output says which source the shared keys describe (dexllm#26's
+    # lesson: otherwise they name an unnamed one of N)
+    assert out["source"] == dk.apk_path() == str(concat)
+
+    # Second leg: a MULTI-source session whose two sources identify DIFFERENTLY,
+    # which is the only shape that pins WHICH one is probed — on a single source
+    # `identify(apk_path())` and `identify(sources()[-1])` are the same call, so
+    # probing the wrong one is an equivalent mutant there.
+    multi = first = last = None
+    for apk in sorted(glob.glob(str(REPO / "test_apk" / "APK" / "*.apk"))):
+        # An unloadable / dex-less / verification-rejected source is an ENVIRONMENT
+        # fact, so it moves on to the next candidate rather than failing. (The
+        # corpus's alphabetically-first apk is a manifest-only container.)
+        if dexllm.identify(apk).get("dex_count", 0) < 1:
+            continue
+        try:
+            candidate = dexllm.DexKit([str(concat), apk])
+        except Exception:  # noqa: BLE001
+            continue
+        a, b = dexllm.identify(candidate.apk_path()), dexllm.identify(apk)
+        if a != b:  # the pair must identify DIFFERENTLY or it pins nothing
+            multi, first, last = candidate, a, b
+            break
+    if multi is None:
+        return  # the first leg still ran; no corpus apk can pair with the fixture
+    m = tools.execute("identify", {}, multi)
+    assert m["source"] == multi.apk_path() == str(concat)
+    for key, value in first.items():
+        assert m[key] == value, f"{key} describes the wrong source: {m[key]!r}"
+    assert m["source_count"] == 2
 
 
 def test_every_mcp_tool_name_exists_on_another_layer():
