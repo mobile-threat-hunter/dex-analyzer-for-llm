@@ -32,8 +32,18 @@ def _forge_store_overread_zip(path: Path, declared_size: int = 50_000_000) -> No
     data = b"dex\n"
     lfh = (
         struct.pack(
-            "<IHHHHHIIIHH", 0x04034B50, 20, 0, 0, 0, 0, 0,
-            declared_size, declared_size, len(name), 0,
+            "<IHHHHHIIIHH",
+            0x04034B50,
+            20,
+            0,
+            0,
+            0,
+            0,
+            0,
+            declared_size,
+            declared_size,
+            len(name),
+            0,
         )
         + name
         + data
@@ -41,14 +51,28 @@ def _forge_store_overread_zip(path: Path, declared_size: int = 50_000_000) -> No
     cd_off = len(lfh)
     cdh = (
         struct.pack(
-            "<IHHHHHHIIIHHHHHII", 0x02014B50, 20, 20, 0, 0, 0, 0, 0,
-            declared_size, declared_size, len(name), 0, 0, 0, 0, 0, 0,
+            "<IHHHHHHIIIHHHHHII",
+            0x02014B50,
+            20,
+            20,
+            0,
+            0,
+            0,
+            0,
+            0,
+            declared_size,
+            declared_size,
+            len(name),
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
         )
         + name
     )
-    eocd = struct.pack(
-        "<IHHHHIIH", 0x06054B50, 0, 0, 1, 1, len(cdh), cd_off, 0
-    )
+    eocd = struct.pack("<IHHHHIIH", 0x06054B50, 0, 0, 1, 1, len(cdh), cd_off, 0)
     path.write_bytes(lfh + cdh + eocd)
 
 

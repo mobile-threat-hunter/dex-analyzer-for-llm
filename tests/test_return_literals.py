@@ -18,8 +18,8 @@ APK-free, deterministic gate (incl. NaN/±Inf via crafted bytecode). This is the
 through-the-binding end-to-end backstop. Skips if no test APK is present.
 """
 
-import json
 import glob
+import json
 import os
 import re
 from pathlib import Path
@@ -272,9 +272,9 @@ def test_text_and_ast_agree_on_corrected_returns():
                     continue
                 checked += 1
                 rets = [
-                    l.strip()
-                    for l in txt.splitlines()
-                    if l.strip().startswith("return ")
+                    line.strip()
+                    for line in txt.splitlines()
+                    if line.strip().startswith("return ")
                 ]
                 # only methods whose return is a corrected literal
                 if not any(

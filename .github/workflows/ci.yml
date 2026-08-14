@@ -1,9 +1,10 @@
 name: CI
 
 # Build the native extension and run the self-contained regression gates on
-# Linux and macOS. The APK-dependent suites (llm_backend_integration, the
-# full sweep, bench_vs_androguard) need the gitignored test_apk/ corpus and
-# are intentionally NOT run here — the C++ parity suites are the APK-free gate.
+# Linux and macOS. The APK-dependent suites need the gitignored test_apk/ corpus,
+# so they SKIP here (never fail) — the C++ parity suites are the APK-free gate.
+# The heavy harnesses (the full sweep, bench_vs_androguard, dvclass_parity) are
+# standalone scripts and are intentionally NOT run here.
 
 on:
   push:
@@ -72,6 +73,9 @@ jobs:
         with:
           python-version: "3.13"
       - run: pip install black ruff mypy
-      - run: black --check src/dexllm
-      - run: ruff check src/dexllm
+      - run: black --check src/dexllm tests
+      - run: ruff check src/dexllm tests
+      # mypy's scope is `files = ["src/dexllm"]` in pyproject.toml — the package
+      # only, deliberately: `disallow_untyped_defs` is a contract for the shipped
+      # API, not for test harnesses (dexllm#40).
       - run: mypy

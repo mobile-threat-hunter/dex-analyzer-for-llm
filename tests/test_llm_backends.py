@@ -8,66 +8,75 @@ What this covers
    the real typed params + `apk_path` (not an opaque kwargs blob), and
    `dispatch_tool` hits DexKit and returns the result dict.
 3. **server.py** (FastAPI) — static endpoints (`/health`, `/tools`,
-   `/upload`, `/session/{id}`) work end-to-end against a real APK.
+   `/upload`, `/session/{id}`) work end-to-end against a real APK. This is the
+   ONLY automated coverage of that surface.
 4. **server.py /analyze** — only runs if `ANTHROPIC_API_KEY` is set in
    the environment; consumes the SSE stream and asserts at least one
    `tool_use` and one `tool_result` event arrive before `done`.
 
-Run
----
-    python -m tests.llm_backend_integration
-    # or
-    python tests/llm_backend_integration.py
-
-Exit codes: 0 on success, non-zero on any failure.
+This file used to be named `llm_backend_integration.py`, which is outside pytest's
+`test_*.py` pattern — so it was never collected and rotted unnoticed, sitting at a
+hard-coded `15` tools against a catalog of 36 (dexllm#40). Every optional dependency
+(`mcp`, `fastapi`) and the corpus are SKIPs, never failures, so it runs in CI.
 """
 
 from __future__ import annotations
 
+import glob
 import os
-import sys
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
-TEST_APK = REPO_ROOT / "test_apk" / "APK" / "com.example.android.tvleanback.apk"
+import pytest
 
-if not TEST_APK.exists():
-    print(f"FAIL: test APK missing: {TEST_APK}")
-    sys.exit(2)
+REPO = Path(__file__).resolve().parents[1]
+
+
+@pytest.fixture(scope="module")
+def apk():
+    """A corpus APK — tvleanback if present (what the assertions were written on)."""
+    env = os.environ.get("DEXLLM_TEST_APK")
+    if env and os.path.isfile(env):
+        return env
+    apks = sorted(glob.glob(str(REPO / "test_apk" / "APK" / "*.apk")))
+    pref = [p for p in apks if "tvleanback" in p] + apks
+    if not pref:
+        pytest.skip("no bundled test APK")
+    return pref[0]
 
 
 # ─── Part 1: tools.py ────────────────────────────────────────────────────
 
 
-def test_tools_module() -> None:
+def test_tools_module(apk):
     import dexllm
     from dexllm import tools as dxtools
 
     defs = dxtools.tool_definitions()
     impls = dxtools.TOOL_IMPLS
-    # NOT a hard-coded count: this file is not collected by pytest (its name is
-    # outside the `test_*.py` pattern), so a pinned number rots unnoticed — it sat
-    # at 15 against a catalog of 36, failing before it reached anything else.
+    # NOT a hard-coded count: a pinned number is what rotted while this file went
+    # uncollected — it sat at 15 against a catalog of 36, failing before it reached
+    # anything else.
     assert len(defs) == len(impls) and defs, f"catalog/impl mismatch: {len(defs)}"
     for spec in defs:
         assert spec["name"] in impls, f"missing impl for {spec['name']}"
         assert "description" in spec
         assert "input_schema" in spec
 
-    dk = dexllm.DexKit(str(TEST_APK))
-    r = dxtools.execute("list_classes", {"limit": 5}, dk)
-    assert isinstance(r.get("items"), list) and len(r["items"]) == 5, r
+    dk = dexllm.DexKit(apk)
+    want = min(5, len(dk.list_classes()))  # the corpus APK may be smaller
+    r = dxtools.execute("list_classes", {"limit": want}, dk)
+    assert isinstance(r.get("items"), list) and len(r["items"]) == want, r
     r = dxtools.execute("summarize_capabilities", {}, dk)
     assert isinstance(r, dict) and "error" not in r, r
     r = dxtools.execute("does_not_exist", {}, dk)
     assert "error" in r, r
-    print(f"[OK] tools.py — {len(defs)} tools, list_classes/summarize/unknown all good")
 
 
 # ─── Part 2: mcp_server.py ───────────────────────────────────────────────
 
 
-def test_mcp_server() -> None:
+def test_mcp_server(apk):
+    pytest.importorskip("mcp")  # the optional [mcp] extra
     from dexllm import mcp_server
 
     # The exposed inputSchema must carry the real typed parameters + apk_path —
@@ -77,7 +86,6 @@ def test_mcp_server() -> None:
 
     assert len(specs) == len(dxtools.tool_definitions()), len(specs)
     by_name = {s["name"]: s for s in specs}
-
     for s in specs:
         props = s["inputSchema"].get("properties", {})
         assert (
@@ -91,25 +99,19 @@ def test_mcp_server() -> None:
     assert "method_descriptor" in dm, dm
 
     # dispatch round-trips on a real APK
-    r = mcp_server.dispatch_tool(
-        "dexllm_list_classes", {"apk_path": str(TEST_APK), "limit": 3}
-    )
+    r = mcp_server.dispatch_tool("dexllm_list_classes", {"apk_path": apk, "limit": 3})
     assert "items" in r and len(r["items"]) == 3, r
 
     # missing apk_path branch
     r = mcp_server.dispatch_tool("dexllm_list_classes", {})
     assert r.get("error", "").startswith("apk_path"), r
 
-    print(
-        f"[OK] mcp_server.py — {len(specs)} tools expose typed schemas "
-        "(apk_path + params), dispatch good"
-    )
-
 
 # ─── Part 3: FastAPI static endpoints ────────────────────────────────────
 
 
-def test_fastapi_static() -> None:
+def test_fastapi_static(apk):
+    pytest.importorskip("fastapi")
     from fastapi.testclient import TestClient
 
     from dexllm.server import app
@@ -124,18 +126,23 @@ def test_fastapi_static() -> None:
     tools = c.get("/tools").json()["tools"]
     assert len(tools) == len(dxtools.tool_definitions()), len(tools)
 
-    with open(TEST_APK, "rb") as f:
+    before = h["sessions"]
+    with open(apk, "rb") as f:
         r = c.post(
             "/upload",
             files={
-                "apk": (TEST_APK.name, f, "application/vnd.android.package-archive")
+                "apk": (
+                    os.path.basename(apk),
+                    f,
+                    "application/vnd.android.package-archive",
+                )
             },
         )
     assert r.status_code == 200, r.text
     sid = r.json()["session_id"]
 
     h = c.get("/health").json()
-    assert h["sessions"] == 1, h
+    assert h["sessions"] == before + 1, h
 
     r = c.delete(f"/session/{sid}").json()
     assert r["ok"] is True, r
@@ -146,27 +153,28 @@ def test_fastapi_static() -> None:
     r = c.post("/upload", files={"apk": ("foo.txt", b"hi", "text/plain")})
     assert r.status_code == 400, r.text
 
-    print("[OK] server.py static — /health, /tools, /upload, /session/* all good")
-
 
 # ─── Part 4: FastAPI live agent (gated on ANTHROPIC_API_KEY) ─────────────
 
 
-def test_fastapi_live_agent() -> None:
+def test_fastapi_live_agent(apk):
     if not os.environ.get("ANTHROPIC_API_KEY"):
-        print("[SKIP] live agent — ANTHROPIC_API_KEY not set")
-        return
-
+        pytest.skip("live agent — ANTHROPIC_API_KEY not set")
+    pytest.importorskip("fastapi")
     from fastapi.testclient import TestClient
 
     from dexllm.server import app
 
     c = TestClient(app)
-    with open(TEST_APK, "rb") as f:
+    with open(apk, "rb") as f:
         sid = c.post(
             "/upload",
             files={
-                "apk": (TEST_APK.name, f, "application/vnd.android.package-archive")
+                "apk": (
+                    os.path.basename(apk),
+                    f,
+                    "application/vnd.android.package-archive",
+                )
             },
         ).json()["session_id"]
 
@@ -194,32 +202,3 @@ def test_fastapi_live_agent() -> None:
     assert seen["tool_use"] >= 1, f"no tool_use: {seen}"
     assert seen["tool_result"] >= 1, f"no tool_result: {seen}"
     assert seen["error"] == 0, f"agent error: {seen}"
-    print(
-        f"[OK] live agent — tool_use={seen['tool_use']} tool_result={seen['tool_result']} text={seen['text']}"
-    )
-
-
-# ─── Main ────────────────────────────────────────────────────────────────
-
-
-def main() -> int:
-    try:
-        test_tools_module()
-        test_mcp_server()
-        test_fastapi_static()
-        test_fastapi_live_agent()
-    except AssertionError as e:
-        print(f"FAIL: {e}")
-        return 1
-    except Exception as e:
-        print(f"FAIL: {type(e).__name__}: {e}")
-        import traceback
-
-        traceback.print_exc()
-        return 1
-    print("\nALL OK")
-    return 0
-
-
-if __name__ == "__main__":
-    sys.exit(main())

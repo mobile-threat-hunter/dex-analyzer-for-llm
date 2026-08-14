@@ -193,7 +193,9 @@ def small_dex():
     import glob
     import os
 
-    cands = sorted(glob.glob(str(REPO_ROOT / "test_apk" / "APK" / "*.dex")), key=os.path.getsize)
+    cands = sorted(
+        glob.glob(str(REPO_ROOT / "test_apk" / "APK" / "*.dex")), key=os.path.getsize
+    )
     if not cands:
         pytest.skip("no bare .dex in the corpus")
     data = Path(cands[0]).read_bytes()
@@ -216,7 +218,9 @@ def _parser_poison(dex: bytes) -> bytes:
     return bytes(b)
 
 
-def test_a_dex_the_verifier_accepts_but_the_parser_rejects_is_refused(small_dex, tmp_path):
+def test_a_dex_the_verifier_accepts_but_the_parser_rejects_is_refused(
+    small_dex, tmp_path
+):
     """`AssertLoadedDexesWereVerified`, on its own. The gate cannot promise that
     everything it accepts also PARSES — so the load is re-checked afterwards, and a
     null `DexItem` becomes a Python exception instead of a later SIGSEGV."""
@@ -255,7 +259,9 @@ def test_more_logical_dexes_than_the_core_can_address_are_refused(small_dex, tmp
     dk.find_classes_by_name("a")
 
 
-def test_the_addressable_limit_is_a_session_total_not_a_per_image_one(small_dex, tmp_path):
+def test_the_addressable_limit_is_a_session_total_not_a_per_image_one(
+    small_dex, tmp_path
+):
     """The counter runs across SOURCES, not within one image: `DexKit([...])` keeps
     handing out ids, so many small sources can exceed the range in aggregate. A
     per-image cap would leave that axis open."""

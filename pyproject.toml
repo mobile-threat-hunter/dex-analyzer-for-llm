@@ -110,6 +110,9 @@ ignore = ["E501"]
 convention = "pep257"
 
 [tool.mypy]
+# The shipped package ONLY, deliberately (dexllm#40): `disallow_untyped_defs` below
+# is a contract for the public API, not for test harnesses. `tests/` is gated by
+# black + ruff in CI, not by mypy.
 files = ["src/dexllm"]
 # The native extension (`_dexkit_core`) and optional deps (androguard, mcp,
 # fastapi) ship no type stubs — don't fail on their missing imports.

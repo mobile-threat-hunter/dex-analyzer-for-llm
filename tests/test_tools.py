@@ -664,7 +664,7 @@ def test_identify_means_the_same_thing_on_every_layer(tmp_path):
     # which is the only shape that pins WHICH one is probed — on a single source
     # `identify(apk_path())` and `identify(sources()[-1])` are the same call, so
     # probing the wrong one is an equivalent mutant there.
-    multi = first = last = None
+    multi = first = None
     for apk in sorted(glob.glob(str(REPO / "test_apk" / "APK" / "*.apk"))):
         # An unloadable / dex-less / verification-rejected source is an ENVIRONMENT
         # fact, so it moves on to the next candidate rather than failing. (The
@@ -677,7 +677,7 @@ def test_identify_means_the_same_thing_on_every_layer(tmp_path):
             continue
         a, b = dexllm.identify(candidate.apk_path()), dexllm.identify(apk)
         if a != b:  # the pair must identify DIFFERENTLY or it pins nothing
-            multi, first, last = candidate, a, b
+            multi, first = candidate, a
             break
     if multi is None:
         return  # the first leg still ran; no corpus apk can pair with the fixture

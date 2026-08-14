@@ -185,9 +185,9 @@ def test_summary_flags_agree_with_the_decompiler_modifiers(dk):
 
     if not sync_checked:
         pytest.skip("no synchronized method with a body in this APK")
-    assert checked >= min(100, len(sample)), (
-        f"oracle ran on only {checked} of {len(sample)} sampled methods"
-    )
+    assert checked >= min(
+        100, len(sample)
+    ), f"oracle ran on only {checked} of {len(sample)} sampled methods"
 
 
 def test_dad_path_still_reports_declared_synchronized(loadable_apks):

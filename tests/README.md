@@ -26,14 +26,18 @@ pip install -e "..[dev]"          # pytest + androguard
 DEXLLM_TEST_APK=/path/to/app.apk pytest . -v
 ```
 
-## 3. Standalone integration / parity scripts
+[`test_llm_backends.py`](test_llm_backends.py) — the end-to-end check of
+`tools.py`, `mcp_server.py`, and the FastAPI `server.py`; the only automated
+coverage of the latter two. Every dependency is a **skip**: no corpus, no `mcp`
+extra, no `fastapi` extra, and the live `/analyze` agent step without
+`ANTHROPIC_API_KEY`. It ran as a standalone script named
+`llm_backend_integration.py` until dexllm#40 — outside pytest's `test_*.py`
+pattern, so it was never collected and rotted unnoticed;
+[`test_harness_hygiene.py`](test_harness_hygiene.py) now fails if any module
+here defines tests pytest cannot collect.
 
-- [`llm_backend_integration.py`](llm_backend_integration.py) — end-to-end check of
-  `tools.py`, `mcp_server.py`, and the FastAPI `server.py` (the live `/analyze`
-  agent step runs only if `ANTHROPIC_API_KEY` is set). Needs the `[all]` extra.
-  ```bash
-  python llm_backend_integration.py
-  ```
+## 3. Standalone parity scripts
+
 - [`dvclass_parity.py`](dvclass_parity.py) — class-level decompile parity vs
   androguard across the APK corpus (heavy; needs `[dev]` + `test_apk/`).
 
@@ -43,4 +47,4 @@ DEXLLM_TEST_APK=/path/to/app.apk pytest . -v
 |---|---|---|---|
 | C++ parity (ctest) | no | no (golden baked in) | IR / decompiler correctness, 0-crash |
 | pytest | optional (skips) | no | Python API surface, AST shape, regressions |
-| integration scripts | yes | yes | LLM backends, corpus-wide parity |
+| parity scripts | yes | yes | corpus-wide decompile parity |

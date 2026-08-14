@@ -13,6 +13,7 @@ Exit code:
   0   — all sampled classes match in header+fields
   1   — at least one mismatch; first 3 diffs printed
 """
+
 from __future__ import annotations
 
 import argparse
@@ -92,9 +93,7 @@ def parity_for_apk(apk: str, n: int) -> tuple[int, int, int, list[tuple[str, str
     for d, cls in sample:
         cls_name = cls.get_name()
         try:
-            dk_out = safe_decompile_class(
-                dk, cls_name, timeout=DECOMPILE_TIMEOUT_S
-            )
+            dk_out = safe_decompile_class(dk, cls_name, timeout=DECOMPILE_TIMEOUT_S)
         except Exception:
             continue
         if is_timeout_marker(dk_out):
