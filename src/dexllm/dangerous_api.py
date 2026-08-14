@@ -30,6 +30,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import threading
 from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -377,6 +378,30 @@ def _external_method_index(dk: DexKit) -> dict[tuple[str, str], list[Any]]:
     return idx
 
 
+# Derived-index cache for `_overload_index`, keyed by the IDENTITY of the table it
+# derives from rather than by the dataset root (issue #39). Identity is the finer
+# key: `_load_perm_api_map_cached` returns the SAME dict object for a given root, so
+# a new root, an evicted-and-reloaded root, or a test-injected table each yield a
+# different object and therefore a fresh index — and no root-keyed entry can be
+# poisoned by a table that did not come from that root. The tables are never mutated
+# in place (every consumer copies), so the derived index cannot go stale. Each entry
+# RETAINS its table: that strong reference is what stops the id() being recycled
+# while the entry lives. FIFO-bounded at the loaders' `lru_cache` maxsize (their
+# eviction is LRU; this is insertion order, which only differs once a process uses
+# more than `_OVERLOAD_CACHE_MAX` distinct dataset roots).
+_OVERLOAD_CACHE: dict[
+    int,
+    tuple[dict[str, tuple[str, ...]], dict[tuple[str, str], dict[int, int]]],
+] = {}
+_OVERLOAD_CACHE_MAX = 8
+# Both servers dispatch these into worker threads (`asyncio.to_thread`), and this is
+# the module's only mutable global, so the miss path takes a lock: `len`/`next(iter)`
+# /`pop`/`__setitem__` are four separate operations, and interleaving them raised
+# `KeyError` / `RuntimeError: dictionary changed size during iteration` out of a
+# read-only query and ratcheted the bound past its maximum (adversarial review).
+_OVERLOAD_LOCK = threading.Lock()
+
+
 def _overload_index(
     table: dict[str, tuple[str, ...]],
 ) -> dict[tuple[str, str], dict[int, int]]:
@@ -384,7 +409,36 @@ def _overload_index(
 
     Drives the ambiguity check: a method with one overload — or one overload of a
     given arity — needs no signature parsing to disambiguate.
+
+    Memoised on ``table``'s identity (~30 ms over the bundled 5,150-row table, paid
+    on every call by all three consumers before #39). The returned mapping is
+    SHARED — callers must treat it as read-only.
     """
+    # The hit path stays lock-free: a `dict.get` is a single atomic operation and a
+    # published entry is never mutated in place.
+    cached = _OVERLOAD_CACHE.get(id(table))
+    # Redundant identity assertion — the retained reference above already rules out
+    # id reuse; kept as a cheap invariant that can be checked without leaving the
+    # function.
+    if cached is not None and cached[0] is table:
+        return cached[1]
+    index = _build_overload_index(table)  # pure + slow: built outside the lock
+    with _OVERLOAD_LOCK:
+        # A racing thread may have published this same table meanwhile — hand back
+        # ITS index so one table still means one shared mapping.
+        cached = _OVERLOAD_CACHE.get(id(table))
+        if cached is not None and cached[0] is table:
+            return cached[1]
+        while len(_OVERLOAD_CACHE) >= _OVERLOAD_CACHE_MAX:
+            _OVERLOAD_CACHE.pop(next(iter(_OVERLOAD_CACHE)))  # oldest insertion
+        _OVERLOAD_CACHE[id(table)] = (table, index)
+    return index
+
+
+def _build_overload_index(
+    table: dict[str, tuple[str, ...]],
+) -> dict[tuple[str, str], dict[int, int]]:
+    """Build the overload index for ``table`` (see :func:`_overload_index`)."""
     # Dedup by the full signature STRING, not the reduced simple-type tuple: two
     # distinct overloads can reduce to the same simple tuple (e.g. java.util.Date
     # vs java.sql.Date -> ('Date',)). Counting tuples would collapse them to one,

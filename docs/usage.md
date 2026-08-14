@@ -587,6 +587,11 @@ The pybind/SDK permission surface uses this C++ join directly.
 > divergent as soon as an override is set. Use one or the other under an
 > override, not both.
 
+The Python path still costs several times the C++ one, but it no longer rebuilds
+its derived overload index on every call: that index is memoised per loaded table
+(alongside the two `lru_cache`d loaders), so repeated calls — and the three
+functions sharing it — pay for it once per dataset (dexllm#39).
+
 The IoC / content-provider / capability analyses are **pure Python**
 (`dexllm.extract_iocs` / `detect_content_providers` / `summarize_capabilities`) —
 the canonical, ReDoS-safe, PSL-validated implementations dexllm's own API uses. The

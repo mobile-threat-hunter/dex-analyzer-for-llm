@@ -9,6 +9,8 @@ import glob
 import json
 import os
 import re
+import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -477,3 +479,168 @@ def test_inner_class_separator_canonicalised(monkeypatch):
 
     apis = da.dangerous_permission_apis(_DK())
     assert "android.permission.FOO" in apis
+
+
+# --- the derived overload index is memoised (issue #39) ------------------------
+#
+# `_overload_index` rebuilt a 5,150-row index on every call — ~30 ms of the ~39 ms
+# warm `permission_api_callers`, paid again by each of its three consumers. It is
+# now memoised on the identity of the table it derives from.
+
+
+@pytest.fixture
+def memo():
+    """An EMPTY, isolated `_OVERLOAD_CACHE` for the test, restored afterwards.
+
+    The memo is a module global in a shared pytest process: without this a test
+    that fills it evicts the bundled entry for every later test (and one that
+    leaves a single extra entry can flip an `is` assertion here).
+    """
+    import dexllm.dangerous_api as da
+
+    saved = da._OVERLOAD_CACHE
+    da._OVERLOAD_CACHE = {}
+    try:
+        yield da
+    finally:
+        da._OVERLOAD_CACHE = saved
+
+
+def _fake_dataset(root, keep=slice(None, None, 2)):
+    """Write a dataset override at `root` holding a SUBSET of the bundled table."""
+    data = REPO / "src" / "dexllm" / "data"
+    full = json.loads((data / "perm_api.json").read_text())
+    levels = json.loads((data / "perm_levels.json").read_text())
+    sub = {p: v[keep] for i, (p, v) in enumerate(sorted(full.items())) if i % 2 == 0}
+    (root / "perm_api_metalava_by_perm.json").write_text(json.dumps(sub))
+    (root / "permissions.json").write_text(
+        json.dumps(
+            [{"name": p, "protectionLevel": levels.get(p, "normal")} for p in sub]
+        )
+    )
+    return sub
+
+
+def test_overload_index_is_memoised_per_table(memo):
+    """Same table object -> the same index; a different table -> its OWN index."""
+    da = memo
+
+    table = da._load_full_map(None)
+    first = da._overload_index(table)
+    assert da._overload_index(table) is first  # not rebuilt
+
+    other = {"android.permission.FOO": ("a.B#m(int i)",)}
+    other_index = da._overload_index(other)
+    assert other_index is not first
+    assert other_index == {("a.B", "m"): {1: 1}}  # derived from ITS table, not the
+    assert da._overload_index(table) is first  # ... bundled one, which is intact
+
+
+def test_public_paths_do_not_rebuild_the_overload_index(dk, memo, monkeypatch):
+    """The three consumers hit the memo, not the builder — the point of #39."""
+    da = memo
+
+    warm = (
+        da.dangerous_permission_apis(dk),
+        da.dangerous_permission_api_callers(dk),
+        da.permission_api_callers(dk),
+    )
+
+    def _explode(_table):
+        raise AssertionError("overload index rebuilt on a warm call")
+
+    monkeypatch.setattr(da, "_build_overload_index", _explode)
+    assert (
+        da.dangerous_permission_apis(dk),
+        da.dangerous_permission_api_callers(dk),
+        da.permission_api_callers(dk),
+    ) == warm
+
+
+def test_consumers_do_not_mutate_the_shared_overload_index(dk, memo):
+    """The memo hands out ONE shared mapping — no consumer may write to it."""
+    da = memo
+
+    table = da._load_full_map(None)
+    expected = da._build_overload_index(table)
+    shared = da._overload_index(table)  # hold it: an eviction must not hide a write
+    da.dangerous_permission_apis(dk)
+    da.dangerous_permission_api_callers(dk, app_only=False)
+    da.permission_api_callers(dk, levels={"dangerous"})
+    assert shared == expected
+
+
+def test_overload_index_cache_is_bounded_and_evicts_oldest_first(memo):
+    """Feeding it many tables must not grow the memo, and must evict in order."""
+    da = memo
+
+    tables = [
+        {"android.permission.FOO": (f"a.B{i}#m(int i)",)}
+        for i in range(da._OVERLOAD_CACHE_MAX + 3)
+    ]
+    for t in tables:
+        da._overload_index(t)
+    assert len(da._OVERLOAD_CACHE) == da._OVERLOAD_CACHE_MAX
+    # the OLDEST 3 were evicted, the newest MAX are still resident
+    assert [id(t) for t in tables[3:]] == list(da._OVERLOAD_CACHE)
+    # and the memo still answers correctly for a table it evicted
+    assert da._overload_index(tables[0]) == {("a.B0", "m"): {1: 1}}
+
+
+def test_overload_index_survives_concurrent_misses(memo):
+    """The miss path mutates a module global — worker threads must not tear it.
+
+    Both servers dispatch these calls with `asyncio.to_thread`. Unlocked, the
+    `len`/`next(iter)`/`pop`/`__setitem__` sequence raised `KeyError` and
+    `RuntimeError: dictionary changed size during iteration` out of a read-only
+    query, and ratcheted the cache past its bound.
+    """
+    da = memo
+
+    for i in range(da._OVERLOAD_CACHE_MAX):  # fill it, so every call below evicts
+        da._overload_index({"p": (f"a.Fill{i}#m(int i)",)})
+
+    errors: list[BaseException] = []
+
+    def hammer(tid: int) -> None:
+        for i in range(1500):
+            table = {
+                "android.permission.FOO": tuple(
+                    f"a.T{tid}_{i}_{k}#m{k}(int i)" for k in range(30)
+                )
+            }
+            try:
+                da._overload_index(table)
+            except BaseException as exc:  # noqa: BLE001
+                errors.append(exc)
+
+    saved = sys.getswitchinterval()
+    sys.setswitchinterval(1e-6)  # force interleaving inside the eviction block
+    try:
+        threads = [threading.Thread(target=hammer, args=(t,)) for t in range(12)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+    finally:
+        sys.setswitchinterval(saved)
+
+    assert not errors, f"{len(errors)} errors, first: {errors[0]!r}"
+    assert len(da._OVERLOAD_CACHE) <= da._OVERLOAD_CACHE_MAX
+
+
+def test_a_dataset_override_is_not_served_the_bundled_index(dk, memo, tmp_path):
+    """A second root must get ITS own index, and the bundled one must survive it.
+
+    Must hold on BOTH sides of #39 — non-discriminating by design (a root-keyed
+    memo could get this wrong; the identity-keyed one cannot). It pins the
+    invariant the memo must not break, it does not prove the memo exists.
+    """
+    da = memo
+
+    _fake_dataset(tmp_path)
+    bundled = da.permission_api_callers(dk)
+    override = da.permission_api_callers(dk, dataset_path=str(tmp_path))
+    assert bundled != override  # else the axis proves nothing
+    assert da.permission_api_callers(dk) == bundled
+    assert da.permission_api_callers(dk, dataset_path=str(tmp_path)) == override
