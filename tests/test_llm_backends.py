@@ -98,9 +98,14 @@ def test_mcp_server(apk):
     dm = by_name["dexllm_decompile_method"]["inputSchema"]["properties"]
     assert "method_descriptor" in dm, dm
 
-    # dispatch round-trips on a real APK
-    r = mcp_server.dispatch_tool("dexllm_list_classes", {"apk_path": apk, "limit": 3})
-    assert "items" in r and len(r["items"]) == 3, r
+    # dispatch round-trips on a real APK (the corpus APK may hold fewer classes)
+    import dexllm
+
+    want = min(3, len(dexllm.DexKit(apk).list_classes()))
+    r = mcp_server.dispatch_tool(
+        "dexllm_list_classes", {"apk_path": apk, "limit": want}
+    )
+    assert "items" in r and len(r["items"]) == want, r
 
     # missing apk_path branch
     r = mcp_server.dispatch_tool("dexllm_list_classes", {})
