@@ -52,6 +52,38 @@ def _candidate_apks():
     ]
 
 
+def corpus_is_narrowed():
+    """True when ``$DEXLLM_TEST_APK`` actually resolved to a file.
+
+    The suite is then looking at ONE sample the developer chose, not the bundled
+    corpus. A dangling override does not narrow anything (``_candidate_apks``
+    ignores it), so it must not soften a floor either.
+    """
+    env = os.environ.get("DEXLLM_TEST_APK")
+    return bool(env and os.path.isfile(env))
+
+
+def require_corpus_shape(present, shape, regression):
+    """Non-vacuity floor for a guard that would otherwise pass without firing.
+
+    Several guards scan the corpus for evidence that a production pass RAN — a
+    `switch` header carrying a pc_map entry, a `boolean v = false;`, a
+    constant-only indicator. A count of zero on the bundled corpus means the
+    pass stopped firing and must FAIL; the same zero under a $DEXLLM_TEST_APK
+    narrowing only means the chosen sample has no such code, and an environment
+    fact must produce a skip, never a failure (this module's own rule, and
+    issue #46).
+
+    `shape` names what the corpus must carry; `regression` says what a bundled
+    failure would mean.
+    """
+    if present:
+        return
+    if corpus_is_narrowed():
+        pytest.skip(f"the narrowed corpus carries no {shape}")
+    pytest.fail(f"no {shape} in the bundled corpus — {regression}")
+
+
 def smali_offsets(dk, desc):
     """Set of valid byte offsets for a method, parsed from its smali (the
     `0xNN:` prefixes). Shared by the D-3 pc-map tests."""
@@ -111,9 +143,20 @@ def dk(_loaded):
 
 @pytest.fixture(scope="session")
 def sample_method(dk):
-    """First internal method that decompiles to a non-empty body."""
+    """First internal method with a CODE ITEM that decompiles to a non-empty body.
+
+    Truthy decompiler output is not enough: an abstract method decompiles to
+    ``public abstract String suggest();`` — a signature, no body — so an APK
+    whose first class is an annotation interface (hello-world.apk) handed every
+    consumer a bodyless method and four tests failed on an environment fact
+    (issue #46). ``.registers`` is smali's marker for a present ``code_item``,
+    which is INDEPENDENT of the ``{``-in-source / non-null-AST properties the
+    consumers assert — so this selection does not make them tautological.
+    """
     for cls in dk.list_classes():
         for m in dk.list_class_methods(cls):
+            if ".registers" not in dk.render_method_smali(m):
+                continue
             if dk.decompile_method(m):
                 return m
-    pytest.skip("no decompilable method in APK")
+    pytest.skip("no method with a code item decompiles in this APK")

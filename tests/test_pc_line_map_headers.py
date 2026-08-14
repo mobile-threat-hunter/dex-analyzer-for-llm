@@ -10,12 +10,14 @@ EXACTLY the short-circuit / multiple-anchor cases D-3 exists to map.
 A statement-only test (test_pc_line_map.py) would stay green even if the
 header hooks were dropped. This file fails in that case: it scans the corpus
 until it has found and verified each header kind, including a short-circuit
-compound condition. Skips only if no test APK is present (never silently
-passes on missing coverage — a kind that is never found is a FAIL).
+compound condition. A kind that is never found in the BUNDLED corpus is a FAIL
+(never a silent pass on missing coverage); under a $DEXLLM_TEST_APK narrowing
+it is a property of the chosen sample and skips instead — see
+`conftest.require_corpus_shape`.
 """
 
 import pytest
-from conftest import smali_offsets
+from conftest import require_corpus_shape, smali_offsets
 
 import dexllm
 
@@ -112,9 +114,10 @@ def header_coverage(loadable_apks):
 @pytest.mark.parametrize("kind", ["if", "while", "dowhile", "switch"])
 def test_header_kind_is_mapped(header_coverage, kind):
     examples, _ = header_coverage
-    assert kind in examples, (
-        f"no {kind!r} header line with a valid pc_map entry was found in the "
-        f"corpus — Finding A regression (header hook missing/broken)"
+    require_corpus_shape(
+        kind in examples,
+        f"{kind!r} header line with a valid pc_map entry",
+        "Finding A regression (header hook missing/broken)",
     )
     m, line, text, off = examples[kind]
     assert off != 0xFFFFFFFF
@@ -125,9 +128,10 @@ def test_short_circuit_header_is_mapped(header_coverage):
     """The headline D-3 case: a compound `(a && b) || c` header maps to the
     offset of its condition's last if-test instruction."""
     _, short_circuit = header_coverage
-    assert short_circuit is not None, (
-        "no short-circuit (&&/||) header with a valid pc_map entry was found — "
-        "Condition::get_ins() recovery for compound headers is broken"
+    require_corpus_shape(
+        short_circuit is not None,
+        "short-circuit (&&/||) header with a valid pc_map entry",
+        "Condition::get_ins() recovery for compound headers is broken",
     )
     m, line, text, off = short_circuit
     assert off != 0xFFFFFFFF

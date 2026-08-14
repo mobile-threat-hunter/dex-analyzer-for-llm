@@ -12,6 +12,7 @@ import re
 from pathlib import Path
 
 import pytest
+from conftest import require_corpus_shape
 
 import dexllm
 
@@ -302,7 +303,11 @@ def test_forward_strings_empty_for_bodyless_and_unknown(dk):
             bodyless += 1
         if bodyless >= 5:
             break
-    assert bodyless > 0, "no interface (abstract) method in the corpus"
+    require_corpus_shape(
+        bodyless > 0,
+        "interface (abstract) method",
+        "the bodyless half of the contract went unexercised",
+    )
 
 
 # ── declaration-side string lookup (dexllm#20) ───────────────────────────────
@@ -663,14 +668,19 @@ def test_field_read_write_xref(dk):
                 sm = dk.render_method_smali(writer_only[0])
                 assert f.name in sm and ("iput" in sm or "sput" in sm)
                 return
-    # A fixture with NO field xref at all cannot exercise direction — skip. But if
-    # xref data existed and NOT ONE field distinguished readers from writers, that is
-    # the signature of the two entry points collapsing onto one C++ impl (which a
-    # copy-paste in the duplicated `.def` block makes plausible) — fail, don't skip.
+    # A fixture with NO field xref at all cannot exercise direction — skip. If xref
+    # data existed and NOT ONE field distinguished readers from writers, that is the
+    # signature of the two entry points collapsing onto one C++ impl (which a
+    # copy-paste in the duplicated `.def` block makes plausible) — a failure on the
+    # bundled corpus. It is NOT that on a tiny sample: TC-debug.apk's 12 fields are
+    # each written and read inside the same `<init>`, so both sets are identical for
+    # an honest implementation too (issue #46).
     if saw_xref:
-        pytest.fail(
-            "field xref returned results but no field had a direction-distinct "
-            "read/write set — readers and writers may be wired to the same impl"
+        require_corpus_shape(
+            False,
+            "field with a direction-distinct read/write set",
+            "field xref returned results but no field distinguished readers from "
+            "writers — they may be wired to the same impl",
         )
     pytest.skip("no field read/write xref in this fixture")
 
@@ -750,8 +760,13 @@ def test_enumeration_companions(dk):
     for d in range(dk.dex_count()):
         f_concat += dk.list_fields_in_dex(d)
         m_concat += dk.list_methods_in_dex(d)
-    assert f_concat == dk.list_fields() and len(f_concat) > 0
+    assert f_concat == dk.list_fields()
     assert m_concat == dk.list_methods() and len(m_concat) > 0
+    # a dex CAN declare no field at all (ExceptionHandling.dex) — a property of
+    # the sample, not an enumerator that stopped walking (issue #46).
+    require_corpus_shape(
+        len(f_concat) > 0, "declared field", "list_fields stopped enumerating"
+    )
     assert dk.list_fields_in_dex(9999) == []
     assert dk.list_methods_in_dex(-1) == []
     raw = dk.extract_dex(0)["bytes"]
@@ -1222,7 +1237,11 @@ def test_smali_never_contains_raw_control_chars(loadable_apks):
             assert not any(ord(c) < 0x20 and c != "\n" for c in text), (apk, cls)
     # Without this the test is vacuous — it would "pass" on a corpus that has
     # nothing to escape, which is precisely how it slipped through review.
-    assert seen_candidate, "no control-bearing literal in the corpus — test vacuous"
+    require_corpus_shape(
+        seen_candidate,
+        "control-bearing literal",
+        "nothing in the corpus could violate the assertion — the test is vacuous",
+    )
 
 
 def _find_two_byte_seq(buf):

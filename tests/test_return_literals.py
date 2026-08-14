@@ -25,6 +25,7 @@ import re
 from pathlib import Path
 
 import pytest
+from conftest import require_corpus_shape
 
 import dexllm
 
@@ -144,7 +145,11 @@ def scanned():
 
 def test_no_return_type_violations(scanned):
     found, violations, _nf, checked = scanned
-    assert checked > 0, "scan exercised no methods"
+    require_corpus_shape(
+        checked > 0,
+        "method with a typed return to scan",
+        "the scan exercised no methods at all",
+    )
     assert not violations, (
         f"{len(violations)} return-type-mismatch violation(s) in {checked} "
         f"methods; first few: {violations[:8]}"
@@ -155,9 +160,14 @@ def test_return_categories_covered(scanned):
     found, _v, _nf, checked = scanned
     # these are abundant in any real corpus — their presence proves the fix
     # path actually fired end-to-end (not a vacuous pass)
-    assert found["Z_bool"] > 0, "no boolean true/false returns seen"
-    assert found["ref_null"] > 0, "no reference `return null;` seen"
-    assert found["F"] > 0, "no float-literal returns seen"
+    for key, shape in (
+        ("Z_bool", "boolean `return true/false;`"),
+        ("ref_null", "reference `return null;`"),
+        ("F", "float-literal return"),
+    ):
+        require_corpus_shape(
+            found[key] > 0, shape, "the return-literal correction did not fire"
+        )
 
 
 def test_nonfinite_returns_render_as_java_constants(scanned):
@@ -343,7 +353,9 @@ def test_boolean_assign_literals():
         f"{len(bad)} `boolean v = <0|1>;` (uncompilable — must render false/true). "
         f"e.g. {bad[:8]}"
     )
-    assert good > 0, "no `boolean v = false/true;` rendered — the fix is inactive"
+    require_corpus_shape(
+        good > 0, "`boolean v = false/true;`", "the boolean-literal fix is inactive"
+    )
 
 
 def test_boolean_decl_text_ast_agree():

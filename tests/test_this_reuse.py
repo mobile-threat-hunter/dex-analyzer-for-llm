@@ -22,6 +22,7 @@ import re
 from pathlib import Path
 
 import pytest
+from conftest import require_corpus_shape
 
 import dexllm
 from dexllm import is_timeout_marker, safe_decompile_method
@@ -47,6 +48,33 @@ _GOOD_MAT = re.compile(
     r"[A-Za-z_][\w.$]*(?:\[\])*\s+v\w+\s*=\s*this\s*;",
     re.M,
 )
+# a bare `vN = this;` — the same seed with its declaration hoisted, which
+# PlaceDeclarations does when the assignment sits inside a branch.
+_BARE_MAT = re.compile(r"^\s*(v\w+)\s*=\s*this\s*;", re.M)
+
+
+def _materialised_local(out):
+    """Name of the local that receives `this`, or None.
+
+    Two renderings of the same materialisation: the inline seed
+    ``<Class> v7 = this;`` and a hoisted declaration plus a bare ``v2_1 = this;``
+    in a branch — different support-library builds of one source produce each
+    (issue #46). Both must be accepted; only the local's declared type being a
+    reference is load-bearing, and `_MISTYPED_MAT` guards the other direction.
+    """
+    m = _GOOD_MAT.search(out)
+    if m:
+        return re.search(r"(v\w+)\s*=\s*this\s*;", m.group(0)).group(1)
+    for m in _BARE_MAT.finditer(out):
+        v = m.group(1)
+        decl = re.compile(
+            r"^\s*(?!(?:" + "|".join(_PRIMS) + r")\b)"
+            r"[A-Za-z_][\w.$]*(?:\[\])*\s+" + re.escape(v) + r"\s*;",
+            re.M,
+        )
+        if decl.search(out):
+            return v
+    return None
 
 
 def _apks():
@@ -125,17 +153,27 @@ def test_no_mistyped_this_materialization(scanned):
 def test_materialization_active(scanned):
     """The fix must actually fire — a genuine valued reuse produces a reference-
     typed `<Class> vX = this;` seed. A count of 0 means the pass is disabled."""
-    assert scanned["good_mat"] > 0, (
-        "no `<Class> v = this;` seeds emitted — MaterializeReusedThis appears "
-        "disabled (a genuine reused-`this` should materialise a local)."
+    require_corpus_shape(
+        scanned["good_mat"] > 0,
+        "`<Class> v = this;` seed",
+        "MaterializeReusedThis appears disabled (a genuine reused-`this` "
+        "should materialise a local)",
     )
 
 
 def test_fragment_reuse_is_valid():
     """The canonical repro `Fragment.findFragmentByWho` reuses p0 to hold the
-    result; the fix must make it valid — no `this =`, a `<Class> v = this;` seed,
-    and `return v`. Skips if the support-library class is absent."""
+    result; the fix must make it valid — no `this =`, a materialised local, and
+    `return v`.
+
+    EVERY bundled variant is checked for the `this =` invariant, and at least one
+    must exhibit the materialisation: com.test.intent_filter bundles a different
+    support-library build whose `findFragmentByWho` compiles to early returns, so
+    it reuses no register and has nothing to materialise (issue #46) — verified
+    by reading its output, not assumed.
+    """
     cls = "Landroid/support/v4/app/Fragment;"
+    seen = materialised = False
     for apk in _apks():
         if cls not in _classes(apk):
             continue
@@ -147,12 +185,21 @@ def test_fragment_reuse_is_valid():
                 break
         if desc is None:
             continue
+        seen = True
         out = dk.decompile_method(desc)
         assert not _THIS_ASSIGN.search(out), f"still emits `this =`:\n{out}"
-        assert _GOOD_MAT.search(out), f"no `<Class> v = this;` seed:\n{out}"
-        assert re.search(r"return\s+v\w+\s*;", out), f"no `return v`:\n{out}"
-        return
-    pytest.skip("findFragmentByWho not found in any bundled Fragment variant")
+        v = _materialised_local(out)
+        if v is None:
+            continue
+        assert re.search(rf"return\s+{v}\s*;", out), f"no `return {v}`:\n{out}"
+        materialised = True
+    if not seen:  # no corpus, or none bundling the repro method
+        pytest.skip("findFragmentByWho not found in any bundled Fragment variant")
+    require_corpus_shape(
+        materialised,
+        "`Fragment.findFragmentByWho` variant that reuses the receiver",
+        "MaterializeReusedThis stopped seeding the canonical repro",
+    )
 
 
 def test_no_this_equals_super_void_call(scanned):
@@ -199,8 +246,10 @@ def test_arg_sink_materialization_valid():
     is_assignable class-hierarchy oracle (or by `this` reaching the call). The
     canonical repro `MenuItemWrapperJB$ActionProviderWrapperJB.setVisibilityList
     ener` must render a valid `<ParamType> vX = this; if(...) vX = null;
-    …setVisibilityListener(vX)` — no `this =`. Skips if absent."""
+    …setVisibilityListener(vX)` — no `this =`. Every bundled variant is checked;
+    at least one must materialise."""
     cls = "Landroid/support/v7/view/menu/MenuItemWrapperJB$ActionProviderWrapperJB;"
+    seen = materialised = False
     for apk in _apks():
         if cls not in _classes(apk):
             continue
@@ -212,13 +261,23 @@ def test_arg_sink_materialization_valid():
                 break
         if desc is None:
             continue
+        seen = True
         out = dk.decompile_method(desc)
         assert not _THIS_ASSIGN.search(out), out[:400]
         # the materialised local is typed as the arg's param type (a reference)
-        assert _GOOD_MAT.search(out), out[:400]
-        assert re.search(r"setVisibilityListener\(v\w+\)", out), out[:400]
-        return
-    pytest.skip("no APK bundling the ActionProviderWrapperJB arg-sink repro")
+        v = _materialised_local(out)
+        if v is None:
+            continue
+        # …and it is the value actually passed to the callee
+        assert re.search(rf"setVisibilityListener\({v}\)", out), out[:400]
+        materialised = True
+    if not seen:  # no corpus, or none bundling the repro class
+        pytest.skip("no APK bundling the ActionProviderWrapperJB arg-sink repro")
+    require_corpus_shape(
+        materialised,
+        "`ActionProviderWrapperJB.setVisibilityListener` arg-sink repro",
+        "the arg-sink materialisation stopped firing",
+    )
 
 
 def test_def_anchor_throw_new():

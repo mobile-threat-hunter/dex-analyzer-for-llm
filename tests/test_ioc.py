@@ -17,6 +17,7 @@ import time
 from pathlib import Path
 
 import pytest
+from conftest import require_corpus_shape
 
 import dexllm
 
@@ -72,8 +73,15 @@ class _FakeDK:
 
 def test_value_strings_feed_exposed(dk):
     strings = dk.list_value_strings()
-    assert isinstance(strings, list) and len(strings) > 50
+    assert isinstance(strings, list) and all(isinstance(s, str) for s in strings)
     assert len(strings) == len(set(strings))  # deduplicated
+    # a real app's const-string pool is large; a handful means the collector
+    # stopped walking (hello-world-sized samples legitimately have one).
+    require_corpus_shape(
+        len(strings) > 50,
+        "APK with more than 50 value strings",
+        f"only {len(strings)} collected — the const-string walk regressed",
+    )
 
 
 def test_declared_in_locates_constant_only_indicators(loadable_apks):
@@ -100,10 +108,11 @@ def test_declared_in_locates_constant_only_indicators(loadable_apks):
                         for d in row["declared_in"]
                     )
                     located += 1
-    assert located >= 15, (
-        f"only {located} constant-only indicators located; the bundled corpus yields 21 "
-        "(a2dp.Vol 1 + weardrawers 19 + partialsignature 1) — the declaration fallback "
-        "has regressed"
+    require_corpus_shape(
+        located >= 15,
+        "constant-only indicator located via `declared_in` (15+)",
+        f"only {located} located; the bundled corpus yields 21 (a2dp.Vol 1 + "
+        "weardrawers 19 + partialsignature 1) — the declaration fallback has regressed",
     )
 
 

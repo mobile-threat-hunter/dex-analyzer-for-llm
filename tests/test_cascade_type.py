@@ -27,6 +27,7 @@ import re
 from pathlib import Path
 
 import pytest
+from conftest import require_corpus_shape
 
 import dexllm
 from dexllm import is_timeout_marker, safe_decompile_method
@@ -481,14 +482,15 @@ def test_object_typed_use_gets_explicit_cast():
                     re.findall(r"\(\([A-Za-z][\w.$]*(?:\.[\w$]+)+\)\s+[vp]\w+\)", out)
                 )
                 noop += len(re.findall(r"\(\(Object\)\s+[vp]\w+\)\.\w", out))
-    # The cast machinery fires broadly (Object-var uses made type-explicit).
-    assert casts > 0, "no `(Type) v` casts emitted — the Object-cast pass is off"
-    # And the no-op-Object exclusion holds corpus-wide (allow the small
-    # pre-existing DAD `((Object) this).wait()` set; assert we did not flood it).
+    # The no-op-Object exclusion holds corpus-wide (allow the small pre-existing
+    # DAD `((Object) this).wait()` set; assert we did not flood it). Ceiling
+    # first: it still runs when the floor below skips on a narrowed corpus.
     assert noop <= 15, (
         f"{noop} `((Object) v).m()` no-op casts — the Object→Object exclusion "
         f"regressed."
     )
+    # The cast machinery fires broadly (Object-var uses made type-explicit).
+    require_corpus_shape(casts > 0, "`(Type) v` cast", "the Object-cast pass is off")
 
 
 def test_object_typed_field_access_gets_owner_cast():
@@ -544,16 +546,19 @@ def test_object_typed_field_access_gets_owner_cast():
                     ):
                         if mm.group(1) not in _OBJM:
                             uncast += 1
-    # the owner-cast machinery fires (field-access + receiver casts)
-    assert (
-        field_casts > 0
-    ), "no `((Owner) v).field/method` casts — the owner-cast pass is off"
     # bundled residual `Object v; v.member` is small (field-owner unknown /
     # array positions not yet covered — a later cut). Was ~12 before the field
-    # cast; the receiver + field casts cut it to ~1.
+    # cast; the receiver + field casts cut it to ~1. Ceiling first: it still runs
+    # when the floor below skips on a narrowed corpus.
     assert uncast <= 5, (
         f"{uncast} `Object v; v.member` uncast receivers — the owner-cast "
         f"regressed (was ~1 after the field-access cast)."
+    )
+    # the owner-cast machinery fires (field-access + receiver casts)
+    require_corpus_shape(
+        field_casts > 0,
+        "`((Owner) v).field/method` cast",
+        "the owner-cast pass is off",
     )
 
 

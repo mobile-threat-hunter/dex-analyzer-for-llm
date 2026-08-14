@@ -162,7 +162,7 @@ def test_stub_argument_names_match_the_runtime():
     assert checked >= 20, f"only {checked} signatures compared — the parser regressed"
 
 
-def test_stub_typeddict_keys_match_the_returned_dict(dk):
+def test_stub_typeddict_keys_match_the_returned_dict(dk, sample_method):
     """Every `_XxxTypedDict` in the stub must have exactly the runtime dict's keys.
 
     A dict-returning API's SHAPE is part of its contract, and nothing else checks
@@ -171,8 +171,9 @@ def test_stub_typeddict_keys_match_the_returned_dict(dk):
     """
     stub = ast.parse((_PKG / "_dexkit_core.pyi").read_text())
     classes = {n.name: n for n in ast.walk(stub) if isinstance(n, ast.ClassDef)}
-    cls0 = dk.list_classes()[0]
-    m0 = dk.list_class_methods(cls0)[0]
+    # `sample_method`, not `list_class_methods(list_classes()[0])[0]` — the first
+    # class may declare no method at all (IndexError on hello-world.apk, #46).
+    m0 = sample_method
     samples = {
         "_ExtractedDex": dk.extract_dex(0),
         "_VerifyStatus": dk.verify_report()[0],

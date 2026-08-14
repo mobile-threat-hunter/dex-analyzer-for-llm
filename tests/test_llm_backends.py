@@ -128,6 +128,11 @@ def test_mcp_server(apk):
 
 def test_fastapi_static(apk):
     pytest.importorskip("fastapi")
+    if not apk.endswith(".apk"):
+        # `/upload` rejects any filename not ending in `.apk` (server.py), while
+        # DexKit itself identifies a container by CONTENT — so a bare `.dex` in
+        # $DEXLLM_TEST_APK is a sample the endpoint declines, not a regression.
+        pytest.skip(f"the /upload endpoint only accepts *.apk, not {apk}")
     from fastapi.testclient import TestClient
 
     from dexllm.server import app

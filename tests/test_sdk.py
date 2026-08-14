@@ -10,6 +10,7 @@ import pathlib
 from types import MappingProxyType
 
 import pytest
+from conftest import require_corpus_shape
 
 from dexllm.sdk import (
     ArgOrigin,
@@ -246,7 +247,11 @@ def test_sources_round_trip_and_pathlib(apk_path):
 def test_identify_and_container_probe(apk_path):
     info = identify(apk_path)
     assert isinstance(info, ContainerInfo)
-    assert info.format == "zip" and info.is_apk and info.dex_count >= 1
+    assert info.format in ("zip", "dex") and info.dex_count >= 1
+    # `is_apk` is exactly "a zip carrying an AndroidManifest.xml"
+    # (dexkit_ext.cpp `info.is_apk = p.has_manifest`) — asserting it outright
+    # asserted a corpus fact, and multidex.apk is a manifest-less zip.
+    assert info.is_apk == (info.format == "zip" and info.has_manifest)
     probe = ContainerProbe()
     assert isinstance(probe, ContainerProbePort)
     assert probe.identify(apk_path) == info
@@ -280,17 +285,20 @@ def test_typed_enumeration_and_xref(apk_path):
     """Enumeration + xref conversions produce the typed models with correct fields."""
     session = open_apk(apk_path)
     refs = session.list_external_method_refs(framework_only=True)
-    assert refs and all(isinstance(r, ExternalMethodRef) for r in refs)
-    r = refs[0]
-    assert r.class_descriptor.startswith("L") and isinstance(r.parameters, tuple)
+    assert all(isinstance(r, ExternalMethodRef) for r in refs)
+    # reference or ARRAY owner, never a primitive — `[Ljava/lang/Object;->clone()`
+    # is a real external ref (3 of hello-world's 3443), which the previous
+    # first-element-only check happened not to sample.
+    assert all(
+        r.class_descriptor[:1] in ("L", "[") and isinstance(r.parameters, tuple)
+        for r in refs
+    )
     # external field / type refs — symmetric with method refs, distinct typed models.
-    # Require non-empty (mirrors the method-ref guard above) so a converter that
-    # regressed to an empty tuple can't pass the all(...) assertions vacuously.
     frefs = session.list_external_field_refs(framework_only=True)
-    assert frefs and all(isinstance(f, ExternalFieldRef) for f in frefs)
+    assert all(isinstance(f, ExternalFieldRef) for f in frefs)
     assert all(f.signature == f"{f.class_descriptor}->{f.name}:{f.type}" for f in frefs)
     trefs = session.list_external_type_refs(framework_only=True)
-    assert trefs and all(isinstance(t, ExternalTypeRef) for t in trefs)
+    assert all(isinstance(t, ExternalTypeRef) for t in trefs)
     # external types are reference (L…;) or array ([…) descriptors, never primitives
     assert all(t.descriptor and t.descriptor[0] in "L[" for t in trefs)
     # find_call_sites_to / resolve_call_args → typed, with per-kind ArgOrigin
@@ -306,6 +314,18 @@ def test_typed_enumeration_and_xref(apk_path):
             assert isinstance(arg.crossed_branch, bool)
             assert not (arg.crossed_branch and arg.kind != "Unknown")
             crossed += int(arg.crossed_branch)
+    # Every all(...) above is satisfied by an empty tuple, so a converter that
+    # regressed to one would pass vacuously — these floors are what catch it.
+    # An APK that references no framework FIELD at all (com.politedroid_4) is a
+    # property of the sample, not a regression.
+    for got, shape in (
+        (refs, "framework method reference"),
+        (frefs, "framework field reference"),
+        (trefs, "framework type reference"),
+    ):
+        require_corpus_shape(
+            bool(got), shape, "the typed converter regressed to an empty tuple"
+        )
 
 
 def test_crossed_branch_reaches_the_typed_model(apk_path):
@@ -332,22 +352,28 @@ def test_typed_smali_rendering(apk_path):
     session = open_apk(apk_path)
     rendered = False
     for cls in session.list_classes():
-        methods = session.list_class_methods(cls)
-        if not methods:
-            continue
-        m = methods[0]
-        sm = session.render_method_smali(m)
-        if sm:
+        # every declared method, not just the first: an abstract one renders the
+        # `# (no code item)` marker instead of a body, so taking methods[0] made
+        # the `.registers` assertion depend on which class came first (issue #46).
+        for m in session.list_class_methods(cls):
+            sm = session.render_method_smali(m)
+            if not sm:
+                continue
             # the rendered method's FIRST line is its own descriptor verbatim, and the
             # body carries smali structure — a load-bearing content check, not just
             # "non-empty" (which any smali would satisfy via a stray "->").
             assert sm.splitlines()[0] == m
-            assert ".registers" in sm
+            # a rendered method carries EITHER a body or the explicit no-code marker
+            assert ".registers" in sm or "# (no code item)" in sm, sm
+            if ".registers" not in sm:
+                continue
             cs = session.render_class_smali(cls)
             assert cs.startswith(".class ") and cls in cs
             rendered = True
             break
-    assert rendered, "no method rendered smali on the fixture APK"
+        if rendered:
+            break
+    assert rendered, "no method with a code item rendered smali on the fixture APK"
     # unknown / external → empty string, never an exception
     assert session.render_method_smali("Lno/such/C;->x()V") == ""
     assert session.render_class_smali("Lno/such/C;") == ""
@@ -365,10 +391,14 @@ def test_typed_search(apk_path):
 
     # class search → ClassMatch; every hit descriptor is a real declared class
     all_classes = set(session.list_classes())
-    cmatches = session.find_classes_by_name("a", match_type="contains")
+    # the needle is derived from a REAL class, so the search is exercised on any
+    # sample — a hard-coded "a" matches nothing in StringTests.dex and made a
+    # working search look broken (issue #46).
+    needle = sorted(all_classes)[0][1:-1].rsplit("/", 1)[-1][:3]
+    cmatches = session.find_classes_by_name(needle, match_type="contains")
     assert cmatches and all(isinstance(c, ClassMatch) for c in cmatches)
     c0 = cmatches[0]
-    assert c0.descriptor in all_classes and c0.dex_id >= 0 and "a" in c0.descriptor
+    assert c0.descriptor in all_classes and c0.dex_id >= 0 and needle in c0.descriptor
     # match_type is load-bearing: equals on a real descriptor returns exactly it,
     # a bogus exact name returns nothing
     exact = session.find_classes_by_name(c0.descriptor, match_type="equals")
@@ -532,7 +562,12 @@ def test_enumeration_companions_typed(apk_path):
     fields = session.list_fields()
     methods = session.list_methods()
     assert isinstance(fields, tuple) and isinstance(methods, tuple)
-    assert fields and methods
+    assert methods
+    # a dex CAN declare no field at all (ExceptionHandling.dex) — that is a
+    # property of the sample, not an enumerator that stopped walking (#46).
+    require_corpus_shape(
+        bool(fields), "declared field", "list_fields stopped enumerating"
+    )
     assert all(":" in f and "->" in f for f in fields[:50])
     assert all("(" in m and "->" in m for m in methods[:50])
     # the all-dexes form is exactly the per-dex concatenation (uniform scope axis)

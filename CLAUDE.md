@@ -602,6 +602,66 @@ for m in dx.find_methods(classname='Lcom/example/android/tvleanback/Utils;', met
 "
 ```
 
+### A narrowed corpus must SKIP, never fail (dexllm#46)
+
+`$DEXLLM_TEST_APK` is a documented override that points the WHOLE pytest suite at
+one sample — what an analyst wants while triaging. Running it that way went RED:
+17 failures on `multidex.apk`, 6 on `hello-world.apk`, across 8 files that assert
+a property of `a2dp.Vol_137.apk`. `tests/conftest.py` already states the rule
+("an environment fact must produce a skip or no effect, never a failure") and
+this repo had hit it three times before (`32f5695`, `14d7266`).
+
+Three kinds of defect, fixed as three kinds:
+
+1. **Non-vacuity floors** — a dozen guards assert a production pass ACTUALLY
+   FIRED (a `switch` header carrying a pc-map entry, a `boolean v = false;`, a
+   constant-only IOC, a `(Type) v` cast). Those floors are load-bearing and must
+   NOT be deleted, so the decision moved into one helper,
+   **`conftest.require_corpus_shape(present, shape, regression)`**: a missing
+   shape on the BUNDLED corpus is a regression and FAILS; the same absence under
+   a narrowing is a property of the sample and SKIPS. `corpus_is_narrowed()`
+   requires the override to actually RESOLVE — a dangling path narrows nothing
+   (`_candidate_apks` ignores it) so it must not soften a floor either. Where a
+   test carried both a floor and a CEILING, the ceiling now runs first so a
+   narrowed skip does not take it with it.
+2. **Fixture quality (a code fact, keep the assert)** — `sample_method` accepted
+   any truthy decompile, and an abstract method decompiles to a signature with no
+   body, so an APK whose first class is an annotation interface handed four tests
+   a bodyless method. It now requires a CODE ITEM (`.registers` in smali — a
+   property INDEPENDENT of the `{`-in-source / non-null-AST the consumers assert,
+   so the selection is not tautological). `test_stubs` took
+   `list_class_methods(list_classes()[0])[0]` and IndexError'd on a first class
+   with no methods; it uses the fixture now. `test_typed_search`'s needle is
+   derived from a real class name (a hard-coded `"a"` matches nothing in
+   `StringTests.dex`).
+3. **Assertions that were simply wrong** — `identify()`'s `is_apk` is exactly
+   "a zip carrying an AndroidManifest.xml" (`dexkit_ext.cpp`), so asserting it
+   outright asserted a corpus fact; it is now the invariant
+   `is_apk == (format == "zip" and has_manifest)`. An external method ref's owner
+   may be an ARRAY (`[Ljava/lang/Object;->clone()`, 3 of hello-world's 3443) —
+   the first-element-only check never sampled one. `_GOOD_MAT` (the reused-`this`
+   seed) only matched the inline `<Class> v7 = this;`, missing the equivalent
+   hoisted-declaration + bare `v2_1 = this;` that another support-library build
+   produces.
+
+**Verified:** the whole suite green on **every bundled sample one at a time** (25
+APKs + 4 bare dexes), default corpus 419 passed / 5 skipped, corpus-less 114
+passed / 310 skipped / 0 failed (the CI shape — and it caught a real defect: two
+repro tests replaced a `pytest.skip` with a floor, which fails when there is no
+corpus at all; they now skip when no APK bundles the repro class), parity 28/28,
+lint trio clean. **Mutation matrix:** forcing `require_corpus_shape`'s `present`
+to False fails exactly **21** tests on the bundled corpus — every floor site is
+REACHED and HARD-FAILS there, so none of them went silently soft; reverting the
+`sample_method` code-item filter reproduces 3 of the original failures.
+`tests/test_corpus_shape_helper.py` pins the helper's own two-way behaviour
+(fail vs skip vs dangling-override), since a helper that degraded to an
+unconditional skip would take every floor with it while the suite stayed green.
+
+**Known, not fixed here:** the FastAPI `/upload` endpoint rejects any filename
+not ending in `.apk` while `DexKit` itself identifies a container by CONTENT, so
+`test_fastapi_static` skips for a bare `.dex` sample rather than papering over
+the inconsistency.
+
 ## Test corpus
 
 - Live corpus: `test_apk/APK/*.apk` (multi-APK)
