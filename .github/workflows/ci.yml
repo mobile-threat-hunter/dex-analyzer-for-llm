@@ -3,6 +3,9 @@ name: CI
 # Build the native extension and run the self-contained regression gates on
 # Linux and macOS. The APK-dependent suites need the gitignored test_apk/ corpus,
 # so they SKIP here (never fail) — the C++ parity suites are the APK-free gate.
+# One exception: the suite runs a second time narrowed to tests/data/multidex.apk
+# (1.2 KB, committed), which reaches 260 tests instead of 114 and is what guards
+# dexllm#46's "an environment fact must skip, never fail".
 # The heavy harnesses (the full sweep, bench_vs_androguard, dvclass_parity) are
 # standalone scripts and are intentionally NOT run here.
 
@@ -50,6 +53,18 @@ jobs:
         run: python -c "import dexllm; print('dexllm', dexllm.__version__, '-', len(dexllm.tools.tool_definitions()), 'tools')"
 
       - name: Python suite (APK-dependent tests skip without a corpus)
+        run: pytest tests -q
+
+      # dexllm#46: `$DEXLLM_TEST_APK` narrows the WHOLE suite to one sample, and
+      # a minimal one carries none of the shapes the non-vacuity floors look for
+      # — a `switch` header, a boolean-literal assignment, a constant-only IOC.
+      # Those must SKIP, never fail. The corpus-less run above cannot catch a
+      # regression of that rule: it skips at the fixtures, before a floor is
+      # reached. tests/data/multidex.apk is the sample that produced 17 of the
+      # issue's failures, so a green run here is the guard.
+      - name: Python suite, narrowed to one minimal APK (dexllm#46)
+        env:
+          DEXLLM_TEST_APK: tests/data/multidex.apk
         run: pytest tests -q
 
       # Configure a dedicated CMake tree for the parity tests (the editable

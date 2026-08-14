@@ -657,10 +657,23 @@ REACHED and HARD-FAILS there, so none of them went silently soft; reverting the
 (fail vs skip vs dangling-override), since a helper that degraded to an
 unconditional skip would take every floor with it while the suite stayed green.
 
+**The rule is CI-guarded**, by the only APK this repo commits:
+[tests/data/multidex.apk](tests/data/multidex.apk) (1,233 B, byte-identical to
+androguard's own Apache-2.0 test data — provenance in
+[tests/data/README.md](tests/data/README.md)). CI runs the suite a second time
+narrowed to it, which is what the corpus-less run structurally cannot do — that
+run skips at the FIXTURES, before a single floor is reached, so it stays green
+against exactly the regression this section exists to prevent. The narrowed leg
+reaches **260** tests where the corpus-less one reaches 114, and the sample is
+chosen as the WORST case (no `switch` header, no boolean-literal assignment, no
+constant-only indicator, no interface method, no control-bearing literal, and
+manifest-less so `identify().is_apk` is False). Verified discriminating: removing
+the helper's narrowing branch turns that leg **16 failed**.
+
 **Known, not fixed here:** the FastAPI `/upload` endpoint rejects any filename
 not ending in `.apk` while `DexKit` itself identifies a container by CONTENT, so
 `test_fastapi_static` skips for a bare `.dex` sample rather than papering over
-the inconsistency.
+the inconsistency (dexllm#47).
 
 ## Test corpus
 
