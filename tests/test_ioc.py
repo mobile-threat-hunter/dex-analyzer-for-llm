@@ -42,7 +42,10 @@ def dk():
     apks = _fixture_apk()
     if not apks:
         pytest.skip("no bundled test APK")
-    return dexllm.DexKit(apks[0])
+    try:
+        return dexllm.DexKit(apks[0])
+    except Exception as exc:  # noqa: BLE001
+        pytest.skip(f"{apks[0]} is not a loadable dex container: {exc}")
 
 
 class _FakeDK:

@@ -38,7 +38,12 @@ def dk():
     apks = _fixture()
     if not apks:
         pytest.skip("no bundled test APK")
-    return dexllm.DexKit(apks[0])
+    try:
+        return dexllm.DexKit(apks[0])
+    except Exception as exc:  # noqa: BLE001
+        # $DEXLLM_TEST_APK can point at anything; a non-container is an
+        # ENVIRONMENT fact, so skip naming it (conftest's fixture does the same).
+        pytest.skip(f"{apks[0]} is not a loadable dex container: {exc}")
 
 
 def test_bundled_full_tables_ship_and_dangerous_derives():

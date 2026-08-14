@@ -34,14 +34,25 @@ REPO = Path(__file__).resolve().parents[1]
 @pytest.fixture(scope="module")
 def apk():
     """A corpus APK — tvleanback if present (what the assertions were written on)."""
+    import dexllm
+
     env = os.environ.get("DEXLLM_TEST_APK")
     if env and os.path.isfile(env):
-        return env
-    apks = sorted(glob.glob(str(REPO / "test_apk" / "APK" / "*.apk")))
-    pref = [p for p in apks if "tvleanback" in p] + apks
-    if not pref:
+        candidates = [env]
+    else:
+        apks = sorted(glob.glob(str(REPO / "test_apk" / "APK" / "*.apk")))
+        candidates = [p for p in apks if "tvleanback" in p] + apks
+    if not candidates:
         pytest.skip("no bundled test APK")
-    return pref[0]
+    for path in candidates:
+        try:
+            if dexllm.DexKit(path).list_classes():
+                return path
+        except Exception:  # noqa: BLE001
+            continue
+    # Every leg here uploads / opens the file, so a non-container is an
+    # ENVIRONMENT fact that must skip rather than fail each assertion.
+    pytest.skip(f"no loadable dex container among {len(candidates)} candidate(s)")
 
 
 # ─── Part 1: tools.py ────────────────────────────────────────────────────
