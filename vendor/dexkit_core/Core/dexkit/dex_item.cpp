@@ -158,6 +158,9 @@ void DexItem::InitBaseCache() {
     lazy_using_numbers_slots = std::make_unique<LazyUsingNumbersSlot[]>(method_count);
     field_descriptors.resize(field_count);
     field_access_flags.resize(field_count);
+    // dexllm (#41): the flag slots are default-0 and 0 is a LEGAL dex value, so
+    // record which ones a class_data field list actually writes.
+    field_access_flags_declared.assign(field_count, false);
 
     method_cross_info.resize(method_count);
     field_cross_info.resize(field_count);
@@ -198,11 +201,13 @@ void DexItem::InitBaseCache() {
         for (uint32_t i = 0, class_field_idx = 0; i < static_fields_size; ++i) {
             class_field_idx += ReadULeb128(&class_data);
             field_access_flags[class_field_idx] = ReadULeb128(&class_data);
+            field_access_flags_declared[class_field_idx] = true;  // dexllm #41
         }
 
         for (uint32_t i = 0, class_field_idx = 0; i < instance_fields_count; ++i) {
             class_field_idx += ReadULeb128(&class_data);
             field_access_flags[class_field_idx] = ReadULeb128(&class_data);
+            field_access_flags_declared[class_field_idx] = true;  // dexllm #41
         }
 
         for (uint32_t i = 0, class_method_idx = 0; i < direct_methods_count; ++i) {

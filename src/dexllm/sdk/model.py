@@ -377,6 +377,12 @@ class FieldInfo:
 
     Its full descriptor is ``f"{class_descriptor}->{name}:{type}"``.
 
+    ``access_flags`` is ``None`` when UNKNOWN — every field of an EXTERNAL class,
+    and an INHERITED FIELD REFERENCE of an internal one: ``class_fields`` is keyed
+    on the whole dex ``field_ids`` table, so it also lists fields the class only
+    references, whose modifiers only the declaring class knows. (``class_methods``
+    has no such case.) See :class:`MethodInfo` for why it is not ``0``.
+
     Example (real, a2dp.Vol StoreLoc.DB)::
 
         FieldInfo(name='DB', type='La2dp/Vol/DeviceDB;', access_flags=2)
@@ -384,7 +390,7 @@ class FieldInfo:
 
     name: str
     type: str
-    access_flags: int
+    access_flags: Optional[int]
 
 
 @dataclass(frozen=True)
@@ -404,13 +410,19 @@ class MethodInfo:
     it here rather than the decoded names, which
     :attr:`MethodAst.access_flags` already carries.
 
-    **On an EXTERNAL class (one no loaded dex declares) ``access_flags`` is 0**,
-    because there is no ``class_data`` to read them from — the members are
-    reconstructed from the ``method_ids`` references other classes make. Zero is
-    not "package-private and nothing else"; it means UNKNOWN. Check
-    ``ClassInfo.is_internal`` before reading a modifier. ``class_methods`` also
-    reports members for an external class where
-    :meth:`EnumerationPort.list_class_methods` returns nothing, so the two agree
+    **On an EXTERNAL class (one no loaded dex declares) ``access_flags`` is
+    ``None``**, because there is no ``class_data`` to read them from — the members
+    are reconstructed from the ``method_ids`` references other classes make. It is
+    NOT 0: in dex 0 is a legal, common value (package-private, non-static,
+    non-final — 5.1% of the test corpus's methods, 8.7% of its fields, 34.9% of its
+    classes), so reporting 0 would make "unknown" and a real declaration the same
+    value and read the whole framework surface as package-private (dexllm#41).
+    ``m.access_flags & ACC_NATIVE`` therefore raises ``TypeError`` on an external
+    member instead of quietly answering "no".
+
+    ``class_methods`` still reports members for an external class where
+    :meth:`EnumerationPort.list_class_methods` returns nothing (the former lists
+    what was OBSERVED, the latter what a loaded dex DECLARES), so the two agree
     only for internal classes.
 
     Its full descriptor is ``f"{class_descriptor}->{name}{proto}"``.
@@ -418,11 +430,15 @@ class MethodInfo:
     Example (real, a2dp.Vol AppChooser)::
 
         MethodInfo(name='onCreate', proto='(Landroid/os/Bundle;)V', access_flags=4)
+
+    Example (real, the EXTERNAL android.app.Activity)::
+
+        MethodInfo(name='onCreate', proto='(Landroid/os/Bundle;)V', access_flags=None)
     """
 
     name: str
     proto: str
-    access_flags: int
+    access_flags: Optional[int]
 
 
 @dataclass(frozen=True)
@@ -430,8 +446,9 @@ class ClassInfo:
     """A class's metadata (no field/method bodies — those are separate queries).
 
     ``is_internal`` is False for a class only REFERENCED (not declared) in a loaded
-    dex — such an external class has ``dex_id=-1``, ``dex_name=""``, ``superclass=""``
-    and (via ``class_fields``) fields deduped + sorted by (name, type) rather than in
+    dex — such an external class has ``dex_id=-1``, ``dex_name=""``, ``superclass=""``,
+    ``access_flags=None`` (UNKNOWN, not 0 — see :class:`MethodInfo`) and (via
+    ``class_fields``) fields deduped + sorted by (name, type) rather than in
     declared order. ``source_file`` may be empty. ``dex_name`` is the declaring dex's
     file name (``classes.dex`` / ``classes2.dex`` / …, from ``verify_report``); ``""``
     for an external class.
@@ -446,7 +463,7 @@ class ClassInfo:
     descriptor: str
     dex_id: int
     is_internal: bool
-    access_flags: int
+    access_flags: Optional[int]
     superclass: str
     interfaces: tuple[str, ...]
     source_file: str

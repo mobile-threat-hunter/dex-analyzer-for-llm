@@ -159,9 +159,9 @@ def test_class_methods_and_list_class_methods_diverge_on_an_external_class(dk):
     `get_class_summary` reconstructs members from the `method_ids` references
     other classes make, so `class_methods` reports them while
     `list_class_methods` (declared members only) returns nothing — and their
-    `access_flags` are all 0, meaning UNKNOWN rather than package-private. Pinned
-    because the sibling test above is internal-only by design and a reader would
-    otherwise take its equality as universal.
+    `access_flags` are all None, meaning UNKNOWN (dexllm#41). Pinned because the
+    sibling test above is internal-only by design and a reader would otherwise
+    take its equality as universal.
     """
     for ref in dk.list_external_type_refs(framework_only=True):
         summary = dk.get_class_summary(ref.descriptor)
@@ -169,7 +169,7 @@ def test_class_methods_and_list_class_methods_diverge_on_an_external_class(dk):
             continue
         assert summary.is_internal is False
         assert dk.list_class_methods(ref.descriptor) == []
-        assert all(m.access_flags == 0 for m in summary.methods)
+        assert all(m.access_flags is None for m in summary.methods)
         return
     pytest.skip("no external class in this corpus carries method refs")
 

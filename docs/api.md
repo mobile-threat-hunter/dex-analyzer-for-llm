@@ -684,6 +684,30 @@ Every `access_flags` here — on the class and on each member — is the **raw d
 bits**, with no `java.lang.reflect.Modifier` normalization; a method declared
 `synchronized` reads `0x20000`, not `0x20`. See
 [`ClassSummary`](#classsummary) for why.
+
+`access_flags` is **`None` when the modifiers are UNKNOWN** — never `0`, which is
+a legal dex value (package-private, non-static, non-final: 5.1% of the test
+corpus's methods, 8.7% of its fields, 34.9% of its classes). Two cases produce it
+(dexllm#41):
+
+```python
+ext = dk.get_class_summary('Landroid/app/Activity;')     # EXTERNAL class
+ext.is_internal, ext.dex_id, ext.access_flags   # (False, -1, None)
+[m.access_flags for m in ext.methods][:3]       # [None, None, None]
+```
+
+1. an **external** class — no `class_data` at all, so the class's own flags and
+   every member's are unknown; the members are reconstructed from the
+   `method_ids` / `field_ids` entries other classes reference;
+2. an **inherited field reference** on an internal class — `fields` is keyed on
+   the whole `field_ids` table, so it also lists fields the class only
+   REFERENCES; those carry `None` while the declaring class reports the real
+   modifier for the same field. (`methods` is unaffected — it comes from
+   `class_data`.)
+
+So `f.access_flags & ACC_STATIC` raises `TypeError` on such a member instead of
+answering `0`.
+
 Render a summary as Java-source-style text (header + static→instance fields + methods):
 ```python
 dexllm.format_class(dk, 'Lcom/example/android/tvleanback/Utils;')   # str — fetch + format
@@ -915,10 +939,15 @@ Where one argument came from (intra-method).
 | `parameter_index` | `int` | for parameter origins (`-1` if n/a) |
 
 ### `ClassSummary`
-`descriptor`, `superclass_descriptor`, `source_file` (`str`); `dex_id`,
-`access_flags` (`int`); `is_internal` (`bool`); `interface_descriptors`
+`descriptor`, `superclass_descriptor`, `source_file` (`str`); `dex_id` (`int`);
+`access_flags` (`int | None`); `is_internal` (`bool`); `interface_descriptors`
 (`list[str]`); `fields` (`list[FieldInfo]`); `methods`
 (`list[MethodInfo]`).
+
+**`access_flags` is `None` when UNKNOWN** — every entity of an external class,
+plus an inherited field reference on an internal one; see
+[`get_class_summary`](#dkget_class_summaryclass_descriptor-str---classsummary).
+It was `0` before dexllm#41, which collided with the legal dex value `0`.
 
 **Access flags are the RAW dex bits** — the values as stored in the file, with no
 `java.lang.reflect.Modifier` normalization, on the class and on every member. In

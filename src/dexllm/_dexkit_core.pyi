@@ -198,7 +198,17 @@ class FieldInfo:
     @property
     def type(self) -> str: ...
     @property
-    def access_flags(self) -> int: ...
+    def access_flags(self) -> int | None:
+        """Raw dex access flags, or ``None`` when UNKNOWN (dexllm#41).
+
+        ``None`` on every member of an EXTERNAL class (one no loaded dex declares,
+        so there is no ``class_data``), and on an INHERITED FIELD REFERENCE of an
+        internal class: ``ClassSummary.fields`` is keyed on the whole ``field_ids``
+        table, so it also lists fields the class only references — the declaring
+        class reports the real modifier for the same field. It is not reported as 0
+        because 0 is a legal dex value — package-private, non-static, non-final —
+        held by 8.7% of the test corpus's fields.
+        """
 
 class MethodInfo:
     @property
@@ -206,12 +216,20 @@ class MethodInfo:
     @property
     def proto(self) -> str: ...
     @property
-    def access_flags(self) -> int:
+    def access_flags(self) -> int | None:
         """Raw dex access flags — no ``java.lang.reflect.Modifier`` normalization.
 
         A method declared ``synchronized`` in Java carries
         ``ACC_DECLARED_SYNCHRONIZED`` (0x20000), not ``ACC_SYNCHRONIZED`` (0x20);
         in dex 0x20 means JNI ``synchronized native``.
+
+        ``None`` when UNKNOWN — every member of an EXTERNAL class, which has no
+        ``class_data`` to read modifiers from (dexllm#41). Not 0: that is a legal
+        dex value (package-private, non-static, non-final) held by 5.1% of the
+        test corpus's methods, so 0 would make the two indistinguishable. A
+        DECLARED method always knows its flags (``class_method_ids`` is built from
+        ``class_data``); the field side has one more unknown case — see
+        :class:`FieldInfo`.
         """
 
 class ClassSummary:
@@ -222,7 +240,13 @@ class ClassSummary:
     @property
     def dex_id(self) -> int: ...
     @property
-    def access_flags(self) -> int: ...
+    def access_flags(self) -> int | None:
+        """The class's own raw dex access flags, ``None`` when UNKNOWN (dexllm#41).
+
+        ``None`` for an EXTERNAL class — 34.9% of the corpus's declared classes
+        carry a genuine 0 (package-private), so 0 cannot also mean "unknown".
+        """
+
     @property
     def superclass_descriptor(self) -> str: ...
     @property
@@ -496,8 +520,11 @@ class DexKit:
     def get_class_summary(self, class_descriptor: str) -> ClassSummary:
         """Class metadata + declared fields and methods in one call.
 
-        For a class only REFERENCED (not declared) in a loaded dex, the result
-        has ``is_internal=False`` and empty members.
+        For a class only REFERENCED (not declared) in a loaded dex the result has
+        ``is_internal=False``, ``dex_id=-1`` and ``access_flags=None`` — on the
+        class AND on every member, which are reconstructed from the ``method_ids``
+        / ``field_ids`` entries other classes reference, so their modifiers are
+        genuinely unknown rather than 0 (dexllm#41).
 
         Example::
 

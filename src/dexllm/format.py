@@ -70,15 +70,17 @@ def format_class_summary(summary: "ClassSummary", *, indent: str = "    ") -> st
 
     out: List[str] = []
     if summary.is_internal:
-        modifiers = _class_modifiers(summary.access_flags)
-        keyword = _class_keyword(summary.access_flags)
+        # An internal class always carries flags (they come from its class_def), so
+        # this is a type-level fallback only; rendering nothing is the same thing
+        # the external branch does with unknown modifiers (dexllm#41).
+        flags = summary.access_flags or 0
+        modifiers = _class_modifiers(flags)
+        keyword = _class_keyword(flags)
         head = f"{(modifiers + ' ') if modifiers else ''}{keyword} {java_cls}"
         if super_desc and super_desc not in ("Ljava/lang/Object;", ""):
             head += f" extends {_d.descriptor_to_java(super_desc)}"
         if interfaces:
-            kind = (
-                "extends" if (summary.access_flags & _ACC_INTERFACE) else "implements"
-            )
+            kind = "extends" if (flags & _ACC_INTERFACE) else "implements"
             head += f" {kind} " + ", ".join(
                 _d.descriptor_to_java(i) for i in interfaces
             )

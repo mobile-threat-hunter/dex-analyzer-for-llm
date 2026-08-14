@@ -1181,7 +1181,7 @@ TOOL_DEFINITIONS: list[dict] = [
     },
     {
         "name": "get_class_summary",
-        "description": "Class header info: the declaring dex (dex_id + dex_name, e.g. 'classes2.dex'), superclass, interfaces, method count, field count, access flags. Cheaper than decompile_class when you only need structure.",
+        "description": "Class header info: the declaring dex (dex_id + dex_name, e.g. 'classes2.dex'), superclass, interfaces, method count, field count, access flags. `access_flags` is null when UNKNOWN — an external class (one no loaded dex declares) has no modifiers to read; null is NOT 0, which in dex means package-private. Cheaper than decompile_class when you only need structure.",
         "input_schema": {
             "type": "object",
             "properties": {

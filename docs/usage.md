@@ -787,6 +787,7 @@ session.find_type_references("Lcom/x/Y;")                 # -> TypeReferences(fi
 info = session.class_info("Lcom/x/Y;")                    # -> ClassInfo(superclass, interfaces, access_flags, ...)
 fields = session.class_fields("Lcom/x/Y;")                # -> tuple[FieldInfo(name, type, access_flags)]
 methods = session.class_methods("Lcom/x/Y;")              # -> tuple[MethodInfo(name, proto, access_flags)]
+# access_flags is None (UNKNOWN) on an external class — see sdk.md / api.md
 descs = session.list_class_methods("Lcom/x/Y;")           # -> the descriptor-only view of the same members
 
 for g in session.permission_callers(app_only=True):       # -> tuple[PermissionCallerGroup, ...]

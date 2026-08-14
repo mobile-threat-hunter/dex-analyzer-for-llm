@@ -1015,20 +1015,31 @@ void FillInternalClassSummary(const dexkit::DexItem& item,
         MethodInfo cm;
         cm.name = std::string(strings[m.name_idx]);
         cm.proto = BuildProtoDescriptor(item, proto_ids[m.proto_idx]);
-        cm.access_flags = (method_idx < method_flags.size())
-                              ? method_flags[method_idx] : 0u;
+        // A method reaches this loop only from `class_method_ids`, which is built
+        // inside the class_data loops, so its flags were always written.
+        if (method_idx < method_flags.size()) {
+            cm.access_flags = method_flags[method_idx];
+        }
         out.methods.push_back(std::move(cm));
     }
     // Fields declared on this class.
     const auto& field_ids = reader.FieldIds();
     const auto& field_flags = item.GetFieldAccessFlags();
+    const auto& field_declared = item.GetFieldAccessFlagsDeclared();
     for (uint32_t field_idx : item.GetClassFieldIds(type_idx)) {
         const auto& f = field_ids[field_idx];
         FieldInfo cf;
         cf.name = std::string(strings[f.name_idx]);
         cf.type = std::string(type_names[f.type_idx]);
-        cf.access_flags = (field_idx < field_flags.size())
-                              ? field_flags[field_idx] : 0u;
+        // UNLIKE the methods above, this loop walks `class_field_ids`, which is
+        // keyed on the whole `field_ids` table — so it also yields inherited
+        // fields this class only REFERENCES. Their flag slot was never written
+        // and holds the default 0, a legal dex value, so it must be reported as
+        // UNKNOWN rather than as a package-private declaration (dexllm#41).
+        if (field_idx < field_flags.size() && field_idx < field_declared.size() &&
+            field_declared[field_idx]) {
+            cf.access_flags = field_flags[field_idx];
+        }
         out.fields.push_back(std::move(cf));
     }
 }
@@ -1068,6 +1079,8 @@ void FillExternalClassSummary(const dexkit::DexKit& core,
                                std::string(type_names[f.type_idx]));
         }
     }
+    // access_flags stays EMPTY on every member (and on the class itself): there is
+    // no class_data here, only the references other classes make (dexllm#41).
     for (auto& [name, proto] : method_keys) {
         MethodInfo cm;
         cm.name = name;

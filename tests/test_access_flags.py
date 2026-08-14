@@ -257,3 +257,226 @@ def test_field_xref_is_per_instruction_not_per_method(loadable_apks):
                 )
                 return
     pytest.skip("no field with a repeated reader in the available APK(s)")
+
+
+# --- UNKNOWN is not 0 (dexllm#41) ---------------------------------------------
+#
+# `get_class_summary` reports members it cannot read modifiers for. Two sources:
+#
+#   * an EXTERNAL class (one no loaded dex declares) has no `class_data` at all —
+#     its members are reconstructed from the `method_ids` / `field_ids` entries
+#     other classes reference;
+#   * an INTERNAL class's FIELD list is keyed on the whole `field_ids` table, so
+#     it also holds inherited fields the class only REFERENCES, whose flag slot no
+#     class_data list ever wrote (2,238 across the bundled corpus, 1,151 of which
+#     have a NONZERO real declaration elsewhere in the same APK).
+#
+# Both used to report 0, which in dex is a LEGAL value — package-private,
+# non-static, non-final — held by 5.1% of the corpus's methods, 8.7% of its
+# fields and 34.9% of its classes. "Unknown" and a real declaration were the same
+# value, so every framework class read as package-private and
+# `m.access_flags & ACC_NATIVE` answered [] with confidence.
+
+ACC_NATIVE = 0x100
+ACC_STATIC = 0x8
+
+
+def _external_with(dk, member: str):
+    """First external class carrying at least one `methods` / `fields` entry."""
+    for ref in dk.list_external_type_refs(framework_only=True):
+        summary = dk.get_class_summary(ref.descriptor)
+        if getattr(summary, member):
+            return summary
+    return None
+
+
+def test_an_external_class_reports_unknown_method_flags_not_zero(dk):
+    summary = _external_with(dk, "methods")
+    if summary is None:
+        pytest.skip("no external class in this corpus carries method refs")
+    assert summary.is_internal is False and summary.dex_id == -1
+    assert summary.access_flags is None, "the class's own flags are unknown too"
+    assert all(m.access_flags is None for m in summary.methods)
+
+
+def test_an_external_class_reports_unknown_field_flags_not_zero(dk):
+    """The FIELD half — asserted on a class that actually HAS fields.
+
+    The first external class with methods usually has none, so an `all(...)` over
+    its (empty) fields is vacuous: reverting FieldInfo alone passed the whole
+    suite until this test picked its own subject.
+    """
+    summary = _external_with(dk, "fields")
+    if summary is None:
+        pytest.skip("no external class in this corpus carries field refs")
+    assert summary.fields, "the subject must actually carry fields"
+    assert summary.is_internal is False
+    assert all(f.access_flags is None for f in summary.fields)
+
+
+def _uleb128(buf, off):
+    result = shift = 0
+    while True:
+        b = buf[off]
+        off += 1
+        result |= (b & 0x7F) << shift
+        if b < 0x80:
+            return result, off
+        shift += 7
+
+
+def _declared_fields_oracle(raw: bytes):
+    """{class descriptor: {(field name, type descriptor)}} parsed from class_data.
+
+    An INDEPENDENT reader of the dex bytes — it does not go through DexKit — so it
+    can say which fields a class DECLARES without using the value under test.
+    """
+    u32 = lambda o: int.from_bytes(raw[o : o + 4], "little")  # noqa: E731
+    str_off = u32(0x3C)
+    type_off = u32(0x44)
+    fld_off, fld_cnt = u32(0x54), u32(0x50)
+    cd_off, cd_cnt = u32(0x64), u32(0x60)
+
+    def string(idx):
+        data = u32(str_off + 4 * idx)
+        _, o = _uleb128(raw, data)  # utf16 length
+        end = raw.index(b"\x00", o)
+        return raw[o:end].decode("utf-8", "replace")
+
+    def type_desc(idx):
+        return string(u32(type_off + 4 * idx))
+
+    fields = []  # field_ids index -> (name, type descriptor)
+    for i in range(fld_cnt):
+        base = fld_off + 8 * i
+        type_idx = int.from_bytes(raw[base + 2 : base + 4], "little")
+        fields.append((string(u32(base + 4)), type_desc(type_idx)))
+
+    declared = {}
+    for i in range(cd_cnt):
+        base = cd_off + 32 * i
+        cls = type_desc(u32(base))
+        data_off = u32(base + 24)
+        if data_off == 0:
+            declared[cls] = set()
+            continue
+        static_n, o = _uleb128(raw, data_off)
+        instance_n, o = _uleb128(raw, o)
+        _, o = _uleb128(raw, o)  # direct methods
+        _, o = _uleb128(raw, o)  # virtual methods
+        own = set()
+        for count in (static_n, instance_n):
+            idx = 0
+            for _ in range(count):
+                delta, o = _uleb128(raw, o)
+                idx += delta
+                _, o = _uleb128(raw, o)  # access_flags
+                own.add(fields[idx])
+        declared[cls] = own
+    return declared
+
+
+def test_an_inherited_field_reference_is_unknown_not_package_private(dk):
+    """An INTERNAL class's field list holds fields it does not DECLARE.
+
+    `class_field_ids` is built from every `field_ids` entry grouped by the class
+    named in the REFERENCE, so a subclass lists inherited fields; their flag slot
+    is never written and held the default 0 — contradicting the declaring class,
+    which answers with the real modifier for the same field in the same session.
+
+    Which fields a class declares is established by parsing `class_data` directly
+    from the dex bytes, NOT from the value under test, so the split is checked
+    rather than assumed.
+    """
+    raw = dk.extract_dex(0)["bytes"]
+    declared = _declared_fields_oracle(raw)
+    checked = 0
+    for cls, own in declared.items():
+        summary = dk.get_class_summary(cls)
+        if not summary.is_internal:
+            continue
+        listed = {(f.name, f.type) for f in summary.fields}
+        if listed <= own:
+            continue  # this class lists nothing it does not declare
+        checked += 1
+        for f in summary.fields:
+            if (f.name, f.type) in own:
+                assert f.access_flags is not None, (
+                    f"{cls}->{f.name}:{f.type} IS declared in class_data but "
+                    f"reports unknown"
+                )
+            else:
+                assert f.access_flags is None, (
+                    f"{cls}->{f.name}:{f.type} is NOT declared in class_data but "
+                    f"reports access_flags={f.access_flags} — a fabricated value "
+                    f"indistinguishable from a real package-private declaration"
+                )
+        if checked >= 5:
+            return
+    if not checked:
+        pytest.skip("no class in this dex lists a field it does not declare")
+
+
+def test_reading_a_modifier_off_an_unknown_member_fails_loudly(dk):
+    """The silent wrong answer is now a TypeError — the point of the change."""
+    summary = _external_with(dk, "methods")
+    if summary is None:
+        pytest.skip("no external class in this corpus carries method refs")
+    with pytest.raises(TypeError):
+        [m for m in summary.methods if m.access_flags & ACC_NATIVE]
+
+
+def test_a_declared_zero_is_still_zero_and_is_corroborated(dk):
+    """The other half: a REAL package-private member keeps its 0.
+
+    Unknown moved out of the encoding; 0 did not move with it. `zero_seen` alone
+    would be satisfied by a fabricated 0, so a declared 0 is corroborated through
+    the DAD path (`decompile_method_ast(...)["access"]`), which reads the same
+    class_data by a different route: no modifier name may appear for it.
+    """
+    zero_corroborated = 0
+    for cls in dk.list_classes():
+        summary = dk.get_class_summary(cls)
+        assert summary.is_internal is True
+        assert summary.access_flags is not None, "a class_def always knows its own"
+        assert all(
+            m.access_flags is not None for m in summary.methods
+        ), "class_method_ids comes from class_data — a method's flags are known"
+        for m in summary.methods:
+            if m.access_flags != 0:
+                continue
+            names = _ast_modifiers(dk.decompile_method_ast(f"{cls}->{m.name}{m.proto}"))
+            assert not names, (
+                f"{cls}->{m.name}{m.proto} reports flags 0 but the DAD path "
+                f"decodes {sorted(names)} — the 0 is fabricated, not declared"
+            )
+            zero_corroborated += 1
+            if zero_corroborated >= 5:
+                return
+    if not zero_corroborated:
+        pytest.skip("no genuine package-private method in this APK")
+
+
+def test_unknown_flags_reach_the_sdk_and_the_tool_output(dk, apk_path):
+    """None must survive the SDK models and stay JSON-serialisable for MCP."""
+    import json
+
+    import dexllm
+    from dexllm.sdk import open_apk
+
+    summary = _external_with(dk, "methods")
+    if summary is None:
+        pytest.skip("no external class in this corpus carries method refs")
+    desc = summary.descriptor
+    session = open_apk(apk_path)
+    assert session.class_info(desc).access_flags is None
+    methods = session.class_methods(desc)
+    assert methods and all(m.access_flags is None for m in methods)
+    out = dexllm.tools.execute("get_class_summary", {"class_descriptor": desc}, dk)
+    assert out["access_flags"] is None
+    assert json.loads(json.dumps(out))["access_flags"] is None
+
+    with_fields = _external_with(dk, "fields")
+    if with_fields is not None:
+        fields = session.class_fields(with_fields.descriptor)
+        assert fields and all(f.access_flags is None for f in fields)

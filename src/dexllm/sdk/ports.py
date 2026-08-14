@@ -435,7 +435,13 @@ class ClassInspectionPort(Protocol):
         ...
 
     def class_fields(self, class_descriptor: str) -> tuple[FieldInfo, ...]:
-        """Return the class's declared fields (name, type, access flags)."""
+        """Return the class's fields (name, type, access flags).
+
+        The list is keyed on the dex ``field_ids`` table, so it also holds
+        inherited fields the class only REFERENCES; those carry
+        ``access_flags`` ``None`` (UNKNOWN) while the declaring class reports the
+        real modifier for the same field (dexllm#41).
+        """
         ...
 
     def class_methods(self, class_descriptor: str) -> tuple[MethodInfo, ...]:
@@ -448,10 +454,11 @@ class ClassInspectionPort(Protocol):
 
         On an EXTERNAL class the two diverge: this reports the members
         reconstructed from other classes' ``method_ids`` references (with
-        ``access_flags == 0``, meaning UNKNOWN — there is no ``class_data`` to read
-        them from), while ``list_class_methods`` returns nothing because the class
-        declares nothing here. Check :attr:`ClassInfo.is_internal` before reading a
-        modifier.
+        ``access_flags`` ``None`` — UNKNOWN, since there is no ``class_data`` to
+        read them from), while ``list_class_methods`` returns nothing because the
+        class declares nothing here. Reading a modifier off such a member raises
+        ``TypeError`` rather than answering 0, which in dex is a legal value
+        (dexllm#41); check :attr:`ClassInfo.is_internal` first.
         """
         ...
 

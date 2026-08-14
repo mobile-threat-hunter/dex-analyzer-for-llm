@@ -3,6 +3,7 @@
 #pragma once
 
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -45,21 +46,29 @@ struct CallSite {
 //     ClassDef + class_data
 //   - external: declared in no loaded dex; member list reflects only the
 //     entries observed across all dexes' MethodIds/FieldIds tables
+//
+// `access_flags` is EMPTY (nullopt -> Python None) when it is unknown, which is
+// the case for every member of an external class: there is no class_data to read
+// modifiers from. It must NOT be reported as 0 (dexllm#41) — in dex, 0 is a legal
+// and common value meaning "package-private, non-static, non-final, …" (5.1% of
+// methods / 8.7% of fields / 34.9% of classes in the test corpus), so a 0 default
+// makes "unknown" indistinguishable from a real declaration and reads the whole
+// framework surface as package-private.
 struct MethodInfo {
     std::string name;
     std::string proto;
-    uint32_t access_flags = 0;             // 0 for external
+    std::optional<uint32_t> access_flags;  // empty = unknown (external)
 };
 struct FieldInfo {
     std::string name;
     std::string type;
-    uint32_t access_flags = 0;             // 0 for external
+    std::optional<uint32_t> access_flags;  // empty = unknown (external)
 };
 struct ClassSummary {
     std::string descriptor;                // "Lcom/x/Y;"
     bool is_internal = false;              // declared in some loaded dex
     int16_t dex_id = -1;                   // -1 for external
-    uint32_t access_flags = 0;             // 0 for external
+    std::optional<uint32_t> access_flags;  // empty = unknown (external)
     std::string superclass_descriptor;     // empty for external / java.lang.Object
     std::vector<std::string> interface_descriptors;
     std::vector<FieldInfo> fields;

@@ -126,8 +126,17 @@ needs — metadata, fields and methods are three queries.
   shared verbatim with the raw layer (dexllm#37 renamed raw's `ClassMemberField` /
   `ClassMemberMethod`, which were a second name for the same records).
 
-`access_flags` on all three is the **raw dex bit-field**, not normalized to
-`java.lang.reflect.Modifier`. Since dexllm#37 that includes METHOD flags via
+`access_flags` on all three is `int | None` — the **raw dex bit-field**, or
+`None` when UNKNOWN.
+
+`None` covers every entity of an EXTERNAL class (`is_internal == False`), which
+has no `class_data`, and an inherited field reference on an internal class
+(`class_fields` lists fields the class only references; `class_methods` is
+unaffected). Reading a modifier off one raises `TypeError` rather than answering
+`0`, which in dex is a legal value — package-private, non-static, non-final
+(dexllm#41).
+
+The bit-field is not normalized to `java.lang.reflect.Modifier`. Since dexllm#37 that includes METHOD flags via
 `MethodInfo`, so the `ACC_DECLARED_SYNCHRONIZED` (`0x20000`) vs
 `ACC_SYNCHRONIZED` (`0x20`) distinction documented for the raw layer's
 `get_class_summary` (see [api.md](api.md#classsummary)) applies here too: a Java

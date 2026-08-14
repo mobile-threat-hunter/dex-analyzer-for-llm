@@ -142,6 +142,17 @@ public:
     [[nodiscard]] const std::vector<uint32_t> &
     GetFieldAccessFlags() const { return field_access_flags; }
 
+    // dexllm (#41): which entries of `field_access_flags` were actually WRITTEN
+    // from a class_data field list. `class_field_ids` is keyed on the whole
+    // `field_ids` table (every field REFERENCE, grouped by the class named in the
+    // reference), so a class's list also holds inherited fields it does not
+    // declare — and their flag slot keeps its default 0, which in dex is the legal
+    // value "package-private, non-static, non-final". Without this bit a caller
+    // cannot tell a real 0 from a never-written one. Methods need no counterpart:
+    // `class_method_ids` is populated only inside the class_data loops.
+    [[nodiscard]] const std::vector<bool> &
+    GetFieldAccessFlagsDeclared() const { return field_access_flags_declared; }
+
     // dexllm L2.5 extension hook — enumerate every invoke-* site within a
     // single method body. Returns (callee_method_idx, byte_offset_within_insns,
     // opcode). Works directly off method_codes which InitBaseCache populated;
@@ -515,6 +526,8 @@ private:
     std::vector<std::vector<uint32_t /*field_id*/>> class_field_ids;
     std::vector<std::vector<uint32_t /*field_id*/>> pending_cross_ref_field_ids;
     std::vector<uint32_t /*access_flag*/> field_access_flags;
+    // dexllm (#41): parallel to field_access_flags — see GetFieldAccessFlagsDeclared.
+    std::vector<bool /*written from class_data*/> field_access_flags_declared;
     std::vector<const dex::Code *> method_codes;
     // method parameter types
     std::vector<const dex::TypeList *> proto_type_list;
