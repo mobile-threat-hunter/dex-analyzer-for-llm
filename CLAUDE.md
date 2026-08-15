@@ -671,10 +671,123 @@ constant-only indicator, no interface method, no control-bearing literal, and
 manifest-less so `identify().is_apk` is False). Verified discriminating: removing
 the helper's narrowing branch turns that leg **16 failed**.
 
-**Known, not fixed here:** the FastAPI `/upload` endpoint rejects any filename
-not ending in `.apk` while `DexKit` itself identifies a container by CONTENT, so
-`test_fastapi_static` skips for a bare `.dex` sample rather than papering over
-the inconsistency (dexllm#47).
+The `/upload` inconsistency this surfaced is now fixed — see the section below.
+
+### `/upload` identifies a container by CONTENT, like every other entry point (dexllm#47)
+
+The FastAPI `/upload` refused any upload whose FILENAME did not end in `.apk`,
+**before looking at a single byte** — contradicting the headline input contract
+("identified by content (PK / `dex\n` magic), not filename") that `DexKit(path)`,
+`dexllm.identify`, the SDK's `open_apk` and the MCP tools all honour. So the one
+input the project advertises it handles — a dumped or renamed container — was the
+one the HTTP surface declined. It was not a safety property either: the bytes go
+to a session tempdir and then to `DexKit`, whose **structural verifier is the
+documented single gate**, and the endpoint never relied on the suffix (it saved
+under the uploaded name and re-derived everything from content).
+
+**The gate is REMOVED** (option 1 of the issue — it deletes a check rather than
+adding cases), so a non-container is now refused for what it IS: `DexKit`'s own
+error, surfaced as the same 400 with a strictly better reason (`failed to open
+upload: RuntimeError: …` instead of `filename must end with .apk`). Three coupled
+changes, all in [server.py](src/dexllm/server.py):
+
+- **the filename stops being a path component** (`_STORED_NAME`, a constant).
+  Removing the gate makes the basename fully client-controlled, and the old code
+  fed it to the save path: `Path(x).name` is `''` for `""` / `"."` / `"/"` and
+  `'..'` for `".."`, both of which resolve to the tempdir itself or its parent
+  (`IsADirectoryError`), while a NUL or a 300-char name is a write failure. A
+  sanitiser would have to get every one of those right; **storing under a fixed
+  name means no filename decides where the bytes land**, which is the same claim
+  the fix makes (the name is not load-bearing — the container is identified by
+  content). The name comes back as `filename`, i.e. display metadata. Traversal
+  was never reachable either way (`Path.name` drops the directory part), but the
+  earlier variants failed the degenerate values differently.
+- **the STORE gets its own try** — the write sat outside the existing one, so any
+  write failure was an unhandled 500 that ALSO leaked the tempdir (pre-existing:
+  a NUL byte or an over-long name passed the old suffix check too, and both now
+  store fine since the name never reaches the filesystem). It is a **500** — a
+  full or unwritable `$TMPDIR` is ours, not the caller's — while the loader's
+  failure stays the caller's **400**. Merging the two into one 400, which an
+  earlier cut did, reported a disk-full outage as a client error. `mkdtemp` is
+  INSIDE that try with the write: it fails on the same condition, and a reviewer
+  showed the version that left it outside answered the identical `ENOSPC` with a
+  bare `500 Internal Server Error` and no reason, decided by which libc call
+  happened to fail first. The response body is also read (`size_bytes`,
+  `loaded_dex_count`) BEFORE `_sessions[sid] = sess`, so registration is the last
+  statement that can fail — otherwise a raise orphans a session whose id the
+  client never received. That ordering incidentally fixes a pre-existing
+  unhandled 500: with `DEXKIT_SESSION_CACHE=0` the LRU evicts the new session
+  inside the handler, and the old code then called `getsize` on the deleted file.
+- **`loaded_dex_count` beside `identified`.** The probe's `dex_count` and the
+  session's are NOT the same number: a concatenated packer dump — the case this
+  endpoint now accepts — probes as ONE dex and loads as N (`ProbeContainer`'s
+  raw-dex fast path never runs `LogicalDexSlices`), and a container whose sibling
+  dex the verifier rejects loads FEWER than it declares. Returning only
+  `identified` would have re-introduced the exact dexllm#38 defect on a new
+  layer, so the two facts get two keys, with the same spelling #38 chose for MCP.
+  The other three probe keys structurally cannot drift (`Identify()` and the
+  constructor share one `ProbeContainer`). A partially-rejected container is a
+  **200**, not a 400 — the survivors still load (dexllm#25) — and for a
+  CONCATENATED one NEITHER count shows the drop (the probe's raw-dex fast path
+  always says 1), so `verify_report()` remains the place the per-dex verdicts
+  live. The docstring says exactly that; an earlier draft claimed a rejected dex
+  is always a 400, which a reviewer falsified with a crafted sibling.
+
+**Observable on the SUCCESS path, deliberately:** `apk_path` used to end in the
+uploaded basename and now always ends in `upload`, so a consumer that recovered
+a display name from it silently gets the constant — `filename` is where that
+information lives now, echoed VERBATIM (unvalidated client input: markup, path
+separators and C1 control characters all survive, so a UI escapes it; a lone
+surrogate is unreachable — starlette decodes the header as latin-1 — so the
+dexllm#29 `ensure_ascii=False` note still holds). Release-notes material (this
+repo keeps no aliases, #24).
+
+**Deliberately NOT renamed:** the multipart part is still `apk` and the response
+key is still `apk_path`, both of which now say APK for a surface that takes any
+container — the `api_descriptor` → `method_descriptor` shape dexllm#21 stage 4
+removed one layer down, and the same one-concept-two-spellings gap as MCP's
+`source`. Unlike the MCP catalog, this surface HAS an out-of-tree consumer
+(dexllm-web), a rename would break it at the wire with no alias mechanism, and no
+naming audit covers HTTP keys — so it is a decision to revisit with that consumer,
+not an oversight.
+
+Docs: no doc described the endpoint's filename contract, so the drift outside the
+handler was the module docstring, the four sibling docstrings and the SYSTEM
+PROMPT that still said APK (the prompt is behavioural — it told the model an APK
+was uploaded for a session that may be a manifest-less dump), plus a README line
+making the reach of the content-based claim explicit.
+
+Guards ([tests/test_llm_backends.py](tests/test_llm_backends.py)), all
+**corpus-independent** — they run on the committed `tests/data/multidex.apk`, so
+they hold under a `$DEXLLM_TEST_APK` narrowing and in the corpus-less CI leg:
+the dexllm#46 skip is gone; the non-container 400 asserts the loader's reason and
+that the OLD message is gone *by its own words*; `test_fastapi_upload_is_content_based`
+uploads the zip under a nameless `blob` and a bare `classes.dex` under `dump`
+(full `identified` verdict + the session actually lists classes);
+`test_fastapi_upload_lands_inside_the_session_tempdir` pins WHERE the bytes land
+for `..` / `.` / `/` / a traversal path — asserting the containment, not merely
+that the request succeeded, with the session tempdir redirected under pytest's
+`tmp_path` so the escape oracle is a private path (a fixed name in the shared
+`/tmp` fails on an ENVIRONMENT fact, this file's own #46 rule, and hard-codes the
+traversal depth); `test_fastapi_upload_cleans_up_and_blames_the_right_side`
+injects `ENOSPC` at BOTH `$TMPDIR` calls and pins 500-with-a-reason + no leaked
+tempdir, and the loader's 400 + no leak;
+`test_fastapi_upload_body_is_read_before_the_session_is_registered` pins the
+ordering via `DEXKIT_SESSION_CACHE=0`;
+`test_fastapi_upload_reports_probe_and_session_dex_counts_separately`
+concatenates the dex with itself so the two counts genuinely disagree (1 vs 2);
+and `test_fastapi_upload_refuses_a_zip_whose_dexes_do_not_start_at_classes_dex`
+pins the accept-set the docstring promises — a `classes2.dex`-only zip matches
+the `classes*.dex` glob an earlier wording used and is still refused.
+Mutation-verified, 9/9 killed: restoring the suffix gate (9 failures), storing
+under the raw client basename (all 4 containment cases), feeding
+`loaded_dex_count` from the probe, dropping `filename`, flipping the store's 500
+to 400, deleting either `rmtree`, moving `mkdtemp` back outside the try, and
+reading the body after registration. **Three of those mutants survived the cut
+that INTRODUCED the behaviours they guard** — the 500, the load-path cleanup and
+the containment oracle all shipped unguarded in the review-response commit, and
+two reviewers had to construct them: the repo's own
+[[review-responses-are-the-weak-spot]] pattern, again.
 
 ## Test corpus
 

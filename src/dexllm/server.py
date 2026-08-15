@@ -2,8 +2,10 @@
 
 Web flow
 --------
-1. Browser uploads an APK to `POST /upload`. Server saves to a session-scoped
-   tempdir, opens a DexKit instance (cached in an LRU), returns `session_id`.
+1. Browser uploads a container to `POST /upload` — an APK, a bare `.dex`, or a
+   renamed/extension-less dump, identified by CONTENT like every other entry
+   point. Server saves to a session-scoped tempdir, opens a DexKit instance
+   (cached in an LRU), returns `session_id` and the `identify()` verdict.
 2. Browser calls `POST /analyze` with `session_id` + `prompt`. Server runs a
    manual Anthropic tool-use loop against `claude-opus-4-8`, dispatching each
    `tool_use` block through `dexllm.tools.execute(name, args, dk)` and
@@ -58,7 +60,7 @@ from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from sse_starlette.sse import EventSourceResponse
 
-from . import DexKit
+from . import DexKit, identify
 from . import tools as dxtools
 
 # ─── Config ───────────────────────────────────────────────────────────────
@@ -73,12 +75,12 @@ MAX_TOKENS = int(os.environ.get("DEXKIT_MAX_TOKENS", "8192"))
 
 
 class Session:
-    """One uploaded APK and its open DexKit handle, keyed by session id."""
+    """One uploaded container and its open DexKit handle, keyed by session id."""
 
     __slots__ = ("id", "apk_path", "tmpdir", "dk")
 
     def __init__(self, sid: str, apk_path: str, tmpdir: str, dk: DexKit) -> None:
-        """Bind the session id, APK path, scratch dir, and DexKit handle."""
+        """Bind the session id, stored path, scratch dir, and DexKit handle."""
         self.id = sid
         self.apk_path = apk_path
         self.tmpdir = tmpdir
@@ -155,31 +157,68 @@ def health() -> dict:
     }
 
 
+# The upload is stored under a FIXED basename. The client-supplied filename is
+# not load-bearing — the container is identified by content — and using it as a
+# path component is the only thing that would make an attacker-chosen string
+# decide where the bytes land (`Path(x).name` is `''` for `"."`/`"/"`, `'..'`
+# for `".."`, and a NUL or a 300-char name is a write error, not a request the
+# server should fail on). It comes back as `filename`, which is what it is:
+# display metadata — unvalidated client input, echoed verbatim (markdown, path
+# separators and C1 control characters all survive), so a UI escapes it.
+_STORED_NAME = "upload"
+
+
 @app.post("/upload")
 async def upload(apk: UploadFile = File(...)) -> dict:
-    """Save an uploaded APK, open DexKit, return a session_id.
+    """Save an uploaded container, open DexKit, return a session_id.
 
-    The APK lives in a session-scoped tempdir until DELETE /session/{id}
+    The upload is identified by CONTENT, not by its filename — an `.apk`, a
+    bare `.dex`, a `.jar`/`.zip` whose dexes start at `classes.dex`, or a
+    renamed / extension-less dump all load, exactly as `DexKit(path)` does.
+    What the loader refuses — a non-container, a zip with no `classes.dex`
+    (a `classes2.dex`-only zip is refused: the run must START there), a dex no
+    logical slice of which survives the structural verifier — comes back as a
+    400 carrying its reason. A container whose SIBLING dex is rejected still
+    loads its survivors (dexllm#25), so it is a 200; `loaded_dex_count` is
+    then the honest count, and the per-dex verdicts are in `verify_report()`.
+
+    The file lives in a session-scoped tempdir until DELETE /session/{id}
     or LRU eviction. Opening DexKit can take several seconds for large
     APKs, so the cost is paid here, once, instead of on every /analyze.
     """
-    if not apk.filename or not apk.filename.lower().endswith(".apk"):
-        raise HTTPException(status_code=400, detail="filename must end with .apk")
-
     sid = uuid.uuid4().hex
-    tmpdir = tempfile.mkdtemp(prefix=f"dexkit-{sid}-")
-    apk_path = str(Path(tmpdir) / Path(apk.filename).name)
-    with open(apk_path, "wb") as f:
-        shutil.copyfileobj(apk.file, f)
+    tmpdir = ""
+
+    # Both calls fail on the SAME condition — a full or unwritable $TMPDIR —
+    # so they answer with the same 500 and the same reason. That is ours, not
+    # the caller's; the loader's refusal below is the caller's 400.
+    try:
+        tmpdir = tempfile.mkdtemp(prefix=f"dexkit-{sid}-")
+        apk_path = str(Path(tmpdir) / _STORED_NAME)
+        with open(apk_path, "wb") as f:
+            shutil.copyfileobj(apk.file, f)
+    except Exception as e:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"failed to store upload: {type(e).__name__}: {e}",
+        )
 
     try:
         dk = await asyncio.to_thread(DexKit, apk_path)
+        verdict = await asyncio.to_thread(identify, apk_path)
     except Exception as e:
         shutil.rmtree(tmpdir, ignore_errors=True)
         raise HTTPException(
             status_code=400,
-            detail=f"failed to open APK: {type(e).__name__}: {e}",
+            detail=f"failed to open upload: {type(e).__name__}: {e}",
         )
+
+    # Everything the response needs is read BEFORE the session is registered:
+    # a raise after that point would orphan a session whose id the client never
+    # received, so registration is the last statement that can fail.
+    size_bytes = os.path.getsize(apk_path)
+    loaded_dex_count = dk.dex_count()
 
     sess = Session(sid, apk_path, tmpdir, dk)
     _sessions[sid] = sess
@@ -188,7 +227,15 @@ async def upload(apk: UploadFile = File(...)) -> dict:
     return {
         "session_id": sid,
         "apk_path": apk_path,
-        "size_bytes": os.path.getsize(apk_path),
+        "filename": apk.filename,
+        "size_bytes": size_bytes,
+        # The PROBE's verdict for the uploaded container...
+        "identified": verdict,
+        # ...and the session's own count, under a name that cannot be mistaken
+        # for it: a concatenated packer dump probes as ONE dex and loads as N,
+        # and a container whose sibling dex the verifier rejects loads FEWER
+        # than it declares. dexllm#38 drew the same line for the MCP `identify`.
+        "loaded_dex_count": loaded_dex_count,
     }
 
 
@@ -205,7 +252,8 @@ def drop_session(sid: str) -> dict:
 # ─── Tool-use loop ────────────────────────────────────────────────────────
 
 SYSTEM_PROMPT = (
-    "You are an Android APK security analyst. The user has uploaded an APK; "
+    "You are an Android security analyst. The user has uploaded a dex "
+    "container — an APK, or a bare/dumped dex with no manifest; "
     "use the provided dexkit tools to investigate it. Be methodical: "
     "1) start with `summarize_capabilities` or `list_classes` to orient, "
     "2) drill into suspicious areas with `find_*` tools, "
@@ -323,7 +371,7 @@ async def _run_agent(sess: Session, prompt: str) -> AsyncIterator[dict]:
 async def analyze(
     session_id: str = Form(...), prompt: str = Form(...)
 ) -> EventSourceResponse:
-    """Stream the agent's SSE response for ``prompt`` against the session APK."""
+    """Stream the agent's SSE response for ``prompt`` against the session's dex."""
     sess = _get_session(session_id)
     return EventSourceResponse(_run_agent(sess, prompt))
 

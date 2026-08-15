@@ -349,6 +349,10 @@ python -m dexllm.mcp_server                 # MCP stdio (Claude Desktop / Cursor
 uvicorn dexllm.server:app --port 8000       # FastAPI + SSE web backend
 ```
 
+The web backend's `POST /upload` takes the same inputs as everything else —
+identified by content, not by filename — and returns the `identify()` verdict
+alongside the `session_id`.
+
 ## Tests
 
 ```bash
