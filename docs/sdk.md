@@ -206,7 +206,15 @@ other spelling, and the reason `MethodInfo` exposes the bits instead.
   twice under two names for the same concern — an API that genuinely spans two
   domains does count once in each, so `sum(categories.values()) >=
   total_call_sites`. `flags` is the orthogonal cross-domain axis (today only
-  `IDENTIFIER`).
+  `IDENTIFIER`). `by_caller` maps a calling method to the catalog APIs it invokes
+  — the transpose of `CapabilityHit.callers`, and what answers "who calls
+  `Runtime.exec` / `DexClassLoader` here". It held `{permissions}` until
+  dexllm#35, built inside the permission loop, so an API declaring none registered
+  no callers and the index covered 17 of the corpus's 317 distinct callers (5.4%).
+  Either view is derivable from `api_hits`, so this is a convenience index; the
+  permission view is one join away
+  (`{p for a in by_caller[c] for p in by_api[a].permissions}`) while a permission
+  set could not give back an API.
 
 ### Content providers
 - **`ContentProviderUse`** `(uri, family, methods)` — a `content://` provider URI

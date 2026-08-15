@@ -757,11 +757,16 @@ class DexKitAdapter:
                     permissions=tuple(h.permissions),
                     categories=tuple(h.categories),
                     flags=tuple(h.flags),
-                    callers=tuple(h.callers),
+                    # sorted, not bare tuple(): these come from a `set`, so the
+                    # order would follow per-process string hashing. dexllm#35 made
+                    # multi-valued `by_caller` entries the normal case (they were
+                    # rare when the values were permissions), which turned a corner
+                    # case into a routine one.
+                    callers=tuple(sorted(h.callers)),
                 )
                 for h in c.api_hits
             ),
-            by_caller={k: tuple(v) for k, v in c.by_caller.items()},
+            by_caller={k: tuple(sorted(v)) for k, v in c.by_caller.items()},
         )
 
     # -- ContentProviderPort --

@@ -734,8 +734,21 @@ class CapabilityReport:
     """The app's capability profile.
 
     Matched catalog APIs, aggregate permission / category / flag counts, and a
-    caller → permissions map. Holds ``Mapping`` fields, so this model is immutable
+    caller → catalog-APIs map. Holds ``Mapping`` fields, so this model is immutable
     (the mappings are read-only views) but NOT hashable.
+
+    ``by_caller`` is the transpose of ``CapabilityHit.callers`` — which method in
+    this app invokes which catalog API. It held ``{permissions}`` until dexllm#35,
+    and was built inside the permission loop, so an API declaring none contributed
+    no callers at all; every REFLECTION / PROCESS_EXEC / DYNAMIC_LOAD /
+    NATIVE_CODE / CRYPTO / WEBVIEW / STORAGE entry is permission-less, as are 6
+    domain entries incl. the ANDROID_ID read, and the index covered 17 of the
+    corpus's 317 distinct callers (5.4%). Both views are derivable from
+    ``api_hits``, so this is a convenience index rather than new information; the
+    value is signatures because that is the more primary view, and because the
+    FIELD only derives one way — ``{p for a in by_caller[c] for p in
+    by_api[a].permissions}`` recovers the old value, a permission set could not
+    recover an API.
 
     ``categories`` is a single axis (domain / behaviour), so one call site is never
     counted twice under two names for the same concern; ``flags`` is the orthogonal
@@ -748,8 +761,9 @@ class CapabilityReport:
                          permissions={'android.permission.INTERNET': 3, ...},
                          categories={'REFLECTION': 73, ...}, flags={},
                          api_hits=(CapabilityHit(...), ...),
-                         by_caller={'Landroid/support/v7/app/TwilightManager;->'
-                                    'getLastKnownLocationForProvider(...)': (...)})
+                         by_caller={'Landroid/arch/lifecycle/ClassesInfoCache$'
+                                    'MethodReference;->invokeCallback(...)':
+                                    ('Ljava/lang/reflect/Method;->invoke(...)',)})
     """
 
     catalog_version: str

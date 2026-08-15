@@ -349,3 +349,252 @@ def test_flags_survive_the_sdk_and_mcp_layers():
     assert out["flags"] == {"IDENTIFIER": 2}
     assert out["api_hits"][0]["flags"] == ["IDENTIFIER"]
     assert out["catalog_version"] == raw.catalog_version
+
+
+def test_by_caller_covers_a_permissionless_api():
+    """The caller index must hold callers of APIs that declare no permission.
+
+    `by_caller` was populated INSIDE `for perm in perms:`, so an entry with no
+    `permissions` registered no callers at all (dexllm#35) — and that is the
+    catalog's behavioural half: 20 of its 42 entries, every REFLECTION /
+    PROCESS_EXEC / DYNAMIC_LOAD / NATIVE_CODE / CRYPTO / WEBVIEW / STORAGE API.
+    The index covered 26 of the corpus's 634 distinct callers, so "who calls
+    `Runtime.exec` here" — the question those entries exist to answer — could not
+    be asked of it.
+
+    Corpus-less: `_FOR_NAME` carries no permission and `_GET_DEVICE_ID` does, so
+    the stub pins both arms without an APK.
+    """
+    from dexllm.capability import summarize_capabilities
+
+    dk = _StubDk({_GET_DEVICE_ID: ["La/B;->m()V"], _FOR_NAME: ["La/C;->n()V"]})
+    report = summarize_capabilities(dk)
+
+    assert (
+        "La/C;->n()V" in report.by_caller
+    ), "the caller of a permission-less API is absent from by_caller"
+    assert "La/B;->m()V" in report.by_caller
+
+
+def test_by_caller_values_are_api_signatures():
+    """The value is WHICH APIs the caller invokes, not which permissions.
+
+    dexllm#35 chose signatures because they are lossless: the permission and tag
+    views are recoverable from the report alone (see the next test), while a
+    permission set could not be turned back into an API.
+    """
+    from dexllm.capability import summarize_capabilities
+
+    dk = _StubDk({_GET_DEVICE_ID: ["La/B;->m()V"], _FOR_NAME: ["La/B;->m()V"]})
+    report = summarize_capabilities(dk)
+
+    assert report.by_caller["La/B;->m()V"] == {_GET_DEVICE_ID, _FOR_NAME}
+
+
+def test_the_permission_view_of_a_caller_is_still_recoverable():
+    """The pre-dexllm#35 value must be derivable, or the change lost information.
+
+    This is the join the docstrings hand the reader; it is a guard because the
+    field-level half of the argument for signatures over permissions rests on it.
+    (The report-level half does NOT: `api_hits` carries `callers`, so either view
+    was always derivable from a report — including a pre-fix one. The bug lost no
+    data, only the index.)
+
+    The expectation is derived from the CATALOG rather than written out, so adding
+    a permission to `getDeviceId` becomes a catalog edit instead of a red test
+    blaming the join. It stays discriminating — every by_caller mutant fails it.
+    """
+    from dexllm.capability import summarize_capabilities
+
+    dk = _StubDk({_GET_DEVICE_ID: ["La/B;->m()V"], _FOR_NAME: ["La/B;->m()V"]})
+    report = summarize_capabilities(dk)
+
+    by_api = {h.api_signature: h for h in report.api_hits}
+    perms = {p for a in report.by_caller["La/B;->m()V"] for p in by_api[a].permissions}
+    expected = set(_entries()[_GET_DEVICE_ID].get("permissions") or ()) | set(
+        _entries()[_FOR_NAME].get("permissions") or ()
+    )
+    assert expected, "the fixture APIs carry no permission — the join proves nothing"
+    assert perms == expected
+
+
+def test_by_caller_is_the_exact_transpose_of_the_hit_callers():
+    """Every caller of every matched API appears, and nothing else does.
+
+    The property the nesting bug broke, stated directly rather than as a count —
+    a fix that merely moved the line one level out but kept a filter would satisfy
+    the tests above on the stub and still under-report on a real APK.
+    """
+    from dexllm.capability import summarize_capabilities
+
+    dk = _StubDk(
+        {
+            _GET_DEVICE_ID: ["La/B;->m()V", "La/C;->n()V"],
+            _FOR_NAME: ["La/C;->n()V", "La/D;->o()V"],
+        }
+    )
+    report = summarize_capabilities(dk)
+
+    expected: dict = {}
+    for hit in report.api_hits:
+        for caller in hit.callers:
+            expected.setdefault(caller, set()).add(hit.api_signature)
+    assert report.by_caller == expected
+    assert set(report.by_caller) == {"La/B;->m()V", "La/C;->n()V", "La/D;->o()V"}
+
+
+def test_by_caller_survives_the_sdk_layer():
+    """`sdk/adapter.py` converts each set to a tuple — one deletable line.
+
+    The caller must hold TWO APIs, and the comparison is on sets: with a
+    one-API-per-caller stub a reviewer's `tuple(v)[:1]` mutant passed the whole
+    suite, and that is not a contrived edit — the field just grew ~25x and
+    `tools.py` already justifies omitting it because per-caller sets "can be
+    huge", so capping is the natural next change. Comparing as sets also keeps
+    this independent of the tuple ORDER, which is only deterministic because the
+    adapter sorts.
+
+    The MCP tool deliberately omits `by_caller` (context size), which is why this
+    stops at the SDK; that omission is asserted at the end.
+    """
+    from dexllm.capability import summarize_capabilities
+    from dexllm.sdk.adapter import DexKitAdapter
+
+    dk = _StubDk({_FOR_NAME: ["La/C;->n()V"], _GET_DEVICE_ID: ["La/C;->n()V"]})
+    raw = summarize_capabilities(dk)
+    assert raw.by_caller == {"La/C;->n()V": {_FOR_NAME, _GET_DEVICE_ID}}
+
+    adapter = DexKitAdapter.__new__(DexKitAdapter)
+    adapter._dk = dk  # type: ignore[attr-defined]
+    sdk_report = DexKitAdapter.summarize_capabilities(adapter)
+    assert {k: set(v) for k, v in sdk_report.by_caller.items()} == {
+        "La/C;->n()V": {_FOR_NAME, _GET_DEVICE_ID}
+    }
+
+    from dexllm.tools import TOOL_IMPLS
+
+    # NON-DISCRIMINATING BY DESIGN on the fix itself: it pins the documented
+    # omission, so a later change that starts emitting the (now much larger)
+    # caller index into an LLM context is a conscious edit, not a slip.
+    assert "by_caller" not in TOOL_IMPLS["summarize_capabilities"](dk)
+
+
+def test_the_sdk_orders_the_caller_index_deterministically():
+    """A `set` -> `tuple` conversion must sort, or the order varies per process.
+
+    `PYTHONHASHSEED` randomises string hashing, so `tuple(some_set)` differs
+    between runs. This repo gates cross-process byte-identity elsewhere, and the
+    change made multi-valued entries common (they were rare when the values were
+    permissions), so the exposure went from a corner case to the normal one.
+
+    MANY on BOTH axes, deliberately: with two elements an unsorted `tuple(set)`
+    lands in sorted order half the time, so the first cut of this guard let the
+    mutant through on the seed it happened to run under — and with one caller per
+    API the `callers` half was trivially sorted, so its mutant survived every seed.
+    At n=8..10 the unsorted variant agrees with `sorted` in 1 of n! orders, which
+    is deterministic in every sense that matters; verified against both mutants on
+    five `PYTHONHASHSEED` values.
+    """
+    from dexllm.sdk.adapter import DexKitAdapter
+
+    many = list(_entries())[:10]
+    callers = [f"La/C{i};->n()V" for i in range(8)]
+    assert len(many) >= 8, "catalog too small to make the order check discriminating"
+    dk = _StubDk({sig: callers for sig in many})
+    adapter = DexKitAdapter.__new__(DexKitAdapter)
+    adapter._dk = dk  # type: ignore[attr-defined]
+    report = DexKitAdapter.summarize_capabilities(adapter)
+
+    assert set(report.by_caller) == set(callers)
+    for values in report.by_caller.values():
+        assert values == tuple(sorted(values))
+        assert set(values) == set(many)
+    for hit in report.api_hits:
+        assert hit.callers == tuple(sorted(hit.callers))
+        assert set(hit.callers) == set(callers)
+
+
+def test_the_caller_index_does_not_depend_on_the_tag_axes_either(tmp_path):
+    """An entry with NEITHER permissions NOR categories must still index.
+
+    The same defect shape as dexllm#35 one axis over: nesting the line in
+    `for cat in cats:` passes every other guard, because every BUNDLED entry
+    carries a category. A replacement catalog need not — `_validate_catalog`
+    requires the tag lists to be lists, not to be non-empty, and the module
+    docstring only says an entry "should" have one. So the override path, which is
+    a supported feature, could silently reproduce the bug.
+    """
+    from dexllm.capability import summarize_capabilities
+
+    bare = "Lp/Q;->r()V"
+    (tmp_path / "android_api_map.json").write_text(
+        json.dumps(
+            {
+                "version": "test",
+                "category_vocabulary": ["REFLECTION"],
+                "flag_vocabulary": [],
+                "entries": {bare: {"permissions": [], "categories": [], "flags": []}},
+            }
+        )
+    )
+    dk = _StubDk({bare: ["La/Z;->z()V"]})
+    report = summarize_capabilities(dk, data_dir=tmp_path)
+
+    assert report.by_caller == {"La/Z;->z()V": {bare}}
+
+
+def test_relocating_the_caller_index_left_the_counters_alone():
+    """The half the a/b covered and the suite did not.
+
+    dexllm#35 moved one statement out of `for perm in perms:`; nothing else in the
+    loop changed. A future refactor that gets the caller index right while
+    disturbing a counter would pass every test above.
+    """
+    from dexllm.capability import summarize_capabilities
+
+    dk = _StubDk(
+        {
+            _GET_DEVICE_ID: ["La/B;->m()V", "La/C;->n()V"],
+            _FOR_NAME: ["La/C;->n()V"],
+        }
+    )
+    report = summarize_capabilities(dk)
+
+    assert report.total_call_sites == 3
+    assert report.permissions == {"android.permission.READ_PHONE_STATE": 2}
+    assert report.categories == {"TELEPHONY": 2, "REFLECTION": 1}
+    assert report.flags == {"IDENTIFIER": 2}
+
+
+def test_every_indexed_signature_is_a_key_of_the_report_s_own_hits():
+    """Join totality as a PROPERTY, so the documented recipe cannot KeyError.
+
+    `test_the_permission_view_of_a_caller_is_still_recoverable` exercises the join
+    on one caller of a two-API stub, so it would survive an unmatched signature
+    leaking into the index; this states the invariant instead.
+    """
+    from dexllm.capability import summarize_capabilities
+
+    dk = _StubDk({_GET_DEVICE_ID: ["La/B;->m()V"], _FOR_NAME: ["La/C;->n()V"]})
+    report = summarize_capabilities(dk)
+
+    indexed = set().union(*report.by_caller.values())
+    assert indexed <= {h.api_signature for h in report.api_hits}
+    assert indexed == {_GET_DEVICE_ID, _FOR_NAME}
+
+
+def test_only_categories_filters_the_caller_index_with_the_hits():
+    """What makes the documented join well-defined per report.
+
+    `only_categories` `continue`s before both `by_caller` and `api_hits` are
+    written, so the two stay the same subset. Pre-dexllm#35 this was vacuous for a
+    permission-less filter like REFLECTION — the index was empty either way — so it
+    is newly observable behaviour with nothing pinning it.
+    """
+    from dexllm.capability import summarize_capabilities
+
+    dk = _StubDk({_GET_DEVICE_ID: ["La/B;->m()V"], _FOR_NAME: ["La/B;->m()V"]})
+    report = summarize_capabilities(dk, only_categories={"REFLECTION"})
+
+    assert report.by_caller == {"La/B;->m()V": {_FOR_NAME}}
+    assert {h.api_signature for h in report.api_hits} == {_FOR_NAME}

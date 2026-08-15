@@ -126,12 +126,41 @@ class ApiHit:
 
 @dataclass
 class CapabilityReport:
-    """Aggregated capability profile of an APK across all matched catalog APIs."""
+    """Aggregated capability profile of an APK across all matched catalog APIs.
+
+    ``by_caller`` maps a calling method to the catalog APIs it invokes — the
+    transpose of ``ApiHit.callers``, and the index that answers "who in this app
+    calls ``Runtime.exec`` / ``DexClassLoader`` / ``Class.forName``".
+
+    It held ``{permissions}`` until dexllm#35, populated inside the permission
+    loop, so an API declaring none registered no callers at all — and every
+    ``REFLECTION`` / ``PROCESS_EXEC`` / ``DYNAMIC_LOAD`` / ``NATIVE_CODE`` /
+    ``CRYPTO`` / ``WEBVIEW`` / ``STORAGE`` entry in the bundled catalog is
+    permission-less, as are 6 domain entries including the ANDROID_ID read
+    (``Settings$Secure.getString``). The index covered **17 of the corpus's 317
+    distinct callers (5.4%)**.
+
+    It is a CONVENIENCE INDEX, not new information: ``api_hits`` carries
+    ``callers`` per API, so either view has always been derivable from a report —
+    including from a PRE-fix one, which is why the bug lost no data. The value is
+    signatures because that is the more primary view (the caller-indexed question
+    is what the index is FOR), and because within the FIELD the derivation only
+    runs one way — APIs give back permissions and tags, a permission set could not
+    give back an API::
+
+        by_api = {h.api_signature: h for h in report.api_hits}
+        perms = {p for a in report.by_caller[caller] for p in by_api[a].permissions}
+        tags = {t for a in report.by_caller[caller] for t in by_api[a].categories}
+
+    The join is defined WITHIN one report: ``only_categories`` filters
+    ``by_caller`` and ``api_hits`` together, so joining against a differently
+    filtered call is meaningless.
+    """
 
     permissions: Counter  # permission -> count of invocations
     categories: Counter  # category -> count of invocations
     flags: Counter  # cross-domain concern -> count of invocations
-    by_caller: Dict[str, Set[str]]  # caller descriptor -> {permissions}
+    by_caller: Dict[str, Set[str]]  # caller descriptor -> {api signatures}
     api_hits: List[ApiHit]  # one entry per matched API
     total_call_sites: int
     catalog_version: str
@@ -235,9 +264,18 @@ def summarize_capabilities(
         for s in sites:
             total_sites += 1
             hit.callers.add(s.caller_descriptor)
+            # OUTSIDE the permission loop, and outside the tag loops below
+            # (dexllm#35). Nesting it inside `for perm in perms:` meant an API
+            # carrying no `permissions` never registered its callers at all —
+            # every REFLECTION / PROCESS_EXEC / DYNAMIC_LOAD / NATIVE_CODE /
+            # CRYPTO / WEBVIEW / STORAGE entry is permission-less, as are 6 domain
+            # entries incl. the ANDROID_ID read — so the index covered 17 of the
+            # corpus's 317 distinct callers. A replacement catalog need not give
+            # an entry any tag either, so this must not be nested in a tag loop
+            # for the same reason.
+            by_caller.setdefault(s.caller_descriptor, set()).add(api_sig)
             for perm in perms:
                 permissions[perm] += 1
-                by_caller.setdefault(s.caller_descriptor, set()).add(perm)
             for cat in cats:
                 categories[cat] += 1
             for flag in entry_flags:

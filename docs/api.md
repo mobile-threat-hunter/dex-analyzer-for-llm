@@ -783,6 +783,35 @@ rolling up across TELEPHONY / BLUETOOTH / …).
 identifier-returning APIs even though it is a flag. A tag the catalog does not
 declare raises `ValueError` rather than returning an empty report.
 
+`r.by_caller` is the caller-indexed view — which method in the app invokes which
+catalog API, the transpose of `ApiHit.callers`:
+```python
+r = dexllm.summarize_capabilities(dk)
+next(iter(r.by_caller.items()), None)
+# ('Landroid/arch/lifecycle/ClassesInfoCache$MethodReference;->invokeCallback(...)',
+#  {'Ljava/lang/reflect/Method;->invoke(Ljava/lang/Object;[Ljava/lang/Object;)Ljava/lang/Object;'})
+```
+It held `{permissions}` until dexllm#35 and was built inside the permission loop,
+so an API declaring none registered no callers at all. Every `REFLECTION` /
+`PROCESS_EXEC` / `DYNAMIC_LOAD` / `NATIVE_CODE` / `CRYPTO` / `WEBVIEW` / `STORAGE`
+entry is permission-less (14 of the catalog's 42), and so are 6 domain entries —
+including `Settings$Secure.getString`, the ANDROID_ID read. The index covered
+**17 of the corpus's 317 distinct callers (5.4%)**.
+
+Either view is derivable from `api_hits`, so `by_caller` is a convenience index
+rather than new information; signatures make it the more primary one, and within
+the field the derivation runs only one way — APIs give back permissions and tags,
+a permission set could not give back an API:
+```python
+r = dexllm.summarize_capabilities(dk)
+by_api = {h.api_signature: h for h in r.api_hits}
+for caller, apis in r.by_caller.items():
+    {p for a in apis for p in by_api[a].permissions}   # the pre-dexllm#35 value
+```
+The join is defined WITHIN one report: `only_categories` filters `by_caller` and
+`api_hits` together, so joining across two differently filtered calls is
+meaningless.
+
 The `dexllm.capability` module also exposes `ApiHit` / `CapabilityReport` types.
 
 ---
@@ -1008,7 +1037,10 @@ form, so one method described itself two ways.) The same bits drive the
 
 ### `CapabilityReport`
 `permissions: collections.Counter[str]`, `categories: collections.Counter[str]`,
-`flags: collections.Counter[str]`.
+`flags: collections.Counter[str]`, `by_caller: dict[str, set[str]]` (caller
+descriptor → the catalog API signatures it invokes — dexllm#35; it was
+`→ {permissions}` before), `api_hits: list[ApiHit]`, `total_call_sites: int`,
+`catalog_version: str`, `catalog_size: int`, `matched_apis: int`.
 
 ---
 
