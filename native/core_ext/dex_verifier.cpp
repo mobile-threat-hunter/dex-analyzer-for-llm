@@ -418,10 +418,17 @@ private:
     bool VerifyEncodedArrayAt(u4 off);              // ART CheckEncodedArray :1225
     bool VerifyEncodedValue(const u1** pp, int depth);  // ART CheckEncodedValue :1049
     bool VerifyClassDefs();  // ART CheckInterClassDefItem :2935
-    // ART FindFirstClassDataDefiner :3070 — class_idx of class_data's first
-    // member (field, else method), or dex::kNoIndex if empty. `off` already
-    // validated by VerifyClassData in CheckIntraSection.
-    bool FindFirstClassDataDefiner(u4 off, u4* out);
+    // ART CheckInterClassDataItem :3208 — EVERY member a class_data declares
+    // must name `cls` as its defining class. ART loops all fields (:3226) and
+    // all methods (:3244), and re-checks per member in CheckClassDataItemField
+    // :934 / CheckClassDataItemMethod :961; this port used to read only the
+    // FIRST member (`FindFirstClassDataDefiner`, defined :2579, called :3070),
+    // so a crafted class_data could declare another class's members as long as
+    // its first entry was its own — dexllm#48. Only the DEFINER half of that ART
+    // function is ported: member access-flag validation, CheckStaticFieldTypes
+    // :1289, and the orphan-class_data check are not. `off` already validated by
+    // VerifyClassData in CheckIntraSection.
+    bool CheckClassDataDefiners(u4 off, u4 cls);
     template <class T>
     const T* TableAt(u4 off, u4 i) const {
         return reinterpret_cast<const T*>(begin_ + off) + i;
@@ -1173,43 +1180,69 @@ bool DexVerifier::VerifyClassDefs() {
             }
         }
 
-        if (cd->class_data_off != 0) {
-            u4 definer;
-            if (!FindFirstClassDataDefiner(cd->class_data_off, &definer)) return false;
-            if (definer != dex::kNoIndex && definer != cls) {
-                return Fail("class_data_item defines members of another class");
-            }
+        if (cd->class_data_off != 0 && !CheckClassDataDefiners(cd->class_data_off, cls)) {
+            return false;
         }
         defined_at[cls] = c;
     }
     return true;
 }
 
-bool DexVerifier::FindFirstClassDataDefiner(u4 off, u4* out) {
+bool DexVerifier::CheckClassDataDefiners(u4 off, u4 cls) {
+    // The INDEX checks below are repeated from VerifyClassData (ART's helpers do
+    // the same). Its OFFSET check is NOT repeated: `off` is a precondition, met
+    // because CheckIntraSection runs first and calls VerifyClassData over the
+    // same class_defs table with the same `!= 0` condition — including under
+    // `lenient`, which gates only VerifyInsns. Nothing is unsafe if that ever
+    // changed: `begin_ + u4` cannot underflow and ReadUleb bounds every byte
+    // against EndOfFile, so a wild `off` ends in "class_data bad counts".
     const u1* p = OffsetToPtr(off);
     u4 sf, inf, dm, vm;
     if (!ReadUleb(&p, &sf) || !ReadUleb(&p, &inf) ||
         !ReadUleb(&p, &dm) || !ReadUleb(&p, &vm)) {
         return Fail("class_data bad counts");
     }
-    if (sf != 0 || inf != 0) {
-        u4 diff, access;
-        if (!ReadUleb(&p, &diff) || !ReadUleb(&p, &access)) return Fail("class_data bad field");
-        if (diff >= header_->field_ids_size) return Fail("class_data field idx out of range");
-        *out = TableAt<dex::FieldId>(header_->field_ids_off, diff)->class_idx;
-        return true;
-    }
-    if (dm != 0 || vm != 0) {
-        u4 diff, access, code_off;
-        if (!ReadUleb(&p, &diff) || !ReadUleb(&p, &access) || !ReadUleb(&p, &code_off)) {
-            return Fail("class_data bad method");
+    // Each of the four lists restarts its delta chain at 0 (dex spec:
+    // `field_idx_diff` / `method_idx_diff` are relative to the previous element
+    // of the SAME list, the first being absolute).
+    auto fields = [&](u4 n) -> bool {
+        u4 idx = 0;
+        for (u4 i = 0; i < n; ++i) {
+            u4 diff, access;
+            if (!ReadUleb(&p, &diff) || !ReadUleb(&p, &access)) {
+                return Fail("class_data bad field");
+            }
+            idx += diff;
+            if (idx >= header_->field_ids_size) {
+                return Fail("class_data field idx out of range");
+            }
+            if (TableAt<dex::FieldId>(header_->field_ids_off, idx)->class_idx != cls) {
+                return Fail("Mismatched defining class for class_data_item field");
+            }
         }
-        if (diff >= header_->method_ids_size) return Fail("class_data method idx out of range");
-        *out = TableAt<dex::MethodId>(header_->method_ids_off, diff)->class_idx;
         return true;
-    }
-    *out = dex::kNoIndex;
-    return true;
+    };
+    auto methods = [&](u4 n) -> bool {
+        u4 idx = 0;
+        for (u4 i = 0; i < n; ++i) {
+            u4 diff, access, code_off;
+            if (!ReadUleb(&p, &diff) || !ReadUleb(&p, &access) ||
+                !ReadUleb(&p, &code_off)) {
+                return Fail("class_data bad method");
+            }
+            idx += diff;
+            if (idx >= header_->method_ids_size) {
+                return Fail("class_data method idx out of range");
+            }
+            if (TableAt<dex::MethodId>(header_->method_ids_off, idx)->class_idx != cls) {
+                return Fail("Mismatched defining class for class_data_item method");
+            }
+        }
+        return true;
+    };
+    // An EMPTY class_data declares nothing, so there is nothing to mismatch —
+    // ART notes such an item may even be shared between classes.
+    return fields(sf) && fields(inf) && methods(dm) && methods(vm);
 }
 
 }  // namespace

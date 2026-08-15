@@ -42,7 +42,16 @@
 //                              syntax for EVERY type_id (CheckInterTypeIdItem
 //                              :2735) as well as the field/method/class_def
 //                              references to one; member-name validity;
-//                              class_def semantics (see VerifyClassDefs)
+//                              class_def semantics (see VerifyClassDefs); and
+//                              EVERY class_data member's defining class
+//                              (CheckClassDataDefiners == the definer half of
+//                              ART CheckInterClassDataItem :3208 — dexllm#48).
+//                              NOT ported from that ART function: member
+//                              access-flag validation (CheckFieldAccessFlags /
+//                              CheckMethodAccessFlags :934/:961),
+//                              CheckStaticFieldTypes :1289, and the orphan
+//                              class_data check ART gets by driving from the MAP
+//                              where this port drives from class_defs.
 //
 //   ONE DELIBERATE DIVERGENCE — instruction-operand bounds (VerifyInsns, inside
 //   VerifyCodeItem). ART's *structural* verifier does NOT check per-instruction

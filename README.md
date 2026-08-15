@@ -118,15 +118,15 @@ spec-reference not runtime dep), turned to **crash-safety**, not execution trust
 |---|---|
 | `CheckHeader` / `CheckMap` | ✅ parity — magic/version/sizes/endian, section bounds, map ordering/alignment/required |
 | `CheckIntraSection` | ✅ parity — string_data MUTF-8, id indices, type_list, code_item, class_data, encoded_array · **⊕ plus `VerifyInsns`** (per-instruction operand bounds, which ART keeps in the *runtime* method verifier, not the structural one) |
-| `CheckInterSection` | ✅ parity — id ordering/uniqueness, descriptor syntax for **every** `type_id` (`CheckInterTypeIdItem`) as well as the field/method/class_def references to one, member-name syntax, class_def semantics (dup / self-inherit / definer-match[^definer]) |
+| `CheckInterSection` | ✅ parity — id ordering/uniqueness, descriptor syntax for **every** `type_id` (`CheckInterTypeIdItem`) as well as the field/method/class_def references to one, member-name syntax, class_def semantics (dup / self-inherit), and **every** `class_data` member's defining class (the definer half of `CheckInterClassDataItem`[^classdata]) |
 
-[^definer]: The definer-match check is ART's `FindFirstClassDataDefiner`, and like
-    the name says it reads the FIRST member. ART additionally re-checks **every**
-    field and method in `CheckInterClassDataItem`; we do not yet
-    ([#48](https://github.com/mobile-threat-hunter/dex-analyzer-for-llm/issues/48)),
-    so a crafted `class_data` can declare a member whose `field_id.class_idx` names
-    another class. Bounds are still checked, so this is a wrong-answer GIGO on
-    crafted input, not a memory-safety gap; corpus incidence is 0.
+[^classdata]: The rest of ART's `CheckInterClassDataItem` is not ported: member
+    access-flag validation (`CheckFieldAccessFlags` / `CheckMethodAccessFlags`),
+    `CheckStaticFieldTypes` (a static field's declared type vs its
+    `encoded_array` initializer), and the orphan-`class_data` check ART gets by
+    driving from the map where this port drives from `class_defs`. All three are
+    wrong-answer gaps, not crash surface — see
+    [docs/dexkit-vs-art-dex-handling.md](docs/dexkit-vs-art-dex-handling.md).
 
 **Deliberately not checked** — execution-trust mechanics irrelevant to a read-only
 analyzer, or out of the structural scope: adler32/SHA-1 checksums, instruction
