@@ -378,10 +378,15 @@ class FieldInfo:
     Its full descriptor is ``f"{class_descriptor}->{name}:{type}"``.
 
     ``access_flags`` is ``None`` when UNKNOWN — every field of an EXTERNAL class,
-    and an INHERITED FIELD REFERENCE of an internal one: ``class_fields`` is keyed
-    on the whole dex ``field_ids`` table, so it also lists fields the class only
-    references, whose modifiers only the declaring class knows. (``class_methods``
-    has no such case.) See :class:`MethodInfo` for why it is not ``0``.
+    which has no ``class_data`` to read modifiers from. See :class:`MethodInfo`
+    for why it is not ``0``.
+
+    On an INTERNAL class every entry is DECLARED there, so its flags are known.
+    An inherited field the class only REFERENCES is not listed (dexllm#45); reach
+    those through ``list_fields()``, which is the whole ``field_ids`` table —
+    ``[f for f in dk.list_fields() if f.startswith(cls + "->")]``. That is a
+    superset of the declarations, and across a MULTIDEX session it repeats a
+    descriptor once per dex holding the entry, so wrap it in ``set()`` to count.
 
     Example (real, a2dp.Vol StoreLoc.DB)::
 

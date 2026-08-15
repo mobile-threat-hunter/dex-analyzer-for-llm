@@ -1741,13 +1741,23 @@ std::string DexItem::RenderClassSmali(uint32_t type_idx) const {
     }
     out << "\n";
 
+    // dexllm #45: `class_field_ids` is keyed on the whole `field_ids` table, so it
+    // also holds INHERITED fields this class only REFERENCES. baksmali emits a
+    // `.field` line only for a class's own class_data entries, so emit only those
+    // — `field_access_flags_declared` marks exactly them (#41).
+    bool any_field = false;
     for (uint32_t field_idx : class_field_ids[type_idx]) {
+        if (field_idx >= field_access_flags_declared.size() ||
+            !field_access_flags_declared[field_idx]) {
+            continue;
+        }
         const auto& f = reader.FieldIds()[field_idx];
         out << ".field "
             << SmaliIdent(strings[f.name_idx])
             << ":" << SmaliIdent(type_names[f.type_idx]) << "\n";
+        any_field = true;
     }
-    if (!class_field_ids[type_idx].empty()) out << "\n";
+    if (any_field) out << "\n";
 
     for (uint32_t m_idx : class_method_ids[type_idx]) {
         out << ".method "

@@ -376,17 +376,21 @@ def _declared_fields_oracle(raw: bytes):
     return declared
 
 
-def test_an_inherited_field_reference_is_unknown_not_package_private(dk):
-    """An INTERNAL class's field list holds fields it does not DECLARE.
+def test_an_internal_class_lists_exactly_the_fields_it_declares(dk):
+    """An INTERNAL class's field list is its `class_data`, nothing more.
 
-    `class_field_ids` is built from every `field_ids` entry grouped by the class
-    named in the REFERENCE, so a subclass lists inherited fields; their flag slot
-    is never written and held the default 0 — contradicting the declaring class,
-    which answers with the real modifier for the same field in the same session.
+    This test used to assert the OPPOSITE half of the same fact: before dexllm#45
+    a subclass DID list inherited fields (`class_field_ids` groups every
+    `field_ids` entry under the class named in the REFERENCE) and #41 only made
+    their modifiers honest, so the guard checked that those entries reported
+    UNKNOWN. #45 removed the entries, which would have left that assertion
+    vacuously true — so it is inverted here rather than deleted, the way the
+    overlong-MUTF-8 (#22) and lone-surrogate (#29) guards were.
 
     Which fields a class declares is established by parsing `class_data` directly
-    from the dex bytes, NOT from the value under test, so the split is checked
-    rather than assumed.
+    from the dex bytes, NOT from the value under test, so the set equality is
+    checked rather than assumed. The equality also subsumes #41's assertion in the
+    surviving direction: every listed field is declared, hence its flags are known.
     """
     raw = dk.extract_dex(0)["bytes"]
     declared = _declared_fields_oracle(raw)
@@ -395,26 +399,20 @@ def test_an_inherited_field_reference_is_unknown_not_package_private(dk):
         summary = dk.get_class_summary(cls)
         if not summary.is_internal:
             continue
-        listed = {(f.name, f.type) for f in summary.fields}
-        if listed <= own:
-            continue  # this class lists nothing it does not declare
         checked += 1
+        listed = {(f.name, f.type) for f in summary.fields}
+        assert listed == own, (
+            f"{cls} lists {sorted(listed - own)} which its class_data does not "
+            f"declare, and omits {sorted(own - listed)} which it does"
+        )
         for f in summary.fields:
-            if (f.name, f.type) in own:
-                assert f.access_flags is not None, (
-                    f"{cls}->{f.name}:{f.type} IS declared in class_data but "
-                    f"reports unknown"
-                )
-            else:
-                assert f.access_flags is None, (
-                    f"{cls}->{f.name}:{f.type} is NOT declared in class_data but "
-                    f"reports access_flags={f.access_flags} — a fabricated value "
-                    f"indistinguishable from a real package-private declaration"
-                )
-        if checked >= 5:
-            return
-    if not checked:
-        pytest.skip("no class in this dex lists a field it does not declare")
+            assert f.access_flags is not None, (
+                f"{cls}->{f.name}:{f.type} IS declared in class_data but reports "
+                f"unknown"
+            )
+    # Non-vacuity: the dex must have contained internal classes at all. This is a
+    # property of any dex, so it holds under a narrowing too — no skip branch.
+    assert checked, "dex 0 declares no class — the oracle read nothing"
 
 
 def test_reading_a_modifier_off_an_unknown_member_fails_loudly(dk):

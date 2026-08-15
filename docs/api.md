@@ -402,7 +402,9 @@ dk.render_method_smali(M)
 ```
 
 ### `dk.render_class_smali(class_descriptor: str) -> str`
-Whole-class smali.
+Whole-class smali. A `.field` line is emitted for each entry of the class's own
+`class_data`, as baksmali does — an inherited field it only references gets none
+(dexllm#45); those live in `list_fields()`.
 
 **Encoding contract (dexllm#22).** A pool string used as a **string literal** (a
 `const-string` operand, and `.source`) is MUTF-8-**decoded before it is escaped**. A
@@ -462,6 +464,26 @@ dk.find_fields_by_name('DB')          # list[FieldMatch]  len 8
 `ignore_case=`. The field arm completes the class/method/field symmetry: before
 dexllm#37 `FieldMatch` was a registered public type that **no call could
 produce**.
+
+**Scoped searches answer with DECLARATIONS; unscoped ones include references.**
+Both `method_ids` and `field_ids` hold an entry per REFERENCE, grouped under the
+class each reference names, so a subclass appears there for a member it merely
+inherits. `declaring_class=` excludes those (for fields, since dexllm#45); without
+it they are kept, so the unscoped form is the one that shows where an inherited
+member is *touched* under an app class:
+
+```python
+C = 'Landroid/support/constraint/ConstraintLayout$LayoutParams;'   # inherits it
+len(dk.find_fields_by_name('bottomMargin'))                  # 8  — app-class references
+dk.find_fields_by_name('bottomMargin', declaring_class=C)    # [] — C declares no such field
+len([f for f in dk.list_fields() if f.endswith('->bottomMargin:I')])   # 11 — every entry
+```
+
+Neither form reaches all 11: **name search only considers entries grouped under a
+class some loaded dex DECLARES** (`type_def_flag`, a pre-existing property of the
+whole `find_*_by_name` family, not of dexllm#45). The 3 missing here are spelled
+under framework classes — `ViewGroup$MarginLayoutParams`, `FrameLayout$LayoutParams`,
+`LinearLayout$LayoutParams`. Only `list_fields()` enumerates those.
 
 ### String search → `list[ClassMatch]` / `list[MethodMatch]`
 ```python
@@ -612,6 +634,20 @@ tp = 'Lcom/google/android/exoplayer2/ui/DefaultTimeBar;->touchPosition:Landroid/
 len(dk.find_methods_reading_field(tp))   # 2 — one method, two iget-object
 len(dk.find_methods_writing_field(tp))   # 1 — the same method, one iput-object
 ```
+**The argument is a field REFERENCE, not a field.** One inherited field is
+addressed by as many `field_ids` entries as there are classes referencing it —
+`Sub;->f:I` and `Base;->f:I` are different descriptors and each answers only for
+the accesses spelled its way, so a COMPLETE read/write set is the union over every
+reference. Since dexllm#45 `class_fields` no longer surfaces the subclass
+spellings; `list_fields()` does:
+```python
+# the spellings under one class — what class_fields used to surface
+C = 'La2dp/Vol/AppChooser$1;'
+sorted({f for f in dk.list_fields() if f.startswith(C + '->')})
+```
+Prefer the `Lcls;->` prefix over a `->name:Type` suffix — the suffix also matches
+same-named fields in unrelated hierarchies. `list_fields()` is the raw table, so
+it repeats a descriptor once per dex carrying the entry; `set()` before counting.
 
 ### Type references → `TypeReferences`
 Signature-position uses of a `Lpkg/Cls;` type — where it appears as a field type, a
@@ -687,8 +723,10 @@ bits**, with no `java.lang.reflect.Modifier` normalization; a method declared
 
 `access_flags` is **`None` when the modifiers are UNKNOWN** — never `0`, which is
 a legal dex value (package-private, non-static, non-final: 5.1% of the test
-corpus's methods, 8.7% of its fields, 34.9% of its classes). Two cases produce it
-(dexllm#41):
+corpus's methods, 8.7% of its fields, 34.9% of its classes). One case produces it
+(dexllm#41): an **external** class — no `class_data` at all, so the class's own
+flags and every member's are unknown, and the members are reconstructed from the
+`method_ids` / `field_ids` entries other classes reference.
 
 ```python
 ext = dk.get_class_summary('Landroid/app/Activity;')     # EXTERNAL class
@@ -696,19 +734,26 @@ ext.is_internal, ext.dex_id, ext.access_flags   # (False, -1, None)
 [m.access_flags for m in ext.methods][:3]       # [None, None, None]
 ```
 
-1. an **external** class — no `class_data` at all, so the class's own flags and
-   every member's are unknown; the members are reconstructed from the
-   `method_ids` / `field_ids` entries other classes reference;
-2. an **inherited field reference** on an internal class — `fields` is keyed on
-   the whole `field_ids` table, so it also lists fields the class only
-   REFERENCES; those carry `None` while the declaring class reports the real
-   modifier for the same field. (`methods` is unaffected — it comes from
-   `class_data`.)
-
 So `f.access_flags & ACC_STATIC` raises `TypeError` on such a member instead of
 answering `0`.
 
-Render a summary as Java-source-style text (header + static→instance fields + methods):
+**On an INTERNAL class, `fields` and `methods` are what it DECLARES** — which is
+why their flags are always known. An inherited field the class only REFERENCES is
+not a member (dexllm#45), even though the dex `field_ids` table groups that
+reference under the referencing class. (An EXTERNAL class has no `class_data` to
+declare anything, so its members are exactly those references — see above.) Read
+the references from `list_fields()`, the whole table:
+
+```python
+C = 'Landroid/support/graphics/drawable/VectorDrawableCompat$VClipPath;'
+[f.name for f in dk.get_class_summary(C).fields]              # [] — it declares none
+[f for f in dk.list_fields() if f.startswith(C + '->')]       # the 3 it inherits from $VPath
+```
+
+Render a summary as Java-source-style text (header + fields + methods). The fields
+are in `field_ids` order, **not** grouped static-then-instance the way
+`decompile_class` emits them — so the two agree on the set but not the order (this
+line claimed static→instance before dexllm#45; it never did):
 ```python
 dexllm.format_class(dk, 'Lcom/example/android/tvleanback/Utils;')   # str — fetch + format
 dexllm.format_class_summary(s, indent='    ')                       # str — format an already-fetched ClassSummary
@@ -944,10 +989,11 @@ Where one argument came from (intra-method).
 (`list[str]`); `fields` (`list[FieldInfo]`); `methods`
 (`list[MethodInfo]`).
 
-**`access_flags` is `None` when UNKNOWN** — every entity of an external class,
-plus an inherited field reference on an internal one; see
+**`access_flags` is `None` when UNKNOWN** — every entity of an external class; see
 [`get_class_summary`](#dkget_class_summaryclass_descriptor-str---classsummary).
 It was `0` before dexllm#41, which collided with the legal dex value `0`.
+On an INTERNAL class `fields` / `methods` list only what it DECLARES (dexllm#45);
+an external one has no `class_data`, so its members are the references others make.
 
 **Access flags are the RAW dex bits** — the values as stored in the file, with no
 `java.lang.reflect.Modifier` normalization, on the class and on every member. In

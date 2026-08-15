@@ -994,7 +994,7 @@ TOOL_DEFINITIONS: list[dict] = [
     },
     {
         "name": "find_fields_by_name",
-        "description": "Find fields whose name matches a query (optionally constrained to a declaring class).",
+        "description": "Find fields whose name matches a query (optionally constrained to a declaring class). With declaring_class the hits are declarations: a field a subclass merely inherits is not a hit under that subclass. Without it every match is kept, references included — use that form to find where an inherited field is touched, since its declaration is often in the framework and outside every loaded dex.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -1181,7 +1181,7 @@ TOOL_DEFINITIONS: list[dict] = [
     },
     {
         "name": "get_class_summary",
-        "description": "Class header info: the declaring dex (dex_id + dex_name, e.g. 'classes2.dex'), superclass, interfaces, method count, field count, access flags. `access_flags` is null when UNKNOWN — an external class (one no loaded dex declares) has no modifiers to read; null is NOT 0, which in dex means package-private. Cheaper than decompile_class when you only need structure.",
+        "description": "Class header info: the declaring dex (dex_id + dex_name, e.g. 'classes2.dex'), superclass, interfaces, method count, field count, access flags. On an internal class `method_count` / `field_count` count what it DECLARES — a field it merely inherits is not counted (use list_fields to see references); an external class declares nothing here, so its counts are the references other classes make. `access_flags` is null when UNKNOWN — an external class (one no loaded dex declares) has no modifiers to read; null is NOT 0, which in dex means package-private. Cheaper than decompile_class when you only need structure.",
         "input_schema": {
             "type": "object",
             "properties": {

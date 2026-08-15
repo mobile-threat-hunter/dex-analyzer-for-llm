@@ -368,7 +368,15 @@ class SearchPort(Protocol):
         declaring_class: str = "",
         ignore_case: bool = False,
     ) -> tuple[FieldMatch, ...]:
-        """Find fields by name, optionally scoped to a declaring class."""
+        """Find fields by name, optionally scoped to a declaring class.
+
+        With a ``declaring_class`` the hits are DECLARATIONS — a field the dex
+        groups under a subclass that merely inherits it is not one (dexllm#45), so
+        the argument means what it says. Without one, every match is kept,
+        references included: that is what :meth:`find_methods_by_name` does too,
+        and an inherited field's declaration is often in the framework, so the
+        unscoped form is what finds where the app touches it.
+        """
         ...
 
     def find_methods_by_annotation(
@@ -435,12 +443,19 @@ class ClassInspectionPort(Protocol):
         ...
 
     def class_fields(self, class_descriptor: str) -> tuple[FieldInfo, ...]:
-        """Return the class's fields (name, type, access flags).
+        """Return the class's DECLARED fields (name, type, access flags).
 
-        The list is keyed on the dex ``field_ids`` table, so it also holds
-        inherited fields the class only REFERENCES; those carry
-        ``access_flags`` ``None`` (UNKNOWN) while the declaring class reports the
-        real modifier for the same field (dexllm#41).
+        Declared means present in this class's own ``class_data``, the same sense
+        :meth:`class_methods` has always had. An inherited field the class only
+        REFERENCES is not a member here (dexllm#45) even though the dex
+        ``field_ids`` table groups that reference under this class; read those
+        from :meth:`EnumerationPort.list_fields`, which is that whole table::
+
+            [f for f in port.list_fields() if f.startswith(cls + "->")]
+
+        On an EXTERNAL class there is no ``class_data``, so the result is instead
+        reconstructed from other classes' ``field_ids`` references and every entry
+        carries ``access_flags`` ``None`` (UNKNOWN) — see :meth:`class_methods`.
         """
         ...
 

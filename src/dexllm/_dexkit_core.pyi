@@ -202,12 +202,14 @@ class FieldInfo:
         """Raw dex access flags, or ``None`` when UNKNOWN (dexllm#41).
 
         ``None`` on every member of an EXTERNAL class (one no loaded dex declares,
-        so there is no ``class_data``), and on an INHERITED FIELD REFERENCE of an
-        internal class: ``ClassSummary.fields`` is keyed on the whole ``field_ids``
-        table, so it also lists fields the class only references — the declaring
-        class reports the real modifier for the same field. It is not reported as 0
-        because 0 is a legal dex value — package-private, non-static, non-final —
-        held by 8.7% of the test corpus's fields.
+        so there is no ``class_data``). It is not reported as 0 because 0 is a
+        legal dex value — package-private, non-static, non-final — held by 8.7% of
+        the test corpus's fields.
+
+        An INTERNAL class's fields are the ones it DECLARES, so their flags are
+        always known: an inherited field it only REFERENCES is not listed
+        (dexllm#45), even though the dex ``field_ids`` table groups that reference
+        under it. Read those from ``list_fields()``, which is the whole table.
         """
 
 class MethodInfo:
@@ -520,6 +522,11 @@ class DexKit:
     def get_class_summary(self, class_descriptor: str) -> ClassSummary:
         """Class metadata + declared fields and methods in one call.
 
+        For an INTERNAL class, ``fields`` / ``methods`` are what its own
+        ``class_data`` declares; an inherited field it only REFERENCES is not among
+        them (dexllm#45), and is in ``list_fields()``, the whole ``field_ids``
+        table.
+
         For a class only REFERENCED (not declared) in a loaded dex the result has
         ``is_internal=False``, ``dex_id=-1`` and ``access_flags=None`` — on the
         class AND on every member, which are reconstructed from the ``method_ids``
@@ -777,6 +784,19 @@ class DexKit:
         symmetry the match types already named (dexllm#37: ``FieldMatch`` was a
         public type nothing could produce).
 
+        With a ``declaring_class`` only DECLARATIONS match — a field REFERENCE the
+        dex groups under a subclass that merely inherits it is not a hit under that
+        subclass (dexllm#45), so ``declaring_class`` means what it says. WITHOUT
+        one, references are kept, which is what the name-search family does:
+        ``find_methods_by_name`` is likewise declaration-only when scoped and not
+        when unscoped. Use the unscoped form to find where an inherited field is
+        touched under an app class.
+
+        Neither form searches the WHOLE id table: an entry grouped under a class no
+        loaded dex declares is never a hit (a pre-existing property of the
+        ``find_*_by_name`` family), so a field spelled under a framework class is
+        reachable only through ``list_fields()``.
+
         Example::
 
             >>> [f.descriptor for f in dk.find_fields_by_name("mTitle", match_type="equals")][:1]
@@ -933,7 +953,12 @@ class DexKit:
         """
 
     def render_class_smali(self, class_descriptor: str) -> str:
-        """``render_method_smali`` for every declared method, under a class header."""
+        """``render_method_smali`` for every declared method, under a class header.
+
+        The ``.field`` lines are the class's own ``class_data`` entries, as
+        baksmali emits them — an inherited field it only references gets no line
+        (dexllm#45).
+        """
     # permissions
     def permission_callers(self, app_only: bool = True) -> list[_PermissionCallerGroup]:
         """Dangerous-permission APIs the app calls, grouped by permission.

@@ -1027,17 +1027,27 @@ void FillInternalClassSummary(const dexkit::DexItem& item,
     const auto& field_flags = item.GetFieldAccessFlags();
     const auto& field_declared = item.GetFieldAccessFlagsDeclared();
     for (uint32_t field_idx : item.GetClassFieldIds(type_idx)) {
+        // UNLIKE the methods above, this loop walks `class_field_ids`, which is
+        // keyed on the whole `field_ids` table — so it also yields INHERITED
+        // fields this class only REFERENCES (dexllm#41 reported their flags as
+        // UNKNOWN; dexllm#45 drops the entries themselves, because a member list
+        // that names a declaration the class does not have is wrong whatever it
+        // says about its modifiers). The reference view is not lost: it is
+        // `list_fields()` filtered by the `Lcls;->` prefix — that is the whole
+        // `field_ids` table, so it is a superset, and across a multidex session it
+        // repeats a descriptor once per dex holding the entry (dedupe to count).
+        if (field_idx >= field_declared.size() || !field_declared[field_idx]) continue;
         const auto& f = field_ids[field_idx];
         FieldInfo cf;
         cf.name = std::string(strings[f.name_idx]);
         cf.type = std::string(type_names[f.type_idx]);
-        // UNLIKE the methods above, this loop walks `class_field_ids`, which is
-        // keyed on the whole `field_ids` table — so it also yields inherited
-        // fields this class only REFERENCES. Their flag slot was never written
-        // and holds the default 0, a legal dex value, so it must be reported as
-        // UNKNOWN rather than as a package-private declaration (dexllm#41).
-        if (field_idx < field_flags.size() && field_idx < field_declared.size() &&
-            field_declared[field_idx]) {
+        // Declared here, so the flag slot was written. The bound is UNREACHABLE
+        // today — both vectors are sized from `field_ids_size` three lines apart
+        // (dex_item.cpp:160/163), so passing the `field_declared` bound above
+        // implies this one — and is kept only as a leaf guard. It must never
+        // become live: an internal class's fields are documented as having known
+        // flags, and taking this branch would emit one with `access_flags` unset.
+        if (field_idx < field_flags.size()) {
             cf.access_flags = field_flags[field_idx];
         }
         out.fields.push_back(std::move(cf));
@@ -1488,7 +1498,40 @@ DexKitExt::FindFieldsByName(std::string_view name,
     auto result = core_->FindField(query);
     auto holder = ::flatbuffers::GetRoot<dexkit::schema::FieldMetaArrayHolder>(
         result->GetBufferPointer());
-    return ParseFieldMetaArray(holder);
+    auto matches = ParseFieldMetaArray(holder);
+    // dexllm #45: the core scans `class_field_ids`, which is keyed on the whole
+    // `field_ids` table, and its declaring-class matcher reads the same
+    // `field_id.class_idx` — so an INHERITED field reference matched under the
+    // subclass that only references it, and `declaring_class` did not mean
+    // declaring. Drop those, so a SCOPED query answers with declarations.
+    //
+    // ONLY when scoped. An UNSCOPED query keeps references, because that is what
+    // the L7 name-search family does — `find_methods_by_name` is declaration-only
+    // in its `declaring_class` fast path and NOT without one, so filtering here
+    // unconditionally would have made the field arm the odd one out rather than
+    // the symmetric one. It also loses real answers: the declaration of an
+    // inherited field is often in the FRAMEWORK, so an unconditional filter took
+    // `find_fields_by_name("rightMargin")` to 0 hits on the bundled corpus — the
+    // app's own accesses, gone. Listing a class's MEMBERS (the other two #45
+    // surfaces) and SEARCHING the id tables by name are different questions; only
+    // the first is answered with declarations alone.
+    //
+    // Note neither form scans the whole `field_ids` table: `try_match_field`
+    // (dex_item_find.cpp) gates on `type_def_flag[field_def.class_idx]`, so an
+    // entry grouped under a class no loaded dex declares is never a hit. That is
+    // pre-existing and unchanged here; `list_fields()` is what enumerates those.
+    //
+    // Filtered HERE, not in the vendored matcher, so upstream FindField semantics
+    // are untouched.
+    if (!declaring_class.empty()) {
+        std::erase_if(matches, [this](const FieldMatch& fm) {
+            auto* item = core_->GetDexItem(fm.dex_id);
+            if (item == nullptr) return true;
+            const auto& declared = item->GetFieldAccessFlagsDeclared();
+            return fm.field_id >= declared.size() || !declared[fm.field_id];
+        });
+    }
+    return matches;
 }
 
 // Build a single-element AnnotationsMatcher whose annotation type's class_name

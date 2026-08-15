@@ -130,11 +130,14 @@ needs — metadata, fields and methods are three queries.
 `None` when UNKNOWN.
 
 `None` covers every entity of an EXTERNAL class (`is_internal == False`), which
-has no `class_data`, and an inherited field reference on an internal class
-(`class_fields` lists fields the class only references; `class_methods` is
-unaffected). Reading a modifier off one raises `TypeError` rather than answering
-`0`, which in dex is a legal value — package-private, non-static, non-final
-(dexllm#41).
+has no `class_data`. Reading a modifier off one raises `TypeError` rather than
+answering `0`, which in dex is a legal value — package-private, non-static,
+non-final (dexllm#41).
+
+On an INTERNAL class, `class_fields` / `class_methods` list what it DECLARES — an
+inherited field it only REFERENCES is not a member (dexllm#45); that lives in
+`list_fields()`, the whole `field_ids` table. An EXTERNAL class declares nothing
+here, so its members are exactly the references other classes make to it.
 
 The bit-field is not normalized to `java.lang.reflect.Modifier`. Since dexllm#37 that includes METHOD flags via
 `MethodInfo`, so the `ACC_DECLARED_SYNCHRONIZED` (`0x20000`) vs
