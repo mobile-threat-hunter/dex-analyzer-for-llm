@@ -16,6 +16,18 @@ mirror of this pure-Python logic.)
 Match semantics (mirrors dexllm-web #16's ``detectProviders``): a dataset URI is a
 hit iff it occurs as a SUBSTRING of some value-string; the ``family`` comes from the
 dataset, the ``methods`` xref from the same L7 search the network IoCs use.
+
+The BUNDLED dataset uses 14 families and every entry carries a real one (an
+override may use any string — ``_validate`` checks only that it IS one, since the
+channel exists so a consumer can bring their own vocabulary): the
+``provider`` catch-all was retired in dexllm#31, where it held 20 of 209 entries —
+a tenth of the dataset grouping under a label that says nothing, while
+``{"family": "provider"}`` reads as though the classification succeeded. Families
+are verified against AOSP by the package the contract lives in (``HbpcdLookup`` is
+``com.android.internal.telephony``, the bluetooth providers are
+``com.android.bluetooth.*``), and ``tests/test_content_uris.py`` refuses both a
+reintroduced ``provider`` and a contract half-classified across two families —
+which is how the bucket accumulated.
 """
 
 from __future__ import annotations

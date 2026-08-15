@@ -801,7 +801,7 @@ class ContentProviderUse:
     """A ``content://`` provider URI the app references, plus the methods using it.
 
     The runtime-assembled surface invisible to the ``@RequiresPermission`` map.
-    ``family`` is e.g. sms / contacts / call-log / calendar.
+    ``family`` is e.g. sms / contacts / calllog / calendar.
 
     Example (shape; ``uri`` / ``family`` are framework constants, caller illustrative)::
 
