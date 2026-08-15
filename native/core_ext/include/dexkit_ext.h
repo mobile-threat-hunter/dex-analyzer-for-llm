@@ -37,6 +37,12 @@ struct ContainerInfo {
     bool has_manifest = false;  // AndroidManifest.xml present (zip only)
     bool is_apk = false;        // zip container that carries an AndroidManifest.xml
     int dex_count = 0;          // sequential classes*.dex (zip) or 1 (raw .dex)
+    // The path the fields above describe. Identify() echoes its argument;
+    // SourceInfo() names which of a session's sources the row is about. A probe
+    // result that cannot say what it probed names an unnamed one of N —
+    // dexllm#26's lesson for extract_dex, applied to the same shape of data.
+    // LAST, like DexVerifyStatus::source: provenance follows the verdict.
+    std::string source;
 };
 
 // Per-dex structural-verification verdict (DexVerifier at the load boundary).
@@ -146,6 +152,19 @@ public:
     // a specific reason and never reached the core.
     [[nodiscard]] const std::vector<DexVerifyStatus>& VerifyReport() const {
         return verify_status_;
+    }
+
+    // What each construction source WAS, probed once at load — one entry per
+    // GetSources() entry, in the same order (dexllm#42).
+    //
+    // A session-bound answer must be a fact about the SESSION. Re-probing the
+    // path at call time reports `format: "unknown", dex_count: 0` once the file
+    // is gone — and 0 is the documented "resources-only container, nothing to
+    // analyse" sentinel — for a session that is entirely fine. A dump in a temp
+    // directory is exactly the shape `add_dumped_dexes` exists for, so the file
+    // outliving the session is the norm there, not an edge case.
+    [[nodiscard]] const std::vector<ContainerInfo>& SourceInfo() const {
+        return source_info_;
     }
 
     // Locate which dex_id defines the given class descriptor; -1 if not declared
@@ -473,6 +492,10 @@ private:
     bool declared_string_index_disabled_ = false;
     std::unique_ptr<DexItemCodeSource> code_source_;  // lazy-constructed
     std::vector<DexVerifyStatus> verify_status_;      // load-boundary verdicts
+    // One probe per construction source, in GetSources() order, recorded by
+    // CollectSource — which already runs ProbeContainer to decide HOW to load,
+    // so this keeps a result that was being computed and thrown away.
+    std::vector<ContainerInfo> source_info_;
     int next_dex_id_ = 0;  // running dex_id handed out to accepted LOGICAL dexes
     // Provenance of one loaded image, recorded in CollectImage BEFORE the image
     // is moved into the core. Keyed by image rather than by dex_id because the

@@ -183,14 +183,15 @@ def test_fastapi_static(apk):
 
 
 def _committed_container() -> tuple[bytes, bytes]:
-    """The zip this repo commits, and one bare dex extracted from it."""
-    import zipfile
+    """The zip this repo commits, and one bare dex extracted from it.
 
-    blob = REPO / "tests" / "data" / "multidex.apk"
-    if not blob.is_file():  # pragma: no cover - the file is committed
-        pytest.skip("tests/data/multidex.apk missing")
-    with zipfile.ZipFile(blob) as z:
-        return blob.read_bytes(), z.read("classes.dex")
+    Moved to conftest so the dexllm#42 guards can build corpus-free fixtures the
+    same way; kept as a local alias because this module's callers read better
+    with the underscore.
+    """
+    from conftest import committed_container
+
+    return committed_container()
 
 
 def test_fastapi_upload_is_content_based():
@@ -227,6 +228,10 @@ def test_fastapi_upload_is_content_based():
             "is_apk": False,
             "has_manifest": False,
             "dex_count": 1,
+            # dexllm#42: a probe result names what it describes — here the STORED
+            # path, which is the file that was actually probed. `filename` is the
+            # (unvalidated) client string; the two are deliberately different.
+            "source": body["apk_path"],
         }, body
         # Through the private session store on purpose: the only public
         # read-back is POST /analyze, which needs an ANTHROPIC_API_KEY.

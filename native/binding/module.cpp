@@ -291,6 +291,27 @@ py::list decoded_unique(const std::vector<std::string>& raw) {
     return out;
 }
 
+// One dict shape for a ContainerInfo, whether it was probed on demand
+// (`identify(path)`) or recorded at load (`DexKit.source_info()`). Shared so the
+// two cannot drift into two vocabularies for the same fact — the mirror of the
+// C++ side's single ContainerInfoFrom.
+py::dict container_info_dict(const dexkit::ext::ContainerInfo& info) {
+    py::dict d;
+    d["format"] = info.format;        // "dex" | "zip" | "unknown"
+    d["is_apk"] = info.is_apk;        // zip carrying an AndroidManifest.xml
+    d["has_manifest"] = info.has_manifest;
+    d["dex_count"] = info.dex_count;  // classes*.dex count (zip) or 1 (dex)
+    // WHICH path the keys above describe (dexllm#26's lesson: a result that
+    // cannot name its subject names an unnamed one of N). Plain assignment, i.e.
+    // pybind's strict caster — the SAME conversion every other `source` key uses
+    // (verify_report, extract_dex, the static verify). A filesystem path is not
+    // dex-pool content, so the MUTF-8/surrogatepass decoder does not belong here,
+    // and using it made `identify(b"...")` answer where its documented sibling
+    // `verify(b"...")` raised on the identical argument.
+    d["source"] = info.source;
+    return d;
+}
+
 class PyDexKit {
 public:
     explicit PyDexKit(const std::string& apk_path, bool lenient = false)
@@ -324,6 +345,15 @@ public:
     // contract.
     py::list list_value_strings() const {
         return decoded_unique(ext_.ListValueStrings());
+    }
+    // What each construction source WAS, probed once at LOAD (dexllm#42) — one
+    // dict per sources() entry, in the same order.
+    py::list source_info() const {
+        py::list out;
+        for (const auto& info : ext_.SourceInfo()) {
+            out.append(container_info_dict(info));
+        }
+        return out;
     }
     py::list verify_report() const {
         py::list out;
@@ -635,16 +665,12 @@ PYBIND11_MODULE(_dexkit_core, m) {
         "identify",
         [](const std::string& path) {
             auto info = dexkit::ext::DexKitExt::Identify(path);
-            py::dict d;
-            d["format"] = info.format;        // "dex" | "zip" | "unknown"
-            d["is_apk"] = info.is_apk;        // zip carrying an AndroidManifest.xml
-            d["has_manifest"] = info.has_manifest;
-            d["dex_count"] = info.dex_count;  // classes*.dex count (zip) or 1 (dex)
-            return d;
+            return container_info_dict(info);
         },
         py::arg("path"),
         "Probe a file by content (dex magic / PK zip signature + AndroidManifest.xml) "
-        "without loading it. Returns {format, is_apk, has_manifest, dex_count}.");
+        "without loading it. Returns {format, is_apk, has_manifest, dex_count, source} "
+        "— `source` echoes the path, so a probe result can say what it describes.");
 
     // Load-free structural verification (the verify() sibling of identify()).
     // Runs the DexVerifier over a path's dex(es) without constructing a DexKit.
@@ -981,6 +1007,14 @@ PYBIND11_MODULE(_dexkit_core, m) {
              "identifier/metadata pool entries (type/method/field names, shorty, "
              "source files). Foundation for static IOC / C2 extraction — see "
              "dexllm.extract_iocs. (Annotation-embedded 0x17 omitted.)")
+        .def("source_info", &PyDexKit::source_info,
+             "What each construction source WAS, probed once at LOAD: one dict per "
+             "sources() entry, in the same order, {format, is_apk, has_manifest, "
+             "dex_count, source} — the same keys dexllm.identify(path) "
+             "returns. A session fact, so it stays true after the file is deleted "
+             "(a dumped dex in a temp dir is exactly that case); re-probing the "
+             "path would report dex_count 0, the 'nothing to analyse' sentinel, "
+             "for a working session.")
         .def("verify_report", &PyDexKit::verify_report,
              "Structural-verification report, one dict per dex considered at "
              "load: {dex_id, name, valid, reason, source}. A dex with valid==False was "

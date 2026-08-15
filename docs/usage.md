@@ -57,7 +57,8 @@ Probe a file **without loading it** with `dexllm.identify(path)` — handy for t
 
 ```python
 dexllm.identify("/path/to/suspect")
-# → {'format': 'zip', 'is_apk': True, 'has_manifest': True, 'dex_count': 2}
+# → {'format': 'zip', 'is_apk': True, 'has_manifest': True, 'dex_count': 2,
+#    'source': '/path/to/suspect'}
 #   format: "dex" | "zip" | "unknown";  is_apk = a zip carrying an AndroidManifest.xml
 ```
 
@@ -781,7 +782,7 @@ argument and return value — so callers program against types, not dict keys.
 from dexllm.sdk import open_apk, identify, DexAnalysisUseCase
 
 # identify is load-free; open_apk returns a session satisfying DexAnalysisUseCase
-info = identify("app.apk")                      # -> ContainerInfo(format, is_apk, has_manifest, dex_count)
+info = identify("app.apk")                      # -> ContainerInfo(format, is_apk, has_manifest, dex_count, source)
 session: DexAnalysisUseCase = open_apk("app.apk")
 # packer/unpack: open_apk([dumped_dex, "app.apk"], lenient=True)  (earlier source wins)
 

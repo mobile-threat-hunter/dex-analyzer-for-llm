@@ -1134,3 +1134,39 @@ def test_typed_analysis_surface(apk_path):
     assert isinstance(session.extract_iocs(), IocReport)
     assert isinstance(session.extract_iocs(with_xref=False), IocReport)
     assert isinstance(session.summarize_capabilities(), CapabilityReport)
+
+
+def test_source_info_reaches_the_typed_layer_for_every_source(tmp_path):
+    """dexllm#42 on the SDK: the load-time record, one typed row per source.
+
+    Guarded here as well as on the raw layer because the adapter's own conversion
+    is where a per-source list can quietly collapse to the primary — a mutant
+    returning only ``source_info()[0]`` passed a single-source version of this.
+
+    Corpus-free, and deliberately so: an earlier cut took the ``apk_path``
+    fixture and asserted the second row is a zip, which hard-FAILED on all nine
+    bundled bare ``.dex`` samples under a ``$DEXLLM_TEST_APK`` narrowing — an
+    environment fact turning the suite red, the exact rule issue #46 exists for.
+    """
+    from conftest import committed_container
+
+    zip_bytes, dex_bytes = committed_container()
+    dump, apk = tmp_path / "dump.dex", tmp_path / "app.apk"
+    dump.write_bytes(dex_bytes)
+    apk.write_bytes(zip_bytes)
+
+    session = open_apk([str(dump), str(apk)])
+    rows = session.source_info()
+    assert isinstance(
+        rows, tuple
+    ), "the port declares a tuple (docs/sdk.md's sequence rule); a list passes every other assertion here"
+    assert len(rows) == len(session.sources) == 2
+    assert all(isinstance(r, ContainerInfo) for r in rows)
+    assert [r.source for r in rows] == [str(dump), str(apk)]
+    assert rows[0].format == "dex" and rows[1].format == "zip"
+    # …the typed model agrees with the on-demand probe while the files are there
+    assert rows[1] == identify(str(apk))
+
+    apk.unlink()
+    assert session.source_info() == rows, "a session fact must survive its file"
+    assert identify(str(apk)).dex_count == 0, "premise: a fresh probe would not"

@@ -666,20 +666,22 @@ def _t_identify(dk: DexKit) -> dict:
     for a single CONCATENATED source, i.e. a packer dump, the case the field
     matters most for.
 
-    The probe keys are read from DISK at call time, so a source deleted after the
-    load (a dump in a temp dir) reports `format: "unknown", dex_count: 0` for a
-    session that still works — `loaded_dex_count` is what stays true. Pre-existing;
-    the tool always re-probed.
-    """
-    from ._dexkit_core import identify
+    The probe keys come from the session's LOAD-TIME record (dexllm#42), not from
+    a fresh read of the path. Re-probing made a source deleted after the load — a
+    dump in a temp dir, which is exactly what `add_dumped_dexes` is for — report
+    `format: "unknown", dex_count: 0` for a session that still works, and 0 is the
+    documented "resources-only container, nothing to analyse" sentinel. An
+    orienting tool emitting that for a live session is a confident wrong answer.
 
-    info = dict(identify(dk.apk_path()))
-    # WHICH source those keys describe. Without it the shared keys name an unnamed
-    # one of N — `add_dumped_dexes` puts the DUMP first, so a packer session probes
-    # a bare dex and reports `is_apk: False` for a session whose real subject is an
-    # APK. dexllm#26 drew the same lesson for `extract_dex`: bytes alone cannot say
-    # which file they came from.
-    info["source"] = dk.apk_path()
+    `source` says WHICH source the shared keys describe. Without it they name an
+    unnamed one of N — `add_dumped_dexes` puts the DUMP first, so a packer session
+    describes a bare dex and reports `is_apk: False` for a session whose real
+    subject is an APK. dexllm#26 drew the same lesson for `extract_dex`: bytes
+    alone cannot say which file they came from.
+    """
+    # [0] is the primary source; the constructor refuses an empty source list, so
+    # a session always has one.
+    info = dict(dk.source_info()[0])
     # ...and the session-level facts, under names that cannot be mistaken for the
     # per-container ones. `verify_report` carries the per-dex list, with sources.
     info["loaded_dex_count"] = dk.dex_count()
@@ -1411,15 +1413,18 @@ TOOL_DEFINITIONS: list[dict] = [
     {
         "name": "identify",
         "description": (
-            "Content-based container probe of the session's primary source: "
-            "{format, is_apk, has_manifest, dex_count} plus source (which of the "
-            "session's sources those describe) — identical in meaning to "
-            "dexllm.identify(path), so dex_count is THAT container's own count — "
-            "plus loaded_dex_count (dexes actually loaded — differs from "
-            "dex_count only for a multi-source load or a concatenated / packer "
-            "dump) and source_count (how many sources the session was built "
-            "from). Quick orientation on what is loaded and how much of it; "
-            "verify_report lists the dexes individually, with their source."
+            "What the session's primary source WAS, as recorded when it was "
+            "LOADED — not a fresh read of the path, so it stays right after the "
+            "file is gone (a dumped dex in a temp dir routinely is): "
+            "{format, is_apk, has_manifest, dex_count, source} — identical in "
+            "meaning to dexllm.identify(path), so dex_count is THAT container's "
+            "own count and source says which of the session's sources these "
+            "describe — plus loaded_dex_count (dexes actually loaded — differs "
+            "from dex_count only for a multi-source load or a concatenated / "
+            "packer dump) and source_count (how many sources the session was "
+            "built from). Quick orientation on what is loaded and how much of "
+            "it; verify_report lists the dexes individually, with their source. "
+            "To ask about a path on disk instead, that is dexllm.identify(path)."
         ),
         "input_schema": {"type": "object", "properties": {}},
     },

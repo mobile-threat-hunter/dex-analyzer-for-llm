@@ -29,20 +29,29 @@ from typing import Any, Mapping, Optional
 
 @dataclass(frozen=True)
 class ContainerInfo:
-    """Content-based probe of a file (no load).
+    """Content-based probe of a container.
 
     ``format`` is ``"dex" | "zip" | "unknown"``; ``is_apk`` iff a zip carrying an
-    AndroidManifest.xml.
+    AndroidManifest.xml. ``source`` is the path the other fields describe, so a
+    probe result can say what it is about — the same reason ``ExtractedDex``
+    carries its provenance (dexllm#26).
+
+    Returned two ways, with one meaning: :func:`dexllm.sdk.identify` probes a path
+    on demand, and :meth:`~dexllm.sdk.ports.EnumerationPort.source_info` reports
+    what a session recorded at LOAD (dexllm#42) — the latter stays true after the
+    file is gone.
 
     Example (real, a2dp.Vol_137.apk)::
 
-        ContainerInfo(format='zip', is_apk=True, has_manifest=True, dex_count=1)
+        ContainerInfo(format='zip', is_apk=True, has_manifest=True, dex_count=1,
+                      source='a2dp.Vol_137.apk')
     """
 
     format: str
     is_apk: bool
     has_manifest: bool
     dex_count: int
+    source: str
 
 
 @dataclass(frozen=True)

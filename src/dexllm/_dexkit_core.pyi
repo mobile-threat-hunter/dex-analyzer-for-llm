@@ -32,6 +32,7 @@ class _IdentifyResult(TypedDict):
     is_apk: bool
     has_manifest: bool
     dex_count: int
+    source: str  # the path the keys above describe (dexllm#26/#42)
 
 class _VerifyStatus(TypedDict):
     dex_id: int
@@ -88,7 +89,8 @@ def identify(path: str) -> _IdentifyResult:
     Example::
 
         >>> dexllm.identify("app.apk")
-        {'format': 'zip', 'is_apk': True, 'has_manifest': True, 'dex_count': 1}
+        {'format': 'zip', 'is_apk': True, 'has_manifest': True, 'dex_count': 1,
+         'source': 'app.apk'}
     """
 
 def verify(path: str, lenient: bool = ...) -> list[_VerifyStatus]:
@@ -380,6 +382,20 @@ class DexKit:
 
         Example: ``dk.sources()`` -> ``['app.apk']``. After
         ``add_dumped_dexes(dk, ['dump.dex'])`` -> ``['dump.dex', 'app.apk']``.
+        """
+
+    def source_info(self) -> list[_IdentifyResult]:
+        """Report what each construction source WAS, probed once at LOAD (#42).
+
+        One entry per :meth:`sources` entry, in the same order, carrying the same
+        keys :func:`identify` returns. A session FACT: it stays true after the
+        file is deleted, which a dumped dex in a temp directory routinely is.
+        Re-probing the path would answer ``dex_count: 0`` — the documented
+        "nothing to analyse" sentinel — for a session that still works.
+
+        Example::
+
+            dk.source_info()[0]["is_apk"]   # -> True
         """
 
     def verify_report(self) -> list[_VerifyStatus]:

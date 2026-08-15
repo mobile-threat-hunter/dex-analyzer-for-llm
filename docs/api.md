@@ -30,7 +30,8 @@ Conventions:
 Content-based probe **without loading** — pre-filter resources-only containers.
 ```python
 dexllm.identify('app.apk')
-# {'format': 'zip', 'is_apk': True, 'has_manifest': True, 'dex_count': 1}
+# {'format': 'zip', 'is_apk': True, 'has_manifest': True, 'dex_count': 1,
+#  'source': 'app.apk'}
 ```
 | key | type | meaning |
 |---|---|---|
@@ -38,6 +39,7 @@ dexllm.identify('app.apk')
 | `is_apk` | `bool` | a zip carrying `AndroidManifest.xml` |
 | `has_manifest` | `bool` | manifest present in the container |
 | `dex_count` | `int` | number of sequential `classes*.dex` |
+| `source` | `str` | the path these keys describe — echoes the argument, and is what lets [`dk.source_info()`](#dksource_info---listdict) reuse the shape |
 
 ### `dexllm.verify(path: str, lenient: bool = False) -> list[dict]`
 Structural verification **without loading** — the `verify()` sibling of
@@ -77,6 +79,23 @@ The construction sources (for `add_dumped_dexes`).
 ```python
 dk.sources()     # ['test_apk/APK/com.example.android.tvleanback.apk']
 ```
+
+### `dk.source_info() -> list[dict]`
+What each construction source **was**, probed once at load — one entry per
+[`sources()`](#dksources---liststr) entry, in the same order, carrying the same
+keys as [`identify()`](#dexllmidentifypath-str---dict).
+
+```python
+dk.source_info()
+# [{'format': 'zip', 'is_apk': True, 'has_manifest': True, 'dex_count': 1,
+#   'source': 'test_apk/APK/com.example.android.tvleanback.apk'}]
+```
+
+A **session fact**, not a fresh read: it stays true after the file is deleted,
+which a dumped dex in a temp directory routinely is. Probing the path again would
+answer `dex_count: 0` — the documented "resources-only container, nothing to
+analyse" sentinel — for a session that still works. Use `identify(path)` when the
+question is about a path on disk, and this when it is about the session.
 
 ### `dk.verify_report() -> list[dict]`
 Per-dex structural-verification verdict (the load-time `VerifyDex` gate results).

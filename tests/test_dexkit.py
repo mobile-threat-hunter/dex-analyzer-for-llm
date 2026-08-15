@@ -12,9 +12,10 @@ import re
 from pathlib import Path
 
 import pytest
-from conftest import require_corpus_shape
+from conftest import committed_container, require_corpus_shape
 
 import dexllm
+import dexllm.tools as tools
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -146,7 +147,12 @@ def test_method_strings_match_smali_ground_truth(dk):
     # Count elements that SURVIVED the filter, not methods: on a dex whose strings
     # are all filtered out the method counters stay positive while the oracle
     # compares nothing, so only this makes the "invariant" claim non-vacuous.
-    assert checked > 0 and with_strings > 0 and compared > 0
+    require_corpus_shape(
+        checked > 0 and with_strings > 0 and compared > 0,
+        "method carrying a printable const-string",
+        "the forward accessor stopped returning literals, or the oracle stopped "
+        "comparing them",
+    )
 
 
 def test_class_strings_are_method_union_then_static_init(dk):
@@ -198,7 +204,11 @@ def test_method_strings_round_trips_into_the_reverse_query(dk):
                 checked += 1
         if checked >= 20:
             break
-    assert checked > 0, "no const-string in the corpus"
+    require_corpus_shape(
+        checked > 0,
+        "const-string to round-trip through the reverse query",
+        "list_method_strings and find_methods_using_strings disagree",
+    )
 
 
 def test_non_ascii_literals_round_trip():
@@ -1407,3 +1417,113 @@ def test_overlong_mutf8_is_rejected_at_the_verifier(tmp_path):
     f = tmp_path / "canonical.dex"
     f.write_bytes(bytes(b))
     assert dexllm.verify(str(f))[0]["valid"], dexllm.verify(str(f))[0]["reason"]
+
+
+def test_source_info_is_a_session_fact_not_a_fresh_probe(tmp_path):
+    """dexllm#42: a session-bound answer must survive its file.
+
+    The MCP `identify` tool re-probed the path at call time, so a source removed
+    after the load — a dump in a temp dir, which is exactly what
+    `add_dumped_dexes` is for — reported `format: "unknown", dex_count: 0` for a
+    session that still worked. And 0 is not a neutral value: `_dexkit_core.pyi`
+    documents it as "resources-only container, nothing to analyse". An orienting
+    tool emitting that for a live session is a confident wrong answer.
+
+    Corpus-free (`tests/data/multidex.apk`), so it runs in the corpus-less CI leg
+    and cannot fail on a `$DEXLLM_TEST_APK` narrowing.
+    """
+    zip_bytes, _ = committed_container()
+    copy = tmp_path / "copy.apk"
+    copy.write_bytes(zip_bytes)
+    dk = dexllm.DexKit(str(copy))
+    before = dk.source_info()
+    assert before == [dict(dexllm.identify(str(copy)))], (
+        "the load-time record must agree with a fresh probe while the file is "
+        "there — otherwise this pins staleness, not stability"
+    )
+
+    copy.unlink()
+    assert dexllm.identify(str(copy))["dex_count"] == 0, (
+        "premise: a fresh probe of the deleted path DOES report the sentinel, so "
+        "the assertions below are not vacuous"
+    )
+    assert dk.source_info() == before, "the session's own answer must not change"
+    assert dk.list_classes(), "…and the session it describes still works"
+
+    out = tools.execute("identify", {}, dk)
+    assert out["format"] != "unknown" and out["dex_count"] >= 1
+    assert out["source"] == str(copy)
+    assert out["loaded_dex_count"] == dk.dex_count()
+
+
+def test_source_info_has_one_row_per_source_in_load_order(tmp_path):
+    """It answers for EVERY source, not only the primary.
+
+    `add_dumped_dexes` puts the dump FIRST, so a packer session's primary is a
+    bare dex and the apk it came from is source #2 — the row an analyst wants
+    when the primary looks nothing like the app. The two sources must also
+    DIFFER, or a list that silently reports only the primary looks identical.
+    """
+    zip_bytes, dex_bytes = committed_container()
+    dump, apk = tmp_path / "dump.dex", tmp_path / "app.apk"
+    dump.write_bytes(dex_bytes)
+    apk.write_bytes(zip_bytes)
+
+    dk = dexllm.DexKit([str(dump), str(apk)])
+    rows = dk.source_info()
+    assert [r["source"] for r in rows] == dk.sources() == [str(dump), str(apk)]
+    assert rows[0]["format"] == "dex" and rows[1]["format"] == "zip"
+    # the tool reports the PRIMARY, and says which one that is (dexllm#38/#26)
+    out = tools.execute("identify", {}, dk)
+    assert out["source"] == str(dump) and out["format"] == "dex"
+
+
+def test_source_info_is_one_row_per_source_not_per_logical_dex(tmp_path):
+    """The row count follows SOURCES, not dexes — the packer-dump shape.
+
+    A concatenated dump is ONE source the loader splits into several logical
+    dexes, so `len(source_info()) == len(sources())` only discriminates a
+    per-source record from a per-image one when some source contributes != 1 dex.
+    Without this, pushing the row inside `CollectImage` instead of
+    `CollectSource` passes every other guard.
+    """
+    _, dex_bytes = committed_container()
+    concat = tmp_path / "concat.dex"
+    concat.write_bytes(dex_bytes * 2)
+
+    dk = dexllm.DexKit(str(concat))
+    assert (
+        dk.dex_count() == 2
+    ), "the fixture must actually split, or this proves nothing"
+    rows = dk.source_info()
+    assert len(rows) == 1 and rows[0]["source"] == str(concat)
+    # …and the row carries the CONTAINER's own count, not the session's (#38)
+    assert rows[0]["dex_count"] == 1 != dk.dex_count()
+
+
+def test_identify_says_which_path_it_probed(tmp_path):
+    """A probe result that cannot name its subject names an unnamed one of N.
+
+    The same reason `extract_dex` grew provenance (dexllm#26) — and it is what
+    lets `source_info()` reuse this exact shape for a per-source list.
+    """
+    zip_bytes, _ = committed_container()
+    apk = tmp_path / "named.apk"
+    apk.write_bytes(zip_bytes)
+    assert dexllm.identify(str(apk))["source"] == str(apk)
+
+
+def test_identify_of_a_missing_path_still_reports_the_full_key_set():
+    """The only assertion pinning the probe dict's EXACT keys — corpus-free.
+
+    A dropped or renamed key in `container_info_dict` is otherwise caught only by
+    tests that need a sample, and a reviewer measured that those skip in BOTH CI
+    legs. A non-existent path needs nothing at all.
+    """
+    assert dexllm.identify("/nonexistent/x.apk") == {
+        "format": "unknown",
+        "is_apk": False,
+        "has_manifest": False,
+        "dex_count": 0,
+        "source": "/nonexistent/x.apk",
+    }

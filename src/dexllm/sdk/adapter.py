@@ -388,6 +388,10 @@ class DexKitAdapter:
         """Return per-loaded-dex structural-verification verdicts."""
         return _to_verify_statuses(self._dk.verify_report())
 
+    def source_info(self) -> tuple[ContainerInfo, ...]:
+        """Return what each construction source was, probed once at load."""
+        return tuple(_container_info(row) for row in self._dk.source_info())
+
     # -- DexExtractionPort --
 
     def extract_dexes(self) -> tuple[ExtractedDex, ...]:
@@ -823,15 +827,24 @@ def _to_verify_statuses(
     )
 
 
+def _container_info(row: Mapping[str, Any]) -> ContainerInfo:
+    """Convert one probe dict to the typed model.
+
+    Shared by the on-demand probe and the session's load-time record, which
+    return the same keys and must therefore produce the same model.
+    """
+    return ContainerInfo(
+        source=row["source"],
+        format=row["format"],
+        is_apk=row["is_apk"],
+        has_manifest=row["has_manifest"],
+        dex_count=row["dex_count"],
+    )
+
+
 def _to_container_info(path: SourceLike) -> ContainerInfo:
     """Probe a file by content (no load) and convert to the typed model."""
-    r = dexllm.identify(os.fspath(path))
-    return ContainerInfo(
-        format=r["format"],
-        is_apk=r["is_apk"],
-        has_manifest=r["has_manifest"],
-        dex_count=r["dex_count"],
-    )
+    return _container_info(dexllm.identify(os.fspath(path)))
 
 
 class ContainerProbe:

@@ -60,7 +60,7 @@ from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from sse_starlette.sse import EventSourceResponse
 
-from . import DexKit, identify
+from . import DexKit
 from . import tools as dxtools
 
 # ─── Config ───────────────────────────────────────────────────────────────
@@ -206,7 +206,11 @@ async def upload(apk: UploadFile = File(...)) -> dict:
 
     try:
         dk = await asyncio.to_thread(DexKit, apk_path)
-        verdict = await asyncio.to_thread(identify, apk_path)
+        # The loader already probed this file to decide how to read it, so take
+        # ITS record rather than reading the path a second time (dexllm#42) —
+        # applying here the same rule that change made for the MCP tool: a fact
+        # about the session comes from the session.
+        verdict = dk.source_info()[0]
     except Exception as e:
         shutil.rmtree(tmpdir, ignore_errors=True)
         raise HTTPException(
@@ -229,7 +233,10 @@ async def upload(apk: UploadFile = File(...)) -> dict:
         "apk_path": apk_path,
         "filename": apk.filename,
         "size_bytes": size_bytes,
-        # The PROBE's verdict for the uploaded container...
+        # What the uploaded container WAS, as the loader recorded it. Its
+        # `source` is the STORED path (= `apk_path`), i.e. the file that was
+        # actually probed — not the client's `filename`, which is display
+        # metadata and is not a path component at all (dexllm#47).
         "identified": verdict,
         # ...and the session's own count, under a name that cannot be mistaken
         # for it: a concatenated packer dump probes as ONE dex and loads as N,

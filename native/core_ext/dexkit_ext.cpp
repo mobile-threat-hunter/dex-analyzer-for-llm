@@ -321,6 +321,11 @@ struct Probe {
     bool has_manifest = false;
 };
 
+// The one place a Probe becomes a reported ContainerInfo, so Identify() (which
+// reports a path) and CollectSource() (which records what it loaded) cannot drift
+// — the same single-rule discipline Probe itself exists for.
+ContainerInfo ContainerInfoFrom(const std::string& path, const struct Probe& p);
+
 Probe ProbeContainer(const std::string& path) {
     Probe p;
     p.map = std::make_unique<dexkit::MemMap>(path);
@@ -338,6 +343,16 @@ Probe ProbeContainer(const std::string& path) {
     p.has_manifest = p.za->Find("AndroidManifest.xml") != nullptr;
     p.dex_count = CountClassesDex(*p.za);
     return p;
+}
+
+ContainerInfo ContainerInfoFrom(const std::string& path, const Probe& p) {
+    ContainerInfo info;
+    info.source = path;
+    info.format = p.format;
+    info.has_manifest = p.has_manifest;
+    info.is_apk = p.has_manifest;  // a zip carrying an AndroidManifest.xml
+    info.dex_count = p.dex_count;
+    return info;
 }
 
 // One logical dex inside an image, with its load-boundary verdict.
@@ -474,13 +489,7 @@ std::unique_ptr<dexkit::MemMap> CopySlice(const uint8_t* base, uint32_t size) {
 }  // namespace
 
 ContainerInfo DexKitExt::Identify(const std::string& path) {
-    Probe p = ProbeContainer(path);
-    ContainerInfo info;
-    info.format = p.format;
-    info.dex_count = p.dex_count;
-    info.has_manifest = p.has_manifest;
-    info.is_apk = p.has_manifest;  // a zip carrying an AndroidManifest.xml
-    return info;
+    return ContainerInfoFrom(path, ProbeContainer(path));
 }
 
 std::vector<DexVerifyStatus> DexKitExt::Verify(const std::string& path,
@@ -625,6 +634,11 @@ void DexKitExt::AssertLoadedDexesWereVerified(size_t accepted) const {
 size_t DexKitExt::CollectSource(const std::string& path, bool check_insns,
                                 std::vector<std::unique_ptr<dexkit::MemMap>>& out) {
     Probe p = ProbeContainer(path);  // one content-based classification
+    // Keep what the probe found, so a session can answer "what was this source"
+    // from memory rather than re-reading a path that may be gone (dexllm#42).
+    // Recorded BEFORE the throws below: a source that fails to load produces no
+    // session at all, so every row here belongs to a source that did load.
+    source_info_.push_back(ContainerInfoFrom(path, p));
 
     if (p.format == "unknown") {
         if (!p.map->ok()) {  // ProbeContainer always sets map; ok() distinguishes

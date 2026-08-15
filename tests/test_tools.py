@@ -608,6 +608,15 @@ _MCP_ONLY_TOOLS: set[str] = set()
 # argument must carry the name its operation already uses (dexllm#44).
 _MCP_TRANSPORT_ARGS: set[str] = {"limit", "offset", "max_chars", "pattern"}
 
+# Tools whose impl legitimately calls a DIFFERENTLY-named operation, with the
+# reason. `identify` reports the shape `dexllm.identify(path)` defines, but from
+# the session's load-time record rather than a fresh probe (dexllm#42) — the tool
+# name is still the operation's name, and the record it reads is the one that
+# operation produced. Declared rather than inferred, so the audit states the
+# exception instead of being satisfied by a docstring that happens to say
+# "identify".
+_MCP_IMPL_CALLS: dict[str, str] = {"identify": "source_info"}
+
 
 def test_identify_means_the_same_thing_on_every_layer(tmp_path):
     """dexllm#38: a shared key must not carry two meanings across layers.
@@ -681,8 +690,15 @@ def test_identify_means_the_same_thing_on_every_layer(tmp_path):
             candidate = dexllm.DexKit([str(concat), apk])
         except Exception:  # noqa: BLE001
             continue
+
+        # …compared WITHOUT `source`, which is the path and therefore always
+        # differs (dexllm#42 added it): leaving it in makes the gate vacuously
+        # true, so any candidate would pass and the leg would pin nothing.
+        def _shape(d):
+            return {k: v for k, v in d.items() if k != "source"}
+
         a, b = dexllm.identify(candidate.apk_path()), dexllm.identify(apk)
-        if a != b:  # the pair must identify DIFFERENTLY or it pins nothing
+        if _shape(a) != _shape(b):  # the pair must identify DIFFERENTLY
             multi, first = candidate, a
             break
     if multi is None:
@@ -763,16 +779,24 @@ def test_every_mcp_tool_name_exists_on_another_layer():
             f"tool {name!r} is implemented by {impl.__name__} — the impl name ties "
             f"the registry key to the operation, so they must agree"
         )
-        # `safe_` covers the two decompile tools, which go through the documented
-        # hang-guarded wrapper (`safe_decompile_method`) rather than calling `dk`
-        # directly. That is the same operation, so it satisfies the rule.
+        # The DOCSTRING is stripped first. It routinely mentions the operation by
+        # name, so leaving it in lets prose satisfy the rule: dexllm#42 changed
+        # `_t_identify`'s body to read a session record, and the audit kept
+        # passing purely on two ``dexllm.identify(...)`` mentions in its prose —
+        # a correct implementation would have gone red on a reworded sentence,
+        # and a genuinely borrowed name would no longer be caught.
+        # …removed by pattern, not by `.replace(impl.__doc__, "")`: that silently
+        # matched nothing (verified) and left the prose in, which is the failure
+        # mode this strip exists to prevent.
+        body = re.sub(r'"""(?:.|\n)*?"""', "", inspect.getsource(impl), count=1)
+        assert '"""' not in body, f"the docstring strip failed for {name!r}"
+        target = _MCP_IMPL_CALLS.get(name, name)
         called = re.search(
-            rf"(?:\bdk\.|\bdexllm\.|\b)(?:safe_)?{re.escape(name)}\s*\(",
-            inspect.getsource(impl),
+            rf"(?:\bdk\.|\bdexllm\.|\b)(?:safe_)?{re.escape(target)}\s*\(", body
         )
         assert called, (
-            f"tool {name!r} does not call an operation of the same name — it is "
-            f"borrowing another operation's name"
+            f"tool {name!r} does not call {target!r} — it is borrowing another "
+            f"operation's name"
         )
 
 

@@ -58,7 +58,7 @@ fields are `tuple`s; `Mapping` fields are read-only views. See
 [Conventions](#conventions) for the immutability / hashability rules.
 
 ### Loading & probing
-- **`ContainerInfo`** `(format, is_apk, has_manifest, dex_count)` — content-based
+- **`ContainerInfo`** `(format, is_apk, has_manifest, dex_count, source)` — content-based
   file probe. `format` ∈ `"dex" | "zip" | "unknown"`.
 - **`DexVerifyStatus`** `(dex_id, name, valid, reason, source)` — one loaded dex's
   structural-verification verdict; `reason` is empty when `valid`. `name` is the
@@ -236,7 +236,7 @@ so a consumer depends on just what it needs:
 |---|---|
 | **`ContainerProbePort`** | `identify(path) -> ContainerInfo`, `verify(path, *, lenient=False) -> tuple[DexVerifyStatus, …]` (load-free) |
 | **`DecompilationPort`** | `decompile_method`, `decompile_method_with_pc_map`, `decompile_class`, `decompile_method_ast`, `render_method_smali`, `render_class_smali` |
-| **`EnumerationPort`** | `list_classes` / `list_classes_in_dex`, `list_class_methods`, `list_fields` / `list_fields_in_dex`, `list_methods` / `list_methods_in_dex`, `list_value_strings` / `list_class_strings` / `list_method_strings` (app-wide, class-scoped, method-scoped — the forward direction of `find_*_using_strings`), `list_external_method_refs` / `list_external_field_refs` / `list_external_type_refs`, `verify_report` (uniform scope axis: bare = all dexes, `…_in_dex(dex_id)` = one dex) |
+| **`EnumerationPort`** | `list_classes` / `list_classes_in_dex`, `list_class_methods`, `list_fields` / `list_fields_in_dex`, `list_methods` / `list_methods_in_dex`, `list_value_strings` / `list_class_strings` / `list_method_strings` (app-wide, class-scoped, method-scoped — the forward direction of `find_*_using_strings`), `list_external_method_refs` / `list_external_field_refs` / `list_external_type_refs`, `verify_report`, `source_info` (what each source WAS, probed at load — a session fact that survives the file) (uniform scope axis: bare = all dexes, `…_in_dex(dex_id)` = one dex) |
 | **`DexExtractionPort`** | `extract_dex` → `ExtractedDex` / `extract_dexes` → all of them in `dex_id` order (bytes + provenance: `source` / `entry` / `offset`; the packer/dump primitive). Provenance is not derivable elsewhere — the verify report's `name` is only the entry name for a zip member, so two sources both report `classes.dex`, and only `offset` says where in a concatenated container a dex starts |
 | **`ClassInspectionPort`** | `class_info`, `class_fields`, `class_methods`, `locate_class_dex` (the ISP split of raw's `get_class_summary`; `class_methods` is the structured twin of `class_fields` — `EnumerationPort.list_class_methods` returns descriptors, which carry no access flags, so before dexllm#37 a method modifier was reachable only by dropping to `.raw`; `locate_class_dex` = cheap declaring-dex lookup, vs the heavy `class_info().dex_id`) |
 | **`CrossReferencePort`** | `find_call_sites_to` (a target's callers — the reverse edge) / `find_call_sites_from` (a method's callees — the forward edge), `resolve_call_args`, `find_methods_reading_field`, `find_methods_writing_field`, `find_type_references`. `find_call_sites_to` / `find_call_sites_from` is the same pair the raw `DexKit` and the MCP catalog use — one spelling across all three layers, and the only one: the pre-unification adapter aliases (`find_call_sites`, `find_call_sites_to_api`, `find_call_sites_from_method`, `find_field_readers`, `find_field_writers`) were removed. Both call-site directions and `resolve_call_args` take `method_descriptor` |

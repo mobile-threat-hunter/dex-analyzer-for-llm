@@ -308,7 +308,7 @@ cd - && pip install -e . --no-build-isolation   # 2. reinstall from repo root
 import dexllm
 
 # Probe a file by content without loading it (handles disguised/extension-less APKs)
-dexllm.identify("/path/to/suspect")   # → {format, is_apk, has_manifest, dex_count}
+dexllm.identify("/path/to/suspect")   # → {format, is_apk, has_manifest, dex_count, source}
 
 # Structurally verify a dex/apk without loading — never raises (the verify() sibling of identify())
 dexllm.verify("/path/to/suspect")     # → [{dex_id, name, valid, reason, source}, …] (per dex)

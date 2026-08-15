@@ -188,6 +188,17 @@ class EnumerationPort(Protocol):
         """Per-loaded-dex structural-verification verdicts."""
         ...
 
+    def source_info(self) -> tuple[ContainerInfo, ...]:
+        """Report what each construction source WAS, probed once at LOAD (#42).
+
+        One entry per :attr:`~DexAnalysisUseCase.sources` entry, in the same
+        order. A session FACT, not a fresh read: it stays true after the file is
+        deleted, which a dumped dex in a temp directory routinely is. Probing the
+        path again would answer ``dex_count == 0`` — the documented "nothing to
+        analyse" sentinel — for a session that still works.
+        """
+        ...
+
 
 @runtime_checkable
 class DexExtractionPort(Protocol):

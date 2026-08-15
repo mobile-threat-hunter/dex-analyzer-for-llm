@@ -95,6 +95,24 @@ def smali_offsets(dk, desc):
     return offs
 
 
+def committed_container():
+    """``(zip_bytes, bare_dex_bytes)`` from the one container this repo commits.
+
+    ``tests/data/multidex.apk`` (1,233 B, from androguard) is the only sample in
+    git, so a guard built on it runs in the corpus-less CI leg AND survives a
+    ``$DEXLLM_TEST_APK`` narrowing to any sample — including a bare ``.dex``,
+    which is what made an earlier cut of the dexllm#42 guards hard-fail on an
+    environment fact (this module's own rule, and issue #46).
+    """
+    import zipfile
+
+    blob = REPO_ROOT / "tests" / "data" / "multidex.apk"
+    if not blob.is_file():  # pragma: no cover - the file is committed
+        pytest.skip("tests/data/multidex.apk missing")
+    with zipfile.ZipFile(blob) as z:
+        return blob.read_bytes(), z.read("classes.dex")
+
+
 def raw_param_names(fn):
     """Parameter names of a pybind11 method, or None when none can be read.
 
