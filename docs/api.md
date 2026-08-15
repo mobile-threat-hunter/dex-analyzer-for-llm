@@ -1061,8 +1061,10 @@ dexllm.detect_content_providers(dk, data_dir="/etc/dexllm")
 | granularity | **per file** — a directory holding only one of the two still serves the bundled other |
 | semantics | whole-file **replacement**, not a merge |
 | bad directory | `NotADirectoryError` naming which of the two spellings supplied it — checked per call, so a vanished directory fails loudly instead of serving a stale cache |
+| entry that is not a regular file | `OSError` naming the path — a directory, a FIFO or a **dangling symlink** is a misconfiguration, not a partial override; only a genuinely absent file falls back. An override directory that exists but is **empty** is not an error: it cannot be told apart from a deliberate partial override |
 | malformed file | `ValueError` naming the path (invalid JSON, non-UTF-8 bytes, or a wrong shape — including a tag list written as a bare string) |
-| caching | per `resolve()`d path, bounded; `dexllm.clear_data_caches()` re-reads a file edited in place |
+| caching | per `resolve()`d path, bounded (16) — the parsed data, and the decision to use an **override**, so a `rm` + `cp` redeploy cannot demote a running server to bundled data mid-request. Above the bound the evicted decisions are re-made. A bundled **fallback** is re-decided every call, so an override appearing later is picked up and a transient failure cannot pin bundled data for the process lifetime |
+| unset value | `None` or `""`. NOT `Path("")` — pathlib turns it into `Path(".")`, a real request for the process directory |
 
 `$DEXLLM_DATA_DIR` is the form that also reaches the MCP and HTTP servers, which
 take no such argument. The permission tables (`perm_api.json` / `perm_levels.json`)
@@ -1071,8 +1073,10 @@ content, and [`dataset_path=`](#9-dangerous-permission-apis-python) /
 `$DEXLLM_AOSP_DATASET` already serve a fresher AOSP snapshot.
 
 ### `dexllm.clear_data_caches() -> None`
-Drop the parsed-data cache. Not needed to switch `data_dir` (the cache is keyed by
-resolved path) — only to pick up a file edited in place.
+Drop the parsed data and the frozen override decisions. Not needed to switch
+`data_dir` (both are keyed by resolved path), nor to pick up an override that
+appears later (a bundled fallback is re-decided every call) — only to pick up a
+change at a path already in use: bytes edited in place, or the file replaced.
 
 ---
 

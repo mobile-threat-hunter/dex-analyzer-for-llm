@@ -23,6 +23,7 @@ Corpus-free — every test uses a stub dk or the match helper directly.
 """
 
 import json
+import os
 
 import pytest
 
@@ -425,27 +426,556 @@ def test_the_cache_is_bounded(tmp_path):
     assert len(datadir._CACHE) <= datadir._MAX_CACHE_ENTRIES
 
 
-def test_a_vanished_data_dir_fails_loudly_rather_than_serving_a_stale_cache(tmp_path):
-    """Resolution runs BEFORE the cache lookup, deliberately.
+def test_a_vanished_dir_is_loud_while_a_vanished_file_stays_stable(tmp_path):
+    """The two directions of "something disappeared", and why they differ.
 
-    A config volume that unmounts must not be masked by what the process happened
-    to load an hour ago — the two directions are stated here so the asymmetry with
-    per-file fallback (a MISSING file inside a VALID directory falls back to
-    bundled) is a documented decision rather than a surprise.
+    INVERTED at issue #43. This test used to assert the opposite for the file
+    half — that unlinking the override mid-run silently switched the answer to
+    bundled — pinning as documented behaviour the very surprise #43 reports: a
+    redeploy doing ``rm`` + ``cp`` has a window in which a long-lived server
+    answers with different `family` labels from one request to the next. The
+    decision to USE that override is now frozen, so the answer is STABLE across
+    that window and only :func:`clear_data_caches` moves it. (The freeze and the
+    content cache are two bounded structures with independent lifetimes, not "one
+    lifetime" as an earlier draft of this comment said — see
+    ``test_a_frozen_override_that_is_deleted_self_heals_once_nothing_is_cached``
+    for what happens when they diverge.)
+
+    The DIRECTORY half is unchanged and deliberate: an unmounted config volume
+    must not be masked by what the process happened to load an hour ago.
     """
     import shutil
 
     _write_uris(tmp_path, "content://vol", "volfam")
     assert set(providers.load_content_uris(data_dir=str(tmp_path))) == {"content://vol"}
 
-    # the file alone disappears -> per-file fallback to bundled, no error
+    # the file alone disappears -> the answer does NOT change mid-run
     (tmp_path / "content_uris.json").unlink()
+    assert set(providers.load_content_uris(data_dir=str(tmp_path))) == {"content://vol"}
+    # …and the documented reset is what moves it, not a filesystem event
+    datadir.clear_data_caches()
     assert "content://sms" in providers.load_content_uris(data_dir=str(tmp_path))
 
     # the whole directory disappears -> loud, even though a copy is still cached
+    _write_uris(tmp_path, "content://vol", "volfam")
+    assert set(providers.load_content_uris(data_dir=str(tmp_path))) == {"content://vol"}
     shutil.rmtree(tmp_path)
     with pytest.raises(NotADirectoryError):
         providers.load_content_uris(data_dir=str(tmp_path))
+
+
+@pytest.mark.parametrize(
+    "kind", ["directory", "fifo", "dangling", "loop", "link_to_fifo"]
+)
+@pytest.mark.parametrize("spelling", ["arg", "env"])
+def test_an_override_entry_that_is_not_a_regular_file_is_loud(
+    tmp_path, kind, spelling, monkeypatch
+):
+    """issue #43: "not a regular file" is a misconfiguration, not "absent".
+
+    The old test was ``is_file()``, so all four of these read as absent and fell
+    back — and the realistic one is the DANGLING SYMLINK: an override that is not
+    really there, after which the analysis runs on bundled data while the operator
+    believes theirs is live. The module docstring promised the opposite ("a typo'd
+    path silently serving bundled data is the failure this prevents"), and that
+    guarantee held only at the directory level.
+
+    ``dangling``/``loop`` are why the check cannot be ``exists()``: it follows the
+    link, so both read as absent.
+
+    Parametrised over BOTH spellings because the message has a branch naming which
+    one supplied the path — its ``NotADirectoryError`` sibling has
+    ``test_a_missing_data_dir_raises_naming_the_source`` for exactly that reason,
+    and an adversarial review showed a mutant hard-coding ``data_dir=`` survived
+    the arg-only version.
+    """
+    entry = tmp_path / "content_uris.json"
+    if kind == "directory":
+        entry.mkdir()
+    elif kind == "fifo":
+        os.mkfifo(entry)
+    elif kind == "dangling":
+        entry.symlink_to(tmp_path / "never_mounted.json")
+    elif kind == "link_to_fifo":
+        # a link is only as good as what it points AT — a reviewer's mutant that
+        # accepted any link with an existing target survived the other four kinds
+        # and handed the loader a FIFO, i.e. an unbounded block one hop away.
+        target = tmp_path / "pipe"
+        os.mkfifo(target)
+        entry.symlink_to(target)
+    else:
+        entry.symlink_to(entry)  # a self-referential link: ELOOP on any follow
+
+    if spelling == "arg":
+        call, expected_source = (
+            lambda: providers.load_content_uris(data_dir=str(tmp_path)),
+            "data_dir=",
+        )
+    else:
+        monkeypatch.setenv(datadir.ENV_VAR, str(tmp_path))
+        call, expected_source = providers.load_content_uris, "$" + datadir.ENV_VAR
+
+    # bounded: a `fifo`/`link_to_fifo` that slipped through would be handed to
+    # `read_bytes()`, which blocks forever — a hang, not a failure, without this
+    got = _bounded(call)
+    assert isinstance(got, OSError), f"expected a raise, got {got!r}"
+    assert "is not a regular file" in str(got)
+    assert str(entry) in str(got), "the message must name the offending path"
+    assert expected_source in str(
+        got
+    ), "…and which spelling supplied it, like the NotADirectoryError sibling"
+    # …and it is not a one-shot: the raise is not memoised into a frozen decision
+    assert isinstance(_bounded(call), OSError)
+
+
+def test_a_genuinely_absent_override_file_still_falls_back(tmp_path):
+    """The other side of the same predicate — non-discriminating BY DESIGN.
+
+    Partial override is the feature the fallback exists for, so the #43 raise must
+    narrow "absent" to "nothing is there at all" without narrowing it further. A
+    fix that raised on any non-``is_file()`` candidate would pass every assertion
+    in the test above and break the channel's headline behaviour.
+    """
+    assert not (tmp_path / "content_uris.json").exists()
+    assert "content://sms" in providers.load_content_uris(data_dir=str(tmp_path))
+
+
+def test_a_symlink_to_a_real_file_is_a_valid_override(tmp_path):
+    """A symlinked override is the NORMAL deployment shape, not the failure one.
+
+    The #43 check accepts a link that RESOLVES to a regular file and rejects one
+    that does not — that is what separates "the volume mounted" from "it did not".
+    Without this the fix would reject the very configuration it protects.
+    """
+    real = tmp_path / "real"
+    real.mkdir()
+    _write_uris(real, "content://linked", "linkfam")
+    link_dir = tmp_path / "cfg"
+    link_dir.mkdir()
+    (link_dir / "content_uris.json").symlink_to(real / "content_uris.json")
+
+    assert set(providers.load_content_uris(data_dir=str(link_dir))) == {
+        "content://linked"
+    }
+
+
+def test_a_frozen_decision_is_absolute_and_shared_by_every_spelling(
+    tmp_path, monkeypatch
+):
+    """The frozen VALUE must be resolved, not the caller's spelling (issue #43).
+
+    The first cut keyed the memo on the RESOLVED root but stored the SPELLED
+    candidate, so a relative `data_dir` froze a CWD-relative path that a later call
+    re-anchored elsewhere: two reviewers independently constructed
+    ``cwd=/a data_dir="cfg"`` then ``cwd=/b data_dir="/a/cfg"`` -> served /b's
+    dataset for an explicit, unambiguous /a request. That is a silent cross-
+    directory WRONG ANSWER — worse than the bug being fixed — and it is exactly the
+    aliasing the content cache resolves its own key to prevent.
+    """
+    cfg = tmp_path / "a" / "cfg"
+    cfg.mkdir(parents=True)
+    _write_uris(cfg, "content://FROM_A", "fam")
+    other = tmp_path / "b"
+    other.mkdir()
+
+    monkeypatch.chdir(tmp_path / "a")  # restored by monkeypatch — a bare
+    # os.chdir would leak the CWD into every later test in the session
+    assert set(providers.load_content_uris(data_dir="cfg")) == {"content://FROM_A"}
+    frozen = next(iter(datadir._RESOLVED.values()))
+    assert frozen.is_absolute(), f"a relative decision was frozen: {frozen}"
+
+    monkeypatch.chdir(other)
+    assert set(providers.load_content_uris(data_dir=str(cfg))) == {"content://FROM_A"}
+    # …and both spellings are ONE decision, which is what the resolved key buys
+    assert len(datadir._RESOLVED) == 1
+
+
+def test_a_bundled_fallback_is_not_frozen(tmp_path):
+    """Only the OVERRIDE direction is frozen — the asymmetry is the point (#43).
+
+    Freezing the bundled fallback too would convert a TRANSIENT wrong answer into a
+    PERMANENT one: a single request landing inside a deploy's ``rm`` window pins
+    bundled data for the life of the process, which is the very failure #43 reports
+    made sticky. An adversarial review constructed exactly that against the first
+    cut (five subsequent requests served bundled data while the override sat on
+    disk, no error), and the first cut's own test asserted that behaviour as
+    intended — so this REPLACES that assertion.
+    """
+    assert "content://sms" in providers.load_content_uris(data_dir=str(tmp_path))
+    _write_uris(tmp_path, "content://appeared", "fam")
+    assert set(providers.load_content_uris(data_dir=str(tmp_path))) == {
+        "content://appeared"
+    }, "a fallback must self-heal without clear_data_caches()"
+
+
+@pytest.mark.parametrize("spelling", ["arg", "env"])
+def test_the_freeze_works_through_both_spellings(tmp_path, monkeypatch, spelling):
+    """`$DEXLLM_DATA_DIR` is the form that reaches the MCP and HTTP servers.
+
+    So it is the long-running process #43 is FOR — yet every other freeze test uses
+    `data_dir=`, and a reviewer's mutant that disabled the freeze for the env
+    spelling alone passed the whole suite.
+    """
+    _write_uris(tmp_path, "content://frozen", "fam")
+    if spelling == "arg":
+        call = lambda: providers.load_content_uris(data_dir=str(tmp_path))  # noqa: E731
+    else:
+        monkeypatch.setenv(datadir.ENV_VAR, str(tmp_path))
+        call = providers.load_content_uris
+
+    assert set(call()) == {"content://frozen"}
+    assert datadir._RESOLVED, f"nothing was frozen for the {spelling} spelling"
+    (tmp_path / "content_uris.json").unlink()
+    assert set(call()) == {"content://frozen"}, "the freeze must not depend on how"
+
+
+def test_the_memo_hit_raise_names_the_configured_path_and_spelling(
+    tmp_path, monkeypatch
+):
+    """A frozen decision holds the RESOLVED TARGET, which is not what to blame.
+
+    For a symlinked override that target is inside the release directory, so a
+    message built from it names neither the file nor the directory the operator
+    configured — and #43's whole point is that a misconfiguration says WHERE. The
+    cold path was parametrised over both spellings; the memo-hit path had no such
+    coverage, and a reviewer's mutant hard-coding `data_dir=` there survived.
+    """
+    real = tmp_path / "rel"
+    real.mkdir()
+    _write_uris(real, "content://linked", "fam")
+    cfg = tmp_path / "cfg"
+    cfg.mkdir()
+    (cfg / "content_uris.json").symlink_to(real / "content_uris.json")
+
+    monkeypatch.setenv(datadir.ENV_VAR, str(cfg))
+    assert set(providers.load_content_uris()) == {"content://linked"}
+    (real / "content_uris.json").unlink()
+    os.mkfifo(real / "content_uris.json")  # the frozen target turns unreadable
+
+    # bounded: if the kind re-check ever stops firing, this reads the FIFO
+    got = _bounded(providers.load_content_uris)
+    assert isinstance(got, OSError) and "is not a regular file" in str(got)
+    assert str(cfg / "content_uris.json") in str(
+        got
+    ), "the message must name the CONFIGURED override, not the release target"
+    assert "$" + datadir.ENV_VAR in str(got)
+
+
+def test_an_empty_data_dir_is_unset_for_a_str_but_pathlib_eats_the_empty_path(
+    tmp_path, monkeypatch
+):
+    """Pins a LIMITATION, not a fix — and where the boundary of it lies.
+
+    A reviewer found that `data_dir=Path("")` means the process CWD, and proposed
+    normalising with `os.fspath`. It does not help and cannot: pathlib collapses
+    `Path("")` to `Path(".")` at CONSTRUCTION, so by the time `resolve_data_file`
+    is called there is nothing left to distinguish it from a deliberate
+    `Path(".")`, which is a legitimate request. The information is lost in the
+    CALLER's own expression.
+
+    So the rule is documented instead of enforced: pass `None` or `""` for an unset
+    value. This test states the reality in both directions so the limitation is a
+    decision on record rather than a surprise — and it would fail if the `str`
+    spelling ever regressed to meaning the CWD.
+    """
+    from pathlib import Path
+
+    _write_uris(tmp_path, "content://CWD_LEAK", "fam")
+    monkeypatch.chdir(tmp_path)
+
+    assert "content://sms" in providers.load_content_uris(data_dir="")
+    assert Path("") == Path("."), "the premise: pathlib normalises before we see it"
+    assert set(providers.load_content_uris(data_dir=Path(""))) == {
+        "content://CWD_LEAK"
+    }, "documented: a Path('') is a real request for the CWD, not an unset value"
+    # …and an ordinary PathLike works, so nothing else was narrowed
+    assert set(providers.load_content_uris(data_dir=Path(tmp_path))) == {
+        "content://CWD_LEAK"
+    }
+
+
+def test_an_unreadable_override_directory_is_the_os_error_not_a_silent_fallback(
+    tmp_path,
+):
+    """`except FileNotFoundError` must not widen to `except OSError` (issue #43).
+
+    The pre-fix `is_file()` swallowed EACCES and fell back to bundled — a container
+    that changes UID between deploys then runs the analysis on data the operator did
+    not configure, with no error. Narrowing the catch fixed it; nothing guarded it,
+    and a reviewer's `except OSError` mutant restored the silent fallback while the
+    whole suite stayed green.
+    """
+    if os.geteuid() == 0:
+        pytest.skip("running as root bypasses the permission bits this asserts")
+    cfg = tmp_path / "cfg"
+    cfg.mkdir()
+    _write_uris(cfg, "content://unreachable", "fam")
+    cfg.chmod(0o600)  # readable, NOT traversable: stat inside it fails EACCES
+    try:
+        with pytest.raises(PermissionError):
+            providers.load_content_uris(data_dir=str(cfg))
+    finally:
+        cfg.chmod(0o755)  # …or tmp_path cleanup fails
+
+
+def test_a_frozen_override_survives_a_rm_and_a_relink(tmp_path):
+    """The stability half, through a symlink — the blue/green deploy shape.
+
+    The memo stores the RESOLVED target, so repointing the link does not re-decide;
+    an earlier cut stored the link path, which decoupled it from the content cache
+    key (that resolves the target) and served the NEW release immediately, silently
+    contradicting the stability this fix promises.
+    """
+    releases = tmp_path / "rel"
+    (releases / "v1").mkdir(parents=True)
+    (releases / "v2").mkdir(parents=True)
+    _write_uris(releases / "v1", "content://v1", "fam")
+    _write_uris(releases / "v2", "content://v2", "fam")
+    cfg = tmp_path / "cfg"
+    cfg.mkdir()
+    link = cfg / "content_uris.json"
+    link.symlink_to(releases / "v1" / "content_uris.json")
+
+    assert set(providers.load_content_uris(data_dir=str(cfg))) == {"content://v1"}
+    # …and what is frozen is the TARGET, not the link. Freezing the link is what a
+    # non-strict `resolve()` produces if the entry vanishes mid-decision, and it
+    # silently un-does the stability below — a delta review constructed exactly
+    # that, so assert the mechanism and not only its effect.
+    frozen = next(iter(datadir._RESOLVED.values()))
+    assert frozen == (releases / "v1" / "content_uris.json").resolve()
+    assert not frozen.is_symlink(), f"the LINK was frozen, not its target: {frozen}"
+
+    link.unlink()
+    link.symlink_to(releases / "v2" / "content_uris.json")
+    assert set(providers.load_content_uris(data_dir=str(cfg))) == {
+        "content://v1"
+    }, "a relink must not switch datasets mid-run"
+    datadir.clear_data_caches()
+    assert set(providers.load_content_uris(data_dir=str(cfg))) == {"content://v2"}
+
+
+def test_a_decision_is_not_frozen_from_an_unverified_resolve(tmp_path, monkeypatch):
+    """`Path.resolve()` is NON-STRICT, so it can hand back the path it was given.
+
+    If the entry vanishes between the usability check and the resolve, resolve()
+    returns the SPELLED path — and freezing a LINK re-opens the relink flip this
+    fix closes, permanently for the process. A delta review hit it naturally
+    (8,751 of 20,000 resolutions under a relinking writer); this forces the same
+    window deterministically by removing the link inside the check, so the guard
+    does not depend on winning a race.
+    """
+    releases = tmp_path / "rel"
+    releases.mkdir()
+    _write_uris(releases, "content://target", "fam")
+    cfg = tmp_path / "cfg"
+    cfg.mkdir()
+    link = cfg / "content_uris.json"
+    link.symlink_to(releases / "content_uris.json")
+
+    real = datadir._override_is_usable
+
+    def vanishing(candidate, source, shown):
+        ok = real(candidate, source, shown)
+        if ok and candidate.is_symlink():
+            candidate.unlink()  # the window: gone before resolve() runs
+        return ok
+
+    monkeypatch.setattr(datadir, "_override_is_usable", vanishing)
+    datadir.resolve_data_file("content_uris.json", data_dir=str(cfg))
+    monkeypatch.undo()
+
+    assert not datadir._RESOLVED, (
+        "an unverified resolve() was frozen: "
+        f"{ {str(k): str(v) for k, v in datadir._RESOLVED.items()} }"
+    )
+    # …and the next call simply re-decides, which is what makes a miss recoverable
+    link.symlink_to(releases / "content_uris.json")
+    assert set(providers.load_content_uris(data_dir=str(cfg))) == {"content://target"}
+    frozen = next(iter(datadir._RESOLVED.values()))
+    assert frozen == (releases / "content_uris.json").resolve()
+
+
+def test_a_frozen_override_that_is_deleted_self_heals_once_nothing_is_cached(tmp_path):
+    """The two bounded dicts have independent lifetimes — reconcile the states.
+
+    A frozen decision serves stability only while its CONTENT is still cached. Once
+    both are gone the decision has nothing left to serve, and handing the path back
+    anyway turns a deliberate `rm` into a permanent FileNotFoundError for that
+    directory — decided by invisible cache pressure, and the same stickiness the
+    bundled direction is deliberately spared. So the frozen entry is dropped and the
+    call re-decides.
+    """
+    _write_uris(tmp_path, "content://frozen", "fam")
+    assert set(providers.load_content_uris(data_dir=str(tmp_path))) == {
+        "content://frozen"
+    }
+    (tmp_path / "content_uris.json").unlink()
+    # content still cached -> the freeze holds (the stability guarantee)
+    assert set(providers.load_content_uris(data_dir=str(tmp_path))) == {
+        "content://frozen"
+    }
+    # …now simulate the content entry being evicted under cache pressure while the
+    # memo survives; the two are bounded independently, so this state is reachable.
+    datadir._CACHE.clear()
+    assert "content://sms" in providers.load_content_uris(
+        data_dir=str(tmp_path)
+    ), "with nothing left to serve it must fall back, not raise"
+    assert not datadir._RESOLVED, "…and the stale decision is dropped, not retried"
+
+
+def test_a_frozen_path_replaced_by_a_fifo_raises_instead_of_blocking(tmp_path):
+    """A frozen decision is not re-decided, but its KIND is re-checked (#43).
+
+    Reading a FIFO with no writer blocks forever — an unbounded hang in a server
+    thread, the failure class this repo already treats as first-class (safe.py, the
+    emit-walk cap). Freezing without the re-check hands the loader exactly that
+    path. ABSENT is deliberately NOT re-decided: that is the stability above.
+
+    Run through ``_bounded`` because the regression this names is a HANG.
+    """
+    _write_uris(tmp_path, "content://real", "fam")
+    assert set(providers.load_content_uris(data_dir=str(tmp_path))) == {
+        "content://real"
+    }
+    entry = tmp_path / "content_uris.json"
+    entry.unlink()
+    os.mkfifo(entry)
+
+    got = _bounded(
+        datadir.resolve_data_file, "content_uris.json", data_dir=str(tmp_path)
+    )
+    assert isinstance(got, OSError), f"expected a raise, got {got!r}"
+    assert "is not a regular file" in str(got)
+
+
+def _bounded(fn, *args, **kwargs):
+    """Run ``fn`` on a worker and return its value, or the OSError it raised.
+
+    Fails the test if it does not finish. Every path that can hand the loader a
+    FIFO is exercised through this: reading one with no writer blocks forever, and
+    an in-line call would hang the suite silently instead of turning it red (there
+    is no per-test timeout configured). Verified necessary — a mutant that accepts
+    any symlink with an existing target made an in-line version hang rather than
+    fail.
+    """
+    import threading
+
+    box: list = []
+
+    def run():
+        try:
+            box.append(fn(*args, **kwargs))
+        except BaseException as exc:  # noqa: BLE001 — reported to the caller
+            box.append(exc)
+
+    worker = threading.Thread(target=run, daemon=True)
+    worker.start()
+    worker.join(timeout=10)
+    assert not worker.is_alive(), f"{getattr(fn, '__name__', fn)} BLOCKED"
+    return box[0]
+
+
+def test_a_concurrent_rewrite_never_raises_about_a_good_file(tmp_path):
+    """The deploy sequence itself must not produce a spurious raise (issue #43).
+
+    The first cut tested ``is_file()`` and then ``os.path.lexists()`` — two
+    syscalls with a gap — so a request landing between a deploy's ``rm`` and its
+    ``cp`` saw "absent" then "present" and raised about a perfectly good file. An
+    adversarial review measured 13,435 such raises in 12 s. ``stat`` decides the
+    working shapes alone now, so the correct count is exactly zero.
+
+    Scoped to a REGULAR-file override, which is what this closes. A symlinked one
+    whose TARGET is rewritten non-atomically still raises transiently — documented
+    in `_override_is_usable` as indistinguishable from a dangling link — so
+    asserting zero there would be asserting something false.
+
+    Carries its own non-vacuity floor: `spurious == 0` is also what a writer that
+    never got scheduled produces, so count the iterations that actually landed in
+    the window (the resolver saw no file and returned the bundled path).
+    """
+    import threading
+
+    _write_uris(tmp_path, "content://churn", "fam")
+    entry = tmp_path / "content_uris.json"
+    payload = entry.read_text()
+    stop = threading.Event()
+
+    def churn():
+        while not stop.is_set():
+            try:
+                entry.unlink()
+                entry.write_text(payload)
+            except OSError:  # noqa: PERF203 — the race is the point
+                pass
+
+    writer = threading.Thread(target=churn, daemon=True)
+    writer.start()
+    try:
+        spurious = in_window = 0
+        for _ in range(20000):
+            try:
+                got = datadir.resolve_data_file(
+                    "content_uris.json", data_dir=str(tmp_path)
+                )
+                in_window += got.parent != tmp_path
+            except OSError:
+                spurious += 1
+            datadir.clear_data_caches()  # re-decide every iteration, not memo-hit
+    finally:
+        stop.set()
+        writer.join(timeout=5)
+    assert spurious == 0, f"{spurious} raises about a file that was being rewritten"
+    assert in_window, "the writer never won a race — this run proved nothing"
+
+
+def test_the_resolution_memo_is_bounded_and_keeps_the_newest(tmp_path):
+    """#43 added a second caller-path-keyed dict, so it takes the same bound.
+
+    The content cache is bounded for a measured reason (300 dirs -> +44 MB, and
+    this repo has shipped that failure once at 1.6 GB). A per-request `data_dir`
+    grows the memo exactly as fast.
+
+    A ceiling ALONE is not enough, and a reviewer proved it: a "refuse new entries
+    when full" policy and a LIFO eviction both satisfy ``<= _MAX_CACHE_ENTRIES``
+    while silently disabling the freeze for everything after the first 16. So this
+    pins WHICH entries survive, in both directions — the newest is kept (kills
+    refuse-when-full) and the oldest is gone (kills LIFO, which drops the entry it
+    just used and would keep the first 16 forever).
+    """
+    dirs = []
+    for i in range(datadir._MAX_CACHE_ENTRIES * 3):
+        d = tmp_path / f"d{i}"
+        d.mkdir()
+        _write_uris(d, f"content://n{i}", "fam")
+        assert set(providers.load_content_uris(data_dir=str(d))) == {f"content://n{i}"}
+        dirs.append(d)
+
+    def key(d):
+        return (str(d.resolve()), "content_uris.json")
+
+    assert len(datadir._RESOLVED) <= datadir._MAX_CACHE_ENTRIES
+    assert datadir._RESOLVED, "…and it is not merely empty"
+    assert key(dirs[-1]) in datadir._RESOLVED, "the newest decision must be kept"
+    assert key(dirs[0]) not in datadir._RESOLVED, "eviction must drop the OLDEST"
+
+
+def test_clear_data_caches_clears_the_frozen_decisions_too(tmp_path):
+    """The reset covers both structures — otherwise a re-read goes through a
+    decision the caller just asked to forget."""
+    _write_uris(tmp_path, "content://first", "fam")
+    assert set(providers.load_content_uris(data_dir=str(tmp_path))) == {
+        "content://first"
+    }
+    assert datadir._RESOLVED, "the decision must actually be memoised"
+
+    datadir.clear_data_caches()
+    assert not datadir._RESOLVED and not datadir._CACHE
+
+    # …and a replaced file is then re-read, which is what the reset is for
+    _write_uris(tmp_path, "content://second", "fam")
+    assert set(providers.load_content_uris(data_dir=str(tmp_path))) == {
+        "content://second"
+    }
 
 
 def test_clear_data_caches_re_reads_an_edited_file(tmp_path):

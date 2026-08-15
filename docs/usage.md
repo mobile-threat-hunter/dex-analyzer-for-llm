@@ -556,15 +556,33 @@ replaced whole rather than merged — both are small enough to copy and edit, an
 merge would need a per-key precedence rule neither schema expresses.
 
 A `data_dir` that is named but does not exist raises `NotADirectoryError` (a typo
-must not silently serve bundled data), and a file that is present but malformed
-raises `ValueError` naming the path. An **empty** value means "not configured"
-through both spellings, not the current directory. Parsed data is cached per
-resolved path, so switching `data_dir` between calls is honoured; call
-`dexllm.clear_data_caches()` after editing a file in place in a long-running
-process. Resolution runs before the cache lookup, so a `data_dir` that later
-disappears fails loudly rather than serving a stale copy — while a single *file*
-vanishing from a still-valid directory falls back to the bundled one, per the
-rule above.
+must not silently serve bundled data); an entry that **is** there but is not a
+regular file — a directory, a FIFO, or a **dangling symlink** — raises `OSError`
+naming the path, rather than reading as "absent" and falling back; and a file that
+is present but malformed raises `ValueError` naming the path. An **empty** value
+means "not configured" through both spellings, not the current directory. Note
+what is *not* an error: an override directory that exists but is **empty** is
+indistinguishable from a deliberate partial override, so it falls back — worth
+knowing, because that is what a failed bind-mount usually leaves behind.
+
+Parsed data is cached per resolved path, and so is **the decision to use an
+override**: once a file has been taken from `data_dir`, a `rm` + `cp` redeploy
+cannot demote a long-running server to bundled data mid-request. A bundled
+**fallback** is re-decided every call, deliberately — an override that appears
+later is picked up on its own, and one request landing inside a deploy window
+cannot pin bundled data for the life of the process. Call
+`dexllm.clear_data_caches()` to pick up a file whose bytes changed, or one
+replaced at a path an override decision has already frozen on. The guarantee is
+bounded by the cache size (16 entries), so a caller rotating more override
+directories than that re-decides the evicted ones; one process-wide
+`$DEXLLM_DATA_DIR`, or a handful of explicit directories, never reaches it.
+Whether the override *directory* still exists is checked on every call, so a
+volume that unmounts fails loudly rather than serving a stale copy — that
+asymmetry is deliberate.
+
+An unset config value must be threaded in as `None` or `""`, not `Path("")`:
+pathlib turns that into `Path(".")` before the call, which is a real request for
+the process directory and cannot be told apart from a deliberate one.
 
 The permission tables (`perm_api.json` / `perm_levels.json`) are **not** in this
 channel: they are mechanical extraction with no hand content, and `dataset_path=`
