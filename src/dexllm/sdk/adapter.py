@@ -767,10 +767,12 @@ class DexKitAdapter:
                     # rare when the values were permissions), which turned a corner
                     # case into a routine one.
                     callers=tuple(sorted(h.callers)),
+                    field_access_count=h.field_access_count,
                 )
                 for h in c.api_hits
             ),
             by_caller={k: tuple(sorted(v)) for k, v in c.by_caller.items()},
+            total_field_accesses=c.total_field_accesses,
         )
 
     # -- ContentProviderPort --

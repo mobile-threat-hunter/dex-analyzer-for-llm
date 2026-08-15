@@ -2152,26 +2152,60 @@ DexKitExt::ListClassStrings(std::string_view class_descriptor) {
 namespace {
 
 // Locate a field descriptor `Lcls;->name:Type` → (dex_id, field_idx), or (-1, 0).
-// Mirrors the WASM binding's LocateField: find the class's living dex (first-wins),
-// then match the field against BuildFieldSignature across the class's field_ids.
-std::pair<int, uint32_t> LocateField(DexKitExt& ext, std::string_view fd) {
+// Every (dex_id, field_id) whose signature is `fd`, across ALL loaded dexes.
+//
+// dexllm#36 replaced a "find the class's living dex, then look there" lookup that
+// was wrong twice over:
+//
+//  * it began with `LocateClassDex(cls)`, which resolves only classes DECLARED in
+//    a loaded dex — so a FRAMEWORK field returned nothing on every possible input.
+//    `list_fields()` hands out those very descriptors, so the library could not
+//    xref one it had just produced: a2dp.Vol reads
+//    `ContactsContract$PhoneLookup;->CONTENT_FILTER_URI` with a plain `sget-object`
+//    and the lookup answered `[]`. That silence is also what made the capability
+//    catalog's field entries inert, i.e. the same defect the catalog change fixes,
+//    one layer down.
+//  * it stopped at ONE dex. A field_id lives in the dex whose CODE references it,
+//    so in a multidex app a read from `classes2.dex` is invisible to a lookup that
+//    only searched the declaring class's dex — even for an app class.
+//
+// The index this feeds was never the limitation: `field_get_method_ids` is sized
+// to the WHOLE `field_ids` table and populated from `method_using_field_ids`, so
+// external field_ids are recorded like any other. Only the gate above blocked it.
+//
+// It walks the reader's OWN `field_ids` table rather than `class_field_ids`,
+// because the latter is emptied for exactly the classes that matter here: the
+// core swaps `class_field_ids[type_idx]` into `pending_cross_ref_field_ids` for
+// every type the dex does not DECLARE (dex_item.cpp, the `type_def_flag` loop),
+// which is the cross-ref aggregation machinery. So the grouped index is empty for
+// every framework class, while the raw table always has the entry — and the
+// `field_get_method_ids` this ultimately reads is sized to that same raw table.
+//
+// Cost: one pass over `field_ids` per dex, narrowed by comparing the class part
+// first so the signature is only built for a candidate of the right class.
+std::vector<std::pair<int, uint32_t>> LocateFields(DexKitExt& ext,
+                                                   std::string_view fd) {
+    std::vector<std::pair<int, uint32_t>> out;
     const auto arrow = fd.find("->");
-    if (arrow == std::string_view::npos) return {-1, 0};
-    const std::string cls(fd.substr(0, arrow));
-    const int dex_id = ext.LocateClassDex(cls);
-    if (dex_id < 0) return {-1, 0};
-    auto* item = ext.core().GetDexItem(static_cast<uint16_t>(dex_id));
-    if (item == nullptr) return {-1, 0};
-    const auto& type_names = item->GetTypeNames();
-    for (uint32_t type_idx = 0; type_idx < type_names.size(); ++type_idx) {
-        if (type_names[type_idx] != cls) continue;
-        for (uint32_t fid : item->GetClassFieldIds(type_idx)) {
-            const std::string sig = BuildFieldSignature(*item, fid);
-            if (std::string_view(sig) == fd) return {dex_id, fid};
+    if (arrow == std::string_view::npos) return out;
+    const std::string_view cls = fd.substr(0, arrow);
+    for (int dex_id = 0; dex_id < ext.DexCount(); ++dex_id) {
+        auto* item = ext.core().GetDexItem(static_cast<uint16_t>(dex_id));
+        if (item == nullptr) continue;
+        const auto& type_names = item->GetTypeNames();
+        const auto& field_ids = item->GetReader().FieldIds();
+        for (uint32_t fid = 0; fid < field_ids.size(); ++fid) {
+            const auto class_idx = field_ids[fid].class_idx;
+            if (class_idx >= type_names.size() || type_names[class_idx] != cls) {
+                continue;
+            }
+            if (std::string_view(BuildFieldSignature(*item, fid)) == fd) {
+                out.emplace_back(dex_id, fid);
+                break;  // field_ids are unique per (class, name, type)
+            }
         }
-        break;  // type descriptors are unique — only one class matches
     }
-    return {-1, 0};
+    return out;
 }
 
 // Readers (FieldGetMethods, writers=false) / writers (FieldPutMethods) of a field.
@@ -2183,16 +2217,20 @@ std::pair<int, uint32_t> LocateField(DexKitExt& ext, std::string_view fd) {
 // gil_scoped_release to those bindings without adding a std::once_flag / mutex here.
 std::vector<std::string> FieldAccessMethods(DexKitExt& ext, std::string_view fd,
                                             bool writers) {
-    const auto loc = LocateField(ext, fd);
-    if (loc.first < 0) return {};
+    const auto locs = LocateFields(ext, fd);
+    if (locs.empty()) return {};
     ext.WarmAnalysisCaches();  // field_get/put_method_ids need the full cache
-    auto* item = ext.core().GetDexItem(static_cast<uint16_t>(loc.first));
-    if (item == nullptr) return {};
     std::vector<std::string> out;
-    const auto beans = writers ? item->FieldPutMethods(loc.second)
-                               : item->FieldGetMethods(loc.second);
-    out.reserve(beans.size());
-    for (const auto& bean : beans) out.emplace_back(bean.dex_descriptor);
+    // UNION over every dex that carries a field_id for this descriptor, in
+    // dex_id order: one field can be referenced from several dexes, and each
+    // dex's index only knows its own references.
+    for (const auto& [dex_id, fid] : locs) {
+        auto* item = ext.core().GetDexItem(static_cast<uint16_t>(dex_id));
+        if (item == nullptr) continue;
+        const auto beans = writers ? item->FieldPutMethods(fid)
+                                   : item->FieldGetMethods(fid);
+        for (const auto& bean : beans) out.emplace_back(bean.dex_descriptor);
+    }
     return out;
 }
 

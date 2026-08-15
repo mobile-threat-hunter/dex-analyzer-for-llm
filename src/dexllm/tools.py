@@ -341,7 +341,7 @@ def _t_summarize_capabilities(dk: DexKit, limit: int = 50) -> dict:
     """Bounded, LLM-friendly capability summary.
 
     Returns top permissions/categories, the cross-domain `flags` rollup, and the
-    `limit` most-invoked APIs. The raw report's per-caller sets (`by_caller`,
+    `limit` most-TOUCHED APIs (invoke sites plus field reads, dexllm#36). The raw report's per-caller sets (`by_caller`,
     `ApiHit.callers`) can be huge on a large APK, so they are intentionally
     omitted here to keep the response within the model's context.
 
@@ -356,9 +356,22 @@ def _t_summarize_capabilities(dk: DexKit, limit: int = 50) -> dict:
 
     rep = summarize_capabilities(dk)
     limit = max(1, int(limit))
-    hits = sorted(rep.api_hits, key=lambda h: h.call_site_count, reverse=True)
+    # …by TOUCHES, so a field entry ranks by the count it actually fills. Sorting
+    # on `call_site_count` alone would sink every field entry to the bottom with a
+    # 0 it is not supposed to have (dexllm#36).
+    # A TOTAL order: touches descending, then signature. `sorted` is stable, so
+    # without the tie-break the ranking followed `entries` iteration order — and
+    # re-serialising the catalog (as dexllm#36 did) silently reordered `top_apis`
+    # on 16 of 32 corpus sources without any count changing.
+    hits = sorted(
+        rep.api_hits,
+        key=lambda h: (-(h.call_site_count + h.field_access_count), h.api_signature),
+    )
     return {
         "total_call_sites": rep.total_call_sites,
+        # Separate, not folded into the line above: a call site is an invoke
+        # instruction and a field access is a reading method (dexllm#36).
+        "total_field_accesses": rep.total_field_accesses,
         "matched_apis": rep.matched_apis,
         "catalog_size": rep.catalog_size,
         # The tag vocabulary is versioned and has changed (0.2 normalised it), so a
@@ -374,6 +387,7 @@ def _t_summarize_capabilities(dk: DexKit, limit: int = 50) -> dict:
                 "categories": h.categories,
                 "flags": h.flags,
                 "call_sites": h.call_site_count,
+                "field_accesses": h.field_access_count,
             }
             for h in hits[:limit]
         ],

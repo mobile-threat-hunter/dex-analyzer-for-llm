@@ -11,8 +11,10 @@ The catalog keeps **two axes** apart so the aggregate counters stay meaningful:
   was given rather than what the APK does). A second tag is only correct when
   the API genuinely spans two domains (``WifiManager.getScanResults`` → WIFI +
   LOCATION) — and then it does count once in each, so
-  ``sum(report.categories.values()) >= report.total_call_sites``, with equality
-  exactly when every matched entry carries a single tag.
+  ``sum(report.categories.values()) >= report.total_call_sites +
+  report.total_field_accesses``, with equality exactly when every matched entry
+  carries a single tag. BOTH totals: the Counters count touches of either kind,
+  while the two totals keep the key forms apart (dexllm#36).
 * ``flags`` — the orthogonal, cross-domain concerns a domain tag cannot express.
   Today only ``IDENTIFIER`` (the API provably returns a device/user identifier),
   which rolls up across TELEPHONY / BLUETOOTH / … and is not recoverable from
@@ -24,9 +26,33 @@ identifier-returning APIs even though ``IDENTIFIER`` is a flag). A tag outside
 the catalog's declared vocabularies raises instead of returning an empty report,
 so a stale rule fails loudly rather than reading as "the APK does not do this".
 
-Catalog keys are METHOD descriptors: a field descriptor resolves nothing (the
-lookup is ``find_call_sites_to``), so it would sit in the catalog matching
-nothing — ``tests/test_capability_catalog.py`` rejects one.
+A catalog key is a METHOD descriptor (``Lcls;->name(proto)ret``) or, since
+dexllm#36, a FIELD descriptor (``Lcls;->NAME:Ltype;``). The two are
+unambiguous by shape — a type descriptor cannot contain ``(`` — so the key form
+alone selects the lookup and no schema key is needed to say which it is:
+
+* a method key resolves through ``find_call_sites_to`` and counts INVOKE
+  INSTRUCTIONS, one per call site, into ``call_site_count``;
+* a field key resolves through ``find_methods_reading_field`` and counts
+  READING METHODS into the separate ``field_access_count``.
+
+**The two counters are separate on purpose** and are not summed for you: a call
+site is an instruction and a field access is a method, so adding them would
+produce a number that means neither. ``call_site_count`` keeps exactly the
+meaning it has always had — a field entry leaves it 0 — because widening it
+would change a released field's value silently, with no type or name change to
+warn a consumer. ``total_call_sites`` / ``total_field_accesses`` mirror the split.
+
+**Reads only, and that is a bound on the claim.** The lookup is
+``find_methods_reading_field``, and a framework ``static final Uri`` can only be
+read — so there is nothing for ``find_methods_writing_field`` to find. But that
+answers the wrong sense of "write": ``resolver.insert(Events.CONTENT_URI, …)``
+and ``resolver.query(Events.CONTENT_URI, …)`` emit the SAME ``sget-object``, so a
+field entry cannot tell a reader from a writer of the PROVIDER and a pure writer
+is reported under ``READ_CALENDAR`` when it needs ``WRITE_CALENDAR``. The entry
+says "this app touches the calendar provider"; the permission is the read-side
+one because that is the common case, not because it was proven. Distinguishing
+them needs the resolver call site, which is `resolve_call_args`' territory.
 
 The catalog is hand-seeded. A consumer can point this module at a richer source
 (PScout / Axplorer / @RequiresPermission scrape) without code changes, provided
@@ -37,10 +63,12 @@ the replacement:
   better than rejecting every tag on a catalog predating the keys, but it does
   give back the silent-empty-report failure mode);
 * gives every entry at least one category — the ``>=`` above rests on it, and an
-  entry with none contributes call sites but no counts, so the sum would fall
-  *below* ``total_call_sites``;
-* uses METHOD descriptors as keys, and no duplicate tag inside one list (the
-  emitter dedupes defensively, but a duplicate signals a merge bug upstream).
+  entry with none contributes touches but no counts, so the sum would fall
+  *below* ``total_call_sites + total_field_accesses``;
+* uses METHOD or FIELD descriptors as keys (see the dispatch above — a third
+  shape routes to a lookup that answers nothing, silently), and no duplicate tag
+  inside one list (the emitter dedupes defensively, but a duplicate signals a
+  merge bug upstream).
 
 Replacing the file *in this repo* additionally means updating the vocabulary
 pinned in ``tests/test_capability_catalog.py``, which is deliberate: it is what
@@ -108,6 +136,25 @@ def _load_catalog(data_dir: Union[str, os.PathLike, None] = None) -> dict:
     return load_data_json(_CATALOG_FILE, data_dir=data_dir, validate=_validate_catalog)
 
 
+def _is_field_key(key: str) -> bool:
+    """Report whether the key is a FIELD descriptor rather than a method one.
+
+    ``Lcls;->NAME:Ltype;`` vs ``Lcls;->name(proto)ret``. The member part of a
+    field descriptor cannot contain ``(``: a type descriptor is
+    ``L…;`` / ``[…`` / one primitive letter, none of which admits a parenthesis,
+    while a method's proto always opens with one. So the two forms are
+    distinguishable without a schema key saying which — which is why the catalog
+    grew none.
+
+    Deliberately NOT `require_member_descriptor`-strict: this only has to route,
+    and a malformed key routes to a lookup that returns nothing, which is what an
+    unmatched entry does anyway. The catalog's own guard is the test that every
+    key is one of the two real forms.
+    """
+    _, _, member = key.partition(";->")
+    return "(" not in member
+
+
 @dataclass
 class ApiHit:
     """A single API in the catalog that was found in the APK."""
@@ -115,13 +162,25 @@ class ApiHit:
     api_signature: str
     permissions: List[str]
     categories: List[str]
+    # INVOKE INSTRUCTIONS, one per call site. A FIELD entry leaves this 0 and
+    # fills `field_access_count` instead (dexllm#36) — widening this one to mean
+    # "places that touch the API" would change a released field's value with no
+    # type or name change to warn a consumer, which is the quiet break dexllm#35
+    # was. Summing the two IS meaningful (both are instruction counts); they are
+    # kept apart so this one's released meaning is untouched, not because the
+    # units differ.
     call_site_count: int
     callers: Set[str] = field(default_factory=set)
     # `flags` is appended rather than placed next to `categories` on purpose: the
     # pre-0.2 positional arity was 5 (`callers` has a default), so inserting a
     # 5th required field mid-signature would make a legacy 5-positional call bind
     # silently wrong (flags=<int>, call_site_count=<set>) instead of raising.
+    # `field_access_count` is appended for the same reason.
     flags: List[str] = field(default_factory=list)
+    # READ INSTRUCTIONS, for a field-descriptor key; 0 for a method key. The
+    # lookup is NOT deduplicated, so a method reading the field twice contributes
+    # 2 — the same unit as `call_site_count`, and therefore NOT `len(callers)`.
+    field_access_count: int = 0
 
 
 @dataclass
@@ -157,22 +216,36 @@ class CapabilityReport:
     filtered call is meaningless.
     """
 
-    permissions: Counter  # permission -> count of invocations
-    categories: Counter  # category -> count of invocations
-    flags: Counter  # cross-domain concern -> count of invocations
+    # The three Counters count TOUCHES: one per invoke instruction for a method
+    # entry, one per read instruction for a field entry (dexllm#36) — the same
+    # unit, so the sum is well-defined. The per-API counters below stay separate
+    # only to keep `call_site_count`'s released meaning intact.
+    permissions: Counter  # permission -> count of touches
+    categories: Counter  # category -> count of touches
+    flags: Counter  # cross-domain concern -> count of touches
     by_caller: Dict[str, Set[str]]  # caller descriptor -> {api signatures}
     api_hits: List[ApiHit]  # one entry per matched API
-    total_call_sites: int
+    total_call_sites: int  # invoke instructions, method entries only
     catalog_version: str
     catalog_size: int
     matched_apis: int
+    # Appended, like ApiHit.field_access_count and for the same positional-arity
+    # reason. Read instructions against field-descriptor entries; 0 when the
+    # catalog has no field keys, which is why an existing consumer sees no change.
+    total_field_accesses: int = 0
 
     def top_permissions(self, n: int = 10) -> List[tuple]:
-        """Return the n most-invoked permissions as (permission, count) pairs."""
+        """Return the n most-touched permissions as (permission, count) pairs.
+
+        "Touched", not "invoked": the Counter includes field reads since dexllm#36.
+        """
         return self.permissions.most_common(n)
 
     def top_categories(self, n: int = 10) -> List[tuple]:
-        """Return the n most-invoked categories as (category, count) pairs."""
+        """Return the n most-touched categories as (category, count) pairs.
+
+        "Touched", not "invoked": the Counter includes field reads since dexllm#36.
+        """
         return self.categories.most_common(n)
 
 
@@ -239,6 +312,8 @@ def summarize_capabilities(
     api_hits: List[ApiHit] = []
     total_sites = 0
 
+    total_field_accesses = 0
+
     for api_sig, meta in entries.items():
         # dict.fromkeys dedupes while preserving order: a tag repeated inside one
         # entry's list is malformed input, not a fact to count twice, and counting
@@ -248,8 +323,15 @@ def summarize_capabilities(
         # Match on EITHER axis, so a tag stays filterable whichever axis it is on.
         if want and not (want & (set(cats) | set(entry_flags))):
             continue
-        sites = dk.find_call_sites_to(api_sig)
-        if not sites:
+        # The key's SHAPE selects the lookup — a type descriptor cannot contain
+        # `(`, so a field key is unambiguous and needs no schema flag to say so
+        # (dexllm#36). A field entry resolves to the METHODS that read it.
+        is_field = _is_field_key(api_sig)
+        if is_field:
+            touches = list(dk.find_methods_reading_field(api_sig))
+        else:
+            touches = [s.caller_descriptor for s in dk.find_call_sites_to(api_sig)]
+        if not touches:
             continue
 
         perms = meta.get("permissions", [])
@@ -258,12 +340,16 @@ def summarize_capabilities(
             permissions=list(perms),
             categories=list(cats),
             flags=list(entry_flags),
-            call_site_count=len(sites),
+            call_site_count=0 if is_field else len(touches),
+            field_access_count=len(touches) if is_field else 0,
         )
 
-        for s in sites:
-            total_sites += 1
-            hit.callers.add(s.caller_descriptor)
+        for caller in touches:
+            if is_field:
+                total_field_accesses += 1
+            else:
+                total_sites += 1
+            hit.callers.add(caller)
             # OUTSIDE the permission loop, and outside the tag loops below
             # (dexllm#35). Nesting it inside `for perm in perms:` meant an API
             # carrying no `permissions` never registered its callers at all —
@@ -273,7 +359,7 @@ def summarize_capabilities(
             # corpus's 317 distinct callers. A replacement catalog need not give
             # an entry any tag either, so this must not be nested in a tag loop
             # for the same reason.
-            by_caller.setdefault(s.caller_descriptor, set()).add(api_sig)
+            by_caller.setdefault(caller, set()).add(api_sig)
             for perm in perms:
                 permissions[perm] += 1
             for cat in cats:
@@ -289,6 +375,7 @@ def summarize_capabilities(
         by_caller=by_caller,
         api_hits=api_hits,
         total_call_sites=total_sites,
+        total_field_accesses=total_field_accesses,
         catalog_version=catalog.get("version", "unknown"),
         catalog_size=len(entries),
         matched_apis=len(api_hits),

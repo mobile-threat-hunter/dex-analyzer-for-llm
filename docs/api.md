@@ -794,7 +794,9 @@ The catalog keeps two axes apart: `categories` is a single axis (domain /
 behaviour) with no tag implied by another, so one call site is never counted
 twice under two names for the same concern (an API that genuinely spans two
 domains does count once in each, so `sum(r.categories.values()) >=
-r.total_call_sites`); `flags` is the orthogonal axis a domain tag cannot express
+r.total_call_sites + r.total_field_accesses` — both totals, because the Counters
+count TOUCHES while the totals keep the units apart, dexllm#36); `flags` is the
+orthogonal axis a domain tag cannot express
 (today only `IDENTIFIER` — the API provably returns a device/user identifier,
 rolling up across TELEPHONY / BLUETOOTH / …).
 
@@ -863,9 +865,12 @@ to the `@RequiresPermission` signature map because the `Uri` is assembled at run
 referenced by the app's value-strings, matched against a bundled AOSP-derived dataset
 (`data/content_uris.json`). Returns `[{'uri', 'family', 'methods'}]` sorted by URI; a
 dataset URI is a hit iff it occurs as a substring of some value-string.
-`family` ∈ `sms` / `contacts` / `calllog` / `calendar` / `telephony` / `browser` /
-`settings` / `media` / `provider` (the last is the catch-all for URIs no family
-fits yet — issue #31 is retiring it). `data_dir=` (else `$DEXLLM_DATA_DIR`) points
+`family` ∈ `blockednumber` / `bluetooth` / `browser` / `calendar` / `calllog` / `contacts` / `media` / `settings` / `simphonebook` / `sms` / `telephony` / `timezone` / `userdictionary` / `voicemail` — the 14 the BUNDLED dataset uses, and a
+test keeps it closed. An override (`data_dir=`) may carry any string: `family` is
+validated as a `str`, deliberately, because the whole point of the channel is a
+consumer's own triage vocabulary. The `provider` catch-all is GONE (dexllm#31): it was never a family but "unclassified", and at 20 of 209 it
+made a tenth of the dataset group under a label that told a consumer nothing
+while the entry read as though classification had succeeded. `data_dir=` (else `$DEXLLM_DATA_DIR`) points
 at a replacement `content_uris.json` — see [§14](#14-overriding-the-bundled-data).
 
 ---
@@ -1058,8 +1063,11 @@ form, so one method described itself two ways.) The same bits drive the
 `permissions: collections.Counter[str]`, `categories: collections.Counter[str]`,
 `flags: collections.Counter[str]`, `by_caller: dict[str, set[str]]` (caller
 descriptor → the catalog API signatures it invokes — dexllm#35; it was
-`→ {permissions}` before), `api_hits: list[ApiHit]`, `total_call_sites: int`,
-`catalog_version: str`, `catalog_size: int`, `matched_apis: int`.
+`→ {permissions}` before), `api_hits: list[ApiHit]`, `total_call_sites: int`
+(invoke instructions), `catalog_version: str`, `catalog_size: int`,
+`matched_apis: int`, `total_field_accesses: int` (methods reading a
+field-descriptor entry — dexllm#36; never summed with the line above, since a
+call site is an instruction and a field access is a method).
 
 ---
 

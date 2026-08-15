@@ -715,9 +715,17 @@ class IocReport:
 class CapabilityHit:
     """One capability-catalog API the app exercises.
 
-    Carries its call-site count, the permissions it maps to, and the catalog's two
+    Carries its touch count, the permissions it maps to, and the catalog's two
     metadata axes: ``categories`` (domain / behaviour) and ``flags`` (cross-domain
     concerns a domain tag cannot express, today only ``IDENTIFIER``).
+
+    **Which counter is populated follows the catalog key's form.** A METHOD entry
+    fills ``call_site_count`` (invoke instructions); a FIELD entry — how an app
+    reaches contacts / call log / calendar, by reading a ``CONTENT_URI`` constant —
+    fills ``field_access_count`` (read instructions, NOT deduplicated by method)
+    and leaves the other 0. Both are instruction counts, so summing them is
+    meaningful; they are separate so ``call_site_count`` keeps exactly the value a
+    consumer already reads.
 
     Example (real, a2dp.Vol)::
 
@@ -736,6 +744,11 @@ class CapabilityHit:
     categories: tuple[str, ...]
     flags: tuple[str, ...]
     callers: tuple[str, ...]
+    # Appended: READ INSTRUCTIONS against a FIELD-descriptor entry (dexllm#36).
+    # 0 for a method entry, and `call_site_count` is 0 for a field one. Both are
+    # instruction counts, so summing them is meaningful; they are separate to keep
+    # `call_site_count`'s released meaning intact, not because the units differ.
+    field_access_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -784,6 +797,12 @@ class CapabilityReport:
     flags: Mapping[str, int]
     api_hits: tuple[CapabilityHit, ...]
     by_caller: Mapping[str, tuple[str, ...]]
+    # Appended (dexllm#36). docs/sdk.md documents the inequality
+    # `sum(categories.values()) >= total_call_sites + total_field_accesses`, which
+    # was unexpressible on this layer until this field existed: without it the only
+    # available form is the WEAKER `>= total_call_sites`, and a matched field entry
+    # makes that read as slack where there is none.
+    total_field_accesses: int = 0
 
     def __post_init__(self) -> None:
         """Wrap the mapping fields in read-only views so the model is immutable."""

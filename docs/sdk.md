@@ -198,14 +198,21 @@ other spelling, and the reason `MethodInfo` exposes the bits instead.
 
 ### Capabilities
 - **`CapabilityHit`** `(api_signature, call_site_count, permissions, categories,
-  flags, callers)` — one catalog API the app exercises.
+  flags, callers, field_access_count)` — one catalog API the app exercises. Which
+  counter is filled follows the catalog key's form: a METHOD key fills
+  `call_site_count` (invoke instructions), a FIELD key — how an app reaches
+  contacts / call log / calendar, by reading a `CONTENT_URI` constant — fills
+  `field_access_count` (reading methods) and leaves the other 0. They are not
+  summed for you: a call site is an instruction, a field access is a method.
 - **`CapabilityReport`** `(catalog_version, catalog_size, matched_apis,
-  total_call_sites, permissions, categories, flags, api_hits, by_caller)` — the
+  total_call_sites, permissions, categories, flags, api_hits, by_caller,
+  total_field_accesses)` — the
   app's capability profile (holds `Mapping`s → immutable, **not hashable**).
   `categories` is one axis (domain / behaviour), so one call site is never counted
   twice under two names for the same concern — an API that genuinely spans two
   domains does count once in each, so `sum(categories.values()) >=
-  total_call_sites`. `flags` is the orthogonal cross-domain axis (today only
+  total_call_sites + total_field_accesses` (both, because the Counters count
+  TOUCHES of either kind while the two totals keep the units apart). `flags` is the orthogonal cross-domain axis (today only
   `IDENTIFIER`). `by_caller` maps a calling method to the catalog APIs it invokes
   — the transpose of `CapabilityHit.callers`, and what answers "who calls
   `Runtime.exec` / `DexClassLoader` here". It held `{permissions}` until
@@ -219,9 +226,10 @@ other spelling, and the reason `MethodInfo` exposes the bits instead.
 ### Content providers
 - **`ContentProviderUse`** `(uri, family, methods)` — a `content://` provider URI
   the app references (the runtime-assembled surface the `@RequiresPermission` map
-  misses). `family` ∈ `sms` / `contacts` / `calllog` / `calendar` / `telephony` /
-  `browser` / `settings` / `media` / `provider` — the last being the catch-all for
-  URIs no family fits yet (issue #31 is retiring it).
+  misses). `family` ∈ `blockednumber` / `bluetooth` / `browser` / `calendar` / `calllog` / `contacts` / `media` / `settings` / `simphonebook` / `sms` / `telephony` / `timezone` / `userdictionary` / `voicemail` — the 14 the BUNDLED dataset uses (an
+  override may carry any string; `family` is validated only as a `str`, since the
+  channel exists for a consumer's own vocabulary). The `provider` catch-all is
+  GONE (dexllm#31): it meant "unclassified", not a family.
 
 ---
 

@@ -24,9 +24,13 @@ green suite before these were added.
 """
 
 import json
+import pathlib
 from pathlib import Path
 
 import pytest
+from conftest import require_corpus_shape
+
+from dexllm import capability
 
 CATALOG = (
     Path(__file__).resolve().parents[1]
@@ -45,7 +49,14 @@ CATEGORY_VOCABULARY = {
     # domains
     "ACCOUNTS",
     "BLUETOOTH",
+    # CALENDAR / CALL_LOG / CONTACTS arrived with the field-descriptor keys
+    # (dexllm#36): an app reaches those providers by READING a CONTENT_URI
+    # constant, so before field keys existed the catalog had no way to express
+    # them and the three domains were absent from the vocabulary entirely.
+    "CALENDAR",
+    "CALL_LOG",
     "CAMERA",
+    "CONTACTS",
     "LOCATION",
     "MICROPHONE",
     "NETWORK_IO",
@@ -77,22 +88,51 @@ def _entries():
     return _catalog()["entries"]
 
 
-def test_every_catalog_key_is_a_method_descriptor():
-    """A key must be ``Lcls;->name(proto)ret``.
+@pytest.fixture
+def write_catalog(tmp_path_factory):
+    """Write an override catalog to a fresh temp dir and return its path.
 
-    ``summarize_capabilities`` resolves each key with ``find_call_sites_to``, which
-    looks up METHODS. A field descriptor (``Lcls;->NAME:Ltype;``) returns zero call
-    sites on every APK and raises nothing, so it is dead weight that still inflates
-    ``catalog_size``. Three ``CONTENT_URI`` field entries shipped that way.
+    A fresh directory per call because `datadir` caches by RESOLVED path (#43), so
+    reusing one would serve the first catalog to every later test. Through
+    `tmp_path_factory` rather than a bare `mkdtemp`, which the first cut used and
+    which never cleaned up — 117 `/tmp/capcat*` directories had accumulated.
+    """
+
+    def _write(catalog):
+        d = tmp_path_factory.mktemp("capcat")
+        (d / "android_api_map.json").write_text(json.dumps(catalog))
+        return str(d)
+
+    return _write
+
+
+def test_every_catalog_key_is_a_method_or_field_descriptor():
+    """A key is ``Lcls;->name(proto)ret`` OR ``Lcls;->NAME:Ltype;``.
+
+    INVERTED at dexllm#36. This used to reject a FIELD descriptor outright,
+    because `summarize_capabilities` resolved every key with `find_call_sites_to`
+    and a field key therefore matched nothing on every APK while still inflating
+    `catalog_size` — three `CONTENT_URI` entries shipped that way and were deleted.
+    The lookup now dispatches on the key's shape, so a field key is a first-class
+    form and the rule is that a key must be one of the two, not that it must be a
+    method. A third shape is still dead weight, which is what this now guards.
     """
     bad = []
     for key in _entries():
         cls, sep, member = key.partition(";->")
-        if not sep or not cls.startswith("L"):
+        if not sep or not cls.startswith("L") or not member:
             bad.append(key)
-        elif "(" not in member or ")" not in member:
+        elif "(" in member:  # method: a complete proto, and a return type after it
+            if not member.endswith(tuple("VZBSCIJFD;[")) or ")" not in member:
+                bad.append(key)
+        elif ":" not in member or not member.split(":", 1)[1]:  # field: NAME:type
             bad.append(key)
-    assert not bad, f"catalog keys that are not method descriptors: {bad}"
+    assert not bad, f"catalog keys that are neither a method nor a field: {bad}"
+
+    # …and BOTH forms are actually present, or the dispatch this pins is untested
+    # by the bundled catalog and the inversion above would be a claim, not a check.
+    forms = {"(" in k.partition(";->")[2] for k in _entries()}
+    assert forms == {True, False}, f"the catalog carries only one key form: {forms}"
 
 
 def test_category_and_flag_axes_stay_disjoint():
@@ -201,13 +241,24 @@ class _Site:
 
 
 class _StubDk:
-    """A dk whose `find_call_sites_to` answers from a {descriptor: [callers]} map."""
+    """A dk answering from {descriptor: [callers]} maps — one per key FORM.
 
-    def __init__(self, sites):
+    A FIELD key resolves through `find_methods_reading_field`, which returns
+    method descriptors rather than call sites (dexllm#36), so the stub needs both
+    lookups: `summarize_capabilities` picks one by the key's shape. That is also
+    the contract note for any duck-typed `dk` stand-in — a catalog carrying field
+    keys now requires the field lookup too.
+    """
+
+    def __init__(self, sites, reads=None):
         self._sites = sites
+        self._reads = reads or {}
 
     def find_call_sites_to(self, descriptor):
         return [_Site(c) for c in self._sites.get(descriptor, ())]
+
+    def find_methods_reading_field(self, descriptor):
+        return list(self._reads.get(descriptor, ()))
 
 
 _GET_DEVICE_ID = "Landroid/telephony/TelephonyManager;->getDeviceId()Ljava/lang/String;"
@@ -598,3 +649,388 @@ def test_only_categories_filters_the_caller_index_with_the_hits():
 
     assert report.by_caller == {"La/B;->m()V": {_FOR_NAME}}
     assert {h.api_signature for h in report.api_hits} == {_FOR_NAME}
+
+
+# --- dexllm#36: FIELD-descriptor keys -----------------------------------------
+
+_FIELD_KEYS = {
+    "Landroid/provider/ContactsContract$Contacts;->CONTENT_URI:Landroid/net/Uri;": (
+        "ContactsContract.java",
+        ["Contacts"],
+    ),
+    "Landroid/provider/ContactsContract$CommonDataKinds$Phone;"
+    "->CONTENT_URI:Landroid/net/Uri;": (
+        "ContactsContract.java",
+        ["CommonDataKinds", "Phone"],
+    ),
+    "Landroid/provider/CallLog$Calls;->CONTENT_URI:Landroid/net/Uri;": (
+        "CallLog.java",
+        ["Calls"],
+    ),
+    "Landroid/provider/CalendarContract$Events;->CONTENT_URI:Landroid/net/Uri;": (
+        "CalendarContract.java",
+        ["Events"],
+    ),
+}
+
+
+def test_a_field_key_resolves_through_the_field_lookup(write_catalog):
+    """The dispatch itself: a field key must NOT go to `find_call_sites_to`.
+
+    That is the whole defect — `ParseApiDescriptor` requires a `(` after `->`, so
+    a field descriptor matched nothing on every possible input and raised nothing.
+    Three entries shipped that way for 15 months.
+    """
+    field_key = next(iter(_FIELD_KEYS))
+    catalog = {
+        "version": "t",
+        "category_vocabulary": ["CONTACTS"],
+        "flag_vocabulary": [],
+        "entries": {field_key: {"categories": ["CONTACTS"]}},
+    }
+
+    class _Dk:
+        def find_call_sites_to(self, descriptor):
+            raise AssertionError(f"a FIELD key went to the method lookup: {descriptor}")
+
+        def find_methods_reading_field(self, descriptor):
+            return ["La/B;->m()V", "La/C;->n()V"] if descriptor == field_key else []
+
+    rep = capability.summarize_capabilities(_Dk(), data_dir=write_catalog(catalog))
+    assert rep.matched_apis == 1
+    hit = rep.api_hits[0]
+    assert hit.field_access_count == 2
+    assert hit.call_site_count == 0, "a field entry must not claim invoke sites"
+    assert rep.total_field_accesses == 2 and rep.total_call_sites == 0
+    assert rep.categories == {"CONTACTS": 2}
+    assert set(rep.by_caller) == {"La/B;->m()V", "La/C;->n()V"}
+
+
+def test_the_two_counters_are_never_summed_into_one(write_catalog):
+    """`call_site_count` keeps EXACTLY its released meaning (dexllm#36).
+
+    Widening it to "places that touch the API" needs no type or name change, so a
+    consumer would read a different number with nothing to warn them — the quiet
+    break dexllm#35 was. This pins the split in a report holding both forms.
+    """
+    field_key = next(iter(_FIELD_KEYS))
+    catalog = {
+        "version": "t",
+        "category_vocabulary": ["CONTACTS", "REFLECTION"],
+        "flag_vocabulary": [],
+        "entries": {
+            field_key: {"categories": ["CONTACTS"]},
+            _FOR_NAME: {"categories": ["REFLECTION"]},
+        },
+    }
+
+    class _Dk:
+        def find_call_sites_to(self, descriptor):
+            return [_Site("La/B;->m()V")] if descriptor == _FOR_NAME else []
+
+        def find_methods_reading_field(self, descriptor):
+            return ["La/C;->n()V", "La/D;->o()V"] if descriptor == field_key else []
+
+    rep = capability.summarize_capabilities(_Dk(), data_dir=write_catalog(catalog))
+    by_sig = {h.api_signature: h for h in rep.api_hits}
+    assert by_sig[_FOR_NAME].call_site_count == 1
+    assert by_sig[_FOR_NAME].field_access_count == 0
+    assert by_sig[field_key].field_access_count == 2
+    assert by_sig[field_key].call_site_count == 0
+    # the two totals stay apart, and neither absorbs the other
+    assert rep.total_call_sites == 1 and rep.total_field_accesses == 2
+    # …while the tag Counters DO count both, which is the documented asymmetry
+    assert rep.categories == {"REFLECTION": 1, "CONTACTS": 2}
+
+
+def test_field_counts_reach_the_sdk_and_mcp_layers(write_catalog, monkeypatch):
+    """A counter nothing propagates is a counter nobody can read."""
+    field_key = next(iter(_FIELD_KEYS))
+    catalog = {
+        "version": "t",
+        "category_vocabulary": ["CONTACTS"],
+        "flag_vocabulary": [],
+        "entries": {field_key: {"categories": ["CONTACTS"]}},
+    }
+
+    class _Dk:
+        def find_call_sites_to(self, descriptor):
+            return []
+
+        def find_methods_reading_field(self, descriptor):
+            return ["La/B;->m()V"] if descriptor == field_key else []
+
+    from dexllm import datadir, tools
+    from dexllm.sdk.adapter import DexKitAdapter
+
+    # monkeypatch, per conftest's own stated rule — the first cut mutated
+    # os.environ directly and was contained only by an autouse fixture it does
+    # not use.
+    monkeypatch.setenv(datadir.ENV_VAR, write_catalog(catalog))
+    datadir.clear_data_caches()
+
+    # …through the adapter's real method, not a private converter: the point is
+    # that the value survives the layer a consumer actually calls.
+    model = DexKitAdapter.summarize_capabilities(type("_A", (), {"_dk": _Dk()})())
+    assert model.api_hits[0].field_access_count == 1
+    # …and the REPORT-level total, which docs/sdk.md documents. It was missing
+    # from the SDK model in the first cut while the docs already asserted the
+    # inequality that needs it — "a counter nothing propagates is a counter
+    # nobody can read" applied to the very test that says so.
+    assert model.total_field_accesses == 1
+    assert sum(model.categories.values()) >= (
+        model.total_call_sites + model.total_field_accesses
+    )
+
+    out = tools.execute("summarize_capabilities", {}, _Dk())
+    assert out["total_field_accesses"] == 1
+    assert out["api_hits"][0]["field_accesses"] == 1
+    assert out["api_hits"][0]["call_sites"] == 0
+
+
+def test_the_bundled_field_keys_name_real_aosp_fields():
+    """A typo'd key matches nothing and raises nothing — the #36 failure itself.
+
+    Shape guards cannot catch `CONTENT_URl` or a wrong nesting, and the bundled
+    corpus references no `CONTENT_URI` at all (measured: 0), so nothing else here
+    can. Checked against a local AOSP checkout; SKIPS without one, since that is
+    an environment fact (CI has none).
+    """
+    import os
+    import re
+
+    root = pathlib.Path(
+        os.environ.get("DEXLLM_AOSP_SRC", pathlib.Path.home() / "Project" / "aosp")
+    )
+    provider = root / "frameworks/base/core/java/android/provider"
+    if not provider.is_dir():
+        pytest.skip(f"no AOSP checkout at {root} (set $DEXLLM_AOSP_SRC)")
+
+    for key, (fname, nesting) in _FIELD_KEYS.items():
+        assert key in _entries(), f"{key} is not in the bundled catalog"
+        member = key.partition(";->")[2]
+        name, _, ftype = member.partition(":")
+        body = (provider / fname).read_text()
+        for cls in nesting:  # walk into the nested class by brace matching
+            m = re.search(rf"\b(?:class|interface)\s+{cls}\b[^{{]*\{{", body)
+            assert m, f"{fname}: no class {cls} for {key}"
+            i = m.end() - 1
+            depth = 0
+            for j in range(i, len(body)):
+                depth += body[j] == "{"
+                depth -= body[j] == "}"
+                if depth == 0:
+                    break
+            body = body[i + 1 : j]
+        assert re.search(
+            rf"public\s+static\s+final\s+Uri\s+{name}\s*=", body
+        ), f"{key}: {'.'.join(nesting)} declares no `public static final Uri {name}`"
+        assert ftype == "Landroid/net/Uri;", key
+
+
+def test_the_documented_counter_inequality_holds_with_both_key_forms(write_catalog):
+    """`sum(categories) >= total_call_sites + total_field_accesses` (dexllm#36).
+
+    docs/usage.md, docs/api.md and docs/sdk.md all assert this. It used to read
+    `>= total_call_sites` alone, which a matched FIELD entry falsifies: the
+    Counters count TOUCHES of either kind while the two totals keep the units
+    apart, so a field access lands on the left and not on the right.
+    """
+    field_key = next(iter(_FIELD_KEYS))
+    catalog = {
+        "version": "t",
+        "category_vocabulary": ["CONTACTS", "REFLECTION"],
+        "flag_vocabulary": [],
+        "entries": {
+            field_key: {"categories": ["CONTACTS"]},
+            _FOR_NAME: {"categories": ["REFLECTION"]},
+        },
+    }
+
+    class _Dk:
+        def find_call_sites_to(self, descriptor):
+            return [_Site("La/B;->m()V")] if descriptor == _FOR_NAME else []
+
+        def find_methods_reading_field(self, descriptor):
+            return ["La/C;->n()V", "La/D;->o()V"] if descriptor == field_key else []
+
+    rep = capability.summarize_capabilities(_Dk(), data_dir=write_catalog(catalog))
+    total = rep.total_call_sites + rep.total_field_accesses
+    assert sum(rep.categories.values()) >= total
+    # …and equality holds here, since every entry carries exactly one tag — which
+    # is what makes the field half genuinely load-bearing rather than slack
+    assert sum(rep.categories.values()) == total == 3
+    # the OLD wording would be false on this very report
+    assert sum(rep.categories.values()) > rep.total_call_sites
+
+
+def test_a_field_entry_matches_on_a_REAL_dex(dk):
+    """The gap that let the 15-month bug ship again, one layer down.
+
+    Every other field test drives a stub, so none of them could see that
+    `find_methods_reading_field` resolved nothing for a FRAMEWORK class: it began
+    with `LocateClassDex`, which answers only for a class DECLARED in a loaded
+    dex. So dexllm#36's first cut swapped one always-empty lookup for another and
+    the four `CONTENT_URI` entries were inert on every possible input — the very
+    defect the issue is about. Two reviewers found it; no test could.
+
+    This asserts the primitive against the real binding, corpus-independently: any
+    field the app provably reads must resolve to at least one reader.
+    """
+    fields = dk.list_fields()
+    # A FRAMEWORK field — the case that was broken. `SDK_INT` is read by
+    # essentially every Android app and its class is never declared in the APK.
+    sdk_int = "Landroid/os/Build$VERSION;->SDK_INT:I"
+    require_corpus_shape(
+        sdk_int in fields,
+        "reference to Build.VERSION.SDK_INT",
+        "the corpus stopped carrying the most universal framework field read",
+    )
+    assert dk.locate_class_dex("Landroid/os/Build$VERSION;") == -1, (
+        "premise: the declaring class is NOT in the app, which is exactly what "
+        "the old lookup required"
+    )
+    readers = dk.find_methods_reading_field(sdk_int)
+    assert readers, "a framework field the app reads must resolve to its readers"
+    assert all(";->" in r for r in readers)
+
+
+def test_field_access_count_is_per_instruction_not_per_method(write_catalog):
+    """Pins the UNIT, which the stubs cannot (dexllm#36).
+
+    `find_methods_reading_field` is documented as NOT deduplicated — one entry per
+    read instruction — but every field stub returned DISTINCT method descriptors,
+    so a mutant applying `dict.fromkeys` (i.e. making the code match an earlier,
+    wrong docstring that said "reading methods") survived the entire suite. Both
+    counters are the same unit, which is why summing them is meaningful and why
+    `field_access_count` is NOT `len(callers)`.
+    """
+    field_key = next(iter(_FIELD_KEYS))
+    catalog = {
+        "version": "t",
+        "category_vocabulary": ["CONTACTS"],
+        "flag_vocabulary": [],
+        "entries": {field_key: {"categories": ["CONTACTS"]}},
+    }
+
+    class _Dk:
+        def find_call_sites_to(self, descriptor):
+            return []
+
+        def find_methods_reading_field(self, descriptor):
+            # ONE method, TWO read instructions — what the real binding returns
+            return ["La/B;->m()V", "La/B;->m()V"] if descriptor == field_key else []
+
+    rep = capability.summarize_capabilities(_Dk(), data_dir=write_catalog(catalog))
+    hit = rep.api_hits[0]
+    assert hit.field_access_count == 2, "instructions, not methods"
+    assert len(hit.callers) == 1, "…while `callers` is a set, so they differ"
+    assert rep.total_field_accesses == 2
+    assert rep.categories == {"CONTACTS": 2}, "the Counter follows the instructions"
+
+
+def test_the_mcp_ranking_counts_field_accesses(write_catalog, monkeypatch):
+    """A field entry must be able to outrank a method one.
+
+    The sort key changed to touches; nothing asserted it, so reverting it to
+    `call_site_count` alone — which sinks every field entry to the bottom with a 0
+    it is not supposed to have — survived the whole suite.
+    """
+    field_key = next(iter(_FIELD_KEYS))
+    catalog = {
+        "version": "t",
+        "category_vocabulary": ["CONTACTS", "REFLECTION"],
+        "flag_vocabulary": [],
+        "entries": {
+            field_key: {"categories": ["CONTACTS"]},
+            _FOR_NAME: {"categories": ["REFLECTION"]},
+        },
+    }
+
+    class _Dk:
+        def find_call_sites_to(self, descriptor):
+            return [_Site("La/B;->m()V")] if descriptor == _FOR_NAME else []
+
+        def find_methods_reading_field(self, descriptor):
+            return ["La/C;->n()V"] * 5 if descriptor == field_key else []
+
+    from dexllm import datadir, tools
+
+    monkeypatch.setenv(datadir.ENV_VAR, write_catalog(catalog))
+    datadir.clear_data_caches()
+    out = tools.execute("summarize_capabilities", {}, _Dk())
+    assert [h["api"] for h in out["api_hits"]] == [
+        field_key,
+        _FOR_NAME,
+    ], "5 field accesses must outrank 1 call site"
+
+
+def test_the_ranking_is_a_total_order(write_catalog, monkeypatch):
+    """Ties break on the signature, so catalog ORDER cannot move the ranking.
+
+    `sorted` is stable, so the ranking followed `entries` iteration order — and
+    re-serialising the catalog (as dexllm#36 did) reordered the MCP `top_apis` on
+    16 of 32 corpus sources with no count changing.
+    """
+    keys = [_FOR_NAME, _GET_DEVICE_ID]
+    base = {
+        "version": "t",
+        "category_vocabulary": ["REFLECTION", "TELEPHONY"],
+        "flag_vocabulary": [],
+    }
+    meta = {
+        _FOR_NAME: {"categories": ["REFLECTION"]},
+        _GET_DEVICE_ID: {"categories": ["TELEPHONY"]},
+    }
+
+    class _Dk:  # equal counts, so only the tie-break can order them
+        def find_call_sites_to(self, descriptor):
+            return [_Site("La/B;->m()V")] if descriptor in meta else []
+
+        def find_methods_reading_field(self, descriptor):
+            return []
+
+    from dexllm import datadir, tools
+
+    seen = []
+    for order in (keys, list(reversed(keys))):
+        catalog = {**base, "entries": {k: meta[k] for k in order}}
+        monkeypatch.setenv(datadir.ENV_VAR, write_catalog(catalog))
+        datadir.clear_data_caches()
+        seen.append(
+            [
+                h["api"]
+                for h in tools.execute("summarize_capabilities", {}, _Dk())["api_hits"]
+            ]
+        )
+    assert (
+        seen[0] == seen[1] == sorted(keys)
+    ), f"the ranking followed catalog order: {seen}"
+
+
+def test_is_field_key_routes_a_malformed_key_to_the_field_lookup():
+    """Pins the documented routing of a third shape.
+
+    `_is_field_key`'s docstring reasons about malformed keys ("routes to a lookup
+    that returns nothing"), so WHICH lookup is stated behaviour — and a mutant
+    sending a key with no `;->` to the METHOD lookup survived the suite. Both
+    lookups are silent on such input, so the cost is only which one is asked; the
+    point is that the answer is pinned rather than incidental.
+    """
+    from dexllm.capability import _is_field_key
+
+    for method_key in (
+        _FOR_NAME,
+        "Lcls;-><init>()V",
+        "Lcls;->m(Ljava/lang/String;I)Ljava/lang/Object;",
+    ):
+        assert not _is_field_key(method_key), method_key
+    for field_or_malformed in (
+        "Lcls;->NAME:Ltype;",
+        "Lcls;->NAME:[I",
+        "",
+        "garbage",
+        "Lcls;",
+        "Lcls;->",
+    ):
+        assert _is_field_key(field_or_malformed), field_or_malformed

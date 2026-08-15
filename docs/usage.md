@@ -272,8 +272,11 @@ The catalog carries **two axes**, kept apart so the counters stay meaningful:
   call site is never counted twice under two names for the same concern. A second
   tag is only correct when the API genuinely spans two domains
   (`WifiManager.getScanResults` → `WIFI` + `LOCATION`) — and then it does count
-  once in each, so `sum(report.categories.values()) >= total_call_sites`, with
-  equality exactly when every matched entry carries a single tag.
+  once in each, so `sum(report.categories.values()) >= total_call_sites +
+  total_field_accesses`, with equality exactly when every matched entry carries a
+  single tag. Both totals appear because the Counters count TOUCHES — an invoke
+  instruction for a method entry, a reading method for a field one (dexllm#36) —
+  while the two totals keep those units apart.
 - `flags` — the orthogonal, cross-domain concerns a domain tag cannot express.
   Today only `IDENTIFIER`, which rolls up across TELEPHONY / BLUETOOTH / … and is
   not recoverable from the domain axis.
