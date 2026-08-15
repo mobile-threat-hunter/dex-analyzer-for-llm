@@ -42,7 +42,8 @@ CI guards that rule by running the suite a second time narrowed to
 [`data/multidex.apk`](data/multidex.apk) — 1.2 KB, the only committed APK, and
 deliberately the sample that produced 17 of the issue's failures. The
 corpus-less run cannot catch a regression of it (it skips at the fixtures,
-before a floor is reached); the narrowed run reaches 260 tests instead of 114.
+before a floor is reached); the narrowed run reaches 254 tests in CI instead of
+111 (260 / 114 locally, with the optional extras installed).
 See [`data/README.md`](data/README.md).
 
 [`test_llm_backends.py`](test_llm_backends.py) — the end-to-end check of

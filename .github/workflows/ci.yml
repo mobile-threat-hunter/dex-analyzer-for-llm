@@ -4,8 +4,8 @@ name: CI
 # Linux and macOS. The APK-dependent suites need the gitignored test_apk/ corpus,
 # so they SKIP here (never fail) — the C++ parity suites are the APK-free gate.
 # One exception: the suite runs a second time narrowed to tests/data/multidex.apk
-# (1.2 KB, committed), which reaches 260 tests instead of 114 and is what guards
-# dexllm#46's "an environment fact must skip, never fail".
+# (1.2 KB, committed), which reaches 254 tests here instead of 111 and is what
+# guards dexllm#46's "an environment fact must skip, never fail".
 # The heavy harnesses (the full sweep, bench_vs_androguard, dvclass_parity) are
 # standalone scripts and are intentionally NOT run here.
 

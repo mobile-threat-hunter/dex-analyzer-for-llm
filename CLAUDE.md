@@ -664,7 +664,8 @@ androguard's own Apache-2.0 test data — provenance in
 narrowed to it, which is what the corpus-less run structurally cannot do — that
 run skips at the FIXTURES, before a single floor is reached, so it stays green
 against exactly the regression this section exists to prevent. The narrowed leg
-reaches **260** tests where the corpus-less one reaches 114, and the sample is
+reaches **254** tests in CI where the corpus-less one reaches 111 (260 / 114
+locally, where the optional extras are installed), and the sample is
 chosen as the WORST case (no `switch` header, no boolean-literal assignment, no
 constant-only indicator, no interface method, no control-bearing literal, and
 manifest-less so `identify().is_apk` is False). Verified discriminating: removing

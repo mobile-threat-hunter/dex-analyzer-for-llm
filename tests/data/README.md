@@ -18,6 +18,10 @@ boolean-literal assignment, no constant-only indicator, no interface method, no
 control-bearing literal, and — being manifest-less — `identify().is_apk == False`).
 A suite that stays green on it is a suite whose floors skip instead of failing.
 
+The narrowed leg reaches **254** tests in CI where the corpus-less run reaches
+111 (260 / 114 locally, where the optional `mcp` / `fastapi` / dev extras are
+installed), so it also adds real coverage where CI had none.
+
 ## Provenance
 
 Taken byte-identical (md5 `627622df6a7557fd0b85fdde6fccb7ad`) from
