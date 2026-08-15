@@ -918,6 +918,95 @@ def test_raw_and_port_share_one_spelling_per_operation():
         ), f"{name} is not a module-level dexllm function"
 
 
+def test_raw_and_port_share_one_spelling_per_argument():
+    """dexllm#44: the ARGUMENT axis of one-operation-one-spelling.
+
+    The sibling audits lock METHOD names (#21) and TYPE names (#37); parameter
+    names were pinned for exactly three operations by
+    `test_call_site_names_are_unified_across_layers` and were otherwise unified
+    only because #21 stage 4 did it by hand. That is the state the whole #21
+    series exists because of: a unification nothing keeps.
+
+    Two rules, one per layer pair:
+
+    1. **raw ⊇ port, in order.** A port parameter must carry the name the raw
+       operation gives it, and the shared names must appear in the same relative
+       order, so a positional call means the same thing on both layers. Only
+       CONTAINMENT, not equality: the SDK deliberately omits knobs
+       (`dataset_path`, `only_categories`), and an absence is not drift.
+    2. **adapter == port, exactly.** The adapter IS the port's implementation, so
+       there is no licensed difference. It needs its own check because a
+       `Protocol` carries NO runtime conformance for parameter names: mypy is
+       blind to a COHERENT rename on either side — verified by renaming a port
+       parameter alone, and by renaming the adapter's parameter together with its
+       body, both of which the CI trio accepts and this test rejects.
+
+    Raw names are read from pybind's generated signature line, i.e. what a
+    keyword call actually resolves against; an unreadable one FAILS rather than
+    silently shrinking the audit to nothing.
+    """
+    import inspect
+
+    from conftest import raw_param_names
+
+    import dexllm
+    import dexllm.sdk.ports as ports_mod
+    from dexllm.sdk.adapter import DexKitAdapter
+
+    port_fns: dict[str, object] = {}
+    for name in dir(ports_mod):
+        obj = getattr(ports_mod, name)
+        if isinstance(obj, type) and (
+            name.endswith("Port") or name == "DexAnalysisUseCase"
+        ):
+            for m, v in vars(obj).items():
+                if not m.startswith("_") and inspect.isfunction(v):
+                    port_fns.setdefault(m, v)
+
+    def params(fn):
+        return [p for p in inspect.signature(fn).parameters if p != "self"]
+
+    shared = sorted(n for n in port_fns if hasattr(dexllm.DexKit, n))
+    # Floor without a magic number: the sibling method audit pins raw ∩ ports
+    # exactly, so every member of it must be reached AND must parse. A parser
+    # that started returning None would otherwise empty this test in silence.
+    assert shared, "no operation is on both raw and a port — the audit is vacuous"
+
+    for name in shared:
+        raw_names = raw_param_names(getattr(dexllm.DexKit, name))
+        assert raw_names is not None, (
+            f"cannot read raw parameter names for {name!r} — the audit would "
+            f"silently skip it"
+        )
+        port_names = params(port_fns[name])
+        assert not set(port_names) - set(raw_names), (
+            f"{name}: port parameter(s) {sorted(set(port_names) - set(raw_names))} "
+            f"are spelled differently on raw {raw_names} — one operation, one "
+            f"spelling per argument"
+        )
+        assert [p for p in raw_names if p in set(port_names)] == port_names, (
+            f"{name}: the shared parameters are ordered {port_names} on the port "
+            f"but {raw_names} on raw — a positional call would mean two things"
+        )
+
+    # …the session-bound ports only: `ContainerProbePort` is the load-free probe,
+    # implemented as a module-level `sdk.identify`, so it is deliberately absent
+    # from the adapter (the same distinction `_PORTS` already draws).
+    session_bound = {
+        m: v
+        for port in _PORTS
+        for m, v in vars(port).items()
+        if not m.startswith("_") and inspect.isfunction(v)
+    }
+    for name, port_fn in sorted(session_bound.items()):
+        adapter_fn = getattr(DexKitAdapter, name, None)
+        assert adapter_fn is not None, f"{name} is on a port but not the adapter"
+        assert params(adapter_fn) == params(port_fn), (
+            f"{name}: adapter {params(adapter_fn)} != port {params(port_fn)} — the "
+            f"adapter implements the port, so there is no licensed difference"
+        )
+
+
 def test_raw_and_sdk_share_one_spelling_per_record_type():
     """dexllm#37: the same axis as above, for TYPE names.
 

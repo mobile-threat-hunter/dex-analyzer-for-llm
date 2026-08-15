@@ -95,6 +95,45 @@ def smali_offsets(dk, desc):
     return offs
 
 
+def raw_param_names(fn):
+    """Parameter names of a pybind11 method, or None when none can be read.
+
+    `inspect.signature` refuses a pybind11 `instancemethod`, but pybind writes the
+    `py::arg()` names into the first docstring line — and those names ARE what a
+    keyword call resolves against, so this is the runtime truth rather than the
+    `.pyi` shadow. Shared by the dexllm#44 argument-name audits, which treat a
+    None (an overload set, a stripped docstring) as a hard failure: a parser that
+    quietly returns nothing would make the whole audit vacuous.
+    """
+    doc = (fn.__doc__ or "").splitlines()
+    if not doc or "Overloaded function" in (fn.__doc__ or ""):
+        return None
+    line, start = doc[0], doc[0].find("(")
+    if start < 0 or "->" not in line:
+        return None
+    depth, end = 0, -1
+    for i in range(start, len(line)):
+        depth += line[i] in "([{"
+        depth -= line[i] in ")]}"
+        if depth == 0:
+            end = i
+            break
+    if end < 0:
+        return None
+    names, depth, cur = [], 0, ""
+    for c in line[start + 1 : end] + ",":
+        depth += c in "([{"
+        depth -= c in ")]}"
+        if c == "," and depth == 0:
+            token = cur.split(":")[0].split("=")[0].strip()
+            if token and token not in ("self", "*", "/"):
+                names.append(token)
+            cur = ""
+        else:
+            cur += c
+    return names
+
+
 @pytest.fixture(scope="session")
 def loadable_apks():
     """Every candidate APK that actually carries decompilable dex (0-dex /

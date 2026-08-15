@@ -602,6 +602,12 @@ def test_sdk_identity_apis_reject_non_descriptor(dk):
 # its siblings in tests/test_sdk.py, so it is discoverable without reading the test.
 _MCP_ONLY_TOOLS: set[str] = set()
 
+# Tool arguments with no counterpart on any other layer, because they are
+# TRANSPORT concerns: an LLM reads a bounded window of a result, so pagination
+# and truncation exist only where the answer crosses the wire. Every other
+# argument must carry the name its operation already uses (dexllm#44).
+_MCP_TRANSPORT_ARGS: set[str] = {"limit", "offset", "max_chars", "pattern"}
+
 
 def test_identify_means_the_same_thing_on_every_layer(tmp_path):
     """dexllm#38: a shared key must not carry two meanings across layers.
@@ -768,6 +774,101 @@ def test_every_mcp_tool_name_exists_on_another_layer():
             f"tool {name!r} does not call an operation of the same name — it is "
             f"borrowing another operation's name"
         )
+
+
+def test_every_mcp_tool_argument_exists_on_another_layer():
+    """dexllm#44: the MCP half of the ARGUMENT axis.
+
+    `test_every_mcp_tool_name_exists_on_another_layer` locks tool NAMES and its
+    sibling in tests/test_sdk.py locks raw ↔ port ARGUMENT names. What was left
+    unheld is the transport's own surface, which has TWO name lists — the impl
+    signature and the advertised `input_schema`, the one an LLM reads and the
+    only one mcp validates against.
+
+    1. schema properties == impl parameters. A property the impl does not accept
+       is a `TypeError` the moment a model uses it; a parameter the schema omits
+       is unreachable over the wire. Compared as SETS: key order in a JSON object
+       carries no meaning.
+    2. every impl parameter is a parameter of the SAME-named operation on raw, on
+       a port, or on a session-analysing module function — or one of the declared
+       transport concerns. Set EQUALITY against that list, so a stale entry fails
+       too, and the list is JUSTIFIED rather than merely listed: a transport name
+       that any referenced operation also uses would be a real domain parameter,
+       and listing it here would let a rename hide behind it.
+
+    Legitimate absences are NOT drift: a tool may omit a knob the Python layer
+    offers (`only_categories`, `dataset_path`), so the rule is one-directional.
+    """
+    from conftest import raw_param_names
+
+    import dexllm.sdk.ports as ports_mod
+
+    port_fns = {}
+    for name in dir(ports_mod):
+        obj = getattr(ports_mod, name)
+        if isinstance(obj, type) and (
+            name.endswith("Port") or name == "DexAnalysisUseCase"
+        ):
+            for m, v in vars(obj).items():
+                if not m.startswith("_") and inspect.isfunction(v):
+                    port_fns.setdefault(m, v)
+
+    def params(fn, drop=()):
+        return [p for p in inspect.signature(fn).parameters if p not in drop]
+
+    def referenced(name):
+        """Parameter names of the operation this tool is named after."""
+        out: set[str] = set()
+        raw_method = getattr(dexllm.DexKit, name, None)
+        if raw_method is not None:
+            names = raw_param_names(raw_method)
+            assert names is not None, f"cannot read raw parameters for {name!r}"
+            out |= set(names)
+        if name in port_fns:
+            out |= set(params(port_fns[name], drop=("self",)))
+        fn = getattr(dexllm, name, None)
+        # …a module function only counts when it ANALYSES a session, the same
+        # `dk`-first rule the sibling tool-NAME audit uses. `identify` / `verify`
+        # are pybind functions, so their names come from the docstring instead —
+        # both are load-free probes taking a `path`, which the rule then drops.
+        if callable(fn) and not isinstance(fn, type):
+            try:
+                declared = params(fn)
+            except (TypeError, ValueError):
+                declared = raw_param_names(fn) or []
+            if declared and declared[0] == "dk":
+                out |= set(declared[1:])
+        return out
+
+    schema = {d["name"]: d for d in tools.tool_definitions()}
+    assert set(schema) == set(tools.TOOL_IMPLS)  # premise of the loop below
+
+    unmatched: set[str] = set()
+    for name, impl in sorted(tools.TOOL_IMPLS.items()):
+        declared = set(params(impl, drop=("dk",)))
+        advertised = set(schema[name]["input_schema"].get("properties", {}))
+        assert declared == advertised, (
+            f"tool {name!r}: the schema advertises {sorted(advertised - declared)} "
+            f"which the impl does not accept, and the impl accepts "
+            f"{sorted(declared - advertised)} which the schema never offers"
+        )
+        unmatched |= declared - referenced(name)
+
+    assert unmatched == _MCP_TRANSPORT_ARGS, (
+        f"tool arguments naming nothing on another layer: "
+        f"{sorted(unmatched - _MCP_TRANSPORT_ARGS)} | stale exceptions: "
+        f"{sorted(_MCP_TRANSPORT_ARGS - unmatched)}"
+    )
+
+    # The exception list must be justified, not merely listed (the same defence
+    # the sibling name audits apply to theirs).
+    every_referenced: set[str] = set()
+    for name in tools.TOOL_IMPLS:
+        every_referenced |= referenced(name)
+    assert not _MCP_TRANSPORT_ARGS & every_referenced, (
+        f"{sorted(_MCP_TRANSPORT_ARGS & every_referenced)} is a real parameter of "
+        f"an operation, not a transport concern — a rename could hide behind it"
+    )
 
 
 def test_tool_catalog_carries_no_aliases(dk):
