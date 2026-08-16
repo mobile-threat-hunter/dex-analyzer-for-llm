@@ -295,6 +295,72 @@ Facts the key already states (`IMSI` for `getSubscriberId`), severity judgements
 `resolve_call_args`](#l4--intra-method-dataflow-whats-actually-passed-at-each-call-site)
 answers that properly) are deliberately **not** tags.
 
+### Reading an `<init>` key on a framework service
+
+Four entries are the CONSTRUCTOR of a class an app **subclasses** —
+`AccessibilityService` (`ACCESSIBILITY`), `InputMethodService` (`INPUT_CAPTURE`),
+`NotificationListenerService` (`NOTIFICATIONS`) and `DeviceAdminReceiver`
+(`DEVICE_ADMIN`). A hit means **the APK declares such a service**:
+
+```python
+report = dexllm.summarize_capabilities(dexllm.DexKit("a2dp.Vol_137.apk"))
+listeners = [h for h in report.api_hits
+             if "NotificationListenerService" in h.api_signature]
+for hit in listeners:
+    print(hit.api_signature, hit.call_site_count, sorted(hit.callers))
+# → Landroid/service/notification/NotificationListenerService;-><init>()V 1
+#   ['La2dp/Vol/NotificationCatcher;-><init>()V']
+```
+
+The capability of such a service is reached two ways, and a member key can name
+neither reliably. A member the app **calls** (`getRootInActiveWindow`,
+`performGlobalAction`, `getActiveNotifications`) is invoked on `this`, and a dex
+`method_id` records the **static receiver type**, so it is spelled under the app's
+own subclass — unreachable, and `getActiveNotifications` accordingly has 0
+`method_id`s in the APK above. A callback the app **overrides**
+(`onNotificationPosted`) is invoked by the system, so there is no call site for it
+at all — unless the override happens to call `super.onNotificationPosted()`, which
+*is* spelled under the framework class but is entirely **optional**: a payload that
+wants the notifications and not the default behaviour simply omits it.
+
+A **constructor is never inherited**, and `super()` is emitted by the compiler
+whether or not the source writes it, so it is the one part of the capability that
+is spelled under the framework class **unconditionally**. That is what makes it a
+usable key where the members are not.
+
+How tightly a hit implies *declares* depends on the class. `AccessibilityService`
+and `NotificationListenerService` are `abstract` in AOSP, so naming their
+constructor is **provably** a subclass — nothing else can. `InputMethodService`
+and `DeviceAdminReceiver` are concrete, so `new X()` would emit the identical
+descriptor and a hit there reads as *declares or constructs*; no corpus APK does
+the latter (nobody instantiates a service by hand) and both readings point at the
+same capability, but the distinction is real.
+
+Nothing else about these entries is special. They count invoke instructions into
+`call_site_count` like any other method key (normally one per subclass; a class
+declaring two constructors of its own chains `super()` twice), the caller is the
+subclass's own `<init>`, so `app_only` separates an app's service from a bundled
+one with no special case.
+
+Four limits, stated rather than left to be discovered:
+
+- **A dex fact only.** The service must also be declared in the manifest with its
+  `BIND_*` permission to be usable, and dexllm reads no manifest — so a hit is a
+  strong triage signal, not proof the capability is reachable at runtime.
+- **No interfaces.** An interface has no constructor, so a capability reached by
+  `implements` is out of scope for this form.
+- **A subclass declaring no constructor is invisible**, since it emits no
+  `super()`. Real but out of reach of these four: 17 of the corpus's 7,539
+  non-`Object` subclasses are in that shape (R8-minified library internals), while
+  **0** of its 178 `Service` / `BroadcastReceiver` / `Activity` / `Application` /
+  `ContentProvider` subclasses are — the framework instantiates a service through
+  its no-arg constructor, so one that lost it would not start.
+- **One key per constructor OVERLOAD.** Each of these four classes declares
+  exactly one constructor, no-arg, so the single `()V` key is complete for them.
+  A class with several would need each curated: `Thread` has 4, and of 30 corpus
+  subclasses only 27 chain `()V` — the rest call `super(Runnable, String)` or
+  `super(String)`.
+
 The catalog is JSON (`android_api_map.json`). To use your own, copy the bundled
 file, edit it, and point dexllm at the containing **directory** — do not edit the
 copy inside `site-packages`, which `pip install -U` discards:

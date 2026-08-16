@@ -791,6 +791,17 @@ r.flags         # Counter() on this APK; Counter({'IDENTIFIER': 2}) on one calli
                 # both getDeviceId overloads (IDENTIFIER also covers getSubscriberId,
                 # getSimSerialNumber, getLine1Number, BluetoothAdapter.getAddress)
 ```
+A key is a method descriptor or a field descriptor (the two are unambiguous by
+shape, so no schema key says which). Four are the **constructor** of a class an app
+subclasses (`AccessibilityService`, `InputMethodService`,
+`NotificationListenerService`, `DeviceAdminReceiver`), where a hit means the APK
+**declares such a service** — the members are invoked on the app's own subclass or
+are callbacks the system calls, and only `super()` is spelled under the framework
+class. They aggregate exactly like any other method key. See
+[usage](usage.md#reading-an-init-key-on-a-framework-service) for the three limits
+(no manifest check, no interfaces, no ctor-less subclass) and for why the
+implication is exact only for the two classes AOSP declares `abstract`.
+
 `app_only=True` (the default since dexllm#49) counts only the app's own callers,
 dropping bundled framework / library plumbing by the same predicate and the same
 default as [`dangerous_permission_api_callers`](#dexllmdangerous_permission_api_callersdk--dataset_pathnone-app_onlytrue---dict).
@@ -840,7 +851,7 @@ next(iter(r.by_caller.items()), None)
 It held `{permissions}` until dexllm#35 and was built inside the permission loop,
 so an API declaring none registered no callers at all. Every `REFLECTION` /
 `PROCESS_EXEC` / `DYNAMIC_LOAD` / `NATIVE_CODE` / `CRYPTO` / `WEBVIEW` / `STORAGE`
-entry is permission-less — 138 of the catalog's 263 entries carry no permission
+entry is permission-less — 142 of the catalog's 267 entries carry no permission
 at all, including `Settings$Secure.getString`, the ANDROID_ID read. Measured on the
 0.3 catalog at the time, the index covered **17 of the corpus's 317 distinct callers
 (5.4%)**; the corpus now has 515 distinct callers under `app_only=False` and every

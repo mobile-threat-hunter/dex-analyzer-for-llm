@@ -76,15 +76,20 @@ CATEGORY_VOCABULARY = {
     "TELEPHONY",
     "WEBVIEW",
     "WIFI",
-    # behaviours. No ACCESSIBILITY: the abuse surface
-    # (`AccessibilityService#getRootInActiveWindow` and friends) is invoked on
-    # `this` inside the app's own subclass, so a dex records it under THAT class
-    # and no `find_call_sites_to` key can name it — see the generator's note.
+    # behaviours. ACCESSIBILITY / INPUT_CAPTURE arrived with the subclassed-service
+    # CONSTRUCTOR keys (dexllm#51). Both were unreachable while the catalog could
+    # only name MEMBERS: `AccessibilityService#getRootInActiveWindow` and friends
+    # are invoked on `this` inside the app's own subclass (recorded under THAT
+    # class), and the interesting IME members are callbacks the system invokes. A
+    # constructor is never inherited, so `super()` IS spelled under the framework
+    # class — see the generator's note.
+    "ACCESSIBILITY",
     "BIOMETRIC",
     "CLIPBOARD",
     "CRYPTO",
     "DEVICE_ADMIN",
     "DYNAMIC_LOAD",
+    "INPUT_CAPTURE",
     "KEYSTORE",
     "NATIVE_CODE",
     "NOTIFICATIONS",
@@ -249,6 +254,33 @@ def test_every_entry_carries_at_least_one_category():
     """
     missing = [k for k, e in _entries().items() if not e.get("categories")]
     assert not missing, f"entries with no category: {missing}"
+
+
+def test_every_declared_tag_is_carried_by_at_least_one_entry():
+    """The reverse of the guard above, and the one that was missing.
+
+    A tag in the closed vocabulary with no entry behind it is worse than an absent
+    one: `only_categories={"X"}` passes validation and returns an EMPTY report —
+    exactly the "indistinguishable from 'the APK exercises none of this'" outcome
+    the module raises a `ValueError` to prevent, arrived at by the other route.
+
+    Newly consequential with dexllm#51: ACCESSIBILITY and INPUT_CAPTURE are each
+    carried by a SINGLE entry, so dropping that entry (while the tag stays
+    declared) reinstates the silent-empty shape the tag was removed for in the
+    first place.
+    """
+    catalog = _catalog()
+    entries = catalog["entries"].values()
+    used_cats = {c for e in entries for c in e.get("categories", ())}
+    used_flags = {f for e in entries for f in e.get("flags", ())}
+
+    orphan_cats = set(catalog["category_vocabulary"]) - used_cats
+    orphan_flags = set(catalog["flag_vocabulary"]) - used_flags
+    assert not orphan_cats, (
+        "declared categories no entry carries — only_categories would accept them "
+        f"and report nothing: {sorted(orphan_cats)}"
+    )
+    assert not orphan_flags, f"declared flags no entry carries: {sorted(orphan_flags)}"
 
 
 # ── behaviour guards (stub dk — no corpus needed) ────────────────────────────
@@ -1201,9 +1233,9 @@ def test_no_ubiquitous_api_is_in_the_catalog():
 # dataset-less run. Update BOTH numbers when the catalog legitimately changes; that
 # edit is the point, since it is what makes a catalog change a conscious one rather
 # than a diff nobody has to look at.
-CATALOG_ENTRY_COUNT = 263
+CATALOG_ENTRY_COUNT = 267
 CATALOG_ENTRY_DIGEST = (
-    "90377ef7c35a39d8e32b423028d8d78ba54f362d1cb072bc97e30581f88c2072"
+    "cebf5b4438570131676f2017889d40810724db438e77f6bd08fbdbecd68e492b"
 )
 
 
@@ -1609,3 +1641,264 @@ def test_the_mcp_echo_reports_the_mode_that_was_actually_applied():
         is False
     )
     assert tools.execute("summarize_capabilities", {}, dk)["dropped_touches"] == 1
+
+
+# ── subclassed framework services, curated by their CONSTRUCTOR (dexllm#51) ──
+#
+# PINNED literals, not derived from the catalog: three of the four never fire on
+# the bundled corpus (0 AccessibilityService / DeviceAdminReceiver /
+# InputMethodService subclasses), so a guard that read the catalog to build its
+# own expectation would be green against dropping any of them. Same reason the
+# vocabulary above is pinned rather than read back.
+_SERVICE_CTOR_KEYS = {
+    "Landroid/accessibilityservice/AccessibilityService;-><init>()V": "ACCESSIBILITY",
+    "Landroid/inputmethodservice/InputMethodService;-><init>()V": "INPUT_CAPTURE",
+    "Landroid/app/admin/DeviceAdminReceiver;-><init>()V": "DEVICE_ADMIN",
+    "Landroid/service/notification/NotificationListenerService;-><init>()V": (
+        "NOTIFICATIONS"
+    ),
+}
+
+
+@pytest.mark.parametrize("key,category", sorted(_SERVICE_CTOR_KEYS.items()))
+def test_a_subclassed_service_is_curated_by_its_constructor(key, category):
+    """The four services an app SUBCLASSES are each in the catalog, as a ctor key.
+
+    Their members cannot be curated — `getRootInActiveWindow` and friends are
+    invoked on `this` inside the app's own subclass, and the rest are callbacks
+    the system invokes — so the constructor is the only part of the capability a
+    dex spells under the framework class (dexllm#51). Dropping any one of these
+    from `CURATED` is invisible to every corpus measurement for three of the four.
+
+    The `<init>` key must also be the class's ONLY key, which is the half that
+    took a review to find: before dexllm#51 the barrier against re-adding the dead
+    member keys `aa83f42` removed was that `ACCESSIBILITY` had left the closed
+    vocabulary, so restoring them meant editing the pinned vocabulary too.
+    Declaring the tag again dropped that barrier — a mutant re-adding
+    `getRootInActiveWindow` / `performGlobalAction` / `dispatchGesture` /
+    `getActiveNotifications` (0 call sites corpus-wide, dead by construction) then
+    passed the whole suite on a regenerate-and-re-pin. Stating the exclusivity
+    restores it, and states the curation decision directly rather than relying on
+    a tag's absence to imply it.
+    """
+    entries = _entries()
+    entry = entries.get(key)
+    assert entry is not None, f"{key} left the catalog"
+    assert "-><init>(" in key, "a subclassed service must be curated by its ctor"
+    assert entry["categories"] == [category]
+
+    owner = key.split("->")[0]
+    members = [
+        k for k in entries if k.startswith(owner + "->") and "-><init>(" not in k
+    ]
+    assert not members, (
+        f"{owner} is curated by its constructor: a member the app CALLS is spelled "
+        f"under the subclass, and an overridden callback has no call site unless the "
+        f"override invokes super, which is optional — so a member key here detects "
+        f"nothing or detects politeness: {sorted(members)}"
+    )
+
+
+def test_a_service_constructor_key_routes_to_the_method_lookup():
+    """`<init>()V` must route as a METHOD key, not a field one.
+
+    A constructor descriptor is the shape closest to the field/method boundary
+    `_is_field_key` decides on, and routing it to `find_methods_reading_field`
+    would answer nothing for every entry above while raising nothing.
+    """
+    for key in _SERVICE_CTOR_KEYS:
+        assert not capability._is_field_key(key), key
+
+
+def test_a_subclass_declaring_a_constructor_calls_its_superclass_constructor():
+    """The property the four entries rest on, on a committed fixture.
+
+    A constructor is never inherited, so a subclass that declares one MUST name
+    its superclass's — the compiler emits `super()` whether or not the source
+    writes it — and that invoke is recorded under the SUPERCLASS. If it were not,
+    the four entries would still be present and would silently answer nothing.
+
+    Only that DIRECTION is asserted, because it is the only one that is true. An
+    earlier version asserted set EQUALITY with `find_classes_by_super` and
+    justified it as "every class whose direct superclass is Object chains to it",
+    which is false twice over: an interface or annotation has `Object` as its
+    superclass and no `<init>` at all (334 such classes in `hello-world.apk`), and
+    `new Object()` makes a caller that is not a subclass (3 there). It passed only
+    because the fixture holds two ordinary classes. The subset direction is what
+    the detection needs, and the converse is separately false for a CONCRETE
+    class — see `test_a_service_constructor_key_can_also_mean_direct_instantiation`.
+
+    Driven by `Ljava/lang/Object;` so it needs no corpus. That makes it a MECHANISM
+    guard, not a proof about the four framework classes: what it pins is that
+    `find_call_sites_to` sees a `super()` invoke at all.
+    """
+    import dexllm
+
+    dk = dexllm.DexKit(str(Path(__file__).parent / "data" / "multidex.apk"))
+    with_ctor = {
+        c.descriptor
+        for c in dk.find_classes_by_super("Ljava/lang/Object;")
+        if any("-><init>(" in m for m in dk.list_class_methods(c.descriptor))
+    }
+    ctor_callers = {
+        s.caller_descriptor.split("->")[0]
+        for s in dk.find_call_sites_to("Ljava/lang/Object;-><init>()V")
+    }
+    assert with_ctor, "the fixture must carry a subclass that declares a constructor"
+    assert with_ctor <= ctor_callers, sorted(with_ctor - ctor_callers)
+
+
+# Which of the four AOSP classes are `abstract`, PINNED (aosp_classes.csv). Naming
+# an abstract class's constructor is provably a subclass; a concrete one can also
+# be reached by `new X()`, which emits the identical descriptor. A review caught
+# the docs generalising the abstract case to all four, so the split is data here
+# and a doc rewrite has to face it.
+_ABSTRACT_SERVICE_OWNERS = {
+    "Landroid/accessibilityservice/AccessibilityService;",
+    "Landroid/service/notification/NotificationListenerService;",
+}
+_CONCRETE_SERVICE_OWNERS = {
+    "Landroid/inputmethodservice/InputMethodService;",
+    "Landroid/app/admin/DeviceAdminReceiver;",
+}
+
+
+def test_the_abstract_and_concrete_services_are_classified_and_covered():
+    """The abstract/concrete split must cover exactly the curated services.
+
+    Adding a fifth service without deciding which side it falls on would leave the
+    "provably a subclass" reasoning silently applied to a class it does not hold
+    for — the drift this pin exists to stop.
+    """
+    assert _ABSTRACT_SERVICE_OWNERS | _CONCRETE_SERVICE_OWNERS == {
+        k.split("->")[0] for k in _SERVICE_CTOR_KEYS
+    }
+    assert not (_ABSTRACT_SERVICE_OWNERS & _CONCRETE_SERVICE_OWNERS)
+
+
+def test_naming_a_concrete_classs_constructor_need_not_mean_subclassing(dk):
+    """Demonstrate the converse failing, rather than asserting it in prose.
+
+    `new X()` on a concrete class emits the same `X;-><init>` descriptor a subclass
+    emits for `super()`, so for `InputMethodService` / `DeviceAdminReceiver` a hit
+    is "declares OR constructs", not "declares". No corpus APK constructs either
+    (they are services — nobody does), so the shape is shown on whatever concrete
+    class the corpus DOES instantiate directly.
+    """
+    not_subclasses = []
+    for cls in list(dk.list_classes())[:400]:
+        outside = {
+            site.caller_descriptor.split("->")[0]
+            for site in dk.find_call_sites_to(f"{cls}-><init>()V")
+        } - {cls}
+        if not outside:
+            continue
+        subclasses = {c.descriptor for c in dk.find_classes_by_super(cls)}
+        not_subclasses += [(cls, o) for o in sorted(outside - subclasses)]
+
+    require_corpus_shape(
+        not_subclasses,
+        "class whose no-arg constructor is called by a non-subclass",
+        "a constructor call site would then always imply subclassing, which would "
+        "make the concrete/abstract distinction above unnecessary",
+    )
+
+
+def test_a_service_subclass_reaches_the_report_through_the_ordinary_pipeline():
+    """A ctor key aggregates like any other method key — no new counting unit.
+
+    The three 0-corpus entries are only reachable through a stub, and this is what
+    proves they are not inert: `total_call_sites` (not a new counter), the
+    category Counter, and the documented invariant all behave as for an ordinary
+    call-site entry.
+    """
+    accessibility = "Landroid/accessibilityservice/AccessibilityService;-><init>()V"
+    subclass_ctor = "Lcom/example/app/Spy;-><init>()V"
+
+    report = capability.summarize_capabilities(
+        _StubDk({accessibility: [subclass_ctor]})
+    )
+
+    assert report.categories["ACCESSIBILITY"] == 1
+    assert report.total_call_sites == 1
+    assert report.total_field_accesses == 0
+    assert report.by_caller[subclass_ctor] == {accessibility}
+    assert sum(report.categories.values()) >= (
+        report.total_call_sites + report.total_field_accesses
+    )
+
+
+def test_the_subclassed_service_tags_are_selectable():
+    """`only_categories={"ACCESSIBILITY"}` must be accepted, not a loud error.
+
+    Both tags were removed from the closed vocabulary when the member keys were,
+    so this query raised `ValueError` — correctly, since nothing carried the tag.
+    Adding an entry without its tag would reinstate that, and the failure would
+    look like a typo rather than a missing curation.
+    """
+    accessibility = "Landroid/accessibilityservice/AccessibilityService;-><init>()V"
+    ime = "Landroid/inputmethodservice/InputMethodService;-><init>()V"
+    dk = _StubDk({accessibility: ["Lcom/example/app/Spy;-><init>()V"], ime: []})
+
+    report = capability.summarize_capabilities(dk, only_categories={"ACCESSIBILITY"})
+    assert report.matched_apis == 1
+
+    capability.summarize_capabilities(dk, only_categories={"INPUT_CAPTURE"})
+
+
+def test_a_library_subclass_of_a_service_is_dropped_by_app_only():
+    """`app_only` needs no new meaning for a ctor key — the caller IS the subclass.
+
+    A super-ctor site is recorded inside the subclass's own `<init>`, so the
+    existing prefix predicate already separates an app's service from a bundled
+    one. Measured on the corpus with `Landroid/app/Service;-><init>()V`: 35 sites,
+    25 of them androidx / support plumbing (`JobIntentService`,
+    `MediaBrowserServiceCompat`, ...).
+    """
+    key = "Landroid/service/notification/NotificationListenerService;-><init>()V"
+    app = "Lcom/example/app/Catcher;-><init>()V"
+    lib = "Landroidx/core/app/SomeListenerService;-><init>()V"
+
+    report = capability.summarize_capabilities(_StubDk({key: [app, lib]}))
+    assert report.total_call_sites == 1
+    assert report.dropped_touches == 1
+    assert report.by_caller == {app: {key}}
+
+    unfiltered = capability.summarize_capabilities(
+        _StubDk({key: [app, lib]}), app_only=False
+    )
+    assert unfiltered.total_call_sites == 2
+    assert unfiltered.dropped_touches == 0
+
+
+def test_the_real_notification_listener_subclass_is_reported(loadable_apks):
+    """End-to-end on a real APK: the one case the bundled corpus can drive.
+
+    a2dp.Vol's `NotificationCatcher extends NotificationListenerService` calls
+    NONE of the members the surface would suggest (`getActiveNotifications` has 0
+    `method_id`s there) — the capability is the subclass plus an overridden
+    callback — so before dexllm#51 this APK reported no NOTIFICATIONS capability
+    at all.
+    """
+    import dexllm
+
+    key = "Landroid/service/notification/NotificationListenerService;-><init>()V"
+    found = []
+    for path in loadable_apks:
+        report = capability.summarize_capabilities(dexllm.DexKit(path))
+        hit = next((h for h in report.api_hits if h.api_signature == key), None)
+        if hit is None:
+            continue
+        found.append(path)
+        assert hit.call_site_count >= 1
+        assert hit.categories == ["NOTIFICATIONS"]
+        assert report.categories["NOTIFICATIONS"] >= 1
+        # the caller is the subclass's own constructor, which is what makes the
+        # existing app_only predicate the right one
+        assert all(c.endswith("-><init>()V") for c in hit.callers), hit.callers
+
+    require_corpus_shape(
+        found,
+        "NotificationListenerService subclass",
+        "the constructor key stopped matching a real subclass",
+    )

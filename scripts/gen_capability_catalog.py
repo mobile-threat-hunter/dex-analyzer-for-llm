@@ -51,22 +51,72 @@ alongside the ``Field`` and ``Constructor`` forms, and never
 ``extends``/``implements`` and emits the descriptor under the CURATED class. Curating
 the declaring class instead would produce an entry no APK can match.
 
-**The same rule puts a whole class of API out of reach of this catalog, and that
-is why ACCESSIBILITY is absent.** When the app SUBCLASSES a framework class, its
-own ``this.m()`` is compiled against the SUBCLASS: a2dp.Vol's
-``NotificationCatcher extends NotificationListenerService`` records
+**The same rule puts the MEMBERS of a subclassed framework class out of reach —
+but not the class itself, which is reachable through its CONSTRUCTOR** (dexllm#51).
+When the app SUBCLASSES a framework class, its own ``this.m()`` is compiled
+against the SUBCLASS: a2dp.Vol's ``NotificationCatcher extends
+NotificationListenerService`` records
 ``La2dp/Vol/NotificationCatcher;->registerReceiver(…)``, never the framework
 spelling. So ``AccessibilityService#getRootInActiveWindow`` /
 ``performGlobalAction`` / ``dispatchGesture`` and
-``NotificationListenerService#getActiveNotifications`` — the accessibility-abuse
-and notification-reading surfaces — cannot be expressed as ``find_call_sites_to``
-keys at all; they are a question about a class's SUPERCLASS, which
-``find_classes_by_super`` answers and this catalog does not. A first cut shipped
-them anyway: real AOSP members, resolvable, and dead in every possible APK. What
-was left of ACCESSIBILITY was ``AccessibilityNodeInfo`` / ``AccessibilityManager``,
-whose callers are **100% support-library internals** on the corpus (measured over
-32 sources, 72/72 touches) — a detector for bundling androidx, so the category
-went with them rather than shipping as a false positive.
+``NotificationListenerService#getActiveNotifications`` cannot be curated: a first
+cut shipped them anyway — real AOSP members, resolvable, and dead in every
+POSSIBLE APK — and they were removed. Worse, the member is often the wrong thing
+to look for even in principle: ``NotificationCatcher`` calls **none** of them
+(``getActiveNotifications`` has 0 ``method_id``s in that APK), because the
+capability is realised by OVERRIDING ``onNotificationPosted``, which the system
+calls. A member-counting key returns 0 for the very case it exists to detect.
+
+An OVERRIDDEN callback is the one partial exception, and it does not rescue the
+member form: if the override calls ``super.onNotificationPosted()`` that invoke IS
+spelled under the framework class (``NotificationCatcher;->onCreate()V`` carries
+``invoke-super {v3}, …NotificationListenerService;->onCreate()V``, so a curated
+``onCreate`` would match 1 site there). But calling super is entirely OPTIONAL — a
+payload that wants the notifications and not the default behaviour omits it — so
+such a key detects politeness, not capability.
+
+**A constructor escapes all of this, because a constructor is never inherited**
+(the same fact :func:`_resolve` relies on below). ``super()`` is emitted by the
+compiler whether or not the source writes it, so unlike ``super.onX()`` it is
+UNCONDITIONAL, and it is spelled under the SUPERCLASS —
+``NotificationCatcher;-><init>()V`` opens with
+``invoke-direct {v1}, Landroid/service/notification/NotificationListenerService;-><init>()V``.
+So subclassing IS an ordinary call site, needing no new key form, no new counting
+unit, and no new meaning for ``app_only`` (the caller is the subclass's own
+``<init>``, so a library subclass is filtered by the existing prefix predicate).
+**Each of the four classes declares exactly ONE constructor, no-arg** (verified
+against ``aosp_members.csv``), which is why a single ``()V`` key is complete for
+them: every subclass must chain to it. That is NOT general — ``Thread`` has 4
+constructors, and of 30 corpus subclasses only 27 call ``()V`` (the other 3 chain
+``super(Runnable, String)`` / ``super(String)``), so a multi-constructor class
+would need every overload curated. Measured over the 22 loadable APKs × 6
+superclasses that DO have a single relevant form: ``find_classes_by_super(S)`` and
+"classes with a call site to ``S``'s constructor" are the SAME SET — 221 classes,
+0 disagreement in either direction, 227 sites (a class declaring two constructors
+of its own chains ``super()`` twice, which is an honest instruction count).
+
+**The blind spot, stated rather than discovered: a subclass that declares NO
+constructor emits no ``super()``, and the ctor key cannot see it.** That is not
+hypothetical — 17 of the corpus's 7,539 non-``Object`` subclasses are in that
+shape (12 of them CONCRETE, all R8-minified Play-services internals whose
+constructor the optimiser removed), so the set equality above holds for the
+superclasses measured, not universally. It does not reach these four entries for
+a STRUCTURAL reason: the framework instantiates a service reflectively through
+its no-arg constructor, so a service that lost it would not start, and Android's
+default keep rules preserve it. All four curated classes are system-instantiated:
+``AccessibilityService`` and ``NotificationListenerService`` extend ``Service``
+directly, ``InputMethodService`` reaches it through ``AbstractInputMethodService``,
+and ``DeviceAdminReceiver`` extends ``BroadcastReceiver``.
+Corroborated: of 178 corpus subclasses of ``Service`` / ``BroadcastReceiver`` /
+``Activity`` / ``Application`` / ``ContentProvider``, **0** lack a constructor.
+
+What was left of ACCESSIBILITY as ordinary call sites was
+``AccessibilityNodeInfo`` / ``AccessibilityManager``, whose callers are **100%
+support-library internals** on the corpus (measured over 32 sources, 72/72
+touches) — a detector for bundling androidx, so those went and are not coming
+back; ``app_only`` now answers that objection by reporting nothing, which is
+correct and useless. The signal was never on that surface. The four ``<init>``
+entries below are the surface it IS on.
 
 Requires a checkout of https://github.com/mobile-threat-hunter/aosp_data_set
 (``aosp_members.csv`` + ``aosp_classes.csv``). Regenerate after editing ``CURATED``:
@@ -97,10 +147,11 @@ PERM_LEVELS = ROOT / "src" / "dexllm" / "data" / "perm_levels.json"
 # Protection levels a third-party app can actually be granted.
 APP_HOLDABLE = {"normal", "dangerous"}
 
-VERSION = "0.4"
+VERSION = "0.5"
 SOURCE = (
     "curated selection (2026-05-25, taxonomy normalised 2026-08-12, field keys "
-    "2026-08-16, behaviour surfaces 2026-08-16); descriptors, overloads and "
+    "2026-08-16, behaviour surfaces 2026-08-16, subclassed services 2026-08-17); "
+    "descriptors, overloads and "
     "permissions derived from aosp_data_set by scripts/gen_capability_catalog.py"
 )
 
@@ -126,11 +177,18 @@ CATEGORY_VOCABULARY = [
     "WEBVIEW",
     "WIFI",
     # behaviours
+    "ACCESSIBILITY",
     "BIOMETRIC",
     "CLIPBOARD",
     "CRYPTO",
     "DEVICE_ADMIN",
     "DYNAMIC_LOAD",
+    # The keystroke counterpart of SCREEN_CAPTURE, and named after it: an IME
+    # sees everything the user types, which is what makes "this APK is a
+    # keyboard" worth telling an analyst. Naming the risk rather than the
+    # subsystem (INPUT_METHOD) follows SCREEN_CAPTURE, whose members are
+    # MediaProjection / DisplayManager calls.
+    "INPUT_CAPTURE",
     "KEYSTORE",
     "NATIVE_CODE",
     "NOTIFICATIONS",
@@ -337,12 +395,32 @@ CURATED: list[tuple[str, str, list[str], list[str]]] = [
     ("android.content.ClipboardManager", "getText", ["CLIPBOARD"], []),
     ("android.text.ClipboardManager", "getText", ["CLIPBOARD"], []),
     ("android.text.ClipboardManager", "setText", ["CLIPBOARD"], []),
-    # --- ACCESSIBILITY: deliberately ABSENT, see the note below ------------
+    # --- ACCESSIBILITY ----------------------------------------------------
+    # The CONSTRUCTOR, not the members: an accessibility service reads every
+    # window and can synthesise gestures, but it does so through `this.m()` and
+    # overridden callbacks, neither of which a dex spells under the framework
+    # class. `super()` is the one thing it must spell (see the note above).
+    # `AccessibilityService` is abstract, so a call to its constructor is
+    # PROVABLY a subclass — nothing else can name it.
+    (
+        "android.accessibilityservice.AccessibilityService",
+        "<init>",
+        ["ACCESSIBILITY"],
+        [],
+    ),
+    # --- INPUT_CAPTURE ----------------------------------------------------
+    # Declaring an IME is declaring "this app sees every keystroke". Also a
+    # constructor for the same reason: the interesting members (`onStartInputView`,
+    # `onKeyDown`) are callbacks the system invokes on the subclass.
+    ("android.inputmethodservice.InputMethodService", "<init>", ["INPUT_CAPTURE"], []),
     # --- NOTIFICATIONS ----------------------------------------------------
     # Posting a notification is what every app does; READING everyone else's is
     # the capability. `NotificationManager` is obtained from `getSystemService`,
     # so a call to it is recorded under `NotificationManager` — unlike
-    # `NotificationListenerService`, which an app SUBCLASSES (see the note below).
+    # `NotificationListenerService`, which an app SUBCLASSES, and which is
+    # therefore curated by its CONSTRUCTOR (see the note above). The two halves
+    # belong together: `isNotificationListenerAccessGranted` asks whether *my
+    # listener* was approved, a question that presupposes the subclass below.
     (
         "android.app.NotificationManager",
         "getActiveNotifications",
@@ -352,6 +430,12 @@ CURATED: list[tuple[str, str, list[str], list[str]]] = [
     (
         "android.app.NotificationManager",
         "isNotificationListenerAccessGranted",
+        ["NOTIFICATIONS"],
+        [],
+    ),
+    (
+        "android.service.notification.NotificationListenerService",
+        "<init>",
         ["NOTIFICATIONS"],
         [],
     ),
@@ -384,6 +468,12 @@ CURATED: list[tuple[str, str, list[str], list[str]]] = [
     ("android.app.ActivityManager", "getRunningTasks", ["USAGE_STATS"], []),
     ("android.app.ActivityManager", "getRecentTasks", ["USAGE_STATS"], []),
     # --- DEVICE_ADMIN -----------------------------------------------------
+    # The `DevicePolicyManager` calls below are what an admin app DOES; the
+    # receiver constructor is what makes it an admin at all (and is what the
+    # anti-uninstall pattern needs). Curated by its constructor for the usual
+    # reason — `onPasswordFailed` / `onProfileProvisioningComplete` are callbacks
+    # the system invokes on the subclass.
+    ("android.app.admin.DeviceAdminReceiver", "<init>", ["DEVICE_ADMIN"], []),
     ("android.app.admin.DevicePolicyManager", "isAdminActive", ["DEVICE_ADMIN"], []),
     ("android.app.admin.DevicePolicyManager", "isDeviceOwnerApp", ["DEVICE_ADMIN"], []),
     ("android.app.admin.DevicePolicyManager", "lockNow", ["DEVICE_ADMIN"], []),
@@ -711,7 +801,28 @@ NOTES = (
     "are the same unit and the counters are kept apart only so call_site_count's "
     "released meaning is untouched. A key names the class the APP writes (the dex "
     "method_id records the static receiver type), which is why Method/Field/Constructor "
-    "each carry setAccessible although AOSP declares it once on AccessibleObject. The "
+    "each carry setAccessible although AOSP declares it once on AccessibleObject. HOW "
+    "TO READ AN <init> KEY ON A FRAMEWORK SERVICE: AccessibilityService, "
+    "InputMethodService, NotificationListenerService and DeviceAdminReceiver are "
+    "classes an app SUBCLASSES, so a hit means the APK DECLARES SUCH A SERVICE -- the "
+    "constructor really is invoked (the compiler emits super()), and because a "
+    "constructor is never inherited it is the one part of the capability spelled under "
+    "the framework class; a member the app CALLS is spelled under the subclass, and a "
+    "callback it OVERRIDES has no call site unless the override happens to invoke "
+    "super, which is optional -- so no member key sees the capability reliably "
+    "(dexllm#51). Each of the four declares exactly ONE constructor, no-arg, so a "
+    "single ()V key is complete for them; a multi-constructor class would need every "
+    "overload. AccessibilityService "
+    "and NotificationListenerService are abstract in AOSP, so naming their constructor "
+    "is PROVABLY a subclass; InputMethodService and DeviceAdminReceiver are concrete, "
+    "so `new X()` emits the identical descriptor and a hit there reads as declares-OR- "
+    "constructs (no corpus APK constructs one -- nobody instantiates a service by "
+    "hand -- and both readings point at the same capability). Such a hit counts the "
+    "constructors that chain to super, normally one per subclass. It is a DEX fact "
+    "only: the service must also be declared in the manifest with its BIND_* "
+    "permission to be usable, which dexllm does not read. A subclass declaring NO "
+    "constructor emits no super() and is invisible; that is out of reach here because "
+    "the framework instantiates a service through its no-arg constructor. The "
     "selection is a judgement about what is worth reporting and excludes ubiquitous "
     "APIs (startActivity, sendBroadcast, ContentResolver.query, ...) even when they "
     "carry a permission; the exhaustive permission surface is dangerous_permission_apis. "
