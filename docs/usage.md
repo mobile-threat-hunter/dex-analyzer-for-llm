@@ -244,15 +244,15 @@ report = dexllm.summarize_capabilities(dk)
 # Top permissions touched (via API usage)
 for perm, count in report.top_permissions(10):
     print(f"{count:>5}× {perm}")
-# →     3 × android.permission.INTERNET
-# →     1 × android.permission.ACCESS_FINE_LOCATION
+# →     5 × android.permission.INTERNET
+# →     3 × android.permission.SCHEDULE_EXACT_ALARM
 
 # Top categories
 for cat, count in report.top_categories(10):
     print(f"{count:>5}× {cat}")
-# →    73 × REFLECTION
-# →     4 × CRYPTO
-# →     3 × STORAGE
+# →   120 × REFLECTION
+# →     8 × SCHEDULING
+# →     8 × CRYPTO
 
 # Cross-domain concerns (today only IDENTIFIER)
 report.flags            # Counter() on this APK; Counter({'IDENTIFIER': 2}) on one
@@ -303,8 +303,32 @@ dexllm.summarize_capabilities(dk, data_dir="/etc/dexllm")   # or $DEXLLM_DATA_DI
 See [Overriding the bundled data](#overriding-the-bundled-data). Keep the two axes
 and declare your own `category_vocabulary` / `flag_vocabulary` — `only_categories`
 validates against **your** catalog's, so a custom taxonomy stays filterable.
-Catalog keys must be **method** descriptors — a field descriptor resolves nothing,
-since the lookup is `find_call_sites_to`.
+A key is either a **method** descriptor (`Lcls;->name(proto)ret`, resolved through
+`find_call_sites_to`) or a **field** descriptor (`Lcls;->NAME:Ltype;`, resolved
+through `find_methods_reading_field` — how an app reaches contacts/SMS/calendar,
+by reading a framework `CONTENT_URI` constant). The two are told apart by shape,
+so no schema key says which; any other shape resolves nothing, silently.
+
+Two things the numbers do **not** say. A `permissions` entry is what the API
+*requires* at any protection level — `getDeviceId` carries both `READ_PHONE_STATE`
+and the `signature`-level `READ_PRIVILEGED_PHONE_STATE` — so it is not what the app
+*requests*; the manifest is. And a count is of **call sites in the dex, not
+executions**: a bundled library's call sites count like the app's own, which is why
+`SCHEDULE_EXACT_ALARM` and `USE_FINGERPRINT` appear above for a TV sample app
+(`AlarmManagerCompat` / `FingerprintManagerCompat` are bundled), and why 84% of the
+corpus's `REFLECTION` touches come from androidx / gson / kotlin. Use
+`report.by_caller` to see who; unlike
+[`dangerous_permission_api_callers`](#dangerous-permission-api-usage) this API has
+no `app_only` filter.
+
+The bundled catalog is **generated** by `scripts/gen_capability_catalog.py` from a
+curated `(class, member)` selection — the script resolves each name against the
+AOSP member catalog, expands it to every overload, and fills permissions from
+`perm_api.json`, so a descriptor is never hand-typed. Only the *selection* is
+hand-made: projecting every `@RequiresPermission` member instead was measured and
+its top additions are `Context.startActivity` / `sendBroadcast` / `bindService`,
+present in essentially every app. For the exhaustive permission surface use
+[`dangerous_permission_apis`](#dangerous-permission-api-usage) instead.
 
 ---
 
@@ -626,8 +650,11 @@ buckets (`perm_api.json` / `perm_levels.json`, all protection levels) and the pr
 URIs (`content_uris.json`) — is a committed snapshot of
 [aosp_data_set](https://github.com/mobile-threat-hunter/aosp_data_set) (metalava
 permission table + content-URI CSVs), verified in sync with upstream as of the
-2026-07-04 dataset revision. (`android_api_map.json` is a separate hand-curated
-catalog for `summarize_capabilities` — not part of that snapshot; see
+2026-07-04 dataset revision. (`android_api_map.json` is a separate catalog for
+`summarize_capabilities`: a hand-curated SELECTION of APIs, with the descriptors,
+overloads and permissions derived from that same dataset by
+`scripts/gen_capability_catalog.py` — so regenerating it needs an `aosp_data_set`
+checkout, while building and running dexllm do not. See
 [L3](#l3--what-permissions--categories-does-this-apk-exercise) for its two-axis
 schema before extending it.)
 

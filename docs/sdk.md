@@ -202,8 +202,10 @@ other spelling, and the reason `MethodInfo` exposes the bits instead.
   counter is filled follows the catalog key's form: a METHOD key fills
   `call_site_count` (invoke instructions), a FIELD key — how an app reaches
   contacts / call log / calendar, by reading a `CONTENT_URI` constant — fills
-  `field_access_count` (reading methods) and leaves the other 0. They are not
-  summed for you: a call site is an instruction, a field access is a method.
+  `field_access_count` (read instructions — `find_methods_reading_field` is not
+  deduplicated) and leaves the other 0. Both count instructions, so summing them
+  is meaningful; they are kept apart only so `call_site_count`'s released meaning
+  is untouched.
 - **`CapabilityReport`** `(catalog_version, catalog_size, matched_apis,
   total_call_sites, permissions, categories, flags, api_hits, by_caller,
   total_field_accesses)` — the

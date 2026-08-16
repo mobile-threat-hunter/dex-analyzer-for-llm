@@ -778,10 +778,10 @@ class CapabilityReport:
 
     Example (real, tvleanback)::
 
-        CapabilityReport(catalog_version='0.2', catalog_size=42,
-                         matched_apis=10, total_call_sites=86,
-                         permissions={'android.permission.INTERNET': 3, ...},
-                         categories={'REFLECTION': 73, ...}, flags={},
+        CapabilityReport(catalog_version='0.4', catalog_size=263,
+                         matched_apis=30, total_call_sites=156,
+                         permissions={'android.permission.INTERNET': 5, ...},
+                         categories={'REFLECTION': 120, ...}, flags={},
                          api_hits=(CapabilityHit(...), ...),
                          by_caller={'Landroid/arch/lifecycle/ClassesInfoCache$'
                                     'MethodReference;->invokeCallback(...)':

@@ -784,8 +784,9 @@ Aggregate permission + capability profile over the catalog. `data_dir=` (else
 `android_api_map.json` — see [§14](#14-overriding-the-bundled-data).
 ```python
 r = dexllm.summarize_capabilities(dk)
-r.permissions   # Counter({'android.permission.INTERNET': 3, 'android.permission.ACCESS_FINE_LOCATION': 1, ...})
-r.categories    # Counter({'REFLECTION': 73, 'CRYPTO': 4, 'STORAGE': 3, ...})
+r.permissions   # Counter({'android.permission.INTERNET': 5, 'android.permission.SCHEDULE_EXACT_ALARM': 3, ...})
+                # what the API REQUIRES, at every protection level — not what the app requests
+r.categories    # Counter({'REFLECTION': 120, 'SCHEDULING': 8, 'CRYPTO': 8, ...})
 r.flags         # Counter() on this APK; Counter({'IDENTIFIER': 2}) on one calling
                 # both getDeviceId overloads (IDENTIFIER also covers getSubscriberId,
                 # getSimSerialNumber, getLine1Number, BluetoothAdapter.getAddress)
@@ -815,9 +816,10 @@ next(iter(r.by_caller.items()), None)
 It held `{permissions}` until dexllm#35 and was built inside the permission loop,
 so an API declaring none registered no callers at all. Every `REFLECTION` /
 `PROCESS_EXEC` / `DYNAMIC_LOAD` / `NATIVE_CODE` / `CRYPTO` / `WEBVIEW` / `STORAGE`
-entry is permission-less (14 of the catalog's 42), and so are 6 domain entries —
-including `Settings$Secure.getString`, the ANDROID_ID read. The index covered
-**17 of the corpus's 317 distinct callers (5.4%)**.
+entry is permission-less — 138 of the catalog's 263 entries carry no permission
+at all, including `Settings$Secure.getString`, the ANDROID_ID read. Measured on the
+0.3 catalog at the time, the index covered **17 of the corpus's 317 distinct callers
+(5.4%)**; the corpus now has 515 distinct callers and every one is indexed.
 
 Either view is derivable from `api_hits`, so `by_caller` is a convenience index
 rather than new information; signatures make it the more primary one, and within
@@ -1065,17 +1067,22 @@ form, so one method described itself two ways.) The same bits drive the
 descriptor → the catalog API signatures it invokes — dexllm#35; it was
 `→ {permissions}` before), `api_hits: list[ApiHit]`, `total_call_sites: int`
 (invoke instructions), `catalog_version: str`, `catalog_size: int`,
-`matched_apis: int`, `total_field_accesses: int` (methods reading a
-field-descriptor entry — dexllm#36; never summed with the line above, since a
-call site is an instruction and a field access is a method).
+`matched_apis: int`, `total_field_accesses: int` (READ INSTRUCTIONS against a
+field-descriptor entry — dexllm#36; `find_methods_reading_field` is not
+deduplicated, so this is the same unit as the line above and summing them is
+meaningful. The two are kept apart only so `total_call_sites`' released meaning
+is untouched).
 
 ---
 
 ## 14. Overriding the bundled data
 
-Two of the four files in `dexllm/data/` carry **hand judgement** rather than
-mechanical AOSP extraction, so they take an override: the capability catalog
-(`android_api_map.json`) and the `family` labels in `content_uris.json`.
+Two of the four files in `dexllm/data/` carry **hand judgement**, so they take an
+override: the capability catalog (`android_api_map.json`) and the `family` labels
+in `content_uris.json`. The catalog is generated
+(`scripts/gen_capability_catalog.py` resolves descriptors and permissions out of
+the AOSP dataset), but WHICH APIs it names is a curated selection — that is the
+judgement, and it is what an override replaces.
 
 ```python
 dexllm.summarize_capabilities(dk, data_dir="/etc/dexllm")
