@@ -241,18 +241,21 @@ all-dexes form is exactly the per-dex concatenation: `dk.list_classes` /
 ```python
 report = dexllm.summarize_capabilities(dk)
 
-# Top permissions touched (via API usage)
+# Top permissions touched (via API usage) — the APP's own call sites by default
 for perm, count in report.top_permissions(10):
     print(f"{count:>5}× {perm}")
-# →     5 × android.permission.INTERNET
-# →     3 × android.permission.SCHEDULE_EXACT_ALARM
+# →     2 × android.permission.INTERNET
 
 # Top categories
 for cat, count in report.top_categories(10):
     print(f"{count:>5}× {cat}")
-# →   120 × REFLECTION
-# →     8 × SCHEDULING
-# →     8 × CRYPTO
+# →     2 × STORAGE
+# →     2 × REFLECTION
+# →     2 × NETWORK_IO
+
+# Everything the dex does, including bundled libraries (the pre-dexllm#49 numbers)
+dexllm.summarize_capabilities(dk, app_only=False).top_categories(3)
+# → [('REFLECTION', 120), ('SCHEDULING', 8), ('CRYPTO', 8)]
 
 # Cross-domain concerns (today only IDENTIFIER)
 report.flags            # Counter() on this APK; Counter({'IDENTIFIER': 2}) on one
@@ -313,13 +316,29 @@ Two things the numbers do **not** say. A `permissions` entry is what the API
 *requires* at any protection level — `getDeviceId` carries both `READ_PHONE_STATE`
 and the `signature`-level `READ_PRIVILEGED_PHONE_STATE` — so it is not what the app
 *requests*; the manifest is. And a count is of **call sites in the dex, not
-executions**: a bundled library's call sites count like the app's own, which is why
-`SCHEDULE_EXACT_ALARM` and `USE_FINGERPRINT` appear above for a TV sample app
-(`AlarmManagerCompat` / `FingerprintManagerCompat` are bundled), and why 84% of the
-corpus's `REFLECTION` touches come from androidx / gson / kotlin. Use
-`report.by_caller` to see who; unlike
-[`dangerous_permission_api_callers`](#dangerous-permission-api-usage) this API has
-no `app_only` filter.
+executions**.
+
+That second one used to mean a bundled library's call sites counted like the app's
+own, which made several categories measure how much androidx an APK ships: over the
+corpus 98% of `REFLECTION` touches, 94% of `SCHEDULING` and **all** of `BIOMETRIC` /
+`SETTINGS` / `DYNAMIC_LOAD` come from library callers, and 90% of the 515 distinct
+callers are library code — which is why a Google TV *sample app* used to report
+`3 × SCHEDULE_EXACT_ALARM` (100% `AlarmManagerCompat`) and `3 × USE_FINGERPRINT`
+(100% `FingerprintManagerCompat`). Since dexllm#49 **`app_only=True` is the
+default**, the same verb, default and predicate as
+[`dangerous_permission_api_callers`](#dangerous-permission-api-usage), so the
+counters describe the app; an API left with no kept caller drops out of `api_hits`
+entirely, so a category can disappear — and `report.dropped_touches` /
+`report.dropped_apis` say what went, so a zero report is readable as "only the
+bundled libraries do this" rather than as "this APK does none of it" (11 of the
+17 corpus sources that report anything report nothing under the default).
+`app_only=False` restores every caller and leaves both at 0.
+
+The filter is a package-prefix heuristic, so a filtered report is a triage aid, not
+proof of absence. A library the list does not name reads as app code and is kept
+(the tvleanback hits above are mostly `com.bumptech.glide`); code that merely sits
+under `com.google.android.*` — what a repackaged sample does — reads as a library
+and is dropped. `report.by_caller` names who, and `app_only=False` shows everyone.
 
 The bundled catalog is **generated** by `scripts/gen_capability_catalog.py` from a
 curated `(class, member)` selection — the script resolves each name against the
@@ -844,7 +863,7 @@ for g in session.permission_callers(app_only=True):       # -> tuple[PermissionC
     for row in g.rows: row.api, row.callers                 # PermissionCallerRow
 
 ioc = session.extract_iocs()                              # -> IocReport; ioc.domains: tuple[Indicator(value, methods, declared_in)]
-cap = session.summarize_capabilities()                   # -> CapabilityReport(api_hits, permissions, categories, flags, ...)
+cap = session.summarize_capabilities()                   # -> CapabilityReport(...); app_only=True by default
 prov = session.detect_content_providers()                # -> tuple[ContentProviderUse(uri, family, methods)]
 
 session.raw       # the underlying dexllm.DexKit (escape hatch for L7 search etc.)

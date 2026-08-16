@@ -35,6 +35,14 @@ from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+# The bundled-library predicate lives in `_callers` so this module and
+# `capability` cannot drift into two notions of "a bundled library" (dexllm#49).
+# Re-exported here because this is the module that has always spelled it.
+from ._callers import (
+    _FRAMEWORK_CALLER_PREFIXES,  # noqa: F401  (re-export: an importer's spelling)
+    _is_framework_caller,
+)
+
 if TYPE_CHECKING:
     from ._dexkit_core import DexKit
 
@@ -93,30 +101,6 @@ _REF = re.compile(r"^[\w.$]+#[A-Za-z_$][\w$]*(\(.*\))?$")
 _ARITY_ONLY = "*"
 _ARITY_ONLY_RE = re.compile(r"\s*(\d+)args\s*")
 _MAX_ARITY = 256  # Dalvik caps a method at 255 args; a larger N is malformed → inert
-
-# Caller classes that are bundled framework / official-library code. A dangerous
-# API call from here is library plumbing (e.g. androidx permission helpers,
-# Play-services location) rather than the app's own behaviour — `app_only` filters
-# them out. Descriptor-prefix form for cheap caller_descriptor matching.
-_FRAMEWORK_CALLER_PREFIXES = (
-    "Landroidx/",
-    "Landroid/support/",
-    "Landroid/arch/",
-    "Lkotlin/",
-    "Lkotlinx/",
-    "Ljava/",
-    "Ljavax/",
-    "Ldalvik/",
-    "Lcom/google/android/",
-    "Lcom/google/common/",
-    "Lcom/google/gson/",
-)
-
-
-def _is_framework_caller(descriptor: str) -> bool:
-    """Return True if a caller belongs to bundled framework / official-library code."""
-    return descriptor.startswith(_FRAMEWORK_CALLER_PREFIXES)
-
 
 # ── signature normalisation ─────────────────────────────────────────────────
 # Both sides are reduced to a tuple of SIMPLE type names (generics erased, last

@@ -776,16 +776,26 @@ class CapabilityReport:
     counted twice under two names for the same concern; ``flags`` is the orthogonal
     cross-domain axis (``IDENTIFIER``).
 
-    Example (real, tvleanback)::
+    Example (real, tvleanback, at the ``app_only=True`` default)::
 
         CapabilityReport(catalog_version='0.4', catalog_size=263,
-                         matched_apis=30, total_call_sites=156,
-                         permissions={'android.permission.INTERNET': 5, ...},
-                         categories={'REFLECTION': 120, ...}, flags={},
+                         matched_apis=5, total_call_sites=8,
+                         permissions={'android.permission.INTERNET': 2},
+                         categories={'STORAGE': 2, 'REFLECTION': 2, ...}, flags={},
                          api_hits=(CapabilityHit(...), ...),
-                         by_caller={'Landroid/arch/lifecycle/ClassesInfoCache$'
-                                    'MethodReference;->invokeCallback(...)':
-                                    ('Ljava/lang/reflect/Method;->invoke(...)',)})
+                         by_caller={'Lcom/example/android/tvleanback/recommendation/'
+                                    'RecommendationReceiver;->scheduleRecommendation'
+                                    'Update(...)':
+                                    ('Landroid/app/AlarmManager;->setInexact'
+                                     'Repeating(...)',)},
+                         dropped_touches=148, dropped_apis=25)
+
+    Every one of those numbers is the app's own; ``summarize_capabilities(...,
+    app_only=False)`` reports 30 APIs / 156 call sites / ``REFLECTION: 120`` for
+    the same APK, of which 2 are the app's — see :func:`dexllm.summarize_capabilities`.
+    A caller under one of the library prefixes (``Landroid/arch/…``,
+    ``Landroidx/…``, …) is structurally absent from a default report's
+    ``by_caller``, which is why the pre-dexllm#49 example here named one.
     """
 
     catalog_version: str
@@ -803,6 +813,12 @@ class CapabilityReport:
     # available form is the WEAKER `>= total_call_sites`, and a matched field entry
     # makes that read as slack where there is none.
     total_field_accesses: int = 0
+    # What `app_only` removed (dexllm#49); 0 under `app_only=False`. Without them
+    # a filtered-to-nothing report is byte-identical to "this APK exercises none
+    # of the catalog" — which the aggregator raises rather than emit for a stale
+    # `only_categories` tag, so emitting it here would contradict that stance.
+    dropped_touches: int = 0
+    dropped_apis: int = 0
 
     def __post_init__(self) -> None:
         """Wrap the mapping fields in read-only views so the model is immutable."""

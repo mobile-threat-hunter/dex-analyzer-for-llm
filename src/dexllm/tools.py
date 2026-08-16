@@ -337,13 +337,23 @@ def _t_render_method_smali(
     return {"descriptor": method_descriptor, **_truncate(out, max_chars)}
 
 
-def _t_summarize_capabilities(dk: DexKit, limit: int = 50) -> dict:
+def _t_summarize_capabilities(
+    dk: DexKit, limit: int = 50, app_only: bool = True
+) -> dict:
     """Bounded, LLM-friendly capability summary.
 
     Returns top permissions/categories, the cross-domain `flags` rollup, and the
     `limit` most-TOUCHED APIs (invoke sites plus field reads, dexllm#36). The raw report's per-caller sets (`by_caller`,
     `ApiHit.callers`) can be huge on a large APK, so they are intentionally
     omitted here to keep the response within the model's context.
+
+    `app_only` (default True) counts only the app's own callers — without it the
+    numbers largely measure which libraries the APK bundles (dexllm#49). Since
+    the per-caller sets are omitted here, this tool alone cannot show WHO called
+    an API, so a model that needs the library view asks for `app_only=False` and
+    compares. `dropped_touches` / `dropped_apis` say what the filter removed, so
+    an all-zero payload is readable as "only libraries do this" rather than as
+    "this APK does none of it".
 
     `categories` is one axis (domain / behaviour), so one call site is never
     counted twice under two names for the same concern — an API that genuinely
@@ -354,7 +364,16 @@ def _t_summarize_capabilities(dk: DexKit, limit: int = 50) -> dict:
     """
     from .capability import summarize_capabilities
 
-    rep = summarize_capabilities(dk)
+    # Coerced, and it is the COERCED value that is echoed below. `app_only` is
+    # advertised as a boolean and mcp validates an advertised tool's arguments,
+    # but `execute` is also the in-process dispatcher for the HTTP / agent loop
+    # and validates nothing — so a model's `"false"` (a common JSON-boolean slip)
+    # arrives as a truthy string, filters, and would otherwise be echoed back
+    # verbatim: the payload would AFFIRM the wrong belief, which is the one thing
+    # the echo exists to prevent. The sibling `limit` is coerced two lines down
+    # for the same reason.
+    app_only = bool(app_only)
+    rep = summarize_capabilities(dk, app_only=app_only)
     limit = max(1, int(limit))
     # …by TOUCHES, so a field entry ranks by the count it actually fills. Sorting
     # on `call_site_count` alone would sink every field entry to the bottom with a
@@ -368,6 +387,18 @@ def _t_summarize_capabilities(dk: DexKit, limit: int = 50) -> dict:
         key=lambda h: (-(h.call_site_count + h.field_access_count), h.api_signature),
     )
     return {
+        # Echoed, because every count below depends on it and the per-caller sets
+        # that would reveal the mode are omitted here — a model comparing two
+        # sessions' numbers must be able to see it was not comparing two modes.
+        "app_only": app_only,
+        # …and WHAT IT COST. Without these an all-zero payload is byte-identical
+        # to "this APK exercises none of the catalog", and the caller sets that
+        # would otherwise reveal the difference are omitted here to bound
+        # context. On the corpus 11 of the 17 sources that report anything at all
+        # report nothing under the default — and the system prompt tells the
+        # model to start here to orient, so a bare zero is the worst answer.
+        "dropped_touches": rep.dropped_touches,
+        "dropped_apis": rep.dropped_apis,
         "total_call_sites": rep.total_call_sites,
         # Separate, not folded into the line above: a call site is an invoke
         # instruction and a field access is a reading method (dexllm#36).
@@ -1230,7 +1261,15 @@ TOOL_DEFINITIONS: list[dict] = [
             "PROCESS_EXEC, …), and `flags` is the cross-domain concern axis "
             "(today only IDENTIFIER — the API returns a device/user identifier), "
             "which rolls up across domains. `catalog_version` identifies the tag "
-            "vocabulary: it changed at 0.2, so do not assume pre-0.2 tag names."
+            "vocabulary: it changed at 0.2, so do not assume pre-0.2 tag names. "
+            "Counts are of call sites in the dex, not executions, and by default "
+            "only the app's OWN callers are counted — set `app_only` false to "
+            "include bundled libraries (androidx / kotlin / play-services), which "
+            "answers 'what does this APK bundle' rather than 'what does this app "
+            "do'. `dropped_touches` / `dropped_apis` report what that filter "
+            "removed, so an all-zero result with a nonzero `dropped_touches` "
+            "means only bundled libraries reach these APIs — NOT that the app "
+            "does none of this."
         ),
         "input_schema": {
             "type": "object",
@@ -1239,7 +1278,15 @@ TOOL_DEFINITIONS: list[dict] = [
                     "type": "integer",
                     "default": 50,
                     "description": "max api_hits to return (by call-site count)",
-                }
+                },
+                "app_only": {
+                    "type": "boolean",
+                    "default": True,
+                    "description": (
+                        "count only the app's own callers, dropping bundled "
+                        "framework/library plumbing (default true)"
+                    ),
+                },
             },
         },
     },

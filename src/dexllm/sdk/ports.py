@@ -535,8 +535,14 @@ class IndicatorExtractionPort(Protocol):
 class CapabilityPort(Protocol):
     """Capability summarisation over the bundled capability catalog."""
 
-    def summarize_capabilities(self) -> CapabilityReport:
-        """Summarize the app's capability profile (matched APIs, permissions)."""
+    def summarize_capabilities(self, *, app_only: bool = True) -> CapabilityReport:
+        """Summarize the app's capability profile (matched APIs, permissions).
+
+        ``app_only`` (default True) counts only the app's own callers, dropping
+        bundled framework / library plumbing — see
+        :func:`dexllm.summarize_capabilities` for the predicate and its blind
+        spots. False counts every caller.
+        """
         ...
 
 

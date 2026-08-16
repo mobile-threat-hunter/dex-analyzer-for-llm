@@ -107,7 +107,16 @@ def verify(path: str, lenient: bool = ...) -> list[_VerifyStatus]:
     """
 
 def is_framework_descriptor(descriptor: str) -> bool:
-    """Report whether a type is Android/JDK framework — the ``app_only`` rule.
+    """Report whether a TYPE is Android/JDK framework — the reference filter.
+
+    This is the rule behind ``list_external_*(framework_only=)``: it answers
+    "is this referenced type framework code". It is NOT the ``app_only``
+    CALLER predicate the Python APIs use (``dexllm._callers``), and the two
+    prefix sets deliberately differ — this one has ``Landroid/``, ``Lorg/json/``,
+    ``Lsun/``, ``Llibcore/`` and no ``Landroidx/``, so
+    ``is_framework_descriptor("Landroidx/core/app/ActivityCompat;")`` is False
+    while that class IS a bundled-library caller. Different questions, different
+    sets; do not use one to predict the other.
 
     Example::
 

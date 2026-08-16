@@ -27,6 +27,7 @@ green suite before these were added.
 
 import json
 import pathlib
+from collections import Counter
 from pathlib import Path
 
 import pytest
@@ -1223,3 +1224,388 @@ def test_the_catalog_entries_match_their_pinned_digest():
         "scripts/gen_capability_catalog.py and update CATALOG_ENTRY_DIGEST to "
         f"{digest}"
     )
+
+
+# ── dexllm#49: a bundled library's call sites are not the app's ───────────────
+#
+# Corpus-less by construction (`_StubDk`), which is what makes these run in the
+# CI leg that has no APKs and under a `$DEXLLM_TEST_APK` narrowing alike — the
+# behaviour is a property of the code, not of any sample.
+
+from dexllm._callers import (  # noqa: E402
+    _FRAMEWORK_CALLER_PREFIXES,
+    _is_framework_caller,
+)
+
+_LIB_CALLER = "Landroidx/core/app/ActivityCompat;->requestPermissions()V"
+_LIB_CALLER2 = "Lkotlin/io/FilesKt;->copyTo()V"
+_APP_CALLER = "Lcom/example/app/Main;->run()V"
+
+
+def test_library_callers_are_dropped_by_default():
+    """The default report counts the APP's call sites, not the ones it bundles.
+
+    Per TOUCH, not per API: the register of callers mixes both kinds (18 of
+    tvleanback's 20 `Class.forName` sites are androidx), so a variant that keeps
+    an API whole as soon as ONE app caller exists would still count the 18. This
+    fixture makes that variant fail — 2 library touches and 1 app touch on the
+    SAME api.
+    """
+    from dexllm.capability import summarize_capabilities
+
+    dk = _StubDk({_FOR_NAME: [_LIB_CALLER, _APP_CALLER, _LIB_CALLER2]})
+
+    app = summarize_capabilities(dk)
+    assert app.matched_apis == 1
+    assert app.total_call_sites == 1
+    assert app.api_hits[0].call_site_count == 1
+    assert app.api_hits[0].callers == {_APP_CALLER}
+    assert app.categories["REFLECTION"] == 1
+    assert set(app.by_caller) == {_APP_CALLER}
+
+    every = summarize_capabilities(dk, app_only=False)
+    assert every.total_call_sites == 3
+    assert every.api_hits[0].call_site_count == 3
+    assert every.api_hits[0].callers == {_LIB_CALLER, _APP_CALLER, _LIB_CALLER2}
+    assert every.categories["REFLECTION"] == 3
+    assert set(every.by_caller) == {_LIB_CALLER, _APP_CALLER, _LIB_CALLER2}
+
+
+def test_an_api_only_libraries_call_leaves_the_report_entirely():
+    """A library-only API is DROPPED, not reported with a zero count.
+
+    `BIOMETRIC` fires wherever `FingerprintManagerCompat` is bundled at all — 100%
+    of the corpus's touches — so "the report no longer says this" is the intended
+    outcome, and it has to reach `matched_apis` / `api_hits` / the Counters, not
+    just the totals. Filtering AFTER the emptiness check would leave a hit behind
+    with BOTH counters 0 — and `tools.py` ranks by
+    `-(call_site_count + field_access_count)`, whose maximum is 0, so every such
+    phantom sorts to the TOP of `top_apis`, ahead of every real hit.
+    """
+    from dexllm.capability import summarize_capabilities
+
+    dk = _StubDk({_GET_DEVICE_ID: [_LIB_CALLER]})
+
+    app = summarize_capabilities(dk)
+    assert app.matched_apis == 0
+    assert app.api_hits == []
+    assert app.total_call_sites == 0
+    assert app.by_caller == {}
+    assert not app.categories and not app.permissions and not app.flags
+
+    assert summarize_capabilities(dk, app_only=False).matched_apis == 1
+
+
+def test_the_field_lookup_is_filtered_too():
+    """A FIELD key resolves to READING METHODS, which are callers just the same.
+
+    The two key forms take different lookups (dexllm#36), so a filter applied on
+    only the invoke branch would leave every `CONTENT_URI` entry unfiltered — and
+    that branch is the one whose result is not a `CallSite` object, so it is the
+    easy one to miss.
+    """
+    from dexllm.capability import summarize_capabilities
+
+    # A literal from `_FIELD_KEYS`, the set this file already pins, rather than a
+    # `next()` over the live catalog — which raises StopIteration (an ERROR, not
+    # an explanation) the day the catalog carries no field key. `_StubDk` answers
+    # from whatever key it is handed, so the key need not be IN the catalog for
+    # the lookup to be exercised; it only has to be one the shape dispatch routes
+    # to `find_methods_reading_field`, and this file asserts that separately.
+    field_key = sorted(_FIELD_KEYS)[0]
+    assert "(" not in field_key.partition(";->")[2], "not a field-shaped key"
+    dk = _StubDk({}, {field_key: [_LIB_CALLER, _APP_CALLER]})
+
+    app = summarize_capabilities(dk)
+    assert app.total_field_accesses == 1
+    assert app.api_hits[0].field_access_count == 1
+    assert app.api_hits[0].callers == {_APP_CALLER}
+    assert summarize_capabilities(dk, app_only=False).total_field_accesses == 2
+
+
+def test_both_apis_share_one_library_predicate():
+    """dexllm#49: ONE definition of "a bundled library", not two that agree today.
+
+    The issue's third open question. A copied prefix tuple would pass every other
+    test in this file and drift on the first edit, so the guard is object
+    identity, not equal behaviour on a sample of descriptors.
+    """
+    import dexllm.capability as cap
+    import dexllm.dangerous_api as dang
+    from dexllm._callers import _FRAMEWORK_CALLER_PREFIXES, _is_framework_caller
+
+    assert cap._is_framework_caller is _is_framework_caller
+    assert dang._is_framework_caller is _is_framework_caller
+    assert dang._FRAMEWORK_CALLER_PREFIXES is _FRAMEWORK_CALLER_PREFIXES
+
+
+def test_the_mcp_tool_forwards_app_only_and_says_which_mode_it_ran():
+    """The tool omits the per-caller sets, so the mode must be readable elsewhere.
+
+    Without the echoed key a model comparing two sessions' counts cannot tell it
+    was comparing two MODES — and `by_caller` / `callers`, which would otherwise
+    reveal it, are deliberately not in this payload.
+    """
+    from dexllm import tools
+
+    dk = _StubDk({_FOR_NAME: [_LIB_CALLER, _APP_CALLER]})
+
+    app = tools.execute("summarize_capabilities", {}, dk)
+    assert app["app_only"] is True
+    assert app["total_call_sites"] == 1
+    assert app["matched_apis"] == 1
+
+    every = tools.execute("summarize_capabilities", {"app_only": False}, dk)
+    assert every["app_only"] is False
+    assert every["total_call_sites"] == 2
+
+
+def test_the_sdk_adapter_forwards_app_only(monkeypatch):
+    """The port declares the knob; the adapter must actually pass it on.
+
+    An adapter that accepts `app_only` and drops it type-checks, satisfies the
+    Protocol (which carries no runtime signature conformance) and passes the
+    argument-name audits — it is only wrong in the value it returns. Driven by a
+    recording double rather than a corpus, so it holds with no APKs present.
+
+    The double also SYNTHESISES a mode-dependent report, so the assertion is on
+    the value that comes BACK, not only on the argument that went in: watching
+    the argument alone would pass an adapter that forwarded correctly and then
+    rebuilt a field from a second, unfiltered call. The bundled
+    `tests/data/multidex.apk` matches no catalog API, so a real report would make
+    both modes an identical empty one and the value check vacuous.
+    """
+    import dexllm
+    from dexllm.sdk.adapter import DexKitAdapter
+
+    seen = []
+
+    def spy(dk, **kw):
+        mode = kw.get("app_only", "ABSENT")
+        seen.append(mode)
+        return capability.CapabilityReport(
+            permissions=Counter({"P": 1 if mode else 9}),
+            categories=Counter({"C": 1 if mode else 9}),
+            flags=Counter(),
+            by_caller=(
+                {_APP_CALLER: {_FOR_NAME}}
+                if mode
+                else {_APP_CALLER: {_FOR_NAME}, _LIB_CALLER: {_FOR_NAME}}
+            ),
+            api_hits=[
+                capability.ApiHit(
+                    api_signature=_FOR_NAME,
+                    permissions=["P"],
+                    categories=["C"],
+                    call_site_count=1 if mode else 9,
+                    callers={_APP_CALLER} if mode else {_APP_CALLER, _LIB_CALLER},
+                )
+            ],
+            total_call_sites=1 if mode else 9,
+            catalog_version="t",
+            catalog_size=1,
+            matched_apis=1,
+            dropped_touches=8 if mode else 0,
+            dropped_apis=3 if mode else 0,
+        )
+
+    monkeypatch.setattr(dexllm, "summarize_capabilities", spy)
+
+    session = DexKitAdapter(
+        str(pathlib.Path(__file__).parent / "data" / "multidex.apk")
+    )
+    app = session.summarize_capabilities()
+    every = session.summarize_capabilities(app_only=False)
+
+    for report, sites, dropped, callers in (
+        (app, 1, (8, 3), 1),
+        (every, 9, (0, 0), 2),
+    ):
+        assert report.total_call_sites == sites
+        assert report.categories["C"] == sites
+        assert report.permissions["P"] == sites
+        assert report.api_hits[0].call_site_count == sites
+        assert len(report.api_hits[0].callers) == callers
+        assert len(report.by_caller) == callers
+        assert (report.dropped_touches, report.dropped_apis) == dropped
+    assert seen == [True, False], f"the adapter did not forward app_only: {seen}"
+
+
+# The shared tuple's CONTENT, PINNED — the same device (and the same reason) as
+# `CATEGORY_VOCABULARY` above: changing it must be a conscious edit in two places.
+# The parametrised guard below iterates the tuple ITSELF, so it is blind to an
+# EDIT of the tuple by construction — deleting `"Lcom/google/android/"` (69 corpus
+# touches) merely removes a case, and it survived the whole suite until this pin
+# existed. The only other content assertions in the repo are in
+# tests/test_dangerous_api.py, which is corpus-gated and therefore skips in the CI
+# leg with no APKs; this one is corpus-less. Five of the eleven have ZERO weight
+# on the bundled corpus, so no a/b can catch them moving either.
+LIBRARY_CALLER_PREFIXES = (
+    "Landroidx/",
+    "Landroid/support/",
+    "Landroid/arch/",
+    "Lkotlin/",
+    "Lkotlinx/",
+    "Ljava/",
+    "Ljavax/",
+    "Ldalvik/",
+    "Lcom/google/android/",
+    "Lcom/google/common/",
+    "Lcom/google/gson/",
+)
+
+
+def test_the_library_prefix_tuple_matches_its_pin():
+    """Adding or removing a prefix is a two-place edit, not a one-line diff.
+
+    It decides the DEFAULT value of six released `CapabilityReport` fields since
+    dexllm#49, and of `dangerous_permission_api_callers`' rows before that — so a
+    silent edit changes what two public APIs report with nothing objecting.
+    ORDER is pinned too: it is a `str.startswith` argument, so order does not
+    affect behaviour, but an unordered comparison would hide a reordering that
+    makes the two lists harder to diff against each other.
+    """
+    assert _FRAMEWORK_CALLER_PREFIXES == LIBRARY_CALLER_PREFIXES, (
+        "the shared library-caller prefix tuple changed; update the pin in this "
+        "file deliberately and re-measure both APIs that depend on it"
+    )
+
+
+@pytest.mark.parametrize("prefix", sorted(_FRAMEWORK_CALLER_PREFIXES))
+def test_every_declared_library_prefix_actually_filters(prefix):
+    """EVERY prefix in the shared tuple must filter, on BOTH key forms.
+
+    Two holes an adversarial review opened with running mutants, neither of which
+    the identity guard below can see, because both keep the shared symbol:
+
+    * a USE-SITE drift — import `_is_framework_caller`, then compare against an
+      inline 2-prefix tuple in the METHOD branch only. That branch carries 1377
+      of the corpus's 1378 dropped touches, so the feature becomes a complete
+      no-op (tvleanback 8 touches -> 156, i.e. exactly `app_only=False`) while
+      126 tests, black, ruff and mypy all stay green;
+    * a TUPLE-CONTENT edit — deleting `"Lcom/google/android/"` (69 corpus
+      touches) passed 126 tests. The only content assertions in the repo live in
+      a corpus-gated test in tests/test_dangerous_api.py, so they skip in the CI
+      leg with no APKs, and its integration half computes the expected total
+      with the very predicate under test.
+
+    Both survived because the hand-written fixtures exercise 2 of the 11
+    prefixes, while `Landroid/support/` alone is 71% of what the corpus drops.
+    Parametrising over the tuple ITSELF closes that by construction and keeps
+    doing so as the tuple grows — a new prefix arrives with its own case.
+
+    Five of the eleven have ZERO weight on the bundled corpus, so no corpus a/b
+    could ever catch them moving; this is the only thing that does.
+    """
+    from dexllm.capability import summarize_capabilities
+
+    caller = prefix + "some/Bundled;->plumbing()V"
+    assert _is_framework_caller(caller), "fixture does not match its own prefix"
+
+    # the METHOD branch (find_call_sites_to) — where the use-site drift lived
+    method = _StubDk({_FOR_NAME: [caller]})
+    assert (
+        summarize_capabilities(method).matched_apis == 0
+    ), f"a caller under {prefix!r} survived the method-key filter"
+    assert summarize_capabilities(method, app_only=False).matched_apis == 1
+
+    # …and the FIELD branch (find_methods_reading_field), a different lookup
+    field_key = sorted(_FIELD_KEYS)[0]
+    field = _StubDk({}, {field_key: [caller]})
+    assert (
+        summarize_capabilities(field).matched_apis == 0
+    ), f"a caller under {prefix!r} survived the field-key filter"
+    assert summarize_capabilities(field, app_only=False).matched_apis == 1
+
+
+def test_a_filtered_report_says_what_it_dropped():
+    """An empty report under the default must not read as "the APK does none of it".
+
+    This module RAISES on an unknown `only_categories` tag with the reason that
+    "silently returning an empty report would be indistinguishable from 'the APK
+    exercises none of this'" — and the new default ships exactly that shape for
+    11 of the 17 corpus sources that report anything at all (one of them drops
+    301 touches across 30 APIs to a bare zero). `dropped_touches` / `dropped_apis`
+    are what keep the module's own stance true of its own default.
+
+    Under `app_only=False` both are 0: nothing was dropped, so the pre-dexllm#49
+    reading of every other field is untouched.
+    """
+    from dexllm.capability import summarize_capabilities
+
+    dk = _StubDk(
+        {
+            _FOR_NAME: [_LIB_CALLER, _APP_CALLER, _LIB_CALLER2],  # partly filtered
+            _GET_DEVICE_ID: [_LIB_CALLER],  # dropped whole
+        }
+    )
+
+    app = summarize_capabilities(dk)
+    assert app.total_call_sites == 1
+    assert app.dropped_touches == 3  # 2 off Class.forName + 1 whole getDeviceId
+    assert app.dropped_apis == 1  # only getDeviceId left entirely
+    # the zero-report case is the one that matters
+    only_lib = summarize_capabilities(_StubDk({_GET_DEVICE_ID: [_LIB_CALLER]}))
+    assert only_lib.matched_apis == 0 and only_lib.dropped_touches == 1
+
+    every = summarize_capabilities(dk, app_only=False)
+    assert every.dropped_touches == 0 and every.dropped_apis == 0
+
+
+def test_the_app_only_default_is_the_same_on_every_layer():
+    """dexllm#44 locked the argument NAME axis; this pins the DEFAULT.
+
+    Two mutants an adversarial review ran, both green before this existed: the
+    Protocol declaring `app_only: bool = False` (111 tests passed — mypy does not
+    check a Protocol's default VALUES, so the contract a consumer type-checks
+    against can invert with nothing objecting), and the MCP `input_schema` saying
+    `"default": False` while the impl defaults to True (178 passed — the schema
+    default is what an LLM reads to decide whether to pass the argument at all).
+    """
+    import inspect
+
+    import dexllm
+    from dexllm import tools
+    from dexllm.sdk import ports
+    from dexllm.sdk.adapter import DexKitAdapter
+
+    def default(fn):
+        return inspect.signature(fn).parameters["app_only"].default
+
+    module_default = default(dexllm.summarize_capabilities)
+    assert module_default is True, "the module function's own default moved"
+    assert default(ports.CapabilityPort.summarize_capabilities) is module_default
+    assert default(DexKitAdapter.summarize_capabilities) is module_default
+    assert default(tools.TOOL_IMPLS["summarize_capabilities"]) is module_default
+
+    schema = next(
+        t for t in tools.TOOL_DEFINITIONS if t["name"] == "summarize_capabilities"
+    )
+    assert (
+        schema["input_schema"]["properties"]["app_only"]["default"] is module_default
+    ), "the advertised default disagrees with the one the impl applies"
+
+
+def test_the_mcp_echo_reports_the_mode_that_was_actually_applied():
+    """The echo must not affirm a belief the code did not act on.
+
+    `tools.execute` is also the in-process dispatcher for the HTTP / agent loop
+    and validates nothing, so a model's `"false"` (a common JSON-boolean slip)
+    arrives as a truthy STRING: the counts are filtered, and echoing the argument
+    verbatim would report `'false'` beside app-only numbers — the payload
+    agreeing with the wrong belief, which is the single thing the echo exists to
+    prevent.
+    """
+    from dexllm import tools
+
+    dk = _StubDk({_FOR_NAME: [_LIB_CALLER, _APP_CALLER]})
+
+    out = tools.execute("summarize_capabilities", {"app_only": "false"}, dk)
+    assert out["total_call_sites"] == 1, "a truthy string must filter"
+    assert out["app_only"] is True, "the echo must state the mode that was applied"
+
+    assert (
+        tools.execute("summarize_capabilities", {"app_only": 0}, dk)["app_only"]
+        is False
+    )
+    assert tools.execute("summarize_capabilities", {}, dk)["dropped_touches"] == 1

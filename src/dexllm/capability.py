@@ -75,13 +75,17 @@ visible and neither of which it introduced:**
   ``READ_PRIVILEGED_PHONE_STATE``, and a few ``@SystemApi`` overloads carry only an
   ``internal`` one). Read it as "what this API requires", not as "what this app
   requests"; the manifest is the source for the latter.
-* a count is of CALL SITES in the dex, not of executions, and a bundled library's
-  call sites count like the app's own. On the corpus 84% of ``REFLECTION`` touches
-  come from androidx / gson / kotlin callers, and ``BIOMETRIC`` fires wherever
-  ``FingerprintManagerCompat`` is bundled at all. ``ApiHit.callers`` and
-  ``by_caller`` are what separate them; unlike
-  :func:`dexllm.dangerous_permission_api_callers` this API has no ``app_only``
-  filter to do it for you.
+* a count is of CALL SITES in the dex, not of executions. A bundled library's
+  call sites used to count like the app's own, which made several categories
+  measure how much androidx an APK ships: over the corpus 98% of ``REFLECTION``
+  touches, 94% of ``SCHEDULING`` and **all** of ``BIOMETRIC`` / ``SETTINGS`` /
+  ``DYNAMIC_LOAD`` come from library callers, and 90% of the 515 distinct callers
+  are library code. Since dexllm#49 ``app_only=True`` is the DEFAULT — the same
+  verb, default and predicate as
+  :func:`dexllm.dangerous_permission_api_callers` — so the counters describe the
+  app. ``app_only=False`` restores every caller (and the pre-dexllm#49 numbers
+  exactly). What the filter cannot do is prove absence: it is a package-prefix
+  heuristic whose blind spots are stated in :mod:`dexllm._callers`.
 
 A consumer can still point this module at a wholly different catalog without code
 changes, provided the replacement:
@@ -96,7 +100,13 @@ changes, provided the replacement:
 * uses METHOD or FIELD descriptors as keys (see the dispatch above — a third
   shape routes to a lookup that answers nothing, silently), and no duplicate tag
   inside one list (the emitter dedupes defensively, but a duplicate signals a
-  merge bug upstream).
+  merge bug upstream);
+* holds APIs whose interesting callers are the APP's. ``app_only=True`` is the
+  default, so a catalog of LIBRARY-facing APIs reports zero unless the caller
+  passes ``app_only=False`` — constructed: a catalog of
+  ``ContextCompat.getExternalCacheDirs`` reports nothing by default on the
+  bundled corpus, because its sole caller is ``support.v4.content.FileProvider``.
+  ``dropped_touches`` / ``dropped_apis`` are what make that zero legible.
 
 Editing the catalog *in this repo* means editing ``CURATED`` in the generator and
 re-running it — the committed JSON is asserted byte-identical to what the script
@@ -113,6 +123,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Dict, List, Optional, Set, Union
 
+from ._callers import _is_framework_caller
 from .datadir import load_data_json
 
 if TYPE_CHECKING:
@@ -241,9 +252,13 @@ class CapabilityReport:
         perms = {p for a in report.by_caller[caller] for p in by_api[a].permissions}
         tags = {t for a in report.by_caller[caller] for t in by_api[a].categories}
 
-    The join is defined WITHIN one report: ``only_categories`` filters
-    ``by_caller`` and ``api_hits`` together, so joining against a differently
-    filtered call is meaningless.
+    The join is defined WITHIN one report: ``only_categories`` **and**
+    ``app_only`` each filter ``by_caller`` and ``api_hits`` together, so joining
+    against a differently filtered call is meaningless. The second one is easy
+    to trip over precisely because the docs suggest reading an unfiltered caller
+    index next to a default report: ``by_api`` built from a default report is
+    missing the library-only APIs, so the join above raises ``KeyError`` on an
+    ``app_only=False`` ``by_caller`` — and loses rows silently the other way.
     """
 
     # The three Counters count TOUCHES: one per invoke instruction for a method
@@ -263,6 +278,21 @@ class CapabilityReport:
     # reason. Read instructions against field-descriptor entries; 0 when the
     # catalog has no field keys, which is why an existing consumer sees no change.
     total_field_accesses: int = 0
+    # What `app_only` REMOVED — 0 when it is False, so a filtered zero is
+    # distinguishable from "this APK exercises none of the catalog" (dexllm#49).
+    # This module raises on an unknown `only_categories` tag for exactly that
+    # reason ("silently returning an empty report would be indistinguishable
+    # from 'the APK exercises none of this'"), and the default would otherwise
+    # ship that very shape: on the corpus 11 of the 17 sources that report
+    # anything at all report NOTHING under it. `dropped_touches` is in the same
+    # unit as `total_call_sites + total_field_accesses` — instructions, of
+    # either key form, which dexllm#36 documents as one unit; `dropped_apis`
+    # counts the catalog entries that left `api_hits` entirely. APPENDED after
+    # the dexllm#36 field, not beside `matched_apis` where they read better:
+    # inserting mid-signature would silently rebind a positional
+    # `total_field_accesses`, the hazard the comment above records.
+    dropped_touches: int = 0
+    dropped_apis: int = 0
 
     def top_permissions(self, n: int = 10) -> List[tuple]:
         """Return the n most-touched permissions as (permission, count) pairs.
@@ -294,6 +324,7 @@ def _catalog_vocabulary(catalog: dict) -> Set[str]:
 def summarize_capabilities(
     dk: DexKit,
     *,
+    app_only: bool = True,
     only_categories: Optional[Set[str]] = None,
     data_dir: Union[str, os.PathLike, None] = None,
 ) -> CapabilityReport:
@@ -301,6 +332,24 @@ def summarize_capabilities(
 
     Args:
         dk: a dexllm.DexKit instance (caches will be warmed lazily)
+        app_only: When True (default), drop touches whose CALLER is bundled
+            framework / official-library code (``androidx.*``,
+            ``android.support.*``, ``kotlin.*``, ``com.google.android.*``, …), as
+            :func:`dexllm.dangerous_permission_api_callers` does — the same verb,
+            the same default, and the same shared predicate. An API left with no
+            kept touch is omitted from ``api_hits`` entirely, so a category can
+            disappear from the report; that is the point (dexllm#49 —
+            ``BIOMETRIC`` fires wherever ``FingerprintManagerCompat`` is bundled
+            at all, and 98% of the corpus's ``REFLECTION`` touches are androidx /
+            gson / kotlin). Pass False for every caller, which reproduces the
+            pre-dexllm#49 numbers exactly. ``dropped_touches`` / ``dropped_apis``
+            report what the filter removed, so an empty report under the default
+            is distinguishable from an APK that exercises none of the catalog.
+            Read a filtered report as a triage aid,
+            NOT as proof of absence — the prefix list's two blind spots are
+            documented in :mod:`dexllm._callers`, and the one that hides a finding
+            (a repackaged sample sitting under ``com.google.android.*``) is
+            answered by ``app_only=False`` plus ``by_caller``.
         only_categories: if set, restrict aggregation to APIs carrying any of
             these tags on **either** axis (e.g. ``{"LOCATION", "TELEPHONY"}``, or
             ``{"IDENTIFIER"}`` — a flag). Matching both axes is what keeps a tag
@@ -343,6 +392,8 @@ def summarize_capabilities(
     total_sites = 0
 
     total_field_accesses = 0
+    dropped_touches = 0
+    dropped_apis = 0
 
     for api_sig, meta in entries.items():
         # dict.fromkeys dedupes while preserving order: a tag repeated inside one
@@ -361,6 +412,27 @@ def summarize_capabilities(
             touches = list(dk.find_methods_reading_field(api_sig))
         else:
             touches = [s.caller_descriptor for s in dk.find_call_sites_to(api_sig)]
+        # Per TOUCH, not per API: a register of callers mixes both kinds (18 of
+        # tvleanback's 20 `Class.forName` sites are androidx), so dropping the API
+        # only when EVERY caller is a library would still count the 18 — and
+        # every number downstream then derives from this one list, so the
+        # Counters, `by_caller`, the per-hit counts and both totals cannot
+        # disagree. Its placement BEFORE the emptiness check buys exactly one
+        # further thing: an emptied API leaves `api_hits` / `matched_apis`
+        # instead of staying as a hit with both counters 0 — which would sort to
+        # the TOP of `tools.py`'s `-(call_site_count + field_access_count)`
+        # ranking, 0 being the maximum of a negated non-negative sum.
+        if app_only:
+            kept = [c for c in touches if not _is_framework_caller(c)]
+            dropped_touches += len(touches) - len(kept)
+            # `touches and` is load-bearing: the catalog is walked WHOLE, so most
+            # entries arrive here already empty (the APK simply does not use
+            # them). Counting those would make `dropped_apis` report the catalog
+            # size minus the matches — 262 of 263 on a one-hit stub — which is
+            # the opposite of the legibility this field exists for.
+            if touches and not kept:
+                dropped_apis += 1
+            touches = kept
         if not touches:
             continue
 
@@ -409,4 +481,6 @@ def summarize_capabilities(
         catalog_version=catalog.get("version", "unknown"),
         catalog_size=len(entries),
         matched_apis=len(api_hits),
+        dropped_touches=dropped_touches,
+        dropped_apis=dropped_apis,
     )

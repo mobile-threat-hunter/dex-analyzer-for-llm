@@ -253,7 +253,7 @@ so a consumer depends on just what it needs:
 | **`SearchPort`** | `find_classes_by_name` / `by_super` / `implementing` / `by_annotation` / `using_strings` / `declaring_strings` (the declaration side — static-field constants the `using` index cannot see), `find_methods_by_name` / `by_annotation` / `using_strings` / `using_int_literals` / `using_double_literals`, `find_fields_by_name` (the field arm, dexllm#37 — `FieldMatch` was a public type nothing could produce), `batch_find_{classes,methods}_using_strings` (DexKit's L1–L7 search; `match_type` ∈ `MatchType`) |
 | **`PermissionAnalysisPort`** | `permission_callers` (all protection levels) |
 | **`IndicatorExtractionPort`** | `extract_iocs` |
-| **`CapabilityPort`** | `summarize_capabilities` |
+| **`CapabilityPort`** | `summarize_capabilities` (`app_only=True` by default — the app's own callers, not the bundled libraries it ships; `dropped_touches` / `dropped_apis` say what that removed, so an empty report is not mistaken for an inert APK; dexllm#49) |
 | **`ContentProviderPort`** | `detect_content_providers` |
 | **`CacheControlPort`** | `decompiler_cache_capacity` / `set_decompiler_cache_capacity` / `decompiler_cache_size` / `clear_decompiler_cache`, `warm_analysis_caches` (operational cache/lifecycle knobs, not analysis — a long-lived embedder bounds/frees/warms caches without dropping to `.raw`) |
 

@@ -778,19 +778,43 @@ dexllm.format_class(dk, 'Lcom/example/android/tvleanback/Utils;')   # str — fe
 dexllm.format_class_summary(s, indent='    ')                       # str — format an already-fetched ClassSummary
 ```
 
-### `dexllm.summarize_capabilities(dk, *, only_categories=None, data_dir=None) -> CapabilityReport`
+### `dexllm.summarize_capabilities(dk, *, app_only=True, only_categories=None, data_dir=None) -> CapabilityReport`
 Aggregate permission + capability profile over the catalog. `data_dir=` (else
 `$DEXLLM_DATA_DIR`, else bundled) points at a directory holding a replacement
 `android_api_map.json` — see [§14](#14-overriding-the-bundled-data).
 ```python
 r = dexllm.summarize_capabilities(dk)
-r.permissions   # Counter({'android.permission.INTERNET': 5, 'android.permission.SCHEDULE_EXACT_ALARM': 3, ...})
+r.permissions   # Counter({'android.permission.INTERNET': 2})
                 # what the API REQUIRES, at every protection level — not what the app requests
-r.categories    # Counter({'REFLECTION': 120, 'SCHEDULING': 8, 'CRYPTO': 8, ...})
+r.categories    # Counter({'STORAGE': 2, 'REFLECTION': 2, 'NETWORK_IO': 2, 'SCHEDULING': 1, 'CRYPTO': 1})
 r.flags         # Counter() on this APK; Counter({'IDENTIFIER': 2}) on one calling
                 # both getDeviceId overloads (IDENTIFIER also covers getSubscriberId,
                 # getSimSerialNumber, getLine1Number, BluetoothAdapter.getAddress)
 ```
+`app_only=True` (the default since dexllm#49) counts only the app's own callers,
+dropping bundled framework / library plumbing by the same predicate and the same
+default as [`dangerous_permission_api_callers`](#dexllmdangerous_permission_api_callersdk--dataset_pathnone-app_onlytrue---dict).
+An API left with no kept caller drops out of `api_hits` entirely, so a whole
+category can disappear — which is the point: on this same APK the unfiltered run
+reports `REFLECTION: 120`, of which **2** are the app's, and `USE_FINGERPRINT: 3`,
+of which none are (`FingerprintManagerCompat` is merely bundled). `app_only=False`
+counts every caller and reproduces the pre-dexllm#49 numbers exactly:
+```python
+dexllm.summarize_capabilities(dk, app_only=False).categories
+# Counter({'REFLECTION': 120, 'SCHEDULING': 8, 'CRYPTO': 8, 'STORAGE': 6, ...})
+```
+`dropped_touches` / `dropped_apis` report what the filter removed, so an empty
+report under the default is distinguishable from an APK that exercises none of
+the catalog — the module raises on an unknown `only_categories` tag for exactly
+that reason, and on the corpus 11 of the 17 sources that report anything at all
+report nothing under the default. Both are 0 when `app_only=False`.
+
+It is a package-prefix heuristic, so read a filtered report as a triage aid and
+not as proof of absence. It is wrong in two directions, and only one of them is
+safe: a library the list does not name reads as app code and is KEPT (the hits
+above are mostly `com.bumptech.glide`), while code that merely *sits* under
+`com.google.android.*` — what a repackaged sample does — reads as a library and is
+DROPPED. Answer the second with `app_only=False` plus `by_caller`.
 The catalog keeps two axes apart: `categories` is a single axis (domain /
 behaviour) with no tag implied by another, so one call site is never counted
 twice under two names for the same concern (an API that genuinely spans two
@@ -810,8 +834,8 @@ catalog API, the transpose of `ApiHit.callers`:
 ```python
 r = dexllm.summarize_capabilities(dk)
 next(iter(r.by_caller.items()), None)
-# ('Landroid/arch/lifecycle/ClassesInfoCache$MethodReference;->invokeCallback(...)',
-#  {'Ljava/lang/reflect/Method;->invoke(Ljava/lang/Object;[Ljava/lang/Object;)Ljava/lang/Object;'})
+# ('Lcom/example/android/tvleanback/recommendation/RecommendationReceiver;->scheduleRecommendationUpdate(...)',
+#  {'Landroid/app/AlarmManager;->setInexactRepeating(IJJLandroid/app/PendingIntent;)V'})
 ```
 It held `{permissions}` until dexllm#35 and was built inside the permission loop,
 so an API declaring none registered no callers at all. Every `REFLECTION` /
@@ -819,7 +843,8 @@ so an API declaring none registered no callers at all. Every `REFLECTION` /
 entry is permission-less — 138 of the catalog's 263 entries carry no permission
 at all, including `Settings$Secure.getString`, the ANDROID_ID read. Measured on the
 0.3 catalog at the time, the index covered **17 of the corpus's 317 distinct callers
-(5.4%)**; the corpus now has 515 distinct callers and every one is indexed.
+(5.4%)**; the corpus now has 515 distinct callers under `app_only=False` and every
+one is indexed — 52 of them are the apps' own, which is what the default reports.
 
 Either view is derivable from `api_hits`, so `by_caller` is a convenience index
 rather than new information; signatures make it the more primary one, and within
