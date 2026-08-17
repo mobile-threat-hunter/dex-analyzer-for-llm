@@ -110,6 +110,61 @@ and ``DeviceAdminReceiver`` extends ``BroadcastReceiver``.
 Corroborated: of 178 corpus subclasses of ``Service`` / ``BroadcastReceiver`` /
 ``Activity`` / ``Application`` / ``ContentProvider``, **0** lack a constructor.
 
+**An INTERFACE gets no key form** (dexllm#51's remaining half) — an EMPIRICAL
+finding about the capability surface, NOT the structural universal a first cut
+claimed. That cut argued the handover is ALWAYS an ordinary call on a framework
+receiver, since an implementation is inert until the app hands it over and only
+classes are declarable manifest components. **An adversarial review refuted it
+from the corpus**, with three handovers that are not calls: an AIDL ``Stub``
+returns its binder from ``onBind``, i.e. as the RETURN VALUE of a callback the
+system invokes; ``Parcelable$Creator`` is a static FIELD the framework reads
+reflectively; and ``ServiceLoader`` registers through a ``META-INF/services``
+RESOURCE (``multiple_locale_appname_test.apk`` ships two, for kotlinx.coroutines).
+
+What survives is narrower and is what the decision actually rests on: **for the
+interfaces that are CAPABILITIES, the handover is a call** — and where it is not,
+the implementing class is reachable another way or is not a capability at all. An
+AIDL ``Stub`` is an abstract CLASS, so the constructor form above covers it;
+``Parcelable$Creator`` is serialization boilerplate; the corpus's ``ServiceLoader``
+entries are coroutine internals. The residual risk is stated rather than denied: a
+capability-shaped interface whose handover is NOT a call would be invisible, and
+none is known.
+
+Measured over the same 32 loadable sources as the change's a/b: of the framework
+interfaces app (non-library) classes implement, all but two are UI, lifecycle or
+serialization boilerplate (``View$OnClickListener``, ``Runnable``,
+``Serializable``, ``Annotation``, ``Parcelable$Creator``). The two are
+``android.location.LocationListener`` — implemented by an app class in TWO REAL
+APKs (a2dp.Vol, partialsignature), whose registration call
+``LocationManager#requestLocationUpdates`` is already curated and FIRES there (3
+sites, ``LOCATION`` 5), which is the decision working end-to-end on real input —
+and ``javax.net.ssl.X509TrustManager``, which occurs only in a bare test dex. (Raw
+per-interface counts are deliberately not quoted: they move with how app-vs-library
+and "framework interface" are defined, so a reader cannot re-derive them, and they
+are corroboration rather than evidence.) The near-miss is a2dp.Vol's copies of the
+``IBluetooth`` / ``IBluetoothA2dp`` AIDL interfaces (two classes each, ``$Stub``
+and ``$Stub$Proxy``), which are not evidence by themselves: the hidden service is
+reached REFLECTIVELY (7 ``Class#forName`` + 24 ``Method#invoke`` sites there),
+which the ``REFLECTION`` tag already reports.
+
+That answer carries a proof obligation — "the registration call is already
+curated" has to be TRUE — so the registration calls were audited. Present for
+``LocationManager#requestLocationUpdates`` and
+``ClipboardManager#addPrimaryClipChangedListener``; absent for one family, TLS
+trust, which the three entries below settle for the INTERFACE half of it. Without
+them the claim was simply false, and measurably so: one corpus APK reaches
+``setHostnameVerifier`` and ``setSSLSocketFactory`` in the same method and the
+catalog reported only the second.
+
+**Two TLS surfaces are deliberately still uncurated, because they register no
+interface** and so belong to a separate curation task rather than to this
+decision: ``SSLCertificateSocketFactory#getInsecure`` (AOSP's own doc says all
+checks are disabled) and ``SslErrorHandler#proceed`` (the ``onReceivedSslError``
+WebView bypass, reached by overriding a callback, not by implementing anything). A
+third gap has no framework spelling at all: an OkHttp ``HostnameVerifier`` goes
+through ``OkHttpClient$Builder#hostnameVerifier``, and unlike the TrustManager
+case there is no ``SSLContext``-shaped choke point behind it.
+
 What was left of ACCESSIBILITY as ordinary call sites was
 ``AccessibilityNodeInfo`` / ``AccessibilityManager``, whose callers are **100%
 support-library internals** on the corpus (measured over 32 sources, 72/72
@@ -147,10 +202,11 @@ PERM_LEVELS = ROOT / "src" / "dexllm" / "data" / "perm_levels.json"
 # Protection levels a third-party app can actually be granted.
 APP_HOLDABLE = {"normal", "dangerous"}
 
-VERSION = "0.5"
+VERSION = "0.6"
 SOURCE = (
     "curated selection (2026-05-25, taxonomy normalised 2026-08-12, field keys "
-    "2026-08-16, behaviour surfaces 2026-08-16, subclassed services 2026-08-17); "
+    "2026-08-16, behaviour surfaces 2026-08-16, subclassed services 2026-08-17, "
+    "TLS-trust registration calls 2026-08-17); "
     "descriptors, overloads and "
     "permissions derived from aosp_data_set by scripts/gen_capability_catalog.py"
 )
@@ -614,8 +670,11 @@ CURATED: list[tuple[str, str, list[str], list[str]]] = [
     ("java.net.Socket", "<init>", ["NETWORK_IO"], []),
     ("java.net.DatagramSocket", "<init>", ["NETWORK_IO"], []),
     ("javax.net.ssl.SSLSocketFactory", "createSocket", ["NETWORK_IO"], []),
-    # Replacing the default verifier or socket factory is how TLS validation is
-    # disabled process-wide.
+    # Replacing the verifier or socket factory is how TLS validation is disabled
+    # -- `setDefault*` process-wide, the instance form per connection. These are
+    # also the REGISTRATION calls for `HostnameVerifier` and (through the factory)
+    # `X509TrustManager`, which is what makes "an interface needs no key form"
+    # true rather than merely argued -- see the module docstring.
     (
         "javax.net.ssl.HttpsURLConnection",
         "setDefaultHostnameVerifier",
@@ -629,6 +688,20 @@ CURATED: list[tuple[str, str, list[str], list[str]]] = [
         [],
     ),
     ("javax.net.ssl.HttpsURLConnection", "setSSLSocketFactory", ["NETWORK_IO"], []),
+    ("javax.net.ssl.HttpsURLConnection", "setHostnameVerifier", ["NETWORK_IO"], []),
+    # The two ways an app-supplied `TrustManager` is put into effect. `init` is
+    # the one an HTTP client consumes indirectly: the classic bypass reaches
+    # `HttpsURLConnection` (curated above), but an OkHttp one goes through
+    # `sslSocketFactory(...)` on a builder that is not a framework class at all,
+    # leaving `SSLContext#init` as the only framework spelling in the dex.
+    # `SSLCertificateSocketFactory#setTrustManagers` is a second, independent
+    # door, found by an adversarial review that CONSTRUCTED an otherwise
+    # undetected path (`new SSLCertificateSocketFactory(0)` + `setTrustManagers`
+    # + `createSocket`, all public API, none of it spelled under a curated class).
+    # `SSLContext#setDefault` is deliberately NOT curated: it is redundant, since
+    # a context carrying app trust must have been through `init` first.
+    ("javax.net.ssl.SSLContext", "init", ["NETWORK_IO"], []),
+    ("android.net.SSLCertificateSocketFactory", "setTrustManagers", ["NETWORK_IO"], []),
     # --- WEBVIEW ----------------------------------------------------------
     ("android.webkit.WebView", "addJavascriptInterface", ["WEBVIEW"], []),
     ("android.webkit.WebView", "loadUrl", ["WEBVIEW", "NETWORK_IO"], []),

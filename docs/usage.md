@@ -342,13 +342,11 @@ declaring two constructors of its own chains `super()` twice), the caller is the
 subclass's own `<init>`, so `app_only` separates an app's service from a bundled
 one with no special case.
 
-Four limits, stated rather than left to be discovered:
+Three limits, stated rather than left to be discovered:
 
 - **A dex fact only.** The service must also be declared in the manifest with its
   `BIND_*` permission to be usable, and dexllm reads no manifest — so a hit is a
   strong triage signal, not proof the capability is reachable at runtime.
-- **No interfaces.** An interface has no constructor, so a capability reached by
-  `implements` is out of scope for this form.
 - **A subclass declaring no constructor is invisible**, since it emits no
   `super()`. Real but out of reach of these four: 17 of the corpus's 7,539
   non-`Object` subclasses are in that shape (R8-minified library internals), while
@@ -360,6 +358,44 @@ Four limits, stated rather than left to be discovered:
   A class with several would need each curated: `Thread` has 4, and of 30 corpus
   subclasses only 27 chain `()V` — the rest call `super(Runnable, String)` or
   `super(String)`.
+
+**An interface is not a fourth limit — it needs no key form at all.** It has no
+constructor, so the trick above does not apply, but nothing has to: an
+implementation is inert until the app **hands it to the framework**, and for a
+capability-shaped interface that handover is an ordinary call on a framework
+receiver (`requestLocationUpdates`, `SSLContext.init`) — already an ordinary call
+site. The subclass case needed a new key for the opposite reason: the system
+instantiates a manifest-declared service *itself*, so there is no app-side call to
+find.
+
+That is an **empirical** claim about the capability surface, not a structural
+universal — a handover is not always a call. An AIDL `Stub` returns its binder
+from `onBind`, `Parcelable$Creator` is a static field the framework reads
+reflectively, and `ServiceLoader` registers through a `META-INF/services`
+resource; all three occur in the corpus. None is a capability the catalog misses:
+an AIDL `Stub` is an abstract **class**, so the constructor form covers it;
+`Creator` is serialization boilerplate; the corpus's `ServiceLoader` entries are
+coroutine internals. A capability-shaped interface whose handover is *not* a call
+would be invisible, and none is known.
+
+On the corpus, exactly two implemented framework interfaces are capability-shaped
+rather than UI, lifecycle or serialization boilerplate:
+
+- **`android.location.LocationListener`**, implemented by an app class in two real
+  APKs — and reported, because `LocationManager.requestLocationUpdates` is curated
+  and fires there (3 sites, `LOCATION` 5). This is the decision working end to end.
+- **`javax.net.ssl.X509TrustManager`**, in a bare test dex only. Its registration
+  calls were the gap: `SSLContext.init` and
+  `SSLCertificateSocketFactory.setTrustManagers` are curated now, alongside the
+  per-connection `HttpsURLConnection.setHostnameVerifier` that was missing beside
+  its already-curated `setDefault*` and instance-factory siblings (all `NETWORK_IO`).
+
+Two TLS surfaces are **deliberately still uncurated**, because they register no
+interface and so belong to a separate curation task: `SSLCertificateSocketFactory
+.getInsecure` and `SslErrorHandler.proceed` (the `onReceivedSslError` WebView
+bypass). A third has no framework spelling at all — an OkHttp `HostnameVerifier`
+is set on a builder that is not a framework class, and unlike the TrustManager
+case there is no `SSLContext`-shaped choke point behind it.
 
 The catalog is JSON (`android_api_map.json`). To use your own, copy the bundled
 file, edit it, and point dexllm at the containing **directory** — do not edit the

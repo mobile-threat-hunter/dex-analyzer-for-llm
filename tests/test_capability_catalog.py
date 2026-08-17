@@ -1233,9 +1233,9 @@ def test_no_ubiquitous_api_is_in_the_catalog():
 # dataset-less run. Update BOTH numbers when the catalog legitimately changes; that
 # edit is the point, since it is what makes a catalog change a conscious one rather
 # than a diff nobody has to look at.
-CATALOG_ENTRY_COUNT = 267
+CATALOG_ENTRY_COUNT = 270
 CATALOG_ENTRY_DIGEST = (
-    "cebf5b4438570131676f2017889d40810724db438e77f6bd08fbdbecd68e492b"
+    "af1fa698a2117d2279a0326c606851f03949a1455f568f1a158334692c48c905"
 )
 
 
@@ -1901,4 +1901,256 @@ def test_the_real_notification_listener_subclass_is_reported(loadable_apks):
         found,
         "NotificationListenerService subclass",
         "the constructor key stopped matching a real subclass",
+    )
+
+
+# ── an INTERFACE needs no key form — its REGISTRATION call is one (dexllm#51) ─
+#
+# The remaining half of dexllm#51. An interface has no constructor, so the trick
+# that made a subclassed service nameable does not apply — but nothing needs to
+# apply: an implementation is inert until the app hands it to the framework, there
+# is no manifest mechanism for an interface, and that handover is an ordinary call
+# on a framework receiver. So the answer is "no new key form", and its price is
+# that the registration call must ACTUALLY be curated. It was not, for TLS trust.
+#
+# PINNED literals, for the reason the block above is: `SSLContext#init` has 0 call
+# sites across the corpus, so a guard that read the catalog to build its own
+# expectation would be green against dropping it.
+_TLS_REGISTRATION_KEYS = {
+    "Ljavax/net/ssl/SSLContext;->init([Ljavax/net/ssl/KeyManager;"
+    "[Ljavax/net/ssl/TrustManager;Ljava/security/SecureRandom;)V",
+    "Landroid/net/SSLCertificateSocketFactory;->setTrustManagers"
+    "([Ljavax/net/ssl/TrustManager;)V",
+    "Ljavax/net/ssl/HttpsURLConnection;->setHostnameVerifier"
+    "(Ljavax/net/ssl/HostnameVerifier;)V",
+    "Ljavax/net/ssl/HttpsURLConnection;->setDefaultHostnameVerifier"
+    "(Ljavax/net/ssl/HostnameVerifier;)V",
+    "Ljavax/net/ssl/HttpsURLConnection;->setSSLSocketFactory"
+    "(Ljavax/net/ssl/SSLSocketFactory;)V",
+    "Ljavax/net/ssl/HttpsURLConnection;->setDefaultSSLSocketFactory"
+    "(Ljavax/net/ssl/SSLSocketFactory;)V",
+}
+
+
+@pytest.mark.parametrize("key", sorted(_TLS_REGISTRATION_KEYS))
+def test_a_tls_trust_registration_call_is_curated(key):
+    """Installing a custom trust decision is reported, whichever door it uses.
+
+    These six are the framework spellings THIS CATALOG CURATES for putting an
+    app-supplied `X509TrustManager` or `HostnameVerifier` into effect — not "the"
+    framework spellings, an absolute an adversarial review refuted by constructing
+    an undetected path through `SSLCertificateSocketFactory` (now the sixth entry).
+    Three were missing until dexllm#51's interface half, which is what made "an
+    interface needs no key form, because its registration call is already a call
+    site" false for the one interface family on the corpus that is a security
+    capability rather than a UI callback.
+
+    Two TLS surfaces stay deliberately uncurated because they register no
+    interface, so they fall outside this decision rather than inside it:
+    `SSLCertificateSocketFactory#getInsecure` and `SslErrorHandler#proceed`.
+    """
+    entry = _entries().get(key)
+    assert entry is not None, f"{key} left the catalog"
+    assert entry["categories"] == ["NETWORK_IO"]
+
+
+@pytest.mark.parametrize(
+    "instance,default",
+    [
+        (
+            "Ljavax/net/ssl/HttpsURLConnection;->setHostnameVerifier"
+            "(Ljavax/net/ssl/HostnameVerifier;)V",
+            "Ljavax/net/ssl/HttpsURLConnection;->setDefaultHostnameVerifier"
+            "(Ljavax/net/ssl/HostnameVerifier;)V",
+        ),
+        (
+            "Ljavax/net/ssl/HttpsURLConnection;->setSSLSocketFactory"
+            "(Ljavax/net/ssl/SSLSocketFactory;)V",
+            "Ljavax/net/ssl/HttpsURLConnection;->setDefaultSSLSocketFactory"
+            "(Ljavax/net/ssl/SSLSocketFactory;)V",
+        ),
+    ],
+)
+def test_both_the_instance_and_the_process_wide_form_are_curated(instance, default):
+    """The exact asymmetry that was the defect, stated as a property.
+
+    `setSSLSocketFactory` (instance) was curated while `setHostnameVerifier`
+    (instance) was not, though they are the same shape and the same capability at
+    two scopes — process-wide for `setDefault*`, per-connection otherwise. The
+    corpus showed the gap rather than merely suggesting it: `app-prod-debug.apk`
+    reaches BOTH setters in one method (`BitcoinJSONRPCClient;->query`) and the
+    catalog reported the factory and not the verifier. (It passes a nullable field
+    rather than provably a permissive verifier — the key reports the SETTING of a
+    verifier, which is the capability; what it is set to is a `resolve_call_args`
+    question.)
+
+    Discrimination is not "it states the defect" — a plain drop fails the pinned
+    literal above at the same time. Its own kill is the mutant that deletes the
+    entry AND its pinned literal together, the shape a re-pinning regression takes,
+    where this property survives to catch it.
+    """
+    entries = _entries()
+    assert instance in entries, f"the per-connection form {instance} is not curated"
+    assert default in entries, f"the process-wide form {default} is not curated"
+
+
+def test_an_interface_is_detected_through_its_registration_call():
+    """The interface answer, end to end, on the entry the corpus cannot drive.
+
+    An app implementing `X509TrustManager` is invisible to every call-site key —
+    an interface has no constructor and its methods are invoked by the framework —
+    but `SSLContext#init` is where such an implementation takes effect, and that IS
+    an ordinary call site. So the detection needs no third key shape, no new
+    counting unit (instructions, as everywhere else) and no new meaning for
+    `app_only`.
+
+    What the key proves is that a context was INITIALISED, not that a custom trust
+    manager was passed: `init(null, null, null)` is the ordinary default-context
+    idiom and fires too. That is why the tag is `NETWORK_IO`, the same weight as
+    `Socket.<init>`, rather than something that reads as a finding on its own.
+    """
+    key = (
+        "Ljavax/net/ssl/SSLContext;->init([Ljavax/net/ssl/KeyManager;"
+        "[Ljavax/net/ssl/TrustManager;Ljava/security/SecureRandom;)V"
+    )
+    caller = "Lcom/example/app/Net;->trustEverything()V"
+
+    report = capability.summarize_capabilities(_StubDk({key: [caller]}))
+
+    assert report.categories["NETWORK_IO"] == 1
+    assert report.total_call_sites == 1
+    assert report.total_field_accesses == 0
+    assert report.by_caller[caller] == {key}
+
+
+def test_the_hostname_verifier_registration_is_reported_on_a_real_apk(loadable_apks):
+    """The corpus-demonstrable half: a real APK that installs a custom verifier.
+
+    Without this the whole change would rest on stubs and pinned literals, and an
+    a/b could not tell "the corpus is quiet" from "the entry is dead".
+    """
+    import dexllm
+
+    key = (
+        "Ljavax/net/ssl/HttpsURLConnection;->setHostnameVerifier"
+        "(Ljavax/net/ssl/HostnameVerifier;)V"
+    )
+    found = []
+    for path in loadable_apks:
+        report = capability.summarize_capabilities(dexllm.DexKit(path))
+        hit = next((h for h in report.api_hits if h.api_signature == key), None)
+        if hit is None:
+            continue
+        found.append(path)
+        assert hit.call_site_count >= 1
+        assert hit.categories == ["NETWORK_IO"]
+        assert report.categories["NETWORK_IO"] >= 1
+
+    require_corpus_shape(
+        found,
+        "APK installing a custom HostnameVerifier",
+        "the per-connection verifier key stopped matching",
+    )
+
+
+def test_an_implemented_interface_is_reported_through_its_registration(loadable_apks):
+    """The decision itself, end to end on a real APK — the evidence first missed.
+
+    An app class implementing a capability-shaped framework interface must show up
+    in the report through the call that REGISTERS it, with no key form of its own.
+    `LocationListener` is the corpus's real instance of exactly that shape, and the
+    first cut of this change asserted in three places that no such APK existed —
+    while its own `_INTERFACE_REGISTRATION` classified the interface as
+    capability-shaped. Both reviewers found the contradiction independently.
+    """
+    import dexllm
+
+    iface = "Landroid/location/LocationListener;"
+    found = []
+    for path in loadable_apks:
+        dk = dexllm.DexKit(path)
+        implementors = [
+            c.descriptor
+            for c in dk.find_classes_implementing(iface)
+            if not _is_framework_caller(c.descriptor)
+        ]
+        if not implementors:
+            continue
+        found.append(path)
+        report = capability.summarize_capabilities(dk)
+        assert report.categories["LOCATION"] >= 1, (
+            f"{path} implements {iface} but the report says nothing — the "
+            "registration call is what makes an interface visible"
+        )
+        assert any(
+            "requestLocationUpdates" in h.api_signature for h in report.api_hits
+        ), sorted(h.api_signature for h in report.api_hits)
+
+    require_corpus_shape(
+        found,
+        "APK whose own class implements LocationListener",
+        "the corpus stopped demonstrating the interface decision on real input",
+    )
+
+
+# The AUDITED SET the interface answer rests on, as data: the framework interfaces
+# whose implementation IS a capability rather than UI, lifecycle or serialization
+# boilerplate, each with the call that registers it. Dropping any of these would
+# not merely lose one entry — it would make "a capability-shaped interface comes
+# paired with a curated call" false again, which is the claim that closed
+# dexllm#51 without a new key form.
+#
+# AUDITED, not exhaustive, and nothing here enforces completeness: a new family
+# arrives with no test failing. `LocationListener` is the one entry a REAL APK
+# drives (a2dp.Vol / partialsignature declare `StoreLoc$2`, and `StoreLoc;->
+# registerListeners()V` calls `requestLocationUpdates` 3 times), which is the
+# decision working end-to-end rather than through a stub. `PhoneStateListener` is
+# deliberately ABSENT: `TelephonyManager#listen` looks like the same shape, but
+# `aosp_classes.csv` records it as a CLASS, so it belongs to the constructor half.
+#
+# The value is EVERY door, not one: `X509TrustManager` has two independent
+# registration calls, and the first cut curated only `SSLContext#init` while
+# calling it "the single choke point". An adversarial reviewer constructed the
+# path through the other one and it went entirely unreported, so "a curated call
+# exists" is too weak a property — every door has to be curated, or the obligation
+# is discharged only for the door someone happened to think of.
+_INTERFACE_REGISTRATION = {
+    "Landroid/location/LocationListener;": (
+        "Landroid/location/LocationManager;->requestLocationUpdates",
+    ),
+    "Landroid/content/ClipboardManager$OnPrimaryClipChangedListener;": (
+        "Landroid/content/ClipboardManager;->addPrimaryClipChangedListener",
+    ),
+    "Ljavax/net/ssl/HostnameVerifier;": (
+        "Ljavax/net/ssl/HttpsURLConnection;->setHostnameVerifier",
+        "Ljavax/net/ssl/HttpsURLConnection;->setDefaultHostnameVerifier",
+    ),
+    "Ljavax/net/ssl/X509TrustManager;": (
+        "Ljavax/net/ssl/SSLContext;->init",
+        "Landroid/net/SSLCertificateSocketFactory;->setTrustManagers",
+    ),
+}
+
+
+@pytest.mark.parametrize(
+    "interface,call",
+    sorted(
+        (iface, call)
+        for iface, calls in _INTERFACE_REGISTRATION.items()
+        for call in calls
+    ),
+)
+def test_a_capability_shaped_interface_has_its_registration_call_curated(
+    interface, call
+):
+    """The proof obligation of "interfaces get no key form", made executable.
+
+    Prefix-matched on `Class;->member` rather than on a full descriptor, because
+    which overloads exist is the generator's business (it emits every one from the
+    AOSP dataset) and pinning them here would re-fail on an unrelated AOSP refresh.
+    """
+    assert any(k.startswith(call + "(") for k in _entries()), (
+        f"{call} is not curated, so nothing reports an app that registers "
+        f"{interface} that way: an implementation would be invisible, which is what "
+        f"a key form for interfaces would have to exist to fix"
     )
