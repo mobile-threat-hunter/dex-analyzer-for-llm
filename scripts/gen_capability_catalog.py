@@ -785,9 +785,15 @@ CURATED: list[tuple[str, str, list[str], list[str]]] = [
     # it checks the hostname "but only for createSocket variants that specify a
     # hostname". A secure factory (`getDefault`, or the public constructor) plus
     # such an overload skips verification with no curated call anywhere. Curation
-    # is by member NAME so all 5 overloads are emitted, including the 2 that do
-    # verify -- deliberately over-inclusive: reaching for this deprecated raw-TLS
-    # factory at all is the signal, and the safe overloads carry no other tag.
+    # is by member NAME so all 6 overloads are emitted, and they split 3/3: the
+    # three taking a hostname (`String, int` / `String, int, InetAddress, int` /
+    # `Socket, String, int, boolean`) DO verify -- unless the instance came from
+    # `getInsecure`, which the same javadoc says returns an unconnected socket
+    # instead -- while `()` / `(InetAddress, int)` / `(InetAddress, int,
+    # InetAddress, int)` carry the warning. Deliberately over-inclusive: reaching
+    # for this deprecated raw-TLS factory at all is the signal, the verifying
+    # overloads stop verifying on an insecure instance anyway, and none of the six
+    # carries another tag.
     (
         "android.net.SSLCertificateSocketFactory",
         "createSocket",
