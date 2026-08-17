@@ -523,17 +523,34 @@ ciphers = sorted({
 
 `ArgOrigin.kind` values: `ConstString`, `ConstInt`, `ConstWide`, `ConstClass`, `ConstNull`, `FieldRead`, `MethodReturn`, `Parameter`, `NewInstance`, `NewArray`, `Unknown`. Available fields depend on kind (`string_value`, `int_value`, `class_descriptor`, …).
 
-**How much this proves (dexllm#16).** The simulation MEETS the register file at every
-control-flow join, so a reported value is one that reaches the call on **every** path —
-a value that is only valid on one branch is never presented as unconditional. It is not
-a fixed point (two passes, no iteration): a value defined *before* a loop and not
-re-established inside it does not survive the loop header, and a *catch handler*
-starts from an unknown register file. Both give `Unknown` with
-**`crossed_branch = True`**, which means "a tracked definition was discarded here" —
-the paths may disagree, or the analyzer gave up at a loop/catch. Treat it as
-*not proven*, not as a proven pair of values. `Unknown` with `crossed_branch = False`
-means no definition was tracked at all (arithmetic, array load, …). A rule that requires an exact argument value should treat a
-`crossed_branch` argument as *unproven*, not as *absent*:
+**How far it looks — `depth`.** The analysis is bounded to a **basic-block window**:
+the call site's own block plus `depth` predecessor levels above it, and nothing
+outside it. `depth=0` is that block alone, the default is `2`.
+
+```python
+dk.resolve_call_args(API, depth=0)   # cheapest — only what the call's own block sets up
+dk.resolve_call_args(API, depth=6)   # look further back when arguments come back Unknown
+```
+
+Cost grows with the window, so raise it when an answer matters rather than globally.
+Which **call sites** come back never depends on `depth` — only their arguments do.
+
+**How much this proves (dexllm#16).** Within the window the simulation MEETS the
+register file at every control-flow join, so a reported value is one that reaches the
+call on **every** path of the window — a value that is only valid on one branch is
+never presented as unconditional. An edge from *outside* the window carries nothing,
+so it tombstones a register some **other** in-window edge does define. That gives
+`Unknown` with **`crossed_branch = True`**, which means "a tracked definition was
+discarded here" — the paths may disagree, or one of them was unknown. Treat it as
+*not proven*, not as a proven pair of values.
+
+`Unknown` with `crossed_branch = False` means no definition was found **within the
+window** at all: never tracked (arithmetic, array load, …), defined further back than
+`depth` blocks, or inside a *catch handler* — which is entered with an empty register
+file, so nothing is carried in and nothing is tombstoned there either. A larger
+`depth` may resolve either flavour, and in the handler case will not: a handler is a
+hard stop rather than a radius. A rule that requires an exact argument value should
+treat a `crossed_branch` argument as *unproven*, not as *absent*:
 
 ```python
 for s in dk.resolve_call_args(
@@ -1055,11 +1072,24 @@ For the ports & adapters boundary see [architecture.md](architecture.md); for th
 | L6 decompile_method | ~0.06 ms / method (warm) | cached |
 | L7 find_classes_by_name | 1–3 ms | same |
 
-¹ Measured before `resolve_call_args` became join-aware (dexllm#16). That change runs
-the register simulation twice and copies the register file at each forward branch, and
-costs **2.6–3.3×** the previous scan — measured on the bundled corpus at 2,407 sites
-2.1 ms → 6.3 ms and 3,534 sites 3.1 ms → 10.2 ms. Absolute cost stays in the
-single-digit-milliseconds range; the row above has not been re-measured on the
+¹ Measured before `resolve_call_args` became join-aware (dexllm#16), which cost
+2.6–3.3× the pre-join scan. It has since been rewritten as a **basic-block window**
+whose radius is the caller-chosen `depth`, so the cost is now a curve rather than a
+constant. Best-of-9 over 400 APIs / 1,153 call sites of the bundled tvleanback APK,
+against that same join-aware whole-method pass as the baseline:
+
+| `depth` | time | vs whole-method | arguments resolved |
+|---|---|---|---|
+| 0 | 5.8 ms | 1.04× | 69.9 % |
+| 1 | 6.9 ms | 1.25× | 82.4 % |
+| **2** (default) | **8.3 ms** | **1.50×** | **86.3 %** |
+| 3 | 9.9 ms | 1.79× | 88.1 % |
+| 4 | 11.6 ms | 2.10× | 88.6 % |
+
+The fixed part of the overhead is building the CFG, which is why `depth=0` is not
+free relative to the old linear pre-pass; beyond that the cost is roughly linear in
+the radius while the resolution rate saturates around `depth` 3–4. Absolute cost stays
+in the single-digit-milliseconds range; the row above has not been re-measured on the
 original 50-dex APK.
 
 Python ↔ C++ marshalling overhead stays under 1 ms per call.

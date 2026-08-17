@@ -530,10 +530,17 @@ def _arg_to_compact(index: int, a: Any) -> dict:
 
 
 def _t_resolve_call_args(
-    dk: DexKit, method_descriptor: str, limit: int = 50, offset: int = 0
+    dk: DexKit,
+    method_descriptor: str,
+    depth: int = 2,
+    limit: int = 50,
+    offset: int = 0,
 ) -> dict:
     require_member_descriptor(method_descriptor)
-    sites = dk.resolve_call_args(method_descriptor)
+    # `depth` is int()-coerced for the same reason `limit` is: tools.execute is also
+    # the in-process dispatcher for the HTTP / agent loop and validates nothing, so a
+    # JSON string would otherwise reach the binding.
+    sites = dk.resolve_call_args(method_descriptor, int(depth))
     items = [
         {
             "caller": s.caller_descriptor,
@@ -1102,12 +1109,16 @@ TOOL_DEFINITIONS: list[dict] = [
             "Java params start at index 1. Use this to match value-specific "
             "patterns — e.g. setComponentEnabledSetting(*, 2, 1) (icon-hide): "
             "args[2].value==2 and args[3].value==1. A value defined across a "
-            "branch, or from a field/method/param, shows its kind, not the int."
+            "branch, or from a field/method/param, shows its kind, not the int. "
+            "`depth` bounds the search to the call's own basic block plus that "
+            "many predecessor levels above it (0 = that block alone); raise it "
+            "when arguments come back Unknown, at proportionate cost."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "method_descriptor": {"type": "string"},
+                "depth": {"type": "integer", "default": 2},
                 "limit": {"type": "integer", "default": 50},
                 "offset": {"type": "integer", "default": 0},
             },

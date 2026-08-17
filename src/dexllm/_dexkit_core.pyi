@@ -634,13 +634,22 @@ class DexKit:
              ('Landroid/view/WindowManager;->getDefaultDisplay()Landroid/view/Display;', 18), ...]
         """
 
-    def resolve_call_args(self, method_descriptor: str) -> list[ResolvedCallSite]:
+    def resolve_call_args(
+        self, method_descriptor: str, depth: int = 2
+    ) -> list[ResolvedCallSite]:
         """``find_call_sites_to`` plus each argument's resolved origin.
 
-        The analysis is join-aware: a definition is reported only if EVERY
-        control-flow edge reaching the call carries it, otherwise the origin is
+        The analysis is BASIC-BLOCK WINDOWED: ``depth`` is how many predecessor
+        levels of blocks are searched above the call site's own block, and nothing
+        outside that window is looked at. ``depth=0`` is the call's own block alone;
+        the default 2 adds two levels above it. Raising it resolves more arguments
+        and costs more; a value defined further back reads as ``Unknown``.
+
+        Within the window the analysis is join-aware: a definition is reported only
+        if EVERY edge reaching the call carries it, otherwise the origin is
         ``Unknown`` with ``crossed_branch=True``. This is what makes an argument
-        rule ("which call sites pass state 2?") trustworthy.
+        rule ("which call sites pass state 2?") trustworthy. An edge from outside
+        the window carries nothing and tombstones the same way.
 
         Example::
 

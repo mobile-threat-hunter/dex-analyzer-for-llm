@@ -300,7 +300,7 @@ def test_the_runner_is_not_vacuous():
     pinned.
     """
     cases = _cases()
-    assert len(cases) >= 76, f"only {len(cases)} runnable fences collected"
+    assert len(cases) >= 77, f"only {len(cases)} runnable fences collected"
 
     per_doc = {}
     for case in cases:
@@ -314,5 +314,8 @@ def test_the_runner_is_not_vacuous():
         "method_ref_java('Lcom/foo/Bar;', 'baz', '(I)V')",  # the arity
         "summary.is_internal",
         "open_apk",  # the SDK surface, otherwise wholly unexercised
+        # The depth argument: a fence that merely MENTIONS it in a comment would
+        # keep the needle while exercising nothing, so the keyword call is pinned.
+        "resolve_call_args(API, depth=6)",
     ):
         assert any(needle in b for b in bodies), f"nothing exercises {needle!r}"

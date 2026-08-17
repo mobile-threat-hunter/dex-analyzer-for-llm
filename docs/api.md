@@ -602,21 +602,47 @@ Same as call sites, plus the resolved origin of each argument (L4 dataflow).
 dk.resolve_call_args('Landroid/content/Context;->getSystemService(Ljava/lang/String;)Ljava/lang/Object;')
 # list[ResolvedCallSite]  len 54; each has .args -> list[ArgOrigin]
 ```
-**What it does and does not prove (dexllm#16).** A forward register simulation with a
-**meet at every control-flow join**: a definition is reported only when it reaches the
-call on *every* path, so a reported value is never one path's value presented as
-unconditional. It is deliberately not a fixed point (two passes, no iteration to convergence): a
-value defined **before** a loop and not re-established inside it does not survive the
-loop header, and a **catch handler** starts from an unknown register file; both yield
-`Unknown`. (A value the loop re-establishes identically *does* survive — the second
-pass meets in what the backward edge carries.) `ArgOrigin.crossed_branch` separates
-the two flavours of `Unknown`:
+**How far it looks: `depth`.** The analysis is bounded to a **basic-block window** —
+the call site's own block plus `depth` predecessor levels above it. `depth=0` is that
+block alone; the default `2` adds two levels. Nothing outside the window is looked at,
+so `depth` *is* the analysis budget and the caller chooses it:
+
+```python
+import dexllm
+dk = dexllm.DexKit("app.apk")
+API = "Landroid/content/Context;->getSystemService(Ljava/lang/String;)Ljava/lang/Object;"
+
+shallow = dk.resolve_call_args(API, depth=0)   # the call's own block only — cheapest
+default = dk.resolve_call_args(API)            # its block + 2 levels above
+deep = dk.resolve_call_args(API, depth=6)      # further back: more resolved, more cost
+assert len(shallow) == len(default) == len(deep)   # the SITES never depend on depth
+```
+
+Raising it resolves more arguments; an argument whose definition lies further back
+reads as `Unknown`. The **call sites themselves never depend on `depth`** — only the
+arguments do.
+
+**What it does and does not prove (dexllm#16).** Within the window it is a forward
+register simulation with a **meet at every control-flow join**: a definition is
+reported only when it reaches the call on *every* path of the window, so a reported
+value is never one path's value presented as unconditional. An edge coming from
+*outside* the window carries nothing, so it tombstones a register some **other**
+in-window edge does define — a register no in-window edge defines is simply absent.
+It is deliberately not a fixed point: a **catch handler** is entered with an *empty*
+register file (nothing is carried in, so nothing is tombstoned there either), and a
+cycle inside the window is resolved by taking nothing from the not-yet-resolved edge.
+The method **entry** counts as an edge of the entry block, so a loop that reassigns a
+parameter register yields `Unknown` at the header rather than the loop-carried value.
+`ArgOrigin.crossed_branch` separates the two flavours of `Unknown`:
 
 | `kind` | `crossed_branch` | meaning |
 |---|---|---|
 | a value kind | `False` | this **origin** reaches the call on every path. Exact for the `Const*` kinds; for `MethodReturn` / `FieldRead` / `NewInstance` it is the origin that is invariant ("the result of `X()`", "a read of field `F`", "a fresh `X`") — the runtime object may still differ per path |
-| `Unknown` | `True` | a tracked definition was **discarded at a merge** — the paths disagree (a genuinely conditional argument), or the analyzer gave up wholesale at a loop header / catch handler (which also discards registers that happen to agree). **Do not read it as a proven "two values"; read it as "not proven".** |
-| `Unknown` | `False` | no tracked definition at that point — never tracked (arithmetic, array load, …), or cleared by a later untracked write |
+| `Unknown` | `True` | a tracked definition was **discarded at a merge** — the paths disagree (a genuinely conditional argument), or one merged edge carried nothing because it came from outside the window or from a block the walk had not resolved yet (which also discards registers that happen to agree). **Do not read it as a proven "two values"; read it as "not proven".** |
+| `Unknown` | `False` | no tracked definition **within the window** — never tracked (arithmetic, array load, …), cleared by a later untracked write, defined further back than `depth` blocks with no merge in between, or inside a catch handler |
+
+Raising `depth` can turn **either** flavour into a value; neither flag promises it
+will, because a catch handler is a hard stop rather than a radius.
 
 Reading `int_value` / `string_value` without checking `kind` yields a silent `0` / `""`
 for both `Unknown` flavours — check `kind` first. For an argument whose value depends

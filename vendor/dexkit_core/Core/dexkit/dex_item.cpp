@@ -20,6 +20,7 @@
 
 #include "dex_item.h"
 
+#include <algorithm>
 #include <unordered_set>
 
 #include "utils/byte_code_util.h"
@@ -1794,16 +1795,28 @@ std::string DexItem::RenderClassSmali(uint32_t type_idx) const {
 
 namespace {
 
-// dexllm#16 — the control-flow join points of one code item, from a single linear
-// pre-pass. `targets` are offsets reached by a FORWARD branch (mergeable: every
-// predecessor's state is known by the time the scan arrives). `barriers` are offsets
-// the linear scan cannot meet — a loop header (some predecessor is a BACKWARD edge,
-// not yet seen) or a catch handler (reachable from any instruction of the try, with
-// the register file in an unknown state) — and clear the file instead.
-struct JoinPoints {
-    std::unordered_set<uint32_t> targets;   // forward-only: merge on arrival
-    std::unordered_set<uint32_t> back;      // has a backward edge: needs pass 2
-    std::unordered_set<uint32_t> barriers;  // catch handlers: never mergeable
+// The basic-block CFG of one code item, from a single linear pre-pass. Replaces the
+// dexllm#16 `JoinPoints` sets: the analysis is no longer a linear scan that meets on
+// arrival, so it needs real blocks and real predecessor lists rather than a
+// classification of offsets into forward/backward/barrier.
+struct Cfg {
+    static constexpr uint32_t kNoBlock = UINT32_MAX;
+
+    std::vector<uint32_t> starts;              // block leaders, ascending byte offset
+    std::vector<std::vector<uint32_t>> preds;  // preds[b] = blocks with an edge into b
+    std::vector<char> is_handler;              // catch handler: register file unknown
+    std::vector<char> has_invoke;              // block contains at least one invoke*
+
+    // The block owning `byte_off`. Callers only pass real instruction offsets.
+    [[nodiscard]] uint32_t BlockOf(uint32_t byte_off) const {
+        auto it = std::upper_bound(starts.begin(), starts.end(), byte_off);
+        if (it == starts.begin()) return kNoBlock;
+        return static_cast<uint32_t>((it - starts.begin()) - 1);
+    }
+    // One past the last byte of block b.
+    [[nodiscard]] uint32_t EndOf(uint32_t b, uint32_t code_bytes) const {
+        return b + 1 < starts.size() ? starts[b + 1] : code_bytes;
+    }
 };
 
 // Bounded uleb128 (the encoded_catch_handler list is verified at load, but this
@@ -1833,49 +1846,72 @@ int32_t ReadSlebBounded(const dex::u1*& p, const dex::u1* end) {
     return result;
 }
 
-JoinPoints CollectJoinPoints(const dex::Code* code, const dex::u1* img_end) {
-    JoinPoints jp;
+// One linear pre-pass over the code item builds the whole CFG: leaders, predecessor
+// lists, catch-handler marks, and which blocks contain an invoke.
+//
+// Successors are decoded per instruction; a block boundary falls after any
+// instruction that branches or does not fall through, and before any branch target
+// or catch handler. Exception edges are deliberately NOT modelled — a handler is
+// reachable from every instruction of its try region, so its entry state is unknown
+// no matter which predecessors we could name, and `is_handler` says exactly that.
+Cfg BuildCfg(const dex::Code* code, const dex::u1* img_end) {
+    Cfg cfg;
     const dex::u2* base = code->insns;
-    const dex::u2* p = base;
     const dex::u2* end_p = base + code->insns_size;
+    const int64_t code_bytes = static_cast<int64_t>(code->insns_size) * 2;
 
-    auto note = [&](int64_t from_byte, int64_t target_byte) {
-        if (target_byte < 0 ||
-            target_byte >= static_cast<int64_t>(code->insns_size) * 2) return;
-        uint32_t t = static_cast<uint32_t>(target_byte);
-        // A BACKWARD edge reaches its target from later in the scan (a loop, or
-        // just a compiler-emitted shared tail). Its contribution is only known
-        // after one full pass, so those targets are resolved on the second pass.
-        if (target_byte <= from_byte) jp.back.insert(t);
-        else jp.targets.insert(t);
+    struct Insn {
+        uint32_t off = 0;
+        uint32_t next = 0;   // byte offset of the following instruction
+        bool falls = true;   // control may continue at `next`
+        bool invoke = false;
+        std::vector<uint32_t> targets;  // explicit branch targets
+    };
+    std::vector<Insn> insns;
+    std::unordered_set<uint32_t> insn_offs;
+
+    auto note = [&](Insn& in, int64_t target_byte) {
+        if (target_byte < 0 || target_byte >= code_bytes) return;
+        in.targets.push_back(static_cast<uint32_t>(target_byte));
     };
 
+    const dex::u2* p = base;
     while (p < end_p) {
         uint8_t op = static_cast<uint8_t>(*p);
         size_t width = GetBytecodeWidth(p);
         if (width == 0) break;
-        int64_t off = (p - base) * 2;  // byte offset of this instruction
+        Insn in;
+        in.off = static_cast<uint32_t>((p - base) * 2);
+        in.next = static_cast<uint32_t>(in.off + width * 2);
+        in.invoke = (op >= 0x6E && op <= 0x72) || (op >= 0x74 && op <= 0x78);
+        const int64_t off = in.off;
         switch (op) {
+            case 0x0E: case 0x0F: case 0x10: case 0x11:  // return*
+            case 0x27:                                   // throw
+                in.falls = false;
+                break;
             case 0x28:  // goto +AA
-                note(off, off + 2 * static_cast<int8_t>((*p >> 8) & 0xFF));
+                note(in, off + 2 * static_cast<int8_t>((*p >> 8) & 0xFF));
+                in.falls = false;
                 break;
             case 0x29:  // goto/16 +AAAA
-                note(off, off + 2 * static_cast<int16_t>(*(p + 1)));
+                note(in, off + 2 * static_cast<int16_t>(*(p + 1)));
+                in.falls = false;
                 break;
             case 0x2A:  // goto/32 +AAAAAAAA
-                note(off, off + 2 * static_cast<int64_t>(
-                                    static_cast<int32_t>(ReadInt(p + 1))));
+                note(in, off + 2 * static_cast<int64_t>(
+                                  static_cast<int32_t>(ReadInt(p + 1))));
+                in.falls = false;
                 break;
             case 0x32: case 0x33: case 0x34: case 0x35: case 0x36: case 0x37:
             case 0x38: case 0x39: case 0x3A: case 0x3B: case 0x3C: case 0x3D:
                 // if-eq..le +CCCC / if-*z +BBBB — the offset is the last unit
-                note(off, off + 2 * static_cast<int16_t>(*(p + width - 1)));
+                note(in, off + 2 * static_cast<int16_t>(*(p + width - 1)));
                 break;
             case 0x2B: case 0x2C: {  // packed-/sparse-switch +BBBBBBBB → payload
                 int64_t pay = off + 2 * static_cast<int64_t>(
                                         static_cast<int32_t>(ReadInt(p + 1)));
-                if (pay < 0 || pay + 4 > static_cast<int64_t>(code->insns_size) * 2)
-                    break;
+                if (pay < 0 || pay + 4 > code_bytes) break;
                 const dex::u2* t = base + pay / 2;
                 uint16_t ident = *t;
                 uint16_t size = *(t + 1);
@@ -1888,19 +1924,23 @@ JoinPoints CollectJoinPoints(const dex::Code* code, const dex::u1* img_end) {
                 // Each target is a 32-bit offset RELATIVE TO THE SWITCH instruction.
                 if (tbl + static_cast<size_t>(size) * 2 > end_p) break;  // malformed
                 for (uint16_t i = 0; i < size; ++i)
-                    note(off, off + 2 * static_cast<int64_t>(
-                                      static_cast<int32_t>(ReadInt(tbl + i * 2))));
+                    note(in, off + 2 * static_cast<int64_t>(
+                                     static_cast<int32_t>(ReadInt(tbl + i * 2))));
                 break;
             }
             default:
                 break;
         }
+        insn_offs.insert(in.off);
+        insns.push_back(std::move(in));
         p += width;
     }
+    if (insns.empty()) return cfg;
 
     // Catch handlers: reachable from anywhere inside the try region, so the register
-    // file at entry is unknown → barrier. (Mirrors ParseExceptions in the snapshot
-    // builder; bounded against the mapped image.)
+    // file at entry is unknown. (Mirrors ParseExceptions in the snapshot builder;
+    // bounded against the mapped image.)
+    std::unordered_set<uint32_t> handlers;
     if (code->tries_size != 0) {
         const dex::u2* after = code->insns + code->insns_size;
         size_t aligned = (reinterpret_cast<size_t>(after) + 3) & ~size_t(3);
@@ -1917,18 +1957,55 @@ JoinPoints CollectJoinPoints(const dex::Code* code, const dex::u1* img_end) {
                 int64_t typed = std::abs(static_cast<int64_t>(size));
                 for (int64_t j = 0; j < typed && hp < end; ++j) {
                     ReadUlebBounded(hp, end);  // type_idx
-                    jp.barriers.insert(ReadUlebBounded(hp, end) * 2);
+                    handlers.insert(ReadUlebBounded(hp, end) * 2);
                 }
                 if (catch_all && hp < end)
-                    jp.barriers.insert(ReadUlebBounded(hp, end) * 2);
+                    handlers.insert(ReadUlebBounded(hp, end) * 2);
             }
         }
     }
-    // Precedence: a catch handler is never mergeable; a target with any backward
-    // edge is resolved by the second pass even if it also has forward edges.
-    for (uint32_t b : jp.back) jp.targets.erase(b);
-    for (uint32_t b : jp.barriers) { jp.targets.erase(b); jp.back.erase(b); }
-    return jp;
+
+    // Leaders. A branch target that is not a real instruction start is dropped here
+    // rather than silently splitting a block at a mid-instruction offset.
+    std::unordered_set<uint32_t> leaders;
+    leaders.insert(insns.front().off);
+    for (auto& in : insns) {
+        in.targets.erase(std::remove_if(in.targets.begin(), in.targets.end(),
+                                        [&](uint32_t t) { return !insn_offs.count(t); }),
+                         in.targets.end());
+        for (uint32_t t : in.targets) leaders.insert(t);
+        if ((!in.falls || !in.targets.empty()) && insn_offs.count(in.next))
+            leaders.insert(in.next);
+    }
+    for (uint32_t h : handlers)
+        if (insn_offs.count(h)) leaders.insert(h);
+
+    cfg.starts.assign(leaders.begin(), leaders.end());
+    std::sort(cfg.starts.begin(), cfg.starts.end());
+    const size_t nb = cfg.starts.size();
+    cfg.preds.resize(nb);
+    cfg.is_handler.assign(nb, 0);
+    cfg.has_invoke.assign(nb, 0);
+
+    for (const auto& in : insns) {
+        const uint32_t b = cfg.BlockOf(in.off);
+        if (b == Cfg::kNoBlock) continue;
+        if (in.invoke) cfg.has_invoke[b] = 1;
+        for (uint32_t t : in.targets) cfg.preds[cfg.BlockOf(t)].push_back(b);
+        // The fall-through edge is only an EDGE when it leaves the block; inside one
+        // it is just the next instruction.
+        if (in.falls && insn_offs.count(in.next)) {
+            const uint32_t nb_idx = cfg.BlockOf(in.next);
+            if (nb_idx != b) cfg.preds[nb_idx].push_back(b);
+        }
+    }
+    for (auto& v : cfg.preds) {
+        std::sort(v.begin(), v.end());
+        v.erase(std::unique(v.begin(), v.end()), v.end());
+    }
+    for (size_t b = 0; b < nb; ++b)
+        if (handlers.count(cfg.starts[b])) cfg.is_handler[b] = 1;
+    return cfg;
 }
 
 // Two tracked definitions are the same value iff kind and the kind-relevant payload
@@ -1956,31 +2033,51 @@ bool SameOrigin(const DexItem::InvokeArg& a, const DexItem::InvokeArg& b) {
 
 // dexllm L4 extension — see header for contract.
 //
-// Light-weight forward register simulation with a MEET at control-flow joins
-// (dexllm#16). Tracks the last definition of each register; at a branch target the
-// fall-through state is intersected with every forward predecessor's state, so a
-// definition survives only if it reaches the site on every path, and a per-path value
-// degrades to Unknown+crossed_branch instead of being reported as unconditional.
+// Bounded-window register analysis. For every basic block holding an invoke, the
+// WINDOW is the set of blocks within `depth` predecessor edges of it; a small forward
+// dataflow over that window produces the block's incoming register state, the block is
+// simulated from it, and each invoke reads its argument registers off the live state.
 // Anything we don't decode (most arithmetic etc.) clears the destination register.
+//
+// `depth` counts predecessor LEVELS: 0 analyses the invoke's own block alone, and the
+// default 2 adds two levels above it. The window is a block SET, not a per-path
+// budget — every block inside it is analysed under the same boundary condition (an
+// edge from outside carries nothing), so two paths that rejoin are compared with the
+// same amount of history behind them. Spending the budget per path instead would
+// tombstone registers the paths genuinely agree on, which is an artefact of the
+// accounting rather than a fact about the code.
+//
+// The dexllm#16 guarantees hold WITHIN the window: a definition that reaches the site
+// on every path of the window survives, and one that holds on only some path degrades
+// to Unknown + crossed_branch instead of being reported as unconditional. Outside it
+// nothing is asserted at all.
 std::vector<DexItem::InvokeSiteWithArgs>
-DexItem::AnalyzeMethodInvokes(uint32_t method_idx) const {
+DexItem::AnalyzeMethodInvokes(uint32_t method_idx, uint32_t depth) const {
     std::vector<InvokeSiteWithArgs> out;
     if (method_idx >= method_codes.size()) return out;
     const auto* code = method_codes[method_idx];
     if (code == nullptr) return out;
 
-    // Per-register state (last known definition).
-    std::unordered_map<uint16_t, InvokeArg> reg_state;
-    reg_state.reserve(code->registers_size);
+    const dex::u1* img_end = nullptr;
+    if (_image != nullptr)
+        img_end = reinterpret_cast<const dex::u1*>(_image->data()) + _image->len();
+    const Cfg cfg = BuildCfg(code, img_end);
+    if (cfg.starts.empty()) return out;
 
-    // Initialise parameter registers — they sit at the high end of the file.
-    uint16_t total_regs = code->registers_size;
-    uint16_t param_regs = code->ins_size;
-    uint16_t first_param = total_regs > param_regs
-                              ? static_cast<uint16_t>(total_regs - param_regs)
-                              : 0;
-    auto entry_state = [&]() {
-        std::unordered_map<uint16_t, InvokeArg> s;
+    const dex::u2* base = code->insns;
+    const uint32_t code_bytes = static_cast<uint32_t>(code->insns_size) * 2;
+    using State = std::unordered_map<uint16_t, InvokeArg>;
+
+    // Parameter registers sit at the high end of the file and are defined by the
+    // method ENTRY, so they belong to the entry block's incoming state — reachable
+    // only when the window actually reaches that block.
+    const uint16_t total_regs = code->registers_size;
+    const uint16_t param_regs = code->ins_size;
+    const uint16_t first_param = total_regs > param_regs
+                                     ? static_cast<uint16_t>(total_regs - param_regs)
+                                     : 0;
+    auto param_state = [&]() {
+        State s;
         for (uint16_t i = 0; i < param_regs; ++i) {
             InvokeArg a;
             a.kind = ArgKind::Parameter;
@@ -1990,45 +2087,6 @@ DexItem::AnalyzeMethodInvokes(uint32_t method_idx) const {
         }
         return s;
     };
-    reg_state = entry_state();
-
-    const dex::u2* base = code->insns;
-    const dex::u2* p = base;
-    const dex::u2* end_p = base + code->insns_size;
-
-    uint32_t last_invoke_callee = 0;
-    bool has_last_invoke = false;
-
-    // A 64-bit value occupies vN AND vN+1. The high half must lose any tracked origin
-    // too, or a stale one is reported for it (invoke-*/range lists one arg entry per
-    // register, so the high half IS surfaced). Table-driven off slicer's own
-    // VerifyFlags rather than a hand-kept opcode list.
-    auto is_wide_dest = [](uint8_t opcode) {
-        return (dex::GetVerifyFlagsFromOpcode(static_cast<dex::Opcode>(opcode)) &
-                dex::kVerifyRegAWide) != 0;
-    };
-    auto set_reg_op = [&](uint16_t r, InvokeArg a, uint8_t opcode) {
-        a.reg_num = r;
-        reg_state[r] = a;
-        if (is_wide_dest(opcode)) reg_state.erase(static_cast<uint16_t>(r + 1));
-    };
-    auto erase_reg_op = [&](uint16_t r, uint8_t opcode) {
-        reg_state.erase(r);
-        if (is_wide_dest(opcode)) reg_state.erase(static_cast<uint16_t>(r + 1));
-    };
-    uint8_t cur_op = 0;  // opcode being processed (for the wide-dest check above)
-    auto set_reg = [&](uint16_t r, InvokeArg a) { set_reg_op(r, a, cur_op); };
-
-    // dexllm#16 — join handling. `pending[T]` accumulates the MEET of every forward
-    // predecessor of T seen so far (intersect-on-arrival, so one state per pending
-    // target, not one per edge). `fall_through_live` is false right after an
-    // unconditional transfer, where the next instruction is reachable only by branch.
-    const dex::u1* img_end = nullptr;
-    if (_image != nullptr)
-        img_end = reinterpret_cast<const dex::u1*>(_image->data()) + _image->len();
-    const JoinPoints jp = CollectJoinPoints(code, img_end);
-    std::unordered_map<uint32_t, std::unordered_map<uint16_t, InvokeArg>> pending;
-    bool fall_through_live = true;
 
     // A register that HAD a definition which a merge discarded is tombstoned rather
     // than erased, so a consumer can tell "conditional / gave up" from "never tracked".
@@ -2039,461 +2097,421 @@ DexItem::AnalyzeMethodInvokes(uint32_t method_idx) const {
         a.crossed_branch = true;
         return a;
     };
-    auto meet_into = [&](std::unordered_map<uint16_t, InvokeArg>& dst,
-                         const std::unordered_map<uint16_t, InvokeArg>& src) {
-        for (auto it = dst.begin(); it != dst.end();) {
-            auto s = src.find(it->first);
-            if (s != src.end() && SameOrigin(it->second, s->second)) {
-                ++it;
-            } else {
-                it->second = tombstone(it->first);  // differs / absent on one path
-                ++it;
-            }
+    auto meet_into = [&](State& dst, const State& src) {
+        for (auto& kv : dst) {
+            auto s = src.find(kv.first);
+            if (s == src.end() || !SameOrigin(kv.second, s->second))
+                kv.second = tombstone(kv.first);  // differs / absent on one path
         }
         for (const auto& kv : src)
             if (dst.find(kv.first) == dst.end()) dst[kv.first] = tombstone(kv.first);
     };
-    // Crafted-input backstop: a method with a pathological number of live forward
-    // branches would otherwise hold one register-file copy per pending target. Far
-    // above any real method (max observed on the corpus is double digits).
-    // Resource budget. `kMaxPending` bounds how many join targets may be in flight;
-    // `kMaxStateEntries` bounds the TOTAL number of saved register entries, because
-    // each saved state is a full copy of the register file and `registers_size` goes
-    // up to 65535 — bounding only the map COUNT let a 142 KB crafted dex allocate
-    // gigabytes (adversarial review). Both are far above any real method (corpus max
-    // is 3 orders of magnitude below), so they bite only on crafted input.
-    constexpr size_t kMaxPending = 4096;
-    constexpr size_t kMaxStateEntries = 1u << 16;
-    size_t saved_entries = 0;
-    // A target whose predecessor state could NOT be recorded (budget exhausted). It
-    // must be tombstoned wholesale at arrival: dropping an edge silently would let the
-    // meet run with an INCOMPLETE predecessor set and report a one-path value as
-    // unconditional — the exact defect this change removes. `pending` entries are
-    // erased as the scan consumes them, so the table drains and a later edge to the
-    // same target would otherwise resurrect it with only that later predecessor
-    // (adversarial review: reproducible at exactly 4096 live targets). Fail CLOSED.
-    std::unordered_set<uint32_t> poisoned;
-    // Contribution of every BACKWARD edge, collected in pass 1 and consumed in pass 2
-    // (see the two-pass loop below).
-    std::unordered_map<uint32_t, std::unordered_map<uint16_t, InvokeArg>> back_in;
-    std::unordered_map<uint32_t, std::unordered_map<uint16_t, InvokeArg>> back_out;
-    bool collecting = true;  // pass 1 fills back_out; pass 2 reads back_in
-    auto record_branch = [&](int64_t from_byte, int64_t target_byte) {
-        if (target_byte < 0 ||
-            target_byte >= static_cast<int64_t>(code->insns_size) * 2) return;
-        uint32_t t = static_cast<uint32_t>(target_byte);
-        // A forward edge into a target that ALSO has a backward edge is resolved
-        // through back_out/back_in like the backward ones, so it goes to that table.
-        const bool to_back = (target_byte <= from_byte) || jp.back.count(t);
-        if (!to_back && !jp.targets.count(t)) return;  // catch-handler barrier
-        if (to_back && !jp.back.count(t)) return;      // ditto
-        auto& tbl = to_back ? back_out : pending;
-        auto it = tbl.find(t);
-        if (it != tbl.end()) {
-            meet_into(it->second, reg_state);
-            return;
+
+    // Simulate one block over `st`. With `emit`, every invoke it contains appends a
+    // site whose arguments are read off the live state. Returns the instruction count
+    // (the work budget below is denominated in instructions).
+    auto run_block = [&](uint32_t b, State& st, bool emit) -> uint64_t {
+        const dex::u2* q = base + cfg.starts[b] / 2;
+        const dex::u2* q_end = base + cfg.EndOf(b, code_bytes) / 2;
+        uint64_t simulated = 0;
+
+        uint32_t last_invoke_callee = 0;
+        // move-result must directly follow its invoke, so it never crosses into this
+        // block from another one.
+        bool has_last_invoke = false;
+        uint8_t cur_op = 0;
+
+        // A 64-bit value occupies vN AND vN+1. The high half must lose any tracked
+        // origin too, or a stale one is reported for it (invoke-*/range lists one arg
+        // entry per register, so the high half IS surfaced). Table-driven off slicer's
+        // own VerifyFlags rather than a hand-kept opcode list.
+        auto is_wide_dest = [](uint8_t opcode) {
+            return (dex::GetVerifyFlagsFromOpcode(static_cast<dex::Opcode>(opcode)) &
+                    dex::kVerifyRegAWide) != 0;
+        };
+        auto set_reg_op = [&](uint16_t r, InvokeArg a, uint8_t opcode) {
+            a.reg_num = r;
+            st[r] = a;
+            if (is_wide_dest(opcode)) st.erase(static_cast<uint16_t>(r + 1));
+        };
+        auto erase_reg_op = [&](uint16_t r, uint8_t opcode) {
+            st.erase(r);
+            if (is_wide_dest(opcode)) st.erase(static_cast<uint16_t>(r + 1));
+        };
+        auto set_reg = [&](uint16_t r, InvokeArg a) { set_reg_op(r, a, cur_op); };
+
+        while (q < q_end) {
+            uint16_t insn = *q;
+            uint8_t op = static_cast<uint8_t>(insn);
+            cur_op = op;
+            size_t width = GetBytecodeWidth(q);
+            if (width == 0) break;
+            ++simulated;
+
+            const uint16_t AA = (insn >> 8) & 0xFF;
+            const uint8_t A = (insn >> 8) & 0x0F;
+            const uint8_t B = (insn >> 12) & 0x0F;
+
+            switch (op) {
+                // ---- transfers of control ----
+                // They write no register. The block ends here (or at the instruction
+                // after a conditional branch), and the CFG carries the successor
+                // edges, so there is nothing to do beyond breaking the invoke →
+                // move-result adjacency.
+                case 0x0E: case 0x0F: case 0x10: case 0x11:  // return*
+                case 0x27:                                    // throw
+                case 0x28: case 0x29: case 0x2A:              // goto*
+                case 0x2B: case 0x2C:                         // packed/sparse-switch
+                case 0x32: case 0x33: case 0x34: case 0x35: case 0x36: case 0x37:
+                case 0x38: case 0x39: case 0x3A: case 0x3B: case 0x3C: case 0x3D:
+                    has_last_invoke = false;
+                    break;
+
+                // ---- move family: propagate state from src register ----
+                case 0x01: case 0x04: case 0x07: {  // move{,-wide,-object} vA, vB
+                    auto it = st.find(B);
+                    if (it != st.end()) set_reg(A, it->second);
+                    else erase_reg_op(A, op);
+                    has_last_invoke = false;
+                    break;
+                }
+                case 0x02: case 0x05: case 0x08: {  // move/from16
+                    uint16_t src = *(q + 1);
+                    auto it = st.find(src);
+                    if (it != st.end()) set_reg(AA, it->second);
+                    else erase_reg_op(AA, op);
+                    has_last_invoke = false;
+                    break;
+                }
+                case 0x03: case 0x06: case 0x09: {  // move/16
+                    uint16_t dst = *(q + 1);
+                    uint16_t src = *(q + 2);
+                    auto it = st.find(src);
+                    if (it != st.end()) set_reg(dst, it->second);
+                    else erase_reg_op(dst, op);
+                    has_last_invoke = false;
+                    break;
+                }
+
+                // ---- move-result* ----
+                case 0x0A: case 0x0B: case 0x0C: {
+                    if (has_last_invoke) {
+                        InvokeArg a;
+                        a.kind = ArgKind::MethodReturn;
+                        a.method_idx = last_invoke_callee;
+                        set_reg(AA, a);
+                    } else {
+                        erase_reg_op(AA, op);
+                    }
+                    break;
+                }
+
+                // ---- const/4 vA, #+B ----
+                case 0x12: {
+                    int8_t v = static_cast<int8_t>(B);
+                    if (v >= 8) v -= 16;
+                    InvokeArg a;
+                    a.kind = (v == 0) ? ArgKind::ConstNull : ArgKind::ConstInt;
+                    a.int_value = v;
+                    set_reg(A, a);
+                    has_last_invoke = false;
+                    break;
+                }
+                // ---- const/16 vAA, #+BBBB ----
+                case 0x13: {
+                    int16_t v = static_cast<int16_t>(*(q + 1));
+                    InvokeArg a;
+                    a.kind = (v == 0) ? ArgKind::ConstNull : ArgKind::ConstInt;
+                    a.int_value = v;
+                    set_reg(AA, a);
+                    has_last_invoke = false;
+                    break;
+                }
+                // ---- const vAA, #+BBBBBBBB ----
+                case 0x14: {
+                    int32_t v = static_cast<int32_t>(ReadInt(q + 1));
+                    InvokeArg a;
+                    a.kind = ArgKind::ConstInt;
+                    a.int_value = v;
+                    set_reg(AA, a);
+                    has_last_invoke = false;
+                    break;
+                }
+                // ---- const/high16 vAA, #+BBBB0000 ----
+                case 0x15: {
+                    int32_t v = static_cast<int32_t>(*(q + 1)) << 16;
+                    InvokeArg a;
+                    a.kind = ArgKind::ConstInt;
+                    a.int_value = v;
+                    set_reg(AA, a);
+                    has_last_invoke = false;
+                    break;
+                }
+                // ---- const-wide/* ----
+                case 0x16: case 0x17: case 0x18: case 0x19: {
+                    int64_t v = 0;
+                    if (op == 0x16)       v = static_cast<int16_t>(*(q + 1));
+                    else if (op == 0x17)  v = static_cast<int32_t>(ReadInt(q + 1));
+                    else if (op == 0x18)  v = static_cast<int64_t>(ReadLong(q + 1));
+                    else                  v = static_cast<int64_t>(*(q + 1)) << 48;
+                    InvokeArg a;
+                    a.kind = ArgKind::ConstWide;
+                    a.int_value = v;
+                    set_reg(AA, a);
+                    has_last_invoke = false;
+                    break;
+                }
+                // ---- const-string vAA, string@BBBB ----
+                case 0x1A: {
+                    InvokeArg a;
+                    a.kind = ArgKind::ConstString;
+                    a.string_idx = *(q + 1);
+                    set_reg(AA, a);
+                    has_last_invoke = false;
+                    break;
+                }
+                // ---- const-string/jumbo vAA, string@BBBBBBBB ----
+                case 0x1B: {
+                    InvokeArg a;
+                    a.kind = ArgKind::ConstString;
+                    a.string_idx = ReadInt(q + 1);
+                    set_reg(AA, a);
+                    has_last_invoke = false;
+                    break;
+                }
+                // ---- const-class vAA, type@BBBB ----
+                case 0x1C: {
+                    InvokeArg a;
+                    a.kind = ArgKind::ConstClass;
+                    a.type_idx = *(q + 1);
+                    set_reg(AA, a);
+                    has_last_invoke = false;
+                    break;
+                }
+                // ---- new-instance vAA, type@BBBB ----
+                case 0x22: {
+                    InvokeArg a;
+                    a.kind = ArgKind::NewInstance;
+                    a.type_idx = *(q + 1);
+                    set_reg(AA, a);
+                    has_last_invoke = false;
+                    break;
+                }
+                // ---- new-array vA, vB, type@CCCC ----
+                case 0x23: {
+                    InvokeArg a;
+                    a.kind = ArgKind::NewArray;
+                    a.type_idx = *(q + 1);
+                    set_reg(A, a);
+                    has_last_invoke = false;
+                    break;
+                }
+
+                // ---- iget* family: writes to vA from field@CCCC ----
+                case 0x52: case 0x53: case 0x54: case 0x55: case 0x56: case 0x57:
+                case 0x58: {
+                    InvokeArg a;
+                    a.kind = ArgKind::FieldRead;
+                    a.field_idx = *(q + 1);
+                    set_reg(A, a);
+                    has_last_invoke = false;
+                    break;
+                }
+                // ---- sget* family: writes to vAA from field@BBBB ----
+                case 0x60: case 0x61: case 0x62: case 0x63: case 0x64: case 0x65:
+                case 0x66: {
+                    InvokeArg a;
+                    a.kind = ArgKind::FieldRead;
+                    a.field_idx = *(q + 1);
+                    set_reg(AA, a);
+                    has_last_invoke = false;
+                    break;
+                }
+
+                // ---- invoke-kind {C..G}, method@BBBB (format 35c) ----
+                case 0x6E: case 0x6F: case 0x70: case 0x71: case 0x72: {
+                    uint8_t arg_count = B;  // high nibble of insn>>8
+                    uint8_t G = A;          // low nibble of insn>>8
+                    uint16_t callee_idx = *(q + 1);
+                    uint16_t pack = *(q + 2);
+                    uint8_t C = pack & 0x0F;
+                    uint8_t D = (pack >> 4) & 0x0F;
+                    uint8_t E = (pack >> 8) & 0x0F;
+                    uint8_t F = (pack >> 12) & 0x0F;
+                    std::vector<uint16_t> regs;
+                    if (arg_count >= 1) regs.push_back(C);
+                    if (arg_count >= 2) regs.push_back(D);
+                    if (arg_count >= 3) regs.push_back(E);
+                    if (arg_count >= 4) regs.push_back(F);
+                    if (arg_count >= 5) regs.push_back(G);
+
+                    if (emit) {
+                        InvokeSiteWithArgs site;
+                        site.method_idx = callee_idx;
+                        site.bytecode_offset = static_cast<uint32_t>((q - base) * 2);
+                        site.opcode = op;
+                        for (auto r : regs) {
+                            auto it = st.find(r);
+                            InvokeArg a = (it != st.end()) ? it->second : InvokeArg{};
+                            a.reg_num = r;
+                            site.args.push_back(a);
+                        }
+                        out.push_back(std::move(site));
+                    }
+                    last_invoke_callee = callee_idx;
+                    has_last_invoke = true;
+                    break;
+                }
+                // ---- invoke-kind/range {CCCC..NNNN}, method@BBBB (format 3rc) ----
+                case 0x74: case 0x75: case 0x76: case 0x77: case 0x78: {
+                    uint8_t arg_count = AA;
+                    uint16_t callee_idx = *(q + 1);
+                    uint16_t first_reg = *(q + 2);
+                    if (emit) {
+                        InvokeSiteWithArgs site;
+                        site.method_idx = callee_idx;
+                        site.bytecode_offset = static_cast<uint32_t>((q - base) * 2);
+                        site.opcode = op;
+                        for (uint8_t i = 0; i < arg_count; ++i) {
+                            uint16_t r = static_cast<uint16_t>(first_reg + i);
+                            auto it = st.find(r);
+                            InvokeArg a = (it != st.end()) ? it->second : InvokeArg{};
+                            a.reg_num = r;
+                            site.args.push_back(a);
+                        }
+                        out.push_back(std::move(site));
+                    }
+                    last_invoke_callee = callee_idx;
+                    has_last_invoke = true;
+                    break;
+                }
+
+                // ---- Untracked writers to vAA (clear dest to avoid stale state) ----
+                // move-exception (0x0D), cmp-* (0x2D-0x31), aget* (0x44-0x4A),
+                // binary 23x (0x90-0xAF), binary/lit/8 (0xD8-0xE2, format k22b =
+                // `vAA, vBB, #+CC`), const-method-handle/type (0xFE/0xFF, format 21c).
+                case 0x0D:
+                case 0x2D: case 0x2E: case 0x2F: case 0x30: case 0x31:
+                case 0x44: case 0x45: case 0x46: case 0x47: case 0x48: case 0x49: case 0x4A:
+                case 0x90: case 0x91: case 0x92: case 0x93: case 0x94: case 0x95: case 0x96: case 0x97:
+                case 0x98: case 0x99: case 0x9A: case 0x9B: case 0x9C: case 0x9D: case 0x9E: case 0x9F:
+                case 0xA0: case 0xA1: case 0xA2: case 0xA3: case 0xA4: case 0xA5: case 0xA6: case 0xA7:
+                case 0xA8: case 0xA9: case 0xAA: case 0xAB: case 0xAC: case 0xAD: case 0xAE: case 0xAF:
+                case 0xD8: case 0xD9: case 0xDA: case 0xDB: case 0xDC: case 0xDD: case 0xDE: case 0xDF:
+                case 0xE0: case 0xE1: case 0xE2:
+                case 0xFE: case 0xFF:
+                    erase_reg_op(AA, op);
+                    has_last_invoke = false;
+                    break;
+
+                // ---- Untracked writers to vA (clear dest) ----
+                // instance-of (0x20), array-length (0x21), unary 12x (0x7B-0x8F),
+                // binary/2addr (0xB0-0xCF), binary/lit/16 (0xD0-0xD7, format k22s =
+                // `vA, vB, #+CCCC`).
+                case 0x20: case 0x21:
+                case 0x7B: case 0x7C: case 0x7D: case 0x7E: case 0x7F:
+                case 0x80: case 0x81: case 0x82: case 0x83: case 0x84: case 0x85: case 0x86: case 0x87:
+                case 0x88: case 0x89: case 0x8A: case 0x8B: case 0x8C: case 0x8D: case 0x8E: case 0x8F:
+                case 0xB0: case 0xB1: case 0xB2: case 0xB3: case 0xB4: case 0xB5: case 0xB6: case 0xB7:
+                case 0xB8: case 0xB9: case 0xBA: case 0xBB: case 0xBC: case 0xBD: case 0xBE: case 0xBF:
+                case 0xC0: case 0xC1: case 0xC2: case 0xC3: case 0xC4: case 0xC5: case 0xC6: case 0xC7:
+                case 0xC8: case 0xC9: case 0xCA: case 0xCB: case 0xCC: case 0xCD: case 0xCE: case 0xCF:
+                case 0xD0: case 0xD1: case 0xD2: case 0xD3: case 0xD4: case 0xD5: case 0xD6: case 0xD7:
+                    erase_reg_op(A, op);
+                    has_last_invoke = false;
+                    break;
+
+                default:
+                    has_last_invoke = false;
+                    break;
+            }
+            q += width;
         }
-        if (tbl.size() >= kMaxPending ||
-            saved_entries + reg_state.size() > kMaxStateEntries) {
-            poisoned.insert(t);  // cannot record this predecessor → tombstone at T
-            return;
-        }
-        saved_entries += reg_state.size();
-        tbl.emplace(t, reg_state);
+        return simulated;
     };
 
-    // dexllm#16 — TWO passes. Pass 1 resolves forward-only joins and records what each
-    // backward edge carries; pass 2 replays the scan and meets that recorded state in
-    // at the backward-edge targets, so a value that survives a compiler-emitted shared
-    // tail (a backward `goto` that is not a loop) is recovered instead of dropped.
-    // Sound by monotonicity: pass 1's states are ⊑ the true fixed point (barriers only
-    // remove entries), and meeting with a ⊑ state can only remove more — never invent
-    // a value. Only pass 2 emits sites. Two passes, not a fixed point: a value defined
-    // only BEFORE a genuine loop does not survive its header (pass 1 tombstoned the
-    // header, so the back edge carries that tombstone); a value the loop re-establishes
-    // identically does survive.
-  for (int pass = 0; pass < 2; ++pass) {
-    collecting = (pass == 0);
-    if (pass == 1) {
-        back_in = std::move(back_out);
-        back_out.clear();
-        out.clear();
-        reg_state = entry_state();
-        pending.clear();
-        saved_entries = 0;  // `poisoned` is NOT reset — poisoning is monotone (safe)
-        fall_through_live = true;
-        has_last_invoke = false;
-        p = base;
-    }
+    // Crafted-input backstop. A window is bounded by `depth`, but a block with a
+    // pathological predecessor count (a switch with thousands of cases into one block)
+    // makes every window large and every invoke-bearing block pays for its own.
+    // `kMaxWork` bounds the time in simulated instructions across the whole method;
+    // `kMaxWindowEntries` bounds the transient memory, since a window holds one
+    // register-file copy per resolved block and `registers_size` goes up to 65535.
+    // On exhaustion the window is abandoned and the block is emitted from an empty
+    // state — the same fail-closed direction a boundary edge already takes. Both are
+    // far above any real method.
+    constexpr uint64_t kMaxWork = 1ull << 22;
+    constexpr size_t kMaxWindowEntries = 1u << 16;
+    uint64_t work = 0;
 
-    while (p < end_p) {
-        const uint32_t cur_off = static_cast<uint32_t>((p - base) * 2);
-        if (jp.barriers.count(cur_off)) {
-            // Catch handler: reachable from any point of the try with the register
-            // file in an unknown state → drop everything, tombstoned so the reason
-            // stays visible.
-            for (auto& kv : reg_state) kv.second = tombstone(kv.first);
-            has_last_invoke = false;
-            fall_through_live = true;
-        } else if (jp.back.count(cur_off)) {
-            // Target of a backward edge. Pass 1 has no information about it yet; pass 2
-            // meets in everything recorded for it (both its backward and forward edges).
-            auto it = back_in.find(cur_off);
-            if (collecting || poisoned.count(cur_off) || it == back_in.end()) {
-                for (auto& kv : reg_state) kv.second = tombstone(kv.first);
-            } else if (fall_through_live) {
-                meet_into(reg_state, it->second);
-            } else {
-                reg_state = it->second;
-            }
-            has_last_invoke = false;
-            fall_through_live = true;
-        } else if (jp.targets.count(cur_off)) {
-            auto it = pending.find(cur_off);
-            const size_t freed = (it == pending.end()) ? 0 : it->second.size();
-            if (poisoned.count(cur_off) || it == pending.end()) {
-                // An unrecorded predecessor exists (budget) — nothing may be asserted.
-                for (auto& kv : reg_state) kv.second = tombstone(kv.first);
-            } else if (fall_through_live) {
-                meet_into(reg_state, it->second);
-            } else {
-                reg_state = std::move(it->second);
-            }
-            if (it != pending.end()) {
-                saved_entries -= std::min(saved_entries, freed);
-                pending.erase(it);
-            }
-            has_last_invoke = false;  // move-result must follow its invoke directly
-            fall_through_live = true;
-        }
+    for (uint32_t b = 0; b < cfg.starts.size(); ++b) {
+        if (!cfg.has_invoke[b]) continue;
 
-        uint16_t insn = *p;
-        uint8_t op = static_cast<uint8_t>(insn);
-        cur_op = op;
-        size_t width = GetBytecodeWidth(p);
-        if (width == 0) break;
-
-        const uint16_t AA = (insn >> 8) & 0xFF;
-        const uint8_t A = (insn >> 8) & 0x0F;
-        const uint8_t B = (insn >> 12) & 0x0F;
-
-        switch (op) {
-            // ---- transfers of control (dexllm#16) ----
-            // The state is no longer wiped here: a definition made BEFORE a branch
-            // still reaches uses that the branch dominates. It is published to the
-            // target's pending meet, and the meet happens AT the target (above).
-            case 0x0E: case 0x0F: case 0x10: case 0x11:  // return*
-            case 0x27:                                    // throw
-                reg_state.clear();          // nothing falls through
-                has_last_invoke = false;
-                fall_through_live = false;
-                break;
-            case 0x28:                                    // goto +AA
-                record_branch(cur_off, cur_off + 2 * static_cast<int8_t>(AA));
-                reg_state.clear();
-                has_last_invoke = false;
-                fall_through_live = false;
-                break;
-            case 0x29:                                    // goto/16 +AAAA
-                record_branch(cur_off, cur_off + 2 * static_cast<int16_t>(*(p + 1)));
-                reg_state.clear();
-                has_last_invoke = false;
-                fall_through_live = false;
-                break;
-            case 0x2A:                                    // goto/32 +AAAAAAAA
-                record_branch(cur_off,
-                              cur_off + 2 * static_cast<int64_t>(
-                                              static_cast<int32_t>(ReadInt(p + 1))));
-                reg_state.clear();
-                has_last_invoke = false;
-                fall_through_live = false;
-                break;
-            case 0x2B: case 0x2C: {                       // packed/sparse-switch
-                // Case targets come from the payload table; the switch itself falls
-                // through when no case matches (that is the default edge).
-                int64_t pay = cur_off + 2 * static_cast<int64_t>(
-                                            static_cast<int32_t>(ReadInt(p + 1)));
-                if (pay >= 0 && pay + 4 <= static_cast<int64_t>(code->insns_size) * 2) {
-                    const dex::u2* t = base + pay / 2;
-                    uint16_t ident = *t, size = *(t + 1);
-                    const dex::u2* tbl = nullptr;
-                    if (op == 0x2B && ident == 0x0100) tbl = t + 4;
-                    else if (op == 0x2C && ident == 0x0200) tbl = t + 2 + size * 2;
-                    if (tbl != nullptr &&
-                        tbl + static_cast<size_t>(size) * 2 <= end_p) {
-                        for (uint16_t i = 0; i < size; ++i)
-                            record_branch(cur_off,
-                                          cur_off + 2 * static_cast<int64_t>(
-                                                        static_cast<int32_t>(
-                                                            ReadInt(tbl + i * 2))));
+        State in;
+        if (work <= kMaxWork) {
+            // Backward BFS — the blocks within `depth` predecessor edges of b. The
+            // walk stops AT a catch handler: its incoming state is empty whatever its
+            // predecessors carry, so resolving them is work whose result is discarded.
+            // (Purely a saving — not the guard that makes a handler safe; that is the
+            // `is_handler` branch below.)
+            std::unordered_map<uint32_t, uint32_t> dist{{b, 0}};
+            std::vector<uint32_t> frontier{b};
+            std::vector<uint32_t> window{b};
+            for (uint32_t d = 0; d < depth && !frontier.empty(); ++d) {
+                std::vector<uint32_t> next;
+                for (uint32_t f : frontier) {
+                    if (cfg.is_handler[f]) continue;
+                    for (uint32_t pd : cfg.preds[f]) {
+                        if (dist.emplace(pd, d + 1).second) {
+                            next.push_back(pd);
+                            window.push_back(pd);
+                        }
                     }
                 }
-                has_last_invoke = false;
-                break;
+                frontier.swap(next);
             }
-            case 0x32: case 0x33: case 0x34: case 0x35: case 0x36: case 0x37:  // if-eq..le
-            case 0x38: case 0x39: case 0x3A: case 0x3B: case 0x3C: case 0x3D:  // if-*z
-                record_branch(cur_off,
-                              cur_off + 2 * static_cast<int16_t>(*(p + width - 1)));
-                has_last_invoke = false;  // fall-through keeps the register file
-                break;
+            // Farthest first, so a block's predecessors are resolved before it. An
+            // edge from a block that is outside the window OR not yet resolved (a
+            // cycle inside it) contributes nothing, which only removes information.
+            std::sort(window.begin(), window.end(), [&](uint32_t x, uint32_t y) {
+                if (dist[x] != dist[y]) return dist[x] > dist[y];
+                return x < y;
+            });
 
-            // ---- move family: propagate state from src register ----
-            case 0x01: case 0x04: case 0x07: {  // move{,-wide,-object} vA, vB
-                auto it = reg_state.find(B);
-                if (it != reg_state.end()) set_reg(A, it->second);
-                else erase_reg_op(A, op);
-                has_last_invoke = false;
-                break;
-            }
-            case 0x02: case 0x05: case 0x08: {  // move/from16
-                uint16_t src = *(p + 1);
-                auto it = reg_state.find(src);
-                if (it != reg_state.end()) set_reg(AA, it->second);
-                else erase_reg_op(AA, op);
-                has_last_invoke = false;
-                break;
-            }
-            case 0x03: case 0x06: case 0x09: {  // move/16
-                uint16_t dst = *(p + 1);
-                uint16_t src = *(p + 2);
-                auto it = reg_state.find(src);
-                if (it != reg_state.end()) set_reg(dst, it->second);
-                else erase_reg_op(dst, op);
-                has_last_invoke = false;
-                break;
-            }
-
-            // ---- move-result* ----
-            case 0x0A: case 0x0B: case 0x0C: {
-                if (has_last_invoke) {
-                    InvokeArg a;
-                    a.kind = ArgKind::MethodReturn;
-                    a.method_idx = last_invoke_callee;
-                    set_reg(AA, a);
+            const State nothing;
+            std::unordered_map<uint32_t, State> outs;
+            size_t stored = 0;
+            for (uint32_t w : window) {
+                State st;
+                if (cfg.is_handler[w]) {
+                    // Reachable from any instruction of its try region with the
+                    // register file in an unknown state — nothing survives into it.
                 } else {
-                    erase_reg_op(AA, op);
+                    bool first = true;
+                    // The method ENTRY is an edge like any other, and it is the one
+                    // that defines the parameter registers. A block that is BOTH the
+                    // entry and a loop header therefore meets the parameters with
+                    // whatever the back edge carries: taking only the back edge would
+                    // report a loop-carried value as if it also held on the first
+                    // iteration (`p0` vs `p0.getCause()` on a `while` that walks a
+                    // cause chain), and taking only the parameters would do the
+                    // converse.
+                    if (w == 0) { st = param_state(); first = false; }
+                    for (uint32_t pd : cfg.preds[w]) {
+                        auto it = outs.find(pd);
+                        const State& contrib = (it != outs.end()) ? it->second : nothing;
+                        if (first) { st = contrib; first = false; }
+                        else meet_into(st, contrib);
+                    }
                 }
-                break;
+                if (w == b) { in = std::move(st); break; }
+                if (work > kMaxWork || stored + st.size() > kMaxWindowEntries) break;
+                work += run_block(w, st, /*emit=*/false);
+                stored += st.size();
+                outs.emplace(w, std::move(st));
             }
-
-            // ---- const/4 vA, #+B ----
-            case 0x12: {
-                int8_t v = static_cast<int8_t>(B);
-                if (v >= 8) v -= 16;
-                InvokeArg a;
-                a.kind = (v == 0) ? ArgKind::ConstNull : ArgKind::ConstInt;
-                a.int_value = v;
-                set_reg(A, a);
-                has_last_invoke = false;
-                break;
-            }
-            // ---- const/16 vAA, #+BBBB ----
-            case 0x13: {
-                int16_t v = static_cast<int16_t>(*(p + 1));
-                InvokeArg a;
-                a.kind = (v == 0) ? ArgKind::ConstNull : ArgKind::ConstInt;
-                a.int_value = v;
-                set_reg(AA, a);
-                has_last_invoke = false;
-                break;
-            }
-            // ---- const vAA, #+BBBBBBBB ----
-            case 0x14: {
-                int32_t v = static_cast<int32_t>(ReadInt(p + 1));
-                InvokeArg a;
-                a.kind = ArgKind::ConstInt;
-                a.int_value = v;
-                set_reg(AA, a);
-                has_last_invoke = false;
-                break;
-            }
-            // ---- const/high16 vAA, #+BBBB0000 ----
-            case 0x15: {
-                int32_t v = static_cast<int32_t>(*(p + 1)) << 16;
-                InvokeArg a;
-                a.kind = ArgKind::ConstInt;
-                a.int_value = v;
-                set_reg(AA, a);
-                has_last_invoke = false;
-                break;
-            }
-            // ---- const-wide/* ----
-            case 0x16: case 0x17: case 0x18: case 0x19: {
-                int64_t v = 0;
-                if (op == 0x16)       v = static_cast<int16_t>(*(p + 1));
-                else if (op == 0x17)  v = static_cast<int32_t>(ReadInt(p + 1));
-                else if (op == 0x18)  v = static_cast<int64_t>(ReadLong(p + 1));
-                else                  v = static_cast<int64_t>(*(p + 1)) << 48;
-                InvokeArg a;
-                a.kind = ArgKind::ConstWide;
-                a.int_value = v;
-                set_reg(AA, a);
-                has_last_invoke = false;
-                break;
-            }
-            // ---- const-string vAA, string@BBBB ----
-            case 0x1A: {
-                InvokeArg a;
-                a.kind = ArgKind::ConstString;
-                a.string_idx = *(p + 1);
-                set_reg(AA, a);
-                has_last_invoke = false;
-                break;
-            }
-            // ---- const-string/jumbo vAA, string@BBBBBBBB ----
-            case 0x1B: {
-                InvokeArg a;
-                a.kind = ArgKind::ConstString;
-                a.string_idx = ReadInt(p + 1);
-                set_reg(AA, a);
-                has_last_invoke = false;
-                break;
-            }
-            // ---- const-class vAA, type@BBBB ----
-            case 0x1C: {
-                InvokeArg a;
-                a.kind = ArgKind::ConstClass;
-                a.type_idx = *(p + 1);
-                set_reg(AA, a);
-                has_last_invoke = false;
-                break;
-            }
-            // ---- new-instance vAA, type@BBBB ----
-            case 0x22: {
-                InvokeArg a;
-                a.kind = ArgKind::NewInstance;
-                a.type_idx = *(p + 1);
-                set_reg(AA, a);
-                has_last_invoke = false;
-                break;
-            }
-            // ---- new-array vA, vB, type@CCCC ----
-            case 0x23: {
-                InvokeArg a;
-                a.kind = ArgKind::NewArray;
-                a.type_idx = *(p + 1);
-                set_reg(A, a);
-                has_last_invoke = false;
-                break;
-            }
-
-            // ---- iget* family: writes to vA from field@CCCC ----
-            case 0x52: case 0x53: case 0x54: case 0x55: case 0x56: case 0x57: case 0x58: {
-                InvokeArg a;
-                a.kind = ArgKind::FieldRead;
-                a.field_idx = *(p + 1);
-                set_reg(A, a);
-                has_last_invoke = false;
-                break;
-            }
-            // ---- sget* family: writes to vAA from field@BBBB ----
-            case 0x60: case 0x61: case 0x62: case 0x63: case 0x64: case 0x65: case 0x66: {
-                InvokeArg a;
-                a.kind = ArgKind::FieldRead;
-                a.field_idx = *(p + 1);
-                set_reg(AA, a);
-                has_last_invoke = false;
-                break;
-            }
-
-            // ---- invoke-kind {C..G}, method@BBBB (format 35c) ----
-            case 0x6E: case 0x6F: case 0x70: case 0x71: case 0x72: {
-                uint8_t arg_count = B;  // high nibble of insn>>8
-                uint8_t G = A;          // low nibble of insn>>8
-                uint16_t callee_idx = *(p + 1);
-                uint16_t pack = *(p + 2);
-                uint8_t C = pack & 0x0F;
-                uint8_t D = (pack >> 4) & 0x0F;
-                uint8_t E = (pack >> 8) & 0x0F;
-                uint8_t F = (pack >> 12) & 0x0F;
-                std::vector<uint16_t> regs;
-                if (arg_count >= 1) regs.push_back(C);
-                if (arg_count >= 2) regs.push_back(D);
-                if (arg_count >= 3) regs.push_back(E);
-                if (arg_count >= 4) regs.push_back(F);
-                if (arg_count >= 5) regs.push_back(G);
-
-                InvokeSiteWithArgs site;
-                site.method_idx = callee_idx;
-                site.bytecode_offset = static_cast<uint32_t>((p - base) * 2);
-                site.opcode = op;
-                for (auto r : regs) {
-                    auto it = reg_state.find(r);
-                    InvokeArg a = (it != reg_state.end()) ? it->second : InvokeArg{};
-                    a.reg_num = r;
-                    site.args.push_back(a);
-                }
-                out.push_back(std::move(site));
-                last_invoke_callee = callee_idx;
-                has_last_invoke = true;
-                break;
-            }
-            // ---- invoke-kind/range {CCCC..NNNN}, method@BBBB (format 3rc) ----
-            case 0x74: case 0x75: case 0x76: case 0x77: case 0x78: {
-                uint8_t arg_count = AA;
-                uint16_t callee_idx = *(p + 1);
-                uint16_t first_reg = *(p + 2);
-                InvokeSiteWithArgs site;
-                site.method_idx = callee_idx;
-                site.bytecode_offset = static_cast<uint32_t>((p - base) * 2);
-                site.opcode = op;
-                for (uint8_t i = 0; i < arg_count; ++i) {
-                    uint16_t r = static_cast<uint16_t>(first_reg + i);
-                    auto it = reg_state.find(r);
-                    InvokeArg a = (it != reg_state.end()) ? it->second : InvokeArg{};
-                    a.reg_num = r;
-                    site.args.push_back(a);
-                }
-                out.push_back(std::move(site));
-                last_invoke_callee = callee_idx;
-                has_last_invoke = true;
-                break;
-            }
-
-            // ---- Untracked writers to vAA (clear dest to avoid stale state) ----
-            // move-exception (0x0D), cmp-* (0x2D-0x31), aget* (0x44-0x4A),
-            // binary 23x (0x90-0xAF), binary/lit/8 (0xD8-0xE2, format k22b = `vAA, vBB, #+CC`),
-            // const-method-handle/type (0xFE/0xFF, format 21c = `vAA, …`).
-            case 0x0D:
-            case 0x2D: case 0x2E: case 0x2F: case 0x30: case 0x31:
-            case 0x44: case 0x45: case 0x46: case 0x47: case 0x48: case 0x49: case 0x4A:
-            case 0x90: case 0x91: case 0x92: case 0x93: case 0x94: case 0x95: case 0x96: case 0x97:
-            case 0x98: case 0x99: case 0x9A: case 0x9B: case 0x9C: case 0x9D: case 0x9E: case 0x9F:
-            case 0xA0: case 0xA1: case 0xA2: case 0xA3: case 0xA4: case 0xA5: case 0xA6: case 0xA7:
-            case 0xA8: case 0xA9: case 0xAA: case 0xAB: case 0xAC: case 0xAD: case 0xAE: case 0xAF:
-            case 0xD8: case 0xD9: case 0xDA: case 0xDB: case 0xDC: case 0xDD: case 0xDE: case 0xDF:
-            case 0xE0: case 0xE1: case 0xE2:
-            case 0xFE: case 0xFF:
-                erase_reg_op(AA, op);
-                has_last_invoke = false;
-                break;
-
-            // ---- Untracked writers to vA (clear dest) ----
-            // instance-of (0x20), array-length (0x21), unary 12x (0x7B-0x8F),
-            // binary/2addr (0xB0-0xCF), binary/lit/16 (0xD0-0xD7, format k22s = `vA, vB, #+CCCC`).
-            case 0x20: case 0x21:
-            case 0x7B: case 0x7C: case 0x7D: case 0x7E: case 0x7F:
-            case 0x80: case 0x81: case 0x82: case 0x83: case 0x84: case 0x85: case 0x86: case 0x87:
-            case 0x88: case 0x89: case 0x8A: case 0x8B: case 0x8C: case 0x8D: case 0x8E: case 0x8F:
-            case 0xB0: case 0xB1: case 0xB2: case 0xB3: case 0xB4: case 0xB5: case 0xB6: case 0xB7:
-            case 0xB8: case 0xB9: case 0xBA: case 0xBB: case 0xBC: case 0xBD: case 0xBE: case 0xBF:
-            case 0xC0: case 0xC1: case 0xC2: case 0xC3: case 0xC4: case 0xC5: case 0xC6: case 0xC7:
-            case 0xC8: case 0xC9: case 0xCA: case 0xCB: case 0xCC: case 0xCD: case 0xCE: case 0xCF:
-            case 0xD0: case 0xD1: case 0xD2: case 0xD3: case 0xD4: case 0xD5: case 0xD6: case 0xD7:
-                erase_reg_op(A, op);
-                has_last_invoke = false;
-                break;
-
-            default:
-                has_last_invoke = false;
-                break;
         }
-        p += width;
+        run_block(b, in, /*emit=*/true);
     }
-    // Nothing carries a backward edge → pass 2 would replay identically.
-    if (pass == 0 && back_out.empty() && jp.back.empty()) break;
-  }
 
     return out;
 }

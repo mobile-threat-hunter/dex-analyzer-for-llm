@@ -452,8 +452,14 @@ class DexKitAdapter:
             for s in self._dk.find_call_sites_from(method_descriptor)
         )
 
-    def resolve_call_args(self, method_descriptor: str) -> tuple[ResolvedCallSite, ...]:
-        """Return call sites of the method with each argument's resolved origin."""
+    def resolve_call_args(
+        self, method_descriptor: str, depth: int = 2
+    ) -> tuple[ResolvedCallSite, ...]:
+        """Return call sites of the method with each argument's resolved origin.
+
+        ``depth`` is the basic-block window: the call's own block plus that many
+        predecessor levels above it.
+        """
         require_member_descriptor(method_descriptor)
         return tuple(
             ResolvedCallSite(
@@ -465,7 +471,7 @@ class DexKitAdapter:
                 invoke_opcode=s.invoke_opcode,
                 args=tuple(_to_arg(a) for a in s.args),
             )
-            for s in self._dk.resolve_call_args(method_descriptor)
+            for s in self._dk.resolve_call_args(method_descriptor, depth)
         )
 
     def find_methods_reading_field(self, field_descriptor: str) -> tuple[str, ...]:

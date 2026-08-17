@@ -572,8 +572,12 @@ public:
         return ext_.FindMethodsUsingDoubleLiterals(vs);
     }
     std::vector<dexkit::ext::ResolvedCallSite>
-    resolve_call_args(const std::string& api_descriptor) {
-        return ext_.ResolveCallArgs(ident_in(api_descriptor));
+    resolve_call_args(const std::string& api_descriptor, int depth) {
+        // A negative depth is nonsense rather than a request for "everything": clamp
+        // it to the block-only window so the argument cannot silently mean its own
+        // opposite after the conversion to unsigned.
+        return ext_.ResolveCallArgs(ident_in(api_descriptor),
+                                    depth < 0 ? 0u : static_cast<uint32_t>(depth));
     }
     // The rendered listing decodes its identifiers inside the renderer (so a
     // decoded identifier is escaped like every other character, not materialised
@@ -1131,11 +1135,14 @@ PYBIND11_MODULE(_dexkit_core, m) {
              "Find methods whose body contains all of the given double literals.")
         .def("resolve_call_args", &PyDexKit::resolve_call_args,
              py::arg("method_descriptor"),  // same value as find_call_sites_to
+             py::arg("depth") = static_cast<int>(dexkit::DexItem::kDefaultArgDepth),
              "L4: for every call site invoking the given API, return a "
              "ResolvedCallSite whose .args list contains an ArgOrigin per "
              "argument register (ConstString / ConstInt / ConstClass / "
              "Parameter / FieldRead / MethodReturn / Unknown). Basic-block-"
-             "scoped forward register simulation.")
+             "scoped forward register simulation: `depth` is how many predecessor "
+             "levels of blocks are searched above the call site's own block "
+             "(0 = that block alone), and nothing outside that window is looked at.")
         .def("render_method_smali", &PyDexKit::render_method_smali,
              py::arg("method_descriptor"),
              "L5: baksmali-style text rendering of a single method body. "

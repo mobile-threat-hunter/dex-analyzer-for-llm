@@ -258,11 +258,18 @@ class CrossReferencePort(Protocol):
         """
         ...
 
-    def resolve_call_args(self, method_descriptor: str) -> tuple[ResolvedCallSite, ...]:
+    def resolve_call_args(
+        self, method_descriptor: str, depth: int = 2
+    ) -> tuple[ResolvedCallSite, ...]:
         """Call sites of the method with each argument's resolved origin.
 
         Same reverse direction (and same fixed/varying fields) as
         :meth:`find_call_sites_to`, plus ``args``.
+
+        ``depth`` bounds the analysis to the call site's own basic block plus that
+        many predecessor levels above it; nothing outside the window is looked at,
+        so an argument defined further back reads as ``Unknown``. ``depth=0`` is the
+        call's own block alone.
         """
         ...
 

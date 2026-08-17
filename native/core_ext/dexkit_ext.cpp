@@ -1974,7 +1974,7 @@ std::vector<CallerRef> CollectApiCallers(dexkit::DexKit* core,
 }  // namespace
 
 std::vector<ResolvedCallSite>
-DexKitExt::ResolveCallArgs(std::string_view api_descriptor) {
+DexKitExt::ResolveCallArgs(std::string_view api_descriptor, uint32_t depth) {
     std::vector<ResolvedCallSite> out;
 
     std::string_view target_class, target_name, target_proto;
@@ -1988,7 +1988,7 @@ DexKitExt::ResolveCallArgs(std::string_view api_descriptor) {
     for (const auto& cr : CollectApiCallers(core_.get(), api_resolve_index_, target_class,
                                             target_name, target_proto)) {
         const auto& item = *cr.item;
-        auto sites = item.AnalyzeMethodInvokes(cr.caller_idx);
+        auto sites = item.AnalyzeMethodInvokes(cr.caller_idx, depth);
         std::string caller_sig = BuildMethodSignature(item, cr.caller_idx);
         for (const auto& s : sites) {
             if (s.method_idx != cr.local_target) continue;
@@ -2074,7 +2074,9 @@ DexKitExt::FindCallSitesFromMethod(std::string_view method_descriptor) {
     // each site's method_idx is the callee IN THIS DEX. Per-invoke (not deduped),
     // mirroring FindCallSitesToApi's per-site output.
     std::string caller_sig = BuildMethodSignature(item, m_idx);
-    for (const auto& s : item.AnalyzeMethodInvokes(m_idx)) {
+    // Only the site identity is used here, never the arguments, so the window is the
+    // call's own block: depth 0 is the cheapest way to ask for exactly that.
+    for (const auto& s : item.AnalyzeMethodInvokes(m_idx, /*depth=*/0)) {
         CallSite cs;
         cs.caller_dex_id = item.GetDexId();
         cs.caller_method_idx = m_idx;

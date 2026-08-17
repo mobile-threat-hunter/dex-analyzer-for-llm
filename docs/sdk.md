@@ -153,10 +153,14 @@ other spelling, and the reason `MethodInfo` exposes the bits instead.
   provenance of one invoke argument. Only the field its `kind` carries is set; `kind`
   ∈ ConstString / ConstInt / ConstWide / ConstClass / ConstNull / FieldRead /
   MethodReturn / Parameter / NewInstance / NewArray / Unknown. A reported origin holds
-  on **every** path to the call; `crossed_branch` (Unknown only) means a tracked
-  definition was **discarded at a control-flow merge** — the paths disagree, or the
-  analyzer stopped at a loop header / catch handler. Treat it as *not proven*, not as
-  *absent* (see docs/api.md §"Intra-method arg resolution").
+  on **every** path to the call *within the analysis window*; `crossed_branch`
+  (Unknown only) means a tracked definition was **discarded at a control-flow merge** —
+  the paths disagree, or one merged edge carried nothing because it came from outside
+  the window. Treat it as *not proven*, not as *absent*. An `Unknown` with
+  `crossed_branch=False` found nothing in the window at all — it may simply lie
+  further back, so `resolve_call_args(..., depth=N)` can resolve it, except inside a
+  catch handler, which is entered empty at every depth (see docs/api.md §"Intra-method
+  arg resolution").
 - **`CallSite`** `(caller_descriptor, caller_dex_id, caller_method_idx,
   callee_descriptor, bytecode_offset, invoke_opcode)` — one invoke edge. Returned by
   both `find_call_sites_to` (a target's CALLERS — callee fixed, `caller_*` vary) and

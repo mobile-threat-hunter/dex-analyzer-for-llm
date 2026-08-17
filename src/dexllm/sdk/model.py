@@ -510,10 +510,14 @@ class ArgOrigin:
     method_signature: Optional[str] = None
     parameter_index: Optional[int] = None
     #: ``Unknown`` only: a control-flow merge discarded this register's definition —
-    #: the value depends on which path reached the call, or the analyzer stopped at a
-    #: loop header / catch handler. ``Unknown`` with this False means "never tracked"
-    #: (arithmetic, array load, …). Never treat a ``varies-by-path`` argument as a
-    #: constant: the site has more than one possible value.
+    #: the value depends on which path reached the call, or one merged edge carried
+    #: nothing because it came from outside the analysis window. ``Unknown`` with this
+    #: False means no definition was found WITHIN the window at all: never tracked
+    #: (arithmetic, array load, …), defined further back than ``depth`` blocks — which
+    #: a larger ``resolve_call_args(..., depth=N)`` may resolve — or inside a catch
+    #: handler, which is entered with an empty register file at every depth. Never
+    #: treat a ``varies-by-path`` argument as a constant: the site has more than one
+    #: possible value.
     crossed_branch: bool = False
 
 

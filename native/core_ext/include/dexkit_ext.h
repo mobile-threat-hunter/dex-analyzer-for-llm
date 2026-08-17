@@ -372,9 +372,12 @@ public:
     // L4 — for every call site that invokes the given API, walk the caller's
     // bytecode and resolve each argument register to a ConstString / ConstInt /
     // ConstClass / Parameter / FieldRead / MethodReturn / Unknown origin via
-    // basic-block-scoped forward register simulation.
+    // basic-block-scoped forward register simulation. `depth` is how many
+    // predecessor levels of basic blocks are searched above the call site's own
+    // block (0 = that block alone); see DexItem::AnalyzeMethodInvokes.
     [[nodiscard]] std::vector<ResolvedCallSite>
-    ResolveCallArgs(std::string_view api_descriptor);
+    ResolveCallArgs(std::string_view api_descriptor,
+                    uint32_t depth = DexItem::kDefaultArgDepth);
 
     // L2.5 — field access-site xref. Which methods READ (iget*/sget*) or WRITE
     // (iput*/sput*) the given field, from the core's field_get/put_method_ids
