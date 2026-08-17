@@ -778,7 +778,7 @@ class CapabilityReport:
 
     Example (real, tvleanback, at the ``app_only=True`` default)::
 
-        CapabilityReport(catalog_version='0.6', catalog_size=270,
+        CapabilityReport(catalog_version='0.8', catalog_size=281,
                          matched_apis=5, total_call_sites=8,
                          permissions={'android.permission.INTERNET': 2},
                          categories={'STORAGE': 2, 'REFLECTION': 2, ...}, flags={},

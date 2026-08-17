@@ -388,14 +388,54 @@ rather than UI, lifecycle or serialization boilerplate:
   calls were the gap: `SSLContext.init` and
   `SSLCertificateSocketFactory.setTrustManagers` are curated now, alongside the
   per-connection `HttpsURLConnection.setHostnameVerifier` that was missing beside
-  its already-curated `setDefault*` and instance-factory siblings (all `NETWORK_IO`).
+  its already-curated `setDefault*` and instance-factory siblings.
 
-Two TLS surfaces are **deliberately still uncurated**, because they register no
-interface and so belong to a separate curation task: `SSLCertificateSocketFactory
-.getInsecure` and `SslErrorHandler.proceed` (the `onReceivedSslError` WebView
-bypass). A third has no framework spelling at all — an OkHttp `HostnameVerifier`
-is set on a builder that is not a framework class, and unlike the TrustManager
-case there is no `SSLContext`-shaped choke point behind it.
+### `CUSTOM_TLS_TRUST` — the app supplies its own TLS trust decision
+
+Those six, plus six more, are tagged **`CUSTOM_TLS_TRUST`** rather than
+`NETWORK_IO` (dexllm#52). Under `NETWORK_IO` "the app supplies its own trust
+decision" was counted exactly like "the app uses the network", which every app
+does.
+
+The name is deliberate in both directions. `TLS_BYPASS` would over-claim: the same
+APIs implement certificate **pinning**, the security-positive use, and what a
+`TrustManager` decides lives in its body, not at the registration, so no call site
+proves a bypass. `TLS_VALIDATION` — the first name tried — under-claimed: *every*
+app validates TLS, so it did not discriminate, and the docs had to explain that
+the tag was not what it sounded like. **CUSTOM** is the discriminating word.
+
+| curated member | what it is |
+|---|---|
+| `SSLContext.init` / `.setDefault` | install a `TrustManager`; `setDefault` needs no `init` first (AOSP: *"The default context must be immediately usable and not require initialization"*) |
+| `HttpsURLConnection.set{,Default}HostnameVerifier` / `set{,Default}SSLSocketFactory` | per-connection and process-wide |
+| `SSLCertificateSocketFactory.setTrustManagers` / `.getInsecure` / `.createSocket` | `getInsecure` needs no `TrustManager` at all — AOSP: *"all SSL security checks disabled … **Warning:** … vulnerable to person-in-the-middle attacks!"*; the hostname-less `createSocket` overloads skip verification |
+| `org.apache.http.conn.ssl.SSLSocketFactory.setHostnameVerifier` / `ALLOW_ALL_HOSTNAME_VERIFIER` | the legacy Apache stack (shipped through API 28) — the twin of the `HttpsURLConnection` setter, and the field is what proves permissiveness rather than customisation |
+| `SslErrorHandler.proceed` | the `onReceivedSslError` bypass |
+
+`SslErrorHandler.proceed` carries **`WEBVIEW` as well**, so a WebView sweep still
+finds it. That is not a contradiction: `categories` forbids a tag *implied by*
+another, not two tags — `WebView.loadUrl` is already `['WEBVIEW', 'NETWORK_IO']`.
+Its sibling `cancel()` is the correct behaviour and is deliberately **not**
+curated; curating both would only detect that a WebView exists.
+
+The callback itself cannot be a key — the system invokes `onReceivedSslError` on
+the app's own `WebViewClient` subclass, so it is spelled there — but `proceed()`
+is called *by* the app *on* a framework object.
+
+**`javax.net.ssl.SSLSocketFactory.createSocket` stays `NETWORK_IO`**: that
+factory's trust comes from the `SSLContext` that built it, and every way of
+customising that context is already a key. (Its `android.net` namesake is
+different, and is curated — AOSP marks its hostname-less overloads as skipping
+verification.)
+
+> **This moved values that were already released.** Six entries left `NETWORK_IO`,
+> so `report.categories['NETWORK_IO']` shrinks and `only_categories={'NETWORK_IO'}`
+> no longer returns them, with no type or name change to warn you. Query
+> `{'CUSTOM_TLS_TRUST'}` for the family.
+
+One path has no framework spelling at all — an OkHttp `HostnameVerifier` is set on
+a builder that is not a framework class, and unlike the TrustManager case there is
+no `SSLContext`-shaped choke point behind it, so nothing in the dex names it.
 
 The catalog is JSON (`android_api_map.json`). To use your own, copy the bundled
 file, edit it, and point dexllm at the containing **directory** — do not edit the

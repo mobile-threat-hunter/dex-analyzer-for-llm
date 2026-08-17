@@ -87,6 +87,7 @@ CATEGORY_VOCABULARY = {
     "BIOMETRIC",
     "CLIPBOARD",
     "CRYPTO",
+    "CUSTOM_TLS_TRUST",
     "DEVICE_ADMIN",
     "DYNAMIC_LOAD",
     "INPUT_CAPTURE",
@@ -1233,9 +1234,9 @@ def test_no_ubiquitous_api_is_in_the_catalog():
 # dataset-less run. Update BOTH numbers when the catalog legitimately changes; that
 # edit is the point, since it is what makes a catalog change a conscious one rather
 # than a diff nobody has to look at.
-CATALOG_ENTRY_COUNT = 270
+CATALOG_ENTRY_COUNT = 281
 CATALOG_ENTRY_DIGEST = (
-    "af1fa698a2117d2279a0326c606851f03949a1455f568f1a158334692c48c905"
+    "6226ccf1df6cbb1a1bd08e62b18117a80fb149913ce32b4d2d12f85dae67037d"
 )
 
 
@@ -1936,22 +1937,19 @@ _TLS_REGISTRATION_KEYS = {
 def test_a_tls_trust_registration_call_is_curated(key):
     """Installing a custom trust decision is reported, whichever door it uses.
 
-    These six are the framework spellings THIS CATALOG CURATES for putting an
-    app-supplied `X509TrustManager` or `HostnameVerifier` into effect — not "the"
-    framework spellings, an absolute an adversarial review refuted by constructing
-    an undetected path through `SSLCertificateSocketFactory` (now the sixth entry).
-    Three were missing until dexllm#51's interface half, which is what made "an
-    interface needs no key form, because its registration call is already a call
-    site" false for the one interface family on the corpus that is a security
-    capability rather than a UI callback.
+    These six discharge dexllm#51's interface obligation: they are what put an
+    app-supplied `X509TrustManager` or `HostnameVerifier` into effect. Three were
+    missing until that change, which is what made "an interface needs no key form,
+    because its registration call is already a call site" false for the one
+    interface family on the corpus that is a security capability rather than a UI
+    callback. Presence ONLY — the tag is asserted by the dexllm#52 block below,
+    over a superset, so asserting it here too would just duplicate that.
 
-    Two TLS surfaces stay deliberately uncurated because they register no
-    interface, so they fall outside this decision rather than inside it:
-    `SSLCertificateSocketFactory#getInsecure` and `SslErrorHandler#proceed`.
+    Never "THE framework spellings": that absolute was refuted twice, first by a
+    constructed path through `SSLCertificateSocketFactory#setTrustManagers` and
+    then by three more (Apache legacy, `createSocket`, `SSLContext#setDefault`).
     """
-    entry = _entries().get(key)
-    assert entry is not None, f"{key} left the catalog"
-    assert entry["categories"] == ["NETWORK_IO"]
+    assert key in _entries(), f"{key} left the catalog"
 
 
 @pytest.mark.parametrize(
@@ -2006,8 +2004,12 @@ def test_an_interface_is_detected_through_its_registration_call():
 
     What the key proves is that a context was INITIALISED, not that a custom trust
     manager was passed: `init(null, null, null)` is the ordinary default-context
-    idiom and fires too. That is why the tag is `NETWORK_IO`, the same weight as
-    `Socket.<init>`, rather than something that reads as a finding on its own.
+    idiom and fires too, so `CUSTOM_TLS_TRUST` slightly over-claims for this ONE
+    key — a default-context init customises nothing. The tag still avoids the
+    bigger error in both directions: `TLS_BYPASS` would assert a bypass no call
+    site can prove (the same call installs PINNING, and what a `TrustManager`
+    decides is in its body), and `TLS_VALIDATION` would not discriminate at all,
+    since every app validates TLS.
     """
     key = (
         "Ljavax/net/ssl/SSLContext;->init([Ljavax/net/ssl/KeyManager;"
@@ -2017,7 +2019,7 @@ def test_an_interface_is_detected_through_its_registration_call():
 
     report = capability.summarize_capabilities(_StubDk({key: [caller]}))
 
-    assert report.categories["NETWORK_IO"] == 1
+    assert report.categories["CUSTOM_TLS_TRUST"] == 1
     assert report.total_call_sites == 1
     assert report.total_field_accesses == 0
     assert report.by_caller[caller] == {key}
@@ -2043,8 +2045,8 @@ def test_the_hostname_verifier_registration_is_reported_on_a_real_apk(loadable_a
             continue
         found.append(path)
         assert hit.call_site_count >= 1
-        assert hit.categories == ["NETWORK_IO"]
-        assert report.categories["NETWORK_IO"] >= 1
+        assert hit.categories == ["CUSTOM_TLS_TRUST"]
+        assert report.categories["CUSTOM_TLS_TRUST"] >= 1
 
     require_corpus_shape(
         found,
@@ -2154,3 +2156,206 @@ def test_a_capability_shaped_interface_has_its_registration_call_curated(
         f"{interface} that way: an implementation would be invisible, which is what "
         f"a key form for interfaces would have to exist to fix"
     )
+
+
+# ── the app's own TLS trust decision is its own tag (dexllm#52) ───────────────
+#
+# dexllm#51's interface half curated the calls that put an app-supplied
+# TrustManager / HostnameVerifier into effect, and explicitly stopped at two
+# framework APIs that disable validation while registering NO interface. This
+# curates those, adds the three more an adversarial review CONSTRUCTED as fully
+# undetected paths, and moves the whole family out of `NETWORK_IO` — where "the
+# app supplies its own trust decision" was counted exactly like "the app uses the
+# network", which every app does.
+#
+# Pinned by curated MEMBER (`Lclass;->member`), not by descriptor: the generator
+# emits every overload from the AOSP dataset, so pinning descriptors would list
+# six mechanical `createSocket` rows and re-fail on an unrelated AOSP refresh.
+# Pinned at all because 15 of the 17 emitted keys fire 0 times on the corpus — an
+# expectation read back from the catalog would be green against dropping them.
+_CUSTOM_TLS_TRUST_MEMBERS = {
+    # put an app-supplied TrustManager / HostnameVerifier into effect
+    "Ljavax/net/ssl/SSLContext;->init",
+    "Ljavax/net/ssl/SSLContext;->setDefault",
+    "Ljavax/net/ssl/HttpsURLConnection;->setHostnameVerifier",
+    "Ljavax/net/ssl/HttpsURLConnection;->setDefaultHostnameVerifier",
+    "Ljavax/net/ssl/HttpsURLConnection;->setSSLSocketFactory",
+    "Ljavax/net/ssl/HttpsURLConnection;->setDefaultSSLSocketFactory",
+    "Landroid/net/SSLCertificateSocketFactory;->setTrustManagers",
+    # the legacy Apache stack — the exact twin of the HttpsURLConnection setter
+    "Lorg/apache/http/conn/ssl/SSLSocketFactory;->setHostnameVerifier",
+    "Lorg/apache/http/conn/ssl/SSLSocketFactory;->ALLOW_ALL_HOSTNAME_VERIFIER",
+    # register no interface at all
+    "Landroid/net/SSLCertificateSocketFactory;->getInsecure",
+    "Landroid/net/SSLCertificateSocketFactory;->createSocket",
+    "Landroid/webkit/SslErrorHandler;->proceed",
+}
+
+
+def _under(prefix):
+    """Catalog keys for one curated member — `(` for a method, `:` for a field."""
+    return [
+        k
+        for k in _entries()
+        if k.startswith(prefix + "(") or k.startswith(prefix + ":")
+    ]
+
+
+@pytest.mark.parametrize("member", sorted(_CUSTOM_TLS_TRUST_MEMBERS))
+def test_a_custom_tls_trust_member_is_curated_with_the_tag(member):
+    """Every pinned member exists and every overload of it carries the tag."""
+    keys = _under(member)
+    assert keys, f"{member} left the catalog"
+    for k in keys:
+        assert "CUSTOM_TLS_TRUST" in _entries()[k]["categories"], (
+            f"{k} is tagged {_entries()[k]['categories']}: supplying the app's own "
+            "TLS trust decision is CUSTOM_TLS_TRUST"
+        )
+
+
+def test_the_tag_covers_exactly_the_pinned_members():
+    """Completeness — nothing OUTSIDE the pinned members may carry the tag.
+
+    The other direction, and the one a reviewer had to construct: the per-member
+    guard above and `test_opening_a_tls_socket_stays_ordinary_network_io` both
+    watch what LEAVES the tag, so retagging an unrelated entry INTO it passed the
+    whole file. Ten `java.net.Socket.<init>` overloads silently became "the app
+    supplies its own trust decision", with the count and digest re-pinned, and the
+    suite stayed green.
+    """
+    tagged = {k for k, v in _entries().items() if "CUSTOM_TLS_TRUST" in v["categories"]}
+    covered = {k for m in _CUSTOM_TLS_TRUST_MEMBERS for k in _under(m)}
+    assert tagged == covered, (
+        "these keys carry CUSTOM_TLS_TRUST without being a pinned member of it: "
+        f"{sorted(tagged - covered)}"
+    )
+
+
+def test_the_tag_is_not_implied_by_network_io_but_may_share_another():
+    """The real rule is "no tag IMPLIED by another", NOT "one tag per entry".
+
+    The first cut asserted exclusivity in three places and in a guard's failure
+    message. The catalog refutes it — six entries are dual-tagged, e.g.
+    `WebView#loadUrl` is `["WEBVIEW", "NETWORK_IO"]`, and `docs/usage.md` says so
+    120 lines above the section that claimed the opposite. What must hold is that
+    none of these entries ALSO claims `NETWORK_IO`: `SSLContext#init` and the
+    setters open no socket, so counting them as IO would be the double count the
+    split removes.
+    """
+    entries = _entries()
+    for k in {k for m in _CUSTOM_TLS_TRUST_MEMBERS for k in _under(m)}:
+        assert (
+            "NETWORK_IO" not in entries[k]["categories"]
+        ), f"{k} claims NETWORK_IO too: taking the trust decision opens no socket"
+    assert [k for k, v in entries.items() if len(v["categories"]) > 1], (
+        "the catalog has no dual-tagged entry left, so the exclusivity the first "
+        "cut assumed would now be true by accident — re-read the axis rule"
+    )
+
+
+def test_the_webview_bypass_is_also_a_webview_key():
+    """`SslErrorHandler#proceed` must stay reachable from the WebView sweep.
+
+    Tagged `CUSTOM_TLS_TRUST` alone it was the ONLY one of the ten
+    `android/webkit` keys without `WEBVIEW`, so a consumer scanning the WebView
+    surface with `only_categories={"WEBVIEW"}` missed the `onReceivedSslError`
+    bypass entirely. `WebView#loadUrl` is the precedent for the second tag.
+    """
+    entries = _entries()
+    webkit = [k for k in entries if k.startswith("Landroid/webkit/")]
+    assert webkit
+    missing = [k for k in webkit if "WEBVIEW" not in entries[k]["categories"]]
+    assert not missing, f"WebView keys not reachable from a WEBVIEW sweep: {missing}"
+
+
+def test_opening_a_tls_socket_stays_ordinary_network_io():
+    """`javax.net.ssl.SSLSocketFactory#createSocket` did NOT move.
+
+    Without this the tag could swallow the whole `javax.net.ssl` package and go
+    back to meaning "uses TLS" — the conflation it was created to end.
+
+    The reason is narrower than the first cut's "creating a socket decides no
+    certificate", which a reviewer refuted from AOSP: the sibling
+    `android.net.SSLCertificateSocketFactory#createSocket` skips hostname
+    verification on its hostname-less overloads, and IS curated. What holds for
+    `javax` is that its factory's trust comes from the `SSLContext` that built it,
+    and every way of customising that context is already a key.
+    """
+    entries = _entries()
+    sockets = [
+        k
+        for k in entries
+        if k.startswith("Ljavax/net/ssl/SSLSocketFactory;->createSocket")
+    ]
+    assert sockets, "the SSLSocketFactory#createSocket overloads left the catalog"
+    for k in sockets:
+        assert entries[k]["categories"] == ["NETWORK_IO"], (
+            f"{k} is tagged {entries[k]['categories']}: a javax factory's trust "
+            "comes from the SSLContext that built it, which is curated already"
+        )
+
+
+def test_a_no_interface_tls_bypass_reaches_the_report():
+    """The dexllm#52 entries, end to end — none of them fires on the corpus.
+
+    `getInsecure` implements nothing at all (AOSP's own javadoc: "all SSL security
+    checks disabled ... vulnerable to person-in-the-middle attacks"), and
+    `SslErrorHandler#proceed` is reached by OVERRIDING `onReceivedSslError` — a
+    callback the system invokes on the app's own `WebViewClient` subclass, so the
+    callback itself is spelled there and cannot be curated. `proceed()` is the
+    part the app calls on a framework object, which is why it is nameable at all.
+    """
+    insecure = (
+        "Landroid/net/SSLCertificateSocketFactory;->getInsecure"
+        "(ILandroid/net/SSLSessionCache;)Ljavax/net/ssl/SSLSocketFactory;"
+    )
+    proceed = "Landroid/webkit/SslErrorHandler;->proceed()V"
+    caller = "Lcom/example/app/Web;->onReceivedSslError()V"
+
+    report = capability.summarize_capabilities(
+        _StubDk({insecure: [caller], proceed: [caller]})
+    )
+
+    assert report.categories["CUSTOM_TLS_TRUST"] == 2
+    assert report.categories["WEBVIEW"] == 1  # proceed is dual-tagged
+    assert "NETWORK_IO" not in report.categories
+    assert report.total_call_sites == 2
+    assert report.by_caller[caller] == {insecure, proceed}
+
+
+def test_the_apache_permissive_verifier_is_reported_as_a_field_read():
+    """The most-cited Android TLS bypass, on the stack that shipped through API 28.
+
+    `ALLOW_ALL_HOSTNAME_VERIFIER` is a FIELD, so it exercises the dexllm#36 key
+    form as well: the setter alone shows customisation, this shows permissiveness.
+    Neither touches `SSLContext`, so no choke point catches this path — which is
+    why an adversarial review could build it undetected.
+    """
+    field = (
+        "Lorg/apache/http/conn/ssl/SSLSocketFactory;->ALLOW_ALL_HOSTNAME_VERIFIER"
+        ":Lorg/apache/http/conn/ssl/X509HostnameVerifier;"
+    )
+    setter = (
+        "Lorg/apache/http/conn/ssl/SSLSocketFactory;->setHostnameVerifier"
+        "(Lorg/apache/http/conn/ssl/X509HostnameVerifier;)V"
+    )
+    caller = "Lcom/example/app/Net;->trustEverything()V"
+
+    report = capability.summarize_capabilities(
+        _StubDk({setter: [caller]}, reads={field: [caller]})
+    )
+
+    assert report.categories["CUSTOM_TLS_TRUST"] == 2
+    assert report.total_call_sites == 1
+    assert report.total_field_accesses == 1
+
+
+def test_the_safe_half_of_the_webview_prompt_is_not_curated():
+    """`SslErrorHandler#cancel` is the CORRECT behaviour and must stay out.
+
+    Curating both sides would make the tag fire on an app that honours the
+    certificate error — detecting that a WebView exists, which is the
+    `AccessibilityNodeInfo` mistake `aa83f42` removed and dexllm#51 declined to
+    repeat.
+    """
+    assert not _under("Landroid/webkit/SslErrorHandler;->cancel")

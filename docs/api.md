@@ -855,7 +855,7 @@ next(iter(r.by_caller.items()), None)
 It held `{permissions}` until dexllm#35 and was built inside the permission loop,
 so an API declaring none registered no callers at all. Every `REFLECTION` /
 `PROCESS_EXEC` / `DYNAMIC_LOAD` / `NATIVE_CODE` / `CRYPTO` / `WEBVIEW` / `STORAGE`
-entry is permission-less — 145 of the catalog's 270 entries carry no permission
+entry is permission-less — 156 of the catalog's 281 entries carry no permission
 at all, including `Settings$Secure.getString`, the ANDROID_ID read. Measured on the
 0.3 catalog at the time, the index covered **17 of the corpus's 317 distinct callers
 (5.4%)**; the corpus now has 515 distinct callers under `app_only=False` and every

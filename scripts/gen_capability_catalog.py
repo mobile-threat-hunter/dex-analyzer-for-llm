@@ -156,14 +156,13 @@ them the claim was simply false, and measurably so: one corpus APK reaches
 ``setHostnameVerifier`` and ``setSSLSocketFactory`` in the same method and the
 catalog reported only the second.
 
-**Two TLS surfaces are deliberately still uncurated, because they register no
-interface** and so belong to a separate curation task rather than to this
-decision: ``SSLCertificateSocketFactory#getInsecure`` (AOSP's own doc says all
-checks are disabled) and ``SslErrorHandler#proceed`` (the ``onReceivedSslError``
-WebView bypass, reached by overriding a callback, not by implementing anything). A
-third gap has no framework spelling at all: an OkHttp ``HostnameVerifier`` goes
-through ``OkHttpClient$Builder#hostnameVerifier``, and unlike the TrustManager
-case there is no ``SSLContext``-shaped choke point behind it.
+Two TLS surfaces were left uncurated by that decision because they register no
+interface — ``SSLCertificateSocketFactory#getInsecure`` and
+``SslErrorHandler#proceed`` — and **dexllm#52 curated them**, along with the whole
+family's move to ``CUSTOM_TLS_TRUST``. One gap remains and has no framework
+spelling at all: an OkHttp ``HostnameVerifier`` goes through
+``OkHttpClient$Builder#hostnameVerifier``, and unlike the TrustManager case there
+is no ``SSLContext``-shaped choke point behind it.
 
 What was left of ACCESSIBILITY as ordinary call sites was
 ``AccessibilityNodeInfo`` / ``AccessibilityManager``, whose callers are **100%
@@ -202,11 +201,11 @@ PERM_LEVELS = ROOT / "src" / "dexllm" / "data" / "perm_levels.json"
 # Protection levels a third-party app can actually be granted.
 APP_HOLDABLE = {"normal", "dangerous"}
 
-VERSION = "0.6"
+VERSION = "0.8"
 SOURCE = (
     "curated selection (2026-05-25, taxonomy normalised 2026-08-12, field keys "
     "2026-08-16, behaviour surfaces 2026-08-16, subclassed services 2026-08-17, "
-    "TLS-trust registration calls 2026-08-17); "
+    "TLS-trust registration calls 2026-08-17, CUSTOM_TLS_TRUST split 2026-08-17); "
     "descriptors, overloads and "
     "permissions derived from aosp_data_set by scripts/gen_capability_catalog.py"
 )
@@ -237,6 +236,17 @@ CATEGORY_VOCABULARY = [
     "BIOMETRIC",
     "CLIPBOARD",
     "CRYPTO",
+    # The app supplies its own TLS trust decision instead of the platform's
+    # (dexllm#52). `TLS_BYPASS` would over-claim -- the same APIs implement
+    # certificate PINNING, the security-positive use, and what a `TrustManager`
+    # decides is in its BODY, not at the registration, so no call site can prove a
+    # bypass. `TLS_VALIDATION` (the first cut) under-claimed in the opposite
+    # direction: EVERY app validates TLS, so the name did not discriminate and the
+    # docs had to spend a paragraph saying the tag is not what it sounds like.
+    # CUSTOM is the discriminating word and it is what the members have in common.
+    # They were `NETWORK_IO` until dexllm#52, where "this app takes over the
+    # certificate decision" was counted exactly like "this app uses the network".
+    "CUSTOM_TLS_TRUST",
     "DEVICE_ADMIN",
     "DYNAMIC_LOAD",
     # The keystroke counterpart of SCREEN_CAPTURE, and named after it: an IME
@@ -669,26 +679,39 @@ CURATED: list[tuple[str, str, list[str], list[str]]] = [
     ("java.net.URL", "openStream", ["NETWORK_IO"], []),
     ("java.net.Socket", "<init>", ["NETWORK_IO"], []),
     ("java.net.DatagramSocket", "<init>", ["NETWORK_IO"], []),
+    # Opening a TLS socket is ordinary IO and stays here; taking over the
+    # certificate DECISION is CUSTOM_TLS_TRUST, below.
     ("javax.net.ssl.SSLSocketFactory", "createSocket", ["NETWORK_IO"], []),
-    # Replacing the verifier or socket factory is how TLS validation is disabled
-    # -- `setDefault*` process-wide, the instance form per connection. These are
-    # also the REGISTRATION calls for `HostnameVerifier` and (through the factory)
-    # `X509TrustManager`, which is what makes "an interface needs no key form"
-    # true rather than merely argued -- see the module docstring.
+    # --- CUSTOM_TLS_TRUST ---------------------------------------------------
+    # Replacing the verifier or socket factory is how certificate validation is
+    # taken over -- `setDefault*` process-wide, the instance form per connection.
+    # These are also the REGISTRATION calls for `HostnameVerifier` and (through
+    # the factory) `X509TrustManager`, which is what makes "an interface needs no
+    # key form" true rather than merely argued -- see the module docstring.
     (
         "javax.net.ssl.HttpsURLConnection",
         "setDefaultHostnameVerifier",
-        ["NETWORK_IO"],
+        ["CUSTOM_TLS_TRUST"],
         [],
     ),
     (
         "javax.net.ssl.HttpsURLConnection",
         "setDefaultSSLSocketFactory",
-        ["NETWORK_IO"],
+        ["CUSTOM_TLS_TRUST"],
         [],
     ),
-    ("javax.net.ssl.HttpsURLConnection", "setSSLSocketFactory", ["NETWORK_IO"], []),
-    ("javax.net.ssl.HttpsURLConnection", "setHostnameVerifier", ["NETWORK_IO"], []),
+    (
+        "javax.net.ssl.HttpsURLConnection",
+        "setSSLSocketFactory",
+        ["CUSTOM_TLS_TRUST"],
+        [],
+    ),
+    (
+        "javax.net.ssl.HttpsURLConnection",
+        "setHostnameVerifier",
+        ["CUSTOM_TLS_TRUST"],
+        [],
+    ),
     # The two ways an app-supplied `TrustManager` is put into effect. `init` is
     # the one an HTTP client consumes indirectly: the classic bypass reaches
     # `HttpsURLConnection` (curated above), but an OkHttp one goes through
@@ -698,10 +721,79 @@ CURATED: list[tuple[str, str, list[str], list[str]]] = [
     # door, found by an adversarial review that CONSTRUCTED an otherwise
     # undetected path (`new SSLCertificateSocketFactory(0)` + `setTrustManagers`
     # + `createSocket`, all public API, none of it spelled under a curated class).
-    # `SSLContext#setDefault` is deliberately NOT curated: it is redundant, since
-    # a context carrying app trust must have been through `init` first.
-    ("javax.net.ssl.SSLContext", "init", ["NETWORK_IO"], []),
-    ("android.net.SSLCertificateSocketFactory", "setTrustManagers", ["NETWORK_IO"], []),
+    ("javax.net.ssl.SSLContext", "init", ["CUSTOM_TLS_TRUST"], []),
+    (
+        "android.net.SSLCertificateSocketFactory",
+        "setTrustManagers",
+        ["CUSTOM_TLS_TRUST"],
+        [],
+    ),
+    # `setDefault` was called "redundant, a context carrying app trust went
+    # through `init` first" -- REFUTED by AOSP: "The default context must be
+    # immediately usable and NOT require initialization"
+    # (`libcore/ojluni/.../SSLContext.java`), and the public
+    # `SSLContext(SSLContextSpi, Provider, String)` constructor is in the dataset,
+    # so an uninitialised context can become the process-wide default.
+    ("javax.net.ssl.SSLContext", "setDefault", ["CUSTOM_TLS_TRUST"], []),
+    # dexllm#52 -- the two that disable validation while registering NO
+    # interface, which is why dexllm#51's interface half deliberately left them
+    # out. `getInsecure` needs no `TrustManager` at all: AOSP's own javadoc reads
+    # "a socket factory with all SSL security checks disabled ... Warning: Sockets
+    # created using this factory are vulnerable to person-in-the-middle attacks!"
+    # `SslErrorHandler#proceed` is the `onReceivedSslError` bypass -- the callback
+    # itself cannot be curated (the system invokes it on the app's own
+    # `WebViewClient` subclass, so it is spelled there), but `proceed()` is called
+    # BY the app ON a framework object, so it is an ordinary call site. Its
+    # sibling `cancel()` is the correct behaviour and is deliberately not curated.
+    (
+        "android.net.SSLCertificateSocketFactory",
+        "getInsecure",
+        ["CUSTOM_TLS_TRUST"],
+        [],
+    ),
+    # WEBVIEW too, and that is not a contradiction: `categories` forbids a tag
+    # IMPLIED by another, not two tags -- `WebView#loadUrl` is already
+    # ["WEBVIEW", "NETWORK_IO"]. Without the second tag this was the only one of
+    # the ten `android/webkit` keys missing WEBVIEW, so a consumer sweeping the
+    # WebView surface with `only_categories={"WEBVIEW"}` missed the bypass.
+    ("android.webkit.SslErrorHandler", "proceed", ["WEBVIEW", "CUSTOM_TLS_TRUST"], []),
+    # The same three doors on the OTHER stacks, all found by an adversarial review
+    # that CONSTRUCTED each as a fully undetected path.
+    #
+    # The legacy Apache stack shipped with Android through API 28, and its
+    # `setHostnameVerifier` is the exact twin of the curated `HttpsURLConnection`
+    # one -- the most-cited Android TLS bypass. It never touches `SSLContext`, so
+    # no choke point catches it. The `ALLOW_ALL_HOSTNAME_VERIFIER` FIELD is what
+    # proves permissiveness rather than merely customisation (a field key, the
+    # dexllm#36 form).
+    (
+        "org.apache.http.conn.ssl.SSLSocketFactory",
+        "setHostnameVerifier",
+        ["CUSTOM_TLS_TRUST"],
+        [],
+    ),
+    (
+        "org.apache.http.conn.ssl.SSLSocketFactory",
+        "ALLOW_ALL_HOSTNAME_VERIFIER",
+        ["CUSTOM_TLS_TRUST"],
+        [],
+    ),
+    # `SSLCertificateSocketFactory#createSocket` meets the SAME evidence standard
+    # as `getInsecure`, on the same class: AOSP marks the hostname-less overloads
+    # "Warning: Hostname verification is not performed with this method. You MUST
+    # verify the server's identity after connecting", and the class javadoc says
+    # it checks the hostname "but only for createSocket variants that specify a
+    # hostname". A secure factory (`getDefault`, or the public constructor) plus
+    # such an overload skips verification with no curated call anywhere. Curation
+    # is by member NAME so all 5 overloads are emitted, including the 2 that do
+    # verify -- deliberately over-inclusive: reaching for this deprecated raw-TLS
+    # factory at all is the signal, and the safe overloads carry no other tag.
+    (
+        "android.net.SSLCertificateSocketFactory",
+        "createSocket",
+        ["CUSTOM_TLS_TRUST"],
+        [],
+    ),
     # --- WEBVIEW ----------------------------------------------------------
     ("android.webkit.WebView", "addJavascriptInterface", ["WEBVIEW"], []),
     ("android.webkit.WebView", "loadUrl", ["WEBVIEW", "NETWORK_IO"], []),
