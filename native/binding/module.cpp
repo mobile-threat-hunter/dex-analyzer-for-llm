@@ -890,7 +890,7 @@ PYBIND11_MODULE(_dexkit_core, m) {
             else if (a.kind == "FieldRead")    body = DecodeMutf8ForPy(a.field_signature);
             else if (a.kind == "MethodReturn") body = DecodeMutf8ForPy(a.method_signature);
             else if (a.kind == "Parameter")    body = "#" + std::to_string(a.parameter_index);
-            else if (a.crossed_branch)         body = "(varies per path)";
+            else if (a.crossed_branch)         body = "(unproven: definition discarded)";  // ASCII only: a repr is printed in loops
             return "ArgOrigin(" + a.kind + (body.empty() ? "" : " " + body) + ")";
         });
 
@@ -1135,7 +1135,7 @@ PYBIND11_MODULE(_dexkit_core, m) {
              "Find methods whose body contains all of the given double literals.")
         .def("resolve_call_args", &PyDexKit::resolve_call_args,
              py::arg("method_descriptor"),  // same value as find_call_sites_to
-             py::arg("depth") = static_cast<int>(dexkit::DexItem::kDefaultArgDepth),
+             py::arg("depth") = static_cast<int>(dexkit::ext::kDefaultArgDepth),
              "L4: for every call site invoking the given API, return a "
              "ResolvedCallSite whose .args list contains an ArgOrigin per "
              "argument register (ConstString / ConstInt / ConstClass / "

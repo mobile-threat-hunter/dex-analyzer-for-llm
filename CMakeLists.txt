@@ -47,9 +47,20 @@ add_library(dexkit_ext STATIC
     native/core_ext/dexkit_ext.cpp
     native/core_ext/dexitem_code_source.cpp
     native/core_ext/dex_verifier.cpp
+    native/core_ext/invoke_args.cpp
     native/core_ext/analysis.cpp
 )
 target_include_directories(dexkit_ext PUBLIC native/core_ext/include native/dad_cpp/include)
+# PRIVATE, deliberately. invoke_args.cpp reaches `utils/opcode_util.h` and
+# `utils/byte_code_util.h` (GetBytecodeWidth / ReadInt / ReadLong -- the decode helpers
+# the L4 analysis already used before it moved out of the vendored core, dexllm#32, and
+# keeping them is what makes the move a lift rather than a rewrite). PUBLIC would
+# propagate `${DEXKIT_CORE_ROOT}/Core/dexkit` through dexkit_dad to every dad_cpp TU,
+# where a DexKit header would then COMPILE -- and check_dad_boundary.sh's FORBIDDEN
+# pattern does not match `utils/`, so the compiler is the only thing enforcing that
+# half of the boundary. No public header of dexkit_ext needs the directory
+# (invoke_args.h includes only slicer/dex_format.h, already PUBLIC via dexkit_static).
+target_include_directories(dexkit_ext PRIVATE ${DEXKIT_CORE_ROOT}/Core/dexkit)
 target_link_libraries(dexkit_ext PUBLIC dexkit_static Threads::Threads dexkit_mutf8)
 # The vendored Core's smali renderer decodes MUTF-8 before escaping (dexllm#22).
 target_link_libraries(dexkit_static PRIVATE dexkit_mutf8)

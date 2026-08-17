@@ -505,10 +505,13 @@ def _arg_to_compact(index: int, a: Any) -> dict:
     FieldRead/MethodReturn (the value is NOT followed — that is a separate hop);
     `pN` for a Parameter; None for ConstNull/Unknown.
 
-    An Unknown that a control-flow merge produced (the argument's value depends on
-    which path reached the call, or the analyzer stopped at a loop / catch handler)
-    carries ``"varies_by_path": True`` — do NOT read it as "no value"; it means the
-    site has more than one possible value and none can be asserted.
+    An Unknown whose tracked definition a control-flow merge DISCARDED carries
+    ``"crossed_branch": True``. Read it as *not proven*, not as *no value* — and not
+    as a proven pair of values either: the merged edges may genuinely disagree, or one
+    of them simply carried nothing because it came from outside the analysis window.
+    The key is named for the raw ``ArgOrigin.crossed_branch`` it mirrors; an earlier
+    ``varies_by_path`` claimed the stronger reading the flag does not support
+    (dexllm#32).
     """
     field = _ARG_VALUE_FIELD.get(a.kind)
     try:
@@ -525,7 +528,7 @@ def _arg_to_compact(index: int, a: Any) -> dict:
         value = "<undecodable MUTF-8>"
     out = {"index": index, "kind": a.kind, "value": value}
     if getattr(a, "crossed_branch", False):
-        out["varies_by_path"] = True
+        out["crossed_branch"] = True
     return out
 
 
@@ -1110,6 +1113,8 @@ TOOL_DEFINITIONS: list[dict] = [
             "patterns — e.g. setComponentEnabledSetting(*, 2, 1) (icon-hide): "
             "args[2].value==2 and args[3].value==1. A value defined across a "
             "branch, or from a field/method/param, shows its kind, not the int. "
+            "An Unknown arg carrying `crossed_branch` means a definition was "
+            "DISCARDED at a merge — treat it as unproven, not as absent. "
             "`depth` bounds the search to the call's own basic block plus that "
             "many predecessor levels above it (0 = that block alone); raise it "
             "when arguments come back Unknown, at proportionate cost."

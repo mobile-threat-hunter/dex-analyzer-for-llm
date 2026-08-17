@@ -516,8 +516,10 @@ class ArgOrigin:
     #: (arithmetic, array load, …), defined further back than ``depth`` blocks — which
     #: a larger ``resolve_call_args(..., depth=N)`` may resolve — or inside a catch
     #: handler, which is entered with an empty register file at every depth. Never
-    #: treat a ``varies-by-path`` argument as a constant: the site has more than one
-    #: possible value.
+    #: treat a ``crossed_branch`` argument as a constant — but do not read it as a
+    #: proven pair of values either: it means a definition was DISCARDED here, so the
+    #: value is UNPROVEN. The merged edges may genuinely disagree, or one of them
+    #: simply carried nothing because it came from outside the window.
     crossed_branch: bool = False
 
 

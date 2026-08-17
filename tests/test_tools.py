@@ -13,6 +13,7 @@ import re
 from pathlib import Path
 
 import pytest
+from conftest import require_corpus_shape
 
 import dexllm
 import dexllm.tools as tools
@@ -145,29 +146,65 @@ def test_resolve_call_args_shapes_compact_args(dk):
             elif a["kind"] in ("ConstNull", "Unknown"):
                 assert a["value"] is None
             # dexllm#16: a merge-produced Unknown is flagged so the LLM does not read
-            # "no value" where the truth is "more than one value can reach here".
-            if a.get("varies_by_path"):
+            # "no value" where the truth is "a definition was discarded here".
+            if a.get("crossed_branch"):
                 assert a["kind"] == "Unknown"
 
 
-def test_varies_by_path_reaches_the_tool_output(dk):
-    """dexllm#16: the compact tool dict must carry `varies_by_path` for a
+def test_crossed_branch_reaches_the_tool_output(dk):
+    """dexllm#16: the compact tool dict must carry `crossed_branch` for a
     merge-produced Unknown — otherwise an LLM reads "no value" where the truth is
-    "more than one value can reach here". A dropped key would still satisfy the
-    conditional assertion in the shape test, so pin that one actually arrives."""
-    for api in (
+    "a definition was discarded here".
+
+    Driven from the RAW layer, not from the tool output: an earlier version searched
+    the compact dicts for the key and skipped when it found none, so "the key stopped
+    arriving" and "this corpus has no conditional argument" were the same result and
+    pytest scored both as a pass — the exact mutation it existed to catch survived it
+    (dexllm#32 review). Asking `resolve_call_args` which arguments carry the flag, and
+    only then requiring the tool to report them, separates the two.
+
+    The key was `varies_by_path` until dexllm#32; that name asserted the stronger
+    "two values provably reach", which the flag does not support. The rename is about
+    that MEANING, not about abbreviation — the same dict deliberately shortens
+    `caller_descriptor` to `caller`.
+    """
+    apis = (
         "Ljava/lang/StringBuilder;->append(Ljava/lang/String;)Ljava/lang/StringBuilder;",
         "Ljava/util/ArrayList;->add(Ljava/lang/Object;)Z",
         "Landroid/util/Log;->d(Ljava/lang/String;Ljava/lang/String;)I",
-    ):
+    )
+    # (api, caller, offset, reg) for every argument the RAW layer flags.
+    expected = {
+        (api, s.caller_descriptor, s.bytecode_offset, a.reg_num)
+        for api in apis
+        for s in dk.resolve_call_args(api)
+        for a in s.args
+        if a.crossed_branch
+    }
+    require_corpus_shape(
+        bool(expected),
+        "call site with a merge-discarded argument among the probe APIs",
+        "the shape is ordinary code; its absence means resolve_call_args stopped "
+        "flagging discarded definitions at all",
+    )
+
+    seen = set()
+    for api in apis:
         out = tools.execute(
             "resolve_call_args", {"method_descriptor": api, "limit": 500}, dk
         )
+        json.dumps(out)  # the payload must stay JSON-serialisable
         for site in out.get("items", []):
-            if any(a.get("varies_by_path") for a in site["args"]):
-                json.dumps(out)
-                return
-    pytest.skip("no conditional argument in this fixture APK")
+            for a in site["args"]:
+                if a.get("crossed_branch"):
+                    assert a["kind"] == "Unknown", a
+                    seen.add((api, site["caller"], site["bytecode_offset"]))
+    # `limit` truncates, so require overlap rather than equality: at least one raw-flagged
+    # site must come back flagged through the tool.
+    assert seen & {(a, c, o) for a, c, o, _ in expected}, (
+        f"the raw layer flags {len(expected)} discarded arguments but the tool "
+        f"reported none of their sites — the compact dict dropped the key"
+    )
 
 
 def test_new_xref_tools_execute_without_error(dk):

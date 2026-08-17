@@ -669,7 +669,7 @@ which carries the real control flow.
 for s in dk.resolve_call_args(API):
     a = s.args[1]
     if a.kind == "ConstString":      trust(a.string_value)   # holds on every path
-    elif a.crossed_branch:           conditional(s)          # ≥2 possible values
+    elif a.crossed_branch:           unproven(s)             # a definition was discarded
     else:                            untracked(s)
 ```
 

@@ -161,7 +161,7 @@ def test_a_catch_handler_is_entered_with_an_empty_state(loadable_apks):
     stop rather than a radius. Asserting BOTH is what keeps this from degenerating
     into "everything is Unknown".
 
-    Two guards in `AnalyzeMethodInvokes` produce this, and each MASKS the other: the
+    Two guards in `AnalyzeInvokes` produce this, and each MASKS the other: the
     BFS stops at a handler, and a handler's IN is forced empty. Removing either alone
     is unobservable (verified over the whole corpus); removing BOTH lets a value leak
     in, and this is the test that catches it.

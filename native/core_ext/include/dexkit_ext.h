@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include "invoke_args.h"
+
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -374,10 +376,10 @@ public:
     // ConstClass / Parameter / FieldRead / MethodReturn / Unknown origin via
     // basic-block-scoped forward register simulation. `depth` is how many
     // predecessor levels of basic blocks are searched above the call site's own
-    // block (0 = that block alone); see DexItem::AnalyzeMethodInvokes.
+    // block (0 = that block alone); see dexkit::ext::AnalyzeInvokes.
     [[nodiscard]] std::vector<ResolvedCallSite>
     ResolveCallArgs(std::string_view api_descriptor,
-                    uint32_t depth = DexItem::kDefaultArgDepth);
+                    uint32_t depth = dexkit::ext::kDefaultArgDepth);
 
     // L2.5 — field access-site xref. Which methods READ (iget*/sget*) or WRITE
     // (iput*/sput*) the given field, from the core's field_get/put_method_ids

@@ -1,6 +1,6 @@
 """The L4 analyzer's opcode enumeration is COMPLETE (dexllm#32).
 
-``AnalyzeMethodInvokes``' ``default:`` clears no register, so every opcode that
+``AnalyzeInvokes``' ``default:`` clears no register, so every opcode that
 WRITES one must appear in a non-default branch. Miss one and a stale origin
 survives its own overwrite and is reported as an unconditional definite value —
 the worst failure this API has, since it exists to answer "which string was passed
@@ -32,7 +32,7 @@ _TABLE = (
     _ROOT
     / "vendor/dexkit_core/Core/third_party/slicer/export/slicer/dex_instruction_list.h"
 )
-_SRC = _ROOT / "vendor/dexkit_core/Core/dexkit/dex_item.cpp"
+_SRC = _ROOT / "native/core_ext/invoke_args.cpp"
 
 # Opcodes whose operand A is a register the instruction only READS. Everything else
 # carrying kVerifyRegA / kVerifyRegAWide writes it. Matched on the slicer table's own

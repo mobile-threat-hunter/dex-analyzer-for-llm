@@ -96,6 +96,35 @@ The payoff is concrete, not theoretical: because the domain only knows the port,
 `MockCodeSource` lets the 25 DAD parity suites exercise the full pipeline **without a
 real APK or DexKit** — the same property hexagonal architecture exists to provide.
 
+## What else lives in `native/core_ext/`
+
+Besides the adapter, `core_ext` is where dexllm's own analyses over DexKit live —
+the ones the vendored Core has no business carrying:
+
+| Analysis | What | Where |
+|---|---|---|
+| Structural verification | `VerifyDex` — the load-time gate, see below | [dex_verifier.h](../native/core_ext/include/dex_verifier.h) |
+| L4 argument origins | `AnalyzeInvokes` — what value reaches each argument register at every invoke site of one method body. Backs `resolve_call_args`, and also the SITE IDENTITY (caller, offset, opcode) of `find_call_sites_from`, which calls it at depth 0 | [invoke_args.h](../native/core_ext/include/invoke_args.h) |
+| Permission / capability join | `analysis.*` — the permission → gated-API → caller join over a loaded `DexKitExt` | [analysis.h](../native/core_ext/include/analysis.h) |
+
+`AnalyzeInvokes` was written into `vendor/.../dex_item.cpp` as a `DexItem` member and
+moved here in dexllm#32. It enlarged the vendor diff in the file that is hardest to
+rebase, and it never needed to be a member: the whole input is one `dex::Code*` plus
+the end of the image it lives in, both reachable through the public `GetMethodCode()`
+/ `GetImage()`. The rule this records — **a dexllm analysis belongs in `core_ext`
+unless it genuinely needs DexKit's privates** — is the outward-facing counterpart of
+the `dad_cpp` boundary below, and it is why the vendored tree now carries ~860 fewer
+dexllm lines.
+
+Note this is a *different* boundary from the hexagonal one: `core_ext` may freely
+include DexKit headers (that is its job), and `invoke_args.cpp` does — two decode
+helpers it already used. Only `dad_cpp` is required to stay DexKit-free, which is why
+the include directory that reaches those helpers is **PRIVATE** to `dexkit_ext`: made
+PUBLIC it propagates to every `dad_cpp` TU, where a DexKit header would then compile
+while `check_dad_boundary.sh` still reports clean (its FORBIDDEN pattern does not match
+`utils/`). The compiler is half of that boundary's enforcement, and CMake visibility is
+what keeps it.
+
 ## Load-time verification — anti-corruption at the input boundary
 
 dexllm processes adversarial input, so before any dex reaches the core (let alone

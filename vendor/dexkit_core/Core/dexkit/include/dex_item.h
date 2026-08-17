@@ -166,97 +166,11 @@ public:
     [[nodiscard]] std::vector<InvokeSite>
     EnumerateInvokeSites(uint32_t method_idx) const;
 
-    // dexllm L4 extension hook — for each invoke-* site in this method,
-    // capture the argument registers' last-known definitions via a forward
-    // register simulation. The walker recognises:
-    //   const-string/const-string-jumbo, const-class, const/const-4/16/wide,
-    //   move/move-*, move-result/move-result-*, iget*/sget*, invoke-* + move-result.
-    // Anything else clears the affected register's tracked origin.
-    // Result vector is one entry per invoke-* instruction.
-    //
-    // BLOCK-WINDOWED (dexllm#32 pre-work) and JOIN-AWARE (dexllm#16). One pre-pass
-    // builds the code item's basic-block CFG (leaders, predecessor lists, catch
-    // handlers). For every block holding an invoke, the WINDOW is that block plus the
-    // blocks within `depth` predecessor edges of it; a forward dataflow over the
-    // window produces the block's incoming register state, and the arguments are read
-    // off it. Nothing outside the window is looked at, so `depth` is the whole
-    // analysis budget and the caller chooses it.
-    //
-    // `depth` counts predecessor LEVELS: 0 is the invoke's own block alone, the
-    // default 2 adds two levels above it. The window is a block SET, not a per-path
-    // budget — every block in it is analysed under the same boundary condition, so
-    // two paths that rejoin are compared with the same amount of history behind them.
-    // (A per-path budget would tombstone registers the paths genuinely agree on: an
-    // artefact of the accounting, not a fact about the code.)
-    //
-    // WITHIN the window the pass is path-INSENSITIVE but merge-correct: a definition
-    // survives a branch only if EVERY edge reaching the use carries the same one, so
-    // a register that differs per path becomes Unknown with `crossed_branch = true`
-    // and a genuinely conditional value is never reported as unconditional. An edge
-    // from OUTSIDE the window carries nothing, so it tombstones a register that some
-    // OTHER in-window edge does define — but a register no in-window edge defines is
-    // simply absent, i.e. Unknown with `crossed_branch = false`. A catch handler is
-    // reachable from any instruction of its try region with an unknown register file,
-    // so it starts EMPTY and the walk never goes above one; nothing is carried in, so
-    // nothing is tombstoned there either. Parameter registers are defined by the
-    // method ENTRY, so they are reported only when the window reaches the entry block.
-    //
-    // Still NOT a fixed point: a cycle inside the window is resolved by processing
-    // blocks farthest-first, and an edge from a block not yet resolved contributes
-    // nothing (which only removes information).
-    enum class ArgKind : uint8_t {
-        Unknown = 0,        // not tracked — see InvokeArg::crossed_branch
-        ConstString = 1,    // string literal, value at string_idx
-        ConstInt = 2,       // const/const-4/16 (32-bit), value at int_value
-        ConstWide = 3,      // const-wide* (64-bit), value at int_value
-        ConstClass = 4,     // const-class, type at type_idx
-        ConstNull = 5,      // const v, 0 / const-null
-        FieldRead = 6,      // iget*/sget*, field_idx
-        MethodReturn = 7,   // move-result after invoke, method_idx = callee
-        Parameter = 8,      // method parameter (initial register state)
-        NewInstance = 9,    // new-instance vAA, type@BBBB
-        NewArray = 10,      // new-array vA, vB, type@CCCC
-    };
-    struct InvokeArg {
-        ArgKind kind = ArgKind::Unknown;
-        uint16_t reg_num = 0;
-        uint32_t string_idx = 0;
-        int64_t int_value = 0;
-        uint32_t type_idx = 0;
-        uint32_t field_idx = 0;
-        uint32_t method_idx = 0;
-        int16_t parameter_index = -1;
-        // Only meaningful when kind == Unknown: this register HAD a tracked
-        // definition that a control-flow merge discarded — either the paths carry
-        // different values (a genuinely conditional argument) or one of the merged
-        // edges came from outside the analysis window / from a block not yet
-        // resolved, which also tombstones registers that happen to agree. So `true`
-        // means "a definition was discarded here", NOT "two values provably reach".
-        // The complement (`false` on an Unknown) means no tracked definition was
-        // FOUND WITHIN THE WINDOW — never tracked (arithmetic, aget, …), cleared by
-        // a later untracked write, defined further back than `depth` blocks with no
-        // merge in between, or inside a catch handler, which is entered with an
-        // EMPTY register file and therefore tombstones nothing. Raising `depth` can
-        // turn EITHER flavour into a value; neither flag is a promise that it will
-        // (a handler is a hard stop, not a radius).
-        bool crossed_branch = false;
-        // Internal to the simulation: this origin is 64-bit, so it owns reg_num AND
-        // reg_num+1 and any write to EITHER destroys it. Not surfaced to Python.
-        bool wide = false;
-    };
-    struct InvokeSiteWithArgs {
-        uint32_t method_idx;        // callee method_idx
-        uint32_t bytecode_offset;   // byte offset within insns
-        uint8_t opcode;
-        std::vector<InvokeArg> args;
-    };
-    // `depth` = predecessor levels of basic blocks searched above the invoke's own
-    // block. kDefaultArgDepth is the API-wide default; 0 restricts the analysis to
-    // the invoke's own block.
-    static constexpr uint32_t kDefaultArgDepth = 2;
-    [[nodiscard]] std::vector<InvokeSiteWithArgs>
-    AnalyzeMethodInvokes(uint32_t method_idx,
-                         uint32_t depth = kDefaultArgDepth) const;
+    // The L4 argument-origin analysis that used to be declared here moved to
+    // native/core_ext/include/invoke_args.h (dexllm#32). It is a dexllm analysis, not
+    // upstream DexKit, and it needs nothing private from this class: GetMethodCode()
+    // and GetImage() are the whole input.
+
 
     // dexllm L5 extension — baksmali-style text rendering of a method body
     // or a full class. Uses slicer's DecodeInstruction / GetOpcodeName /

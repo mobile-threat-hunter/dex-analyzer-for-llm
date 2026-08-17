@@ -1,5 +1,7 @@
 #include "dexkit_ext.h"
 
+#include "invoke_args.h"
+
 #include <algorithm>
 #include <array>
 #include <cstring>  // memcmp (raw-dex magic sniff)
@@ -1771,8 +1773,21 @@ void DexKitExt::EnsureApiResolveIndex() {
 
 namespace {
 
-const char* ArgKindName(dexkit::DexItem::ArgKind k) {
-    using K = dexkit::DexItem::ArgKind;
+// The L4 analysis moved out of the vendored core (dexllm#32), so its two inputs --
+// the decoded code item and the end of the image it lives in -- are read here through
+// DexItem's public accessors and handed over.
+std::vector<dexkit::ext::InvokeSiteWithArgs>
+AnalyzeInvokesOf(const dexkit::DexItem& item, uint32_t method_idx, uint32_t depth) {
+    const dex::Code* code = item.GetMethodCode(method_idx);
+    if (code == nullptr) return {};
+    const dex::u1* img_end = nullptr;
+    if (const MemMap* img = item.GetImage())
+        img_end = reinterpret_cast<const dex::u1*>(img->data()) + img->len();
+    return dexkit::ext::AnalyzeInvokes(code, img_end, depth);
+}
+
+const char* ArgKindName(dexkit::ext::ArgKind k) {
+    using K = dexkit::ext::ArgKind;
     switch (k) {
         case K::ConstString:  return "ConstString";
         case K::ConstInt:     return "ConstInt";
@@ -1806,7 +1821,7 @@ std::string BuildFieldSignature(const dexkit::DexItem& item, uint32_t field_idx)
 }
 
 ArgOrigin ConvertArg(const dexkit::DexItem& item,
-                     const dexkit::DexItem::InvokeArg& src) {
+                     const dexkit::ext::InvokeArg& src) {
     ArgOrigin o;
     o.kind = ArgKindName(src.kind);
     o.reg_num = src.reg_num;
@@ -1814,7 +1829,7 @@ ArgOrigin ConvertArg(const dexkit::DexItem& item,
     const auto& reader = item.GetReader();
     const auto& strings = item.GetStrings();
     const auto& type_names = item.GetTypeNames();
-    using K = dexkit::DexItem::ArgKind;
+    using K = dexkit::ext::ArgKind;
     switch (src.kind) {
         case K::ConstString:
             if (src.string_idx < strings.size())
@@ -1988,7 +2003,7 @@ DexKitExt::ResolveCallArgs(std::string_view api_descriptor, uint32_t depth) {
     for (const auto& cr : CollectApiCallers(core_.get(), api_resolve_index_, target_class,
                                             target_name, target_proto)) {
         const auto& item = *cr.item;
-        auto sites = item.AnalyzeMethodInvokes(cr.caller_idx, depth);
+        auto sites = AnalyzeInvokesOf(item, cr.caller_idx, depth);
         std::string caller_sig = BuildMethodSignature(item, cr.caller_idx);
         for (const auto& s : sites) {
             if (s.method_idx != cr.local_target) continue;
@@ -2076,7 +2091,7 @@ DexKitExt::FindCallSitesFromMethod(std::string_view method_descriptor) {
     std::string caller_sig = BuildMethodSignature(item, m_idx);
     // Only the site identity is used here, never the arguments, so the window is the
     // call's own block: depth 0 is the cheapest way to ask for exactly that.
-    for (const auto& s : item.AnalyzeMethodInvokes(m_idx, /*depth=*/0)) {
+    for (const auto& s : AnalyzeInvokesOf(item, m_idx, /*depth=*/0)) {
         CallSite cs;
         cs.caller_dex_id = item.GetDexId();
         cs.caller_method_idx = m_idx;
