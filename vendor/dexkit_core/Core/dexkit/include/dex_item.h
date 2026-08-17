@@ -240,6 +240,9 @@ public:
         // turn EITHER flavour into a value; neither flag is a promise that it will
         // (a handler is a hard stop, not a radius).
         bool crossed_branch = false;
+        // Internal to the simulation: this origin is 64-bit, so it owns reg_num AND
+        // reg_num+1 and any write to EITHER destroys it. Not surfaced to Python.
+        bool wide = false;
     };
     struct InvokeSiteWithArgs {
         uint32_t method_idx;        // callee method_idx

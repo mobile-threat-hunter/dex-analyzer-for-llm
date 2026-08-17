@@ -644,6 +644,23 @@ parameter register yields `Unknown` at the header rather than the loop-carried v
 Raising `depth` can turn **either** flavour into a value; neither flag promises it
 will, because a catch handler is a hard stop rather than a radius.
 
+"Cleared by a later untracked write" is the load-bearing half of that table. The
+fall-through branch of the analyzer's opcode switch clears nothing, so a writer it
+does not enumerate leaves the previous origin in place and reports a value the code had
+overwritten — with `crossed_branch` `False`, i.e. as unconditional. The enumeration is
+machine-checked against slicer's own instruction table by
+`tests/test_arg_opcode_coverage.py`, and dexllm#32 closed the seven holes it found
+(ART's runtime-only `iget-*-quick` forms, which reach the analyzer because `VerifyInsns`
+bounds registers and indices but has no opcode-legality gate, so a dex carrying one
+verifies clean in both strict and lenient mode).
+
+Enumeration completeness is **necessary but not sufficient** for that row: a 64-bit
+value occupies a register PAIR, so it is also destroyed by a write to either half.
+dexllm#32 closed the aliasing direction too (a narrow write to `vN+1` now invalidates a
+wide origin at `vN`). Both are crafted-input corrections — no dex in the test corpus
+carries either shape — so they change no result you can observe on ordinary input; they
+bound what a hostile or odex-derived one can make this API assert.
+
 Reading `int_value` / `string_value` without checking `kind` yields a silent `0` / `""`
 for both `Unknown` flavours — check `kind` first. For an argument whose value depends
 on a branch, decompile the caller (`decompile_method` / `decompile_method_ast`),

@@ -1887,6 +1887,7 @@ Cfg BuildCfg(const dex::Code* code, const dex::u1* img_end) {
         const int64_t off = in.off;
         switch (op) {
             case 0x0E: case 0x0F: case 0x10: case 0x11:  // return*
+            case 0x73:  // return-void-no-barrier (ART odex form of 0x0E)
             case 0x27:                                   // throw
                 in.falls = false;
                 break;
@@ -2129,14 +2130,30 @@ DexItem::AnalyzeMethodInvokes(uint32_t method_idx, uint32_t depth) const {
             return (dex::GetVerifyFlagsFromOpcode(static_cast<dex::Opcode>(opcode)) &
                     dex::kVerifyRegAWide) != 0;
         };
+        // The ALIASING direction of the same fact, and the one the comment above does
+        // NOT cover: a 64-bit value parked at vN-1 also owns vN, so ANY write to vN
+        // destroys it — including a narrow one. Without this, `const-wide v0` followed
+        // by `const/16 v1` still reported the whole original 64-bit constant for v0,
+        // with crossed_branch FALSE, i.e. a confidently wrong value on a dex that
+        // verifies strict-valid (dexllm#32 adversarial review). `wide` records that a
+        // stored origin owns the next register; it is set from the DEFINING opcode, so
+        // a `move-wide` / `move-result-wide` carries it without a second opcode list.
+        auto kill_wide_alias = [&](uint16_t r) {
+            if (r == 0) return;
+            auto it = st.find(static_cast<uint16_t>(r - 1));
+            if (it != st.end() && it->second.wide) st.erase(it);
+        };
         auto set_reg_op = [&](uint16_t r, InvokeArg a, uint8_t opcode) {
             a.reg_num = r;
+            a.wide = is_wide_dest(opcode);
             st[r] = a;
-            if (is_wide_dest(opcode)) st.erase(static_cast<uint16_t>(r + 1));
+            if (a.wide) st.erase(static_cast<uint16_t>(r + 1));
+            kill_wide_alias(r);
         };
         auto erase_reg_op = [&](uint16_t r, uint8_t opcode) {
             st.erase(r);
             if (is_wide_dest(opcode)) st.erase(static_cast<uint16_t>(r + 1));
+            kill_wide_alias(r);
         };
         auto set_reg = [&](uint16_t r, InvokeArg a) { set_reg_op(r, a, cur_op); };
 
@@ -2317,6 +2334,24 @@ DexItem::AnalyzeMethodInvokes(uint32_t method_idx, uint32_t depth) const {
                     has_last_invoke = false;
                     break;
                 }
+                // ---- iget-*-quick: WRITES vA, and there is nothing to track ----
+                // ART's runtime-only forms (k22c, dest vA like the iget* above, and
+                // `iget-wide-quick` is kVerifyRegAWide so the high half goes too).
+                // Their operand is a vtable/field OFFSET, not a field_idx, so the
+                // value has no recoverable origin — but the register IS overwritten,
+                // and `default:` clears nothing, so leaving them there let a stale
+                // origin survive its own overwrite and be reported as an
+                // UNCONDITIONAL value (no crossed_branch). They reach us because
+                // VerifyInsns bounds registers and indices and has no opcode-legality
+                // gate, so a dex carrying one verifies clean in BOTH strict and
+                // lenient mode; an odex-derived packer dump is the realistic source.
+                // The iput-*-quick siblings (0xE6-0xE8, 0xEB-0xEE) READ vA and so
+                // must NOT be listed here.
+                case 0xE3: case 0xE4: case 0xE5:
+                case 0xEF: case 0xF0: case 0xF1: case 0xF2:
+                    erase_reg_op(A, op);
+                    has_last_invoke = false;
+                    break;
                 // ---- sget* family: writes to vAA from field@BBBB ----
                 case 0x60: case 0x61: case 0x62: case 0x63: case 0x64: case 0x65:
                 case 0x66: {
@@ -2421,6 +2456,20 @@ DexItem::AnalyzeMethodInvokes(uint32_t method_idx, uint32_t depth) const {
                     has_last_invoke = false;
                     break;
 
+                // Reaching here must mean the opcode WRITES NO REGISTER, because this
+                // branch clears nothing: an unhandled writer would let a stale origin
+                // survive its own overwrite and be reported as an unconditional value.
+                // The enumeration above is therefore a completeness obligation, not a
+                // convenience, and it is machine-checked against slicer's own
+                // instruction table by tests/test_arg_opcode_coverage.py.
+                //
+                // The opcodes that legitimately land here WITH a register in operand A
+                // only READ it, so preserving the origin is correct and wanted:
+                // monitor-enter/exit, fill-array-data, aput* (0x4B-0x51), iput*
+                // (0x59-0x5F), sput* (0x67-0x6D), iput-*-quick (0xE6-0xE8, 0xEB-0xEE),
+                // and check-cast (0x1F), whose whole point is that the VALUE is
+                // unchanged — clearing it would lose the origin across every
+                // `(String) x` cast.
                 default:
                     has_last_invoke = false;
                     break;
