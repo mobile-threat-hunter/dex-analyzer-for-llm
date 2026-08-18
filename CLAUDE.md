@@ -1119,6 +1119,188 @@ annotation definer-match (`CheckInterAnnotationsDirectoryItem`'s "does this fiel
 annotation belong to the annotated class" — a wrong-answer gap, not crash
 surface), and `hiddenapi_class_data` (not parsed by the core).
 
+### `invoke-polymorphic` is not false-rejected — `arg[]` is a per-FORMAT layout (dexllm#58, 2026-08-18)
+
+`VerifyInsns`' vararg-register loop bounded `d.arg[0..vA-1]` for **every** opcode
+carrying `kVerifyVarArg`. Its comment ("args in d.arg[0..vA-1]") is true for `35c`
+and **false for `45cc`** — `invoke-polymorphic` (0xFA), the only other varargs
+form, which carries a SECOND index. The slicer decodes it
+([dex_bytecode.cc:280](vendor/dexkit_core/Core/third_party/slicer/dex_bytecode.cc#L280))
+as `vC` = the first argument register, `arg[0..3]` = vD..vG, and
+**`arg[4]` = proto@HHHH**. So the window was **shifted by one at every arity**:
+
+1. **`vC` was bounded by NOTHING**, at every `A`. 0xFA's flags are
+   `kVerifyRegBMethod | kVerifyVarArgNonZero | kVerifyRegHPrototype` — no
+   `kVerifyRegC` — so the one loop that was supposed to cover the argument list
+   skipped the register at the front and read one slot too many at the end.
+2. **At `A == 5` that extra slot IS the proto index, and the shift became a FALSE
+   REJECT.** Reproduced on an **unmodified AOSP file** —
+   `tools/dexter/testdata/method_handles.dex` — whose 16 `invoke-polymorphic`
+   sites include exactly two with `A == 5`; replaying the verifier's own predicate
+   (widths from the vendored `dex_instruction_list.h`, decode mirrored from
+   `dex_bytecode.cc`) isolates them: `verifier_checks=[2,3,1,4,82]` and
+   `[2,3,1,4,91]` against `registers_size=5`, where 82 and 91 are prototype
+   indices. `DexKit(path)` raised, `verify()` said `code: vararg register out of
+   range`, and nothing in that APK could be analysed. Below `A == 5` the extra
+   slot is an unused nibble, which a compiler zeroes — which is why only `A == 5`
+   ever showed up on real output, and why the other 14 sites,
+   `art/test/dexdump/invoke-custom.dex` and `const-method-handle.dex` (all
+   `A <= 4`) load fine and the defect went unseen for as long as it did.
+
+**A false reject is the one failure direction an ADDED check has that ART's own
+verifier cannot** (`VerifyInsns` is this port's single deliberate non-port), and
+this repo already ranks it: dexllm#57 declines to reject spec-legal `0x15`/`0x16`
+encoded values precisely because "rejecting them would false-reject real apps,
+which is strictly worse than a throw". Here it was not hypothetical — and an
+affected APK does not degrade, it is refused. `lenient=True` was the only way in,
+and it disables *every* instruction-operand check rather than this one.
+
+**Fix** ([dex_verifier.cpp](native/core_ext/dex_verifier.cpp)): branch the loop on
+the instruction FORMAT — for `k45cc` the argument sequence is
+`{vC, arg[0], arg[1], arg[2], arg[3]}` truncated to `vA`, and `arg[4]` is not a
+register. `fmt` was already computed a few lines below for the index-operand check
+and only needed hoisting. The branch is **complete, not a heuristic**:
+`kVerifyVarArg[NonZero]` appears on exactly two formats in the slicer's own table
+— `k35c` (8 opcodes) and `k45cc` (0xFA alone) — which a guard re-derives from
+`dex_instruction_list.h` so a third would fail rather than fall through.
+`invoke-polymorphic/range` (0xFB, `k4rcc`) is untouched: it carries
+`kVerifyVarArgRangeNonZero`, and the range branch reads `vC`/`vA`, never `arg[]`.
+
+The sequence is **ART's own**, not a re-derivation: an adversarial reviewer used
+`Instruction::GetVarArgs` (`dex_instruction-inl.h:563`) as the oracle — ART uses
+the SAME function for 35c and 45cc, filling `arg[0..4]` with C,D,E,F,G, and
+`CheckVarArgRegs` bounds `idx < vA` — so `{d.vC, d.arg[0..3]}` is exactly the set
+ART checks.
+
+**Corollary, stated because something got LESS checked:** the proto index used to
+be bounded against `registers_size` **by accident**, and now is bounded by
+nothing. That matches the documented index-operand scope (`kIndexMethodAndProtoRef`
+and `kIndexCallSiteRef` both fall to the `default:` arm), and nothing dereferences
+either — `ResolveConstRef` returns `monostate` and the invoke collectors gate on
+the 0x6E-0x72 / 0x74-0x78 opcodes. The comment above that switch used to claim the
+bound outright ("so the core never asks the slicer for a nonexistent id"); it now
+says which kinds it covers and that a consumer which starts reading the others
+must add the bound in the same change.
+
+**Measured (a/b OFF vs ON, SAME script, both `.so` md5-verified — `69aa8ffc…` OFF
+and `4e4a8d35…` ON, and the ON build bit-reproducing its md5 after the swap):**
+49 sources — the whole bundled corpus, the committed `tests/data/multidex.apk`,
+every `art/test/dexdump/*.dex`, and the dexter testdata dex — × {strict verify,
+lenient verify, load, `dex_count`, `verify_report`, class list, and a smali +
+decompile digest over the first 40 classes} = **319 axis records, 6 changed, ALL
+of them on `method_handles.dex`** and all in the direction rejected → loads (24
+classes). **0 other source moved on any axis**, and `lenient` verdicts are
+unchanged everywhere (lenient already accepted it, which is the asymmetry that
+made the defect survivable rather than invisible). parity 29/29, pytest 677
+passed / 6 skipped, corpus-less 274 passed / 409 skipped / 0 failed, narrowed to
+`tests/data/multidex.apk` 580 passed, the guard file green narrowed to **each of
+the 34 bundled samples one at a time** (25 APK + 9 bare dex) plus the committed
+one, sweep 27,018-class / 229,537 method-block
+0-crash 0-timeout, determinism 3 processes × 3 `PYTHONHASHSEED`s identical, lint
+trio clean.
+
+Unlike most changes in this file the a/b is **not** required to be byte-identical:
+the corpus carries no `invoke-polymorphic` at all — 0 occurrences of 0xFA / 0xFB /
+0xFC / 0xFD across all 33 dex-bearing sources (the 32 bundled ones plus the
+committed `tests/data/multidex.apk`), counted with the PRODUCT's
+own decoder (a `render_class_smali` sweep) rather than a hand-rolled instruction
+walk, which is not pedantry: a hand-rolled width walk written for this section
+desynchronised on payload-bearing methods and reported a confident 88 before the
+cross-check killed it. So a 0-diff would have proved only that the corpus is
+quiet. The 6 changed records ARE the mechanism firing. A reviewer also ran a
+**13,216-case differential fuzz** (all 256 opcodes × 6 A|G patterns × 6 operand
+patterns, plus 4,000 random) in place on `tests/data/multidex.apk` against both
+builds: **7 verdicts differ, all on 0xFA**, 6 of them accept→REJECT (the new `vC`
+bound) and the single relaxation is `A=1` with a nonzero *unused* vD nibble —
+i.e. the old code over-rejecting, which ART also accepts.
+
+**Guards** (9 functions / 13 collected cases, in
+[tests/test_verifier_invoke_polymorphic.py](tests/test_verifier_invoke_polymorphic.py)),
+crafted from `tests/data/multidex.apk` — the one container this repo commits — so
+they hold in the corpus-less CI leg and under any `$DEXLLM_TEST_APK` narrowing,
+and the AOSP dex is evidence rather than a dependency (the sole exception is the
+no-false-reject floor, which walks the loaded corpus and SKIPS where there is
+none). The craft is length-preserving to the code unit: an instruction prefix
+measuring exactly 4 code units (`invoke-direct` + `return-void`, in a method with
+no try/catch) is overwritten by one 4-unit instruction, so `insns_size`, every
+later instruction boundary and every section offset are untouched (verified: 688 →
+688 bytes, all 5 differing bytes inside the window), and the fixture asserts the
+prefix's SHAPE before patching so a substituted container fails loudly instead of
+being patched at a wrong offset. **The proto index is the fixture's load-bearing
+knob**: the acceptance guard needs it ABOVE `registers_size` (or the pre-fix build
+accepts too and the guard proves nothing), and the register guards need it BELOW
+(or the pre-fix build rejects on `arg[4]` and they pass against the very defect
+they exist to catch).
+
+**6 mutants, each BUILT and RUN, each killed by its intended guard.** Four were
+enumerated from the diff; **the two that mattered most were CONSTRUCTED BY THE
+REVIEW**, and both passed the entire suite (672 passed at the time) plus
+`ctest 29/29` before the guards were extended:
+
+| mutant | guard that kills it |
+|---|---|
+| pre-fix build | 6 fail — the false reject AND the unchecked `vC` |
+| branch present, `regs45` filled from `arg[0..4]` (a cosmetic-looking refactor) | 6 fail |
+| `45cc` stops at `arg[3]`, still ignores `vC` — the plausible half-fix | 5 fail — only the parametrised `vC` guard |
+| the `45cc` sequence applied to EVERY format (35c then checks `arg[0]` twice and never reaches the fifth register) | `test_the_fifth_register_of_a_35c_invoke_is_still_checked` |
+| **`45cc` drops the fifth argument register `vG`** (the obvious way to kill the false reject alone) | `test_the_last_argument_register_of_a_polymorphic_is_checked` |
+| **`vC` appended at the END of the sequence** — restores the unchecked-`vC` half for `A ∈ 1..4` while still passing at `A == 5` | the `vC` guard at arities 1-4 (arity 5 passes, exactly as predicted) |
+
+The last two are the finding both reviewers reached independently: the original
+guards pinned **2 of the 5 slots at 1 of the 5 arities**, so they proved `vC` was
+*in* the sequence and never that it was *first*. `test_the_first_argument_register_of_a_polymorphic_is_checked`
+is now parametrised over `A ∈ 1..5` (`vC` is an argument whenever `A >= 1`) and a
+`vG` fixture covers the far end.
+
+**Reviewers: 2 independent, 0 findings in the code.** Both re-derived the format
+enumeration from the vendored table, both reproduced the AOSP evidence to the
+digit (16 sites, `A` distribution `{2:1, 3:12, 4:1, 5:2}`), both rebuilt the a/b,
+and both confirmed no new dereference (a crafted `A=5` polymorphic with
+`meth@0xFFFF, proto@0xFFFF` — rejected pre-fix, accepted now — through load /
+warm / smali / decompile / AST / xref / `resolve_call_args` / capabilities / IOC:
+no crash, no hang). Every finding was in the guards or the prose: the two mutants
+above, three published counts each exactly one too low (a test had been added
+after the numbers were measured), the `A == 5` framing that understated the defect
+to a one-arity problem, the index-comment overstatement, and a claim that the
+adjacent findings below had been "filed" when they had not.
+
+**Adjacent, found on the same walk and recorded here** (the same "the vendored
+toolchain predates invoke-dynamic" family as dexllm#57, where the slicer's
+`encoded_value` parser stops at 16 of 18 types). All are wrong-ANSWER or
+missing-output gaps — no crash, no load refusal — and all are **0-incidence across
+the bundled corpus** (see above), so no corpus a/b can see them; measured on the
+file this fix un-blocks (24 classes / 142 methods):
+* `render_*_smali` prints **16** lines of `invoke-polymorphic <unhandled-fmt-29>`
+  — the smali emitter has no `k45cc`/`k4rcc` case.
+* **6 of 142 methods** emit `// DECOMPILE ERROR: malformed bytecode: null operand
+  to MoveExpression` — the IR builder does not model 0xFA, so the following
+  `move-result-object` finds no invoke and hits the documented null-guard at
+  [instruction.cpp:274](native/dad_cpp/instruction.cpp#L274). Contained and
+  reported, but the method is lost.
+* `DexItem::GetInvokeMethodsFromCode` selects invokes by FORMAT (`k35c || k3rc`),
+  which is wrong in both directions. `invoke-polymorphic` is missed entirely:
+  `MethodHandle;->invoke` / `invokeExact` are both in
+  `list_external_method_refs()` and 16 methods carry the opcode, yet
+  `find_call_sites_to` answers **0** for each — so the caller xref, and every
+  consumer built on it, is silently blind to those sites. Conversely
+  `invoke-custom` (0xFC) IS `k35c`, but its `BBBB` is a **call_site** index, so an
+  unrelated method id enters `method_invoking_ids` — bounded, and absorbed
+  downstream (the visible paths re-enumerate real invoke opcodes, so no bogus
+  `find_call_sites_to` row was observed on `invoke-custom.dex`), i.e. wrong data
+  in the index rather than in an answer.
+
+**Two notes so they are not rediscovered as regressions of this change:**
+`art/test/dexdump/all.dex` is refused on BOTH builds (`code: vC wide register out
+of range` — a wide pair whose high half is outside a 3-register frame, genuinely
+spec-invalid, and it loads under `lenient=True`, which is exactly the split that
+mode exists for). And a reviewer saw the full suite die non-deterministically
+(`Segmentation fault` / `Bus error` in `safe.py:_worker`) on BOTH this build and
+HEAD while two agents were building concurrently; three full runs here with
+nothing else building were clean (677 passed twice, the third cut by a harness
+timeout). The likely cause is the shared worktree — `pip install -e .` REPLACES
+the mmap'd `.so` under a running interpreter, which is a textbook `SIGBUS` — but
+that is a hypothesis, not a measurement.
+
 ### Skills
 
 `dexkit-build` is the production rebuild loop (ninja + pip install). Use `/dexkit-build` after any C++ change.

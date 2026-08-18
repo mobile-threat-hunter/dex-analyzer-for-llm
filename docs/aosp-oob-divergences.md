@@ -126,6 +126,19 @@ keep-vs-remove decision.
   bytecode spec (slicer `VerifyFlags`/`IndexType` tables). This is an *addition*,
   not a guard-on-an-AOSP-function — it is the deliberate one-line non-port called
   out in `dex_verifier.h`.
+- **Known cost, and the shape it takes (dexllm#58):** an ADDED check can only
+  fail in one direction ART's own verifier cannot — by rejecting a dex ART
+  accepts. It happened: the vararg-register loop read `Instruction::arg[]` for
+  every opcode carrying `kVerifyVarArg`, which is where the argument registers
+  live for `35c` and NOT for `45cc` (`invoke-polymorphic`), whose `arg[4]` holds
+  a second index (proto@HHHH) and whose first argument register lives in `vC`.
+  The window was shifted by one at EVERY arity — `vC` unchecked at the front, one
+  slot too many at the end — and at `A == 5` that extra slot IS the proto index,
+  so an unmodified AOSP dex (`tools/dexter/testdata/method_handles.dex`, two such
+  sites, proto 82/91 against 5 registers) was refused outright. Fixed by branching
+  on the instruction FORMAT; the durable lesson is in `dex_verifier.h`'s
+  divergence paragraph — an operand check must be read against the decoder's
+  per-format layout, not against the flag's name.
 - **Assessment:** intentional, foundational to the "0-crash on malformed dex"
   contract. Not a removal candidate — listed here for completeness because its
   purpose is OOB prevention.

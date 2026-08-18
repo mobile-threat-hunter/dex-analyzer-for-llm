@@ -810,6 +810,7 @@ bool DexVerifier::VerifyInsns(const u2* insns, u4 insns_size, u2 registers_size)
             const dex::Opcode op = dex::OpcodeFromBytecode(first);
             const dex::Instruction d = dex::DecodeInstruction(p);
             const dex::VerifyFlags vf = dex::GetVerifyFlagsFromOpcode(op);
+            const dex::InstructionFormat fmt = dex::GetFormatFromOpcode(op);
 
             // Register operands. A kVerifyReg* bit is set only when that field is
             // truly a register; index/branch fields use distinct bits.
@@ -826,9 +827,31 @@ bool DexVerifier::VerifyInsns(const u2* insns, u4 insns_size, u2 registers_size)
             if ((vf & dex::kVerifyRegCWide) && !check_reg(d.vC + 1))
                 return Fail("code: vC wide register out of range");
             if (vf & (dex::kVerifyVarArg | dex::kVerifyVarArgNonZero)) {
-                // d.vA = arg count (<= 5); args in d.arg[0..vA-1].
+                // WHERE THE ARGUMENT REGISTERS LIVE IS FORMAT-DEPENDENT, and reading
+                // d.arg[] for both formats is dexllm#58: 45cc (invoke-polymorphic,
+                // the only non-35c varargs form) carries a SECOND index — proto@HHHH
+                // — which DecodeInstruction parks in d.arg[4] (dex_bytecode.cc k45cc),
+                // while its first argument register goes to d.vC. So the window was
+                // SHIFTED BY ONE at every arity: vC unchecked at the front (0xFA's
+                // flags carry no kVerifyRegC either), one slot too many at the end.
+                // At A == 5 that extra slot IS the proto index, which is where the
+                // shift stopped being cosmetic and REJECTED a spec-legal dex (an
+                // AOSP dexter testdata dex, two sites, proto 82/91 vs 5 registers);
+                // below 5 it read an unused nibble, which a compiler zeroes.
+                // Corollary: the proto index used to be bounded here BY ACCIDENT and
+                // now is bounded by nothing — consistent with the index-operand scope
+                // below, and nothing dereferences it. 35c fills arg[0..vA-1]
+                // with the registers and mirrors the first into vC, so it reads
+                // straight. 4rcc takes the RANGE branch below and never touches arg[].
+                // The branch is COMPLETE, not a heuristic: kVerifyVarArg[NonZero]
+                // appears on exactly two formats in the slicer's own table — k35c
+                // (8 opcodes) and k45cc (0xFA alone). A third would be a silent
+                // hole, so tests/test_verifier_invoke_polymorphic.py re-derives
+                // that enumeration from dex_instruction_list.h and fails on one.
+                const u4 regs45[5] = {d.vC, d.arg[0], d.arg[1], d.arg[2], d.arg[3]};
                 for (u4 k = 0; k < d.vA && k < 5; ++k) {
-                    if (!check_reg(d.arg[k])) return Fail("code: vararg register out of range");
+                    const u4 reg = (fmt == dex::k45cc) ? regs45[k] : d.arg[k];
+                    if (!check_reg(reg)) return Fail("code: vararg register out of range");
                 }
             }
             if (vf & (dex::kVerifyVarArgRange | dex::kVerifyVarArgRangeNonZero)) {
@@ -842,8 +865,13 @@ bool DexVerifier::VerifyInsns(const u2* insns, u4 insns_size, u2 registers_size)
             // Index operand — only the kinds the const-pool path dereferences
             // (matches method_snapshot_builder ResolveConstRef: pick vC for
             // k22c/k22cs, else vB). Out-of-table index → reject so the core never
-            // asks the slicer for a nonexistent id.
-            const dex::InstructionFormat fmt = dex::GetFormatFromOpcode(op);
+            // asks the slicer for a nonexistent id — FOR THOSE KINDS. The default
+            // arm is not "no index": kIndexMethodAndProtoRef (invoke-polymorphic)
+            // and kIndexCallSiteRef (invoke-custom) carry indices that are bounded
+            // by NOTHING here. That is safe only because nothing dereferences them
+            // (ResolveConstRef returns monostate; the invoke collectors gate on the
+            // 0x6E-0x72 / 0x74-0x78 opcodes), so a consumer that starts reading
+            // them must add the bound in the same change.
             const u4 ridx = (fmt == dex::k22c || fmt == dex::k22cs) ? d.vC : d.vB;
             switch (dex::GetIndexTypeFromOpcode(op)) {
                 case dex::kIndexStringRef:

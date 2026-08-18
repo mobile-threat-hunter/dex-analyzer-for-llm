@@ -74,6 +74,15 @@
 //   be larger AND less traceable than reusing the table the core already ships.
 //   SCOPE LINE: layout/bounds only. Instruction *semantics* (type/dataflow
 //   verification) are out of scope — that IS the runtime method verifier.
+//   COUPLING TO WATCH (dexllm#58): reusing the slicer's decoder also inherits its
+//   FIELD LAYOUT, and that layout is per-FORMAT, not per-flag. `Instruction::arg[]`
+//   holds the argument registers for 35c, but for 45cc (invoke-polymorphic) it
+//   ends with a second INDEX — proto@HHHH — while the first argument register
+//   goes to vC. Reading arg[] uniformly for kVerifyVarArg therefore bounded a
+//   proto index against registers_size (a spec-legal dex REJECTED, which is
+//   strictly worse than any throw) and left vC bounded by nothing. A new operand
+//   check must be read against dex_bytecode.cc's decode for EVERY format that
+//   sets the flag, never against the flag's name.
 //
 // ── OUT OF SCOPE (stated so the boundary is discoverable, not a silent gap) ──
 //   * Instruction type/dataflow semantics — runtime method_verifier, not ported.
