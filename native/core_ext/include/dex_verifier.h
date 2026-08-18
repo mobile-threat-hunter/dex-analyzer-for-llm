@@ -37,7 +37,13 @@
 //                              type_list, class_def, class_data, code_item
 //                              (VerifyCodeItem == ART CheckIntraCodeItem :1726),
 //                              encoded_array/encoded_value (VerifyEncodedArrayAt
-//                              == ART CheckEncodedArray :1225 — static_values_off)
+//                              == ART CheckEncodedArray :1225 — static_values_off),
+//                              and the annotations subtree off annotations_off
+//                              (VerifyAnnotationsDirectory == ART
+//                              CheckIntraAnnotationsDirectoryItem :2111 +
+//                              CheckIntraAnnotationItem :2056, fused with the
+//                              offset-following of CheckInterAnnotationsDirectory
+//                              Item :3276 — dexllm#56)
 //   CheckInterSection :3477  — cross-refs: id ordering/uniqueness; descriptor
 //                              syntax for EVERY type_id (CheckInterTypeIdItem
 //                              :2735) as well as the field/method/class_def
@@ -71,11 +77,32 @@
 //
 // ── OUT OF SCOPE (stated so the boundary is discoverable, not a silent gap) ──
 //   * Instruction type/dataflow semantics — runtime method_verifier, not ported.
-//   * annotations, call_site/method_handle — lazy-parsed by the core; left to the
-//     guards below, not pre-verified. (encoded_array IS verified, see above.)
+//   * call_site/method_handle — not dereferenced by the core.
 //   * debug_info — dexllm never parses it; not verified by design.
 //   * adler32 checksum — intentionally not verified (project policy; ART itself
 //     only warns when verify_checksum=false — aosp-wiki dexfileverifier.md).
+//   * ART's offset_to_type_map_ / CheckOffsetToTypeMap (:2564) — NOT ported, and
+//     the reason is structural rather than an omission: ART is MAP-driven (it
+//     walks every section item by item and records offset -> map type, then
+//     checks each reference against it), this port is REFERENCE-driven (it walks
+//     from the header's tables and validates whatever each offset points AT).
+//     The equivalent guarantee is therefore per-structure: every offset the core
+//     dereferences — type_list, class_data, encoded_array, and since dexllm#56
+//     the annotations subtree — is checked to decode as what its referrer claims
+//     it is. What is genuinely lost is TYPE CONFUSION as a category: an offset
+//     that happens to decode cleanly as the expected structure is accepted here
+//     and rejected by ART.
+//
+//   ANNOTATIONS WERE ON THAT LIST UNTIL dexllm#56, and how they got off it is
+//   the cautionary half. They were excused as "lazy-parsed by the core", which
+//   was true and irrelevant: Reader::ExtractAnnotations runs off class_def.
+//   annotations_off during cache init, so "lazy" meant "later", not "never", and
+//   a 4-byte repoint of that offset produced a dex this gate called valid in
+//   BOTH modes on which the slicer's ParseAnnotation walked off the end — a
+//   SIGSEGV, which no catch(...) can contain. Combined with the paragraph above
+//   the channel needed two omissions at once, so either one alone would have
+//   blocked it. When adding a section to this list, the question is not whether
+//   the core parses it EAGERLY; it is whether the core parses it AT ALL.
 //
 // ── THE OTHER GUARDS: why each exists, and why none are redundant deletions ───
 // VerifyDex is the single LOAD-TIME gate for malformed-dex *structure*. The guards

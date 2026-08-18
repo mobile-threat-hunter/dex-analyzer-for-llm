@@ -108,9 +108,10 @@ class_def semantics) — **plus** `VerifyInsns`, an instruction-operand bounds p
 that ART keeps in the *runtime* method_verifier (deliberately not vendored), here
 re-derived from the Dalvik bytecode spec. **Intentional differences from ART:**
 adler32/SHA-1 still **not** checked (policy — checksums are not a crash vector and
-malware routinely lies about them); instruction *dataflow* semantics, annotations,
+malware routinely lies about them); instruction *dataflow* semantics,
 call_site/method_handle, debug_info are out of scope (documented in
-`dex_verifier.h`). The slicer's own `Reader::ValidateHeader()` still runs after as
+`dex_verifier.h`). Annotations were on that list until dexllm#56 — see the
+`annotation_item` row below for why "the core lazy-parses it" was the wrong test. The slicer's own `Reader::ValidateHeader()` still runs after as
 a second cheap sanity layer; per-item decode problems beyond the verifier's scope
 still surface lazily as `SLICER_CHECK` → `std::runtime_error`, skipping that method.
 
@@ -151,7 +152,9 @@ Legend: ✅ ported (behavioural parity) · ⊕ beyond ART's *structural* verifie
 | class_data_item | ✅ `VerifyClassData` |
 | **per-instruction operand bounds** (reg / index / branch / switch / array target) | ⊕ `VerifyInsns` — **not in ART's structural verifier** (it lives in the 6032-line runtime `method_verifier`); re-derived from the Dalvik spec via the slicer's VerifyFlags/IndexType tables |
 | debug_info_item | ◐ dexllm never parses it |
-| annotation_item / annotations_directory / hiddenapi | ◐ lazy, not on the decompile path |
+| annotations_directory / annotation_set(_ref_list) / annotation_item | ✅ `VerifyAnnotationsDirectory` (= ART `CheckIntraAnnotationsDirectoryItem` :2111 + `CheckIntraAnnotationItem` :2056, fused with the offset-following of `CheckInterAnnotationsDirectoryItem` :3276) — added for dexllm#56. The row used to read "◐ lazy, not on the decompile path", which was true of the *decompile* path and false of the one that mattered: `Reader::ExtractAnnotations` runs off `class_def.annotations_off` during cache init, so a 4-byte repoint of that offset produced a dex `verify()` called valid in both modes on which `ParseAnnotation` walked off the end (SIGSEGV, uncatchable). The walk covers exactly what `reader.cc` dereferences, and requires the three per-member offsets to be non-zero as ART does — for the parameter one that is load-bearing rather than parity, since `ExtractAnnotationSetRefList` has no zero guard and would read the dex header as a list |
+| hiddenapi_class_data | ◐ not parsed by the core |
+| annotation definer-match (a field/method annotation belongs to the annotated class) | ◐ not checked — a wrong-answer gap, not crash surface |
 | method / field access_flags validity | ⚠ not checked (raw flags used; not a crash vector) |
 
 **CheckInterSection (ART :3477)**
@@ -167,7 +170,7 @@ Legend: ✅ ported (behavioural parity) · ⊕ beyond ART's *structural* verifie
 | class_data — member access flags (`CheckFieldAccessFlags` / `CheckMethodAccessFlags` :934/:961) · `CheckStaticFieldTypes` :1289 (a static field's declared type vs its `encoded_array` initializer) · orphan class_data (ART drives from the MAP and requires a `class_def`; this port drives from `class_defs`) | ◐ not checked — wrong-answer gaps, not crash surface. The `CheckStaticFieldTypes` one is *relied upon* today: `tests/test_mutf8_identifiers.py::test_astral_type_in_a_field_initializer_decompiles` retypes a static value `0x17`→`0x18` and expects the dex to load. Orphan class_data is inert (the core walks `class_defs`, never the map) |
 | proto shorty ↔ descriptor match | ◐ correctness-only (descriptors themselves are verified) |
 | annotations definer-match · call_site / method_handle inter | ◐ not dereferenced |
-| `CheckOffsetToTypeMap` (offset matches its declared map-item type) | ⚠ not checked — contents are validated directly (`VerifyTypeList`/`VerifyClassData`/`VerifyEncodedArrayAt`) so it stays crash-safe, but type-confusion of an offset is caught by ART, not here |
+| `CheckOffsetToTypeMap` (offset matches its declared map-item type) | ⚠ not checked — contents are validated directly (`VerifyTypeList`/`VerifyClassData`/`VerifyEncodedArrayAt`/`VerifyAnnotationsDirectory`) so it stays crash-safe, but type-confusion of an offset is caught by ART, not here. **That sentence was false for annotations until dexllm#56** and the gap was exactly this one plus the missing walk: with no type map, "the contents are validated directly" has to hold for *every* referenced structure, and one exception is a crash. ART is map-driven (walk each section, record `offset -> type`, check references against it); this port is reference-driven (walk from the header's tables, validate what each offset points at) — so a section the port never walks is a section nothing checks at all |
 
 **Bottom line:** the structural crash surface is at ART parity (plus `VerifyInsns`
 goes beyond it); every divergence is either an *execution-trust* check (checksums,

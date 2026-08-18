@@ -8,10 +8,28 @@ retired and every caller of the warm / caller-xref family blocked forever — on
 dex the structural verifier calls **valid**, because annotations are documented
 as out of its scope.
 
-The fixture crafts exactly that: it repoints one class_def's `annotations_off`
-at the map_list, which is a well-formed offset holding the wrong structure. The
-craft is IN PLACE and length-preserving, so every other section, offset and
-checksum-independent field is untouched and the dex still verifies.
+THE VEHICLE CHANGED IN dexllm#56, and the reason is worth keeping. The original
+fixture repointed one class_def's `annotations_off` at the map_list — a
+well-formed offset holding the wrong structure — which worked only because
+`annotations_off` was checked by nothing. #56 closed that (the verifier now walks
+the whole annotations subtree), so this fixture could no longer be built: the
+guards below went from green to nine hard errors, correctly naming the reason.
+
+The replacement is a channel #56 deliberately does NOT close, and cannot. The
+vendored slicer's `Reader::ParseEncodedValue` implements 16 of the 18 dex
+encoded_value types: `0x15 METHOD_TYPE` and `0x16 METHOD_HANDLE` are missing and
+hit its `SLICER_CHECK(!"unexpected value type")`. Both are legal per the dex
+spec (invoke-dynamic constants, API 26+), so the verifier accepting them is
+CORRECT — rejecting them at the gate would false-reject real apps, which is
+strictly worse than the throw. Retyping one annotation element to `0x16` is
+therefore a ONE-BYTE craft that yields a dex verifying valid in both modes, on
+which the annotation walk inside cache init throws — and, unlike the old
+vehicle, one no future verifier improvement can take away.
+
+(That the slicer does not implement two spec-legal value types is a separate,
+pre-existing gap: a genuine dex carrying a `MethodHandle` constant fails to load.
+It is 0-incidence across the bundled corpus, so nothing here depends on it being
+rare, only on it being a THROW rather than a crash.)
 
 Every call that could hang runs in a SUBPROCESS with a deadline. A regression
 must FAIL the suite, not hang it — an in-process assertion cannot do that.
@@ -37,25 +55,68 @@ TIMEOUT_S = 90
 _ANNOTATIONS_OFF = 20
 _CLASS_DEF_SIZE = 32
 
+# encoded_value types whose payload is exactly `arg + 1` bytes, i.e. the ones a
+# retype to 0x16 leaves byte-for-byte the same length. Retyping anything else
+# would shift every following element and the craft would stop verifying — which
+# is a real trap, not a hypothetical: the fixture would then silently fall
+# through to the next candidate instead of doing what it says.
+_SAME_WIDTH_AS_METHOD_HANDLE = frozenset(
+    {0x00, 0x02, 0x03, 0x04, 0x06, 0x10, 0x11, 0x17, 0x18, 0x19, 0x1A, 0x1B}
+)
+_ENCODED_METHOD_HANDLE = 0x16
+
+
+def _uleb(raw: bytearray, off: int) -> tuple[int, int]:
+    r = s = 0
+    while True:
+        x = raw[off]
+        off += 1
+        r |= (x & 0x7F) << s
+        s += 7
+        if not (x & 0x80):
+            return r, off
+
 
 def _craft(src: pathlib.Path, dst: pathlib.Path) -> bool:
-    """Repoint the first nonzero `annotations_off` at the map_list.
+    """Retype one annotation element to `0x16 METHOD_HANDLE` (see the module doc).
 
-    Returns False when `src` declares no annotated class, i.e. the shape this
-    guard needs is absent from that file.
+    The element is reached the way the slicer reaches it — class_def ->
+    annotations_directory -> class_annotations_off -> set -> item -> the first
+    element's encoded_value header. Only the TYPE bits change; the `arg` bits,
+    and therefore the element's width, are preserved.
+
+    Returns False when `src` offers no such element, i.e. the shape this guard
+    needs is absent from that file.
     """
     raw = bytearray(src.read_bytes())
     if raw[:4] != b"dex\n":
         return False
-    map_off = struct.unpack_from("<I", raw, 0x34)[0]
+
+    def u32(o: int) -> int:
+        return struct.unpack_from("<I", raw, o)[0]
+
     cds_size, cds_off = struct.unpack_from("<II", raw, 0x60)
     for i in range(cds_size):
-        p = cds_off + i * _CLASS_DEF_SIZE + _ANNOTATIONS_OFF
-        if struct.unpack_from("<I", raw, p)[0] == 0:
+        d = u32(cds_off + i * _CLASS_DEF_SIZE + _ANNOTATIONS_OFF)
+        if d == 0:
             continue
-        struct.pack_into("<I", raw, p, map_off)
-        dst.write_bytes(bytes(raw))
-        return True
+        class_annotations_off = u32(d)
+        if class_annotations_off == 0:
+            continue
+        for k in range(u32(class_annotations_off)):
+            item = u32(class_annotations_off + 4 + 4 * k)
+            p = item + 1  # past the visibility byte
+            _type_idx, p = _uleb(raw, p)
+            size, p = _uleb(raw, p)
+            if size == 0:
+                continue
+            _name_idx, p = _uleb(raw, p)
+            header = raw[p]
+            if (header & 0x1F) not in _SAME_WIDTH_AS_METHOD_HANDLE:
+                continue
+            raw[p] = (header & 0xE0) | _ENCODED_METHOD_HANDLE
+            dst.write_bytes(bytes(raw))
+            return True
     return False
 
 
@@ -103,8 +164,8 @@ def broken_cache_dex(tmp_path_factory):
 
     require_corpus_shape(
         craftable > 0,
-        "bare .dex declaring an annotated class whose crafted annotations_off "
-        "breaks cache init",
+        "bare .dex declaring a class annotation whose first element can be "
+        "retyped to METHOD_HANDLE and break cache init",
         "the #55 fixture can no longer be built, so the hang is unguarded",
     )
     pytest.fail(

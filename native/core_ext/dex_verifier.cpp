@@ -24,6 +24,7 @@
 
 #include <cstring>
 #include <exception>
+#include <unordered_set>
 #include <vector>
 
 #include "slicer/dex_bytecode.h"  // VerifyInsns: decode + VerifyFlags/IndexType
@@ -417,6 +418,30 @@ private:
     bool VerifyClassData(u4 off);
     bool VerifyEncodedArrayAt(u4 off);              // ART CheckEncodedArray :1225
     bool VerifyEncodedValue(const u1** pp, int depth);  // ART CheckEncodedValue :1049
+    // ── annotations subtree (dexllm#56) ──────────────────────────────────────
+    // ART splits these across its two phases: the item structure in
+    // CheckIntraAnnotationsDirectoryItem :2111 / CheckIntraAnnotationItem :2056 /
+    // the CheckList cases for annotation_set(_ref_list) :2284/:2290, and the
+    // offsets between them in CheckInterAnnotationsDirectoryItem :3276 (which
+    // resolves each through CheckOffsetToTypeMap :2564). This port is
+    // REFERENCE-driven where ART is MAP-driven, so the two halves fuse into one
+    // recursive walk from class_def.annotations_off — the same shape
+    // VerifyClassData / VerifyEncodedArrayAt / VerifyTypeList already use for
+    // the other class_def offsets. See the header's OUT OF SCOPE note for what
+    // that costs (offset_to_type_map_ is not ported, here or anywhere).
+    bool VerifyAnnotationsDirectory(u4 off);
+    bool VerifyAnnotationSet(u4 off);
+    bool VerifyAnnotationSetRefList(u4 off);
+    bool VerifyAnnotationItem(u4 off);
+    // A bare encoded_annotation (no 0x1d value header). Shared by the 0x1d
+    // ARRAY-element form and by annotation_item, which stores it raw.
+    bool VerifyEncodedAnnotation(const u1** pp, int depth);
+    // 4-aligned, in-image header of a fixed-size annotation struct. The
+    // alignment is not cosmetic: the slicer asserts it (reader.cc
+    // ExtractAnnotations / ExtractAnnotationSet / ExtractAnnotationSetRefList
+    // each SLICER_CHECK_EQ(offset % 4, 0)), so checking it here turns a throw
+    // from deep inside the parser into a reject with a byte-level reason.
+    bool AnnotationStructAt(u4 off, size_t sz, const char* who, const u1** out);
     bool VerifyClassDefs();  // ART CheckInterClassDefItem :2935
     // ART CheckInterClassDataItem :3208 — EVERY member a class_data declares
     // must name `cls` as its defining class. ART loops all fields (:3226) and
@@ -468,6 +493,15 @@ private:
     bool check_insns_ = true;  // false = ART-structural-equivalent (skip VerifyInsns)
     const dex::Header* header_ = nullptr;
     std::string reason_;
+    // Annotation offsets already walked, per structure kind. The slicer memoises
+    // the same way (reader.cc annotations_directories_ / annotation_sets_ /
+    // annotations_), so this matches what it actually parses — and it is what
+    // keeps the walk LINEAR: nothing stops a dex from pointing every class_def
+    // at one directory, or every set entry at one item, and re-walking a shared
+    // subtree per reference is quadratic in exactly the way dexllm#20's declared-
+    // string index was. Per-kind because one offset may legally be reachable as
+    // two different structures.
+    std::unordered_set<u4> seen_ann_dir_, seen_ann_set_, seen_ann_ref_, seen_ann_item_;
 };
 
 bool DexVerifier::CheckHeader() {
@@ -964,30 +998,196 @@ bool DexVerifier::VerifyEncodedValue(const u1** pp, int depth) {
             }
             return true;
         }
-        case 0x1d: {                                                               // ANNOTATION
+        case 0x1d:                                                                 // ANNOTATION
             if (arg != 0) return Fail("encoded annotation arg");
-            u4 type_idx, size;
-            if (!ReadUleb(pp, &type_idx)) return Fail("encoded_annotation bad type");
-            if (type_idx >= header_->type_ids_size) return Fail("encoded_annotation type idx");
-            if (!ReadUleb(pp, &size)) return Fail("encoded_annotation bad size");
-            for (u4 i = 0; i < size; ++i) {
-                u4 name_idx;
-                if (!ReadUleb(pp, &name_idx)) return Fail("encoded_annotation bad name");
-                if (name_idx >= header_->string_ids_size) return Fail("encoded_annotation name idx");
-                if (!VerifyEncodedValue(pp, depth + 1)) return false;
-            }
-            return true;
-        }
+            return VerifyEncodedAnnotation(pp, depth);
         default: return Fail("encoded_value bad type code");
     }
+}
+
+// encoded_annotation (ART CheckEncodedAnnotation :1177) — a bare
+// (uleb type_idx, uleb size, then `size` × (uleb name_idx, encoded_value)). The
+// 0x1d value header above only wraps it when it is NESTED inside another value;
+// annotation_item stores this form raw, exactly as encoded_array_item stores a
+// bare array. `depth` is the CALLER's depth: elements recurse one deeper, so the
+// kMaxDepth cap in VerifyEncodedValue bounds this walk too.
+bool DexVerifier::VerifyEncodedAnnotation(const u1** pp, int depth) {
+    u4 type_idx, size;
+    if (!ReadUleb(pp, &type_idx)) return Fail("encoded_annotation bad type");
+    if (type_idx >= header_->type_ids_size) return Fail("encoded_annotation type idx");
+    if (!ReadUleb(pp, &size)) return Fail("encoded_annotation bad size");
+    for (u4 i = 0; i < size; ++i) {
+        u4 name_idx;
+        if (!ReadUleb(pp, &name_idx)) return Fail("encoded_annotation bad name");
+        if (name_idx >= header_->string_ids_size) return Fail("encoded_annotation name idx");
+        if (!VerifyEncodedValue(pp, depth + 1)) return false;
+    }
+    return true;
+}
+
+// ── annotations subtree (dexllm#56) ──────────────────────────────────────────
+// Reached from class_def.annotations_off. Before this, that offset was checked by
+// NOTHING — not that it is in range, and not that it points at an annotations_
+// directory rather than at some other section — because annotations were listed
+// out of scope on the grounds that the core lazy-parses them. It does parse them
+// (Reader::ExtractAnnotations, off the class_def), so "lazy" meant "later", not
+// "never", and a 4-byte repoint yielded a dex verify() called valid on which the
+// slicer's ParseAnnotation walked off the end: SIGSEGV, which no catch(...) sees.
+//
+// The walk below covers EXACTLY what reader.cc dereferences, in the same order:
+//   ExtractAnnotations      -> directory header, class_annotations_off, 3 lists
+//   ParseField/MethodAnnotation -> each annotations_off -> ExtractAnnotationSet
+//   ParseParamAnnotation    -> annotations_off -> ExtractAnnotationSetRefList
+//   ExtractAnnotationSet    -> entries[i] -> ExtractAnnotationItem
+//   ExtractAnnotationItem   -> visibility byte + ParseAnnotation (encoded_annotation)
+// so a dex that passes cannot make that parser leave the image.
+bool DexVerifier::AnnotationStructAt(u4 off, size_t sz, const char* who, const u1** out) {
+    if ((off & 3u) != 0) return Fail(std::string(who) + ": misaligned offset");
+    const u1* p = OffsetToPtr(off);
+    if (p < begin_ || !CheckListSize(p, 1, sz, who)) return false;
+    *out = p;
+    return true;
+}
+
+// ART CheckIntraAnnotationsDirectoryItem :2111 + CheckInterAnnotationsDirectoryItem
+// :3276 (see the declaration comment for why they fuse here).
+bool DexVerifier::VerifyAnnotationsDirectory(u4 off) {
+    if (!seen_ann_dir_.insert(off).second) return true;
+    const u1* p;
+    if (!AnnotationStructAt(off, sizeof(dex::AnnotationsDirectoryItem),
+                            "annotations_directory", &p)) {
+        return false;
+    }
+    const auto* dir = reinterpret_cast<const dex::AnnotationsDirectoryItem*>(p);
+    // Only the CLASS annotations may be absent (ART :3283 guards this one on != 0,
+    // and ExtractAnnotationSet(0) returns nullptr). The three per-member offsets
+    // below may not — ART checks them unconditionally, and the slicer's
+    // SLICER_CHECK_NE(annotations, nullptr) agrees.
+    if (dir->class_annotations_off != 0 && !VerifyAnnotationSet(dir->class_annotations_off)) {
+        return false;
+    }
+
+    // The three lists follow the header contiguously, in this order.
+    const auto* fa = reinterpret_cast<const dex::FieldAnnotationsItem*>(dir + 1);
+    if (!CheckListSize(fa, dir->fields_size, sizeof(dex::FieldAnnotationsItem),
+                       "field_annotations list")) {
+        return false;
+    }
+    u4 last = 0;
+    for (u4 i = 0; i < dir->fields_size; ++i, ++fa) {
+        if (!CheckIndex(fa->field_idx, header_->field_ids_size, "field annotation")) return false;
+        if (i != 0 && last >= fa->field_idx) {
+            return Fail("Out-of-order field_idx for annotation");
+        }
+        last = fa->field_idx;
+        if (fa->annotations_off == 0) return Fail("field_annotation annotations_off is 0");
+        if (!VerifyAnnotationSet(fa->annotations_off)) return false;
+    }
+
+    const auto* ma = reinterpret_cast<const dex::MethodAnnotationsItem*>(fa);
+    if (!CheckListSize(ma, dir->methods_size, sizeof(dex::MethodAnnotationsItem),
+                       "method_annotations list")) {
+        return false;
+    }
+    last = 0;
+    for (u4 i = 0; i < dir->methods_size; ++i, ++ma) {
+        if (!CheckIndex(ma->method_idx, header_->method_ids_size, "method annotation")) return false;
+        if (i != 0 && last >= ma->method_idx) {
+            return Fail("Out-of-order method_idx for annotation");
+        }
+        last = ma->method_idx;
+        if (ma->annotations_off == 0) return Fail("method_annotation annotations_off is 0");
+        if (!VerifyAnnotationSet(ma->annotations_off)) return false;
+    }
+
+    const auto* pa = reinterpret_cast<const dex::ParameterAnnotationsItem*>(ma);
+    if (!CheckListSize(pa, dir->parameters_size, sizeof(dex::ParameterAnnotationsItem),
+                       "parameter_annotations list")) {
+        return false;
+    }
+    last = 0;
+    for (u4 i = 0; i < dir->parameters_size; ++i, ++pa) {
+        if (!CheckIndex(pa->method_idx, header_->method_ids_size, "parameter annotation method")) {
+            return false;
+        }
+        if (i != 0 && last >= pa->method_idx) {
+            return Fail("Out-of-order method_idx for annotation");
+        }
+        last = pa->method_idx;
+        // Non-zero is load-bearing here, not just ART parity: unlike
+        // ExtractAnnotationSet, ExtractAnnotationSetRefList has NO zero guard, so
+        // offset 0 reads the dex HEADER as a set_ref_list and takes its `size`
+        // from the magic bytes.
+        if (pa->annotations_off == 0) return Fail("parameter_annotation annotations_off is 0");
+        if (!VerifyAnnotationSetRefList(pa->annotations_off)) return false;
+    }
+    return true;
+}
+
+// annotation_set_item — ART verifies it as CheckList(sizeof(uint32_t)) :2290,
+// i.e. a u4 count then that many u4 offsets, each an annotation_item (:3186).
+bool DexVerifier::VerifyAnnotationSet(u4 off) {
+    if (!seen_ann_set_.insert(off).second) return true;
+    const u1* p;
+    if (!AnnotationStructAt(off, sizeof(dex::AnnotationSetItem), "annotation_set", &p)) {
+        return false;
+    }
+    const auto* set = reinterpret_cast<const dex::AnnotationSetItem*>(p);
+    if (!CheckListSize(set->entries, set->size, sizeof(u4), "annotation_set entries")) return false;
+    for (u4 i = 0; i < set->size; ++i) {
+        // ExtractAnnotationItem SLICER_CHECK_NE(offset, 0), and ART's
+        // CheckOffsetToTypeMap can never resolve 0 either.
+        if (set->entries[i] == 0) return Fail("annotation_set entry offset is 0");
+        if (!VerifyAnnotationItem(set->entries[i])) return false;
+    }
+    return true;
+}
+
+// annotation_set_ref_list — ART CheckList(sizeof(AnnotationSetRefItem)) :2284.
+bool DexVerifier::VerifyAnnotationSetRefList(u4 off) {
+    if (!seen_ann_ref_.insert(off).second) return true;
+    const u1* p;
+    if (!AnnotationStructAt(off, sizeof(dex::AnnotationSetRefList), "annotation_set_ref_list",
+                            &p)) {
+        return false;
+    }
+    const auto* rl = reinterpret_cast<const dex::AnnotationSetRefList*>(p);
+    if (!CheckListSize(rl->list, rl->size, sizeof(dex::AnnotationSetRefItem),
+                       "annotation_set_ref_list entries")) {
+        return false;
+    }
+    for (u4 i = 0; i < rl->size; ++i) {
+        // 0 IS legal here and means "this parameter carries no annotations" —
+        // ExtractAnnotationSetRefList skips such an entry. The asymmetry with the
+        // three offsets above is the slicer's, and ART's.
+        u4 e = rl->list[i].annotations_off;
+        if (e != 0 && !VerifyAnnotationSet(e)) return false;
+    }
+    return true;
+}
+
+// ART CheckIntraAnnotationItem :2056 — a visibility byte then a bare
+// encoded_annotation. Byte-aligned (ART's kDexTypeAnnotationItem is in the
+// 1-align group), so this one does NOT go through AnnotationStructAt.
+bool DexVerifier::VerifyAnnotationItem(u4 off) {
+    if (!seen_ann_item_.insert(off).second) return true;
+    const u1* p = OffsetToPtr(off);
+    if (p < begin_ || !CheckListSize(p, 1, sizeof(u1), "annotation_item")) return false;
+    const u1 vis = *p++;
+    if (vis != dex::kVisibilityBuild && vis != dex::kVisibilityRuntime &&
+        vis != dex::kVisibilitySystem) {
+        return Fail("Bad annotation visibility");
+    }
+    return VerifyEncodedAnnotation(&p, 0);
 }
 
 // ── CheckIntraSection (ART :2450) ────────────────────────────────────────────
 // Per-item internal structure: string_data(MUTF-8), type/proto/field/method id
 // index validity, type_list, class_def + class_data + code_item (incl. VerifyInsns
 // instruction-operand bounds). These are the items InitBaseCache and the decompile
-// path dereference. Out of scope (see dex_verifier.h): encoded_array(static
-// values), annotations, debug_info, call_site/method_handle — lazy-parsed.
+// path dereference, plus the encoded_array and annotations subtrees the slicer's
+// Reader walks off a class_def. Out of scope (see dex_verifier.h): debug_info,
+// call_site/method_handle.
 bool DexVerifier::CheckIntraSection() {
     const u4 string_count = header_->string_ids_size;
     const u4 type_count = header_->type_ids_size;
@@ -1039,6 +1239,9 @@ bool DexVerifier::CheckIntraSection() {
         if (!VerifyTypeList(cd->interfaces_off, "class_def.interfaces")) return false;
         if (cd->class_data_off != 0 && !VerifyClassData(cd->class_data_off)) return false;
         if (cd->static_values_off != 0 && !VerifyEncodedArrayAt(cd->static_values_off)) {
+            return false;
+        }
+        if (cd->annotations_off != 0 && !VerifyAnnotationsDirectory(cd->annotations_off)) {
             return false;
         }
     }

@@ -47,7 +47,7 @@ DexKit ↔ DAD boundary: `MethodSnapshotBuilder::Build(IDexCodeSource&, dex_id, 
 
 Builder runs in 7 stages: decode → leaders → exception table → block split → CFG edges → payload attach. Strings come from DexItem (process-lifetime); snapshot lives shorter than DexItem.
 
-**Malformed-dex safety — a load-time structural verifier is the single gate (see [native/core_ext/dex_verifier.h](native/core_ext/include/dex_verifier.h), THE safety contract):** `dexkit::ext::VerifyDex(image, size, check_insns, header_off) → {ok, reason}` runs in `DexKitExt` *before* the core parses any dex — raw `.dex` before `AddImage`, each `classes*.dex` before feeding the core; a reject throws with a byte-level reason (siblings in an apk still load), surfaced via `dk.verify_report()`. **Once per LOGICAL dex, not per file (dexllm#25, 2026-08-08):** `AddImage` runs `ParseLogicalDexOffsets`, which splits ONE image into a `DexItem` per embedded `dex\n` header, so verifying the image once at offset 0 let every later logical dex reach the core UNVERIFIED — a crafted concatenation made `find_classes_by_name` SEGV on a file `verify_report()` called `valid: True` (the `DexItem` ctor throws inside AddImage's ThreadPool lambda, the exception is swallowed, and the core's search loops deref the null). `DexKitExt::CollectImage` now verifies every slice (`LogicalDexSlices` mirrors the core's split rule; `AssertLoadedDexesWereVerified` refuses the load if the mirror and the core ever disagree, or if any `DexItem` came back null). All-verified → the image is handed over WHOLE (no copy, byte-identical to before); some-rejected → the survivors are copied into images of their own (`image_origin_.base_offset` keeps `extract_dex()["offset"]` reporting the position in the ORIGINAL container). A v41 CONTAINER slice is not salvageable that way (its offsets address the container) so it is rejected alongside its sibling. `VerifyDex`'s span is now ART's `DexFile::GetDataRange` (`dex_file.cc:240`): a standard dex is bounded by its own `file_size` (ART's rule — the previous whole-image bound is what let a concatenated tail's sections roam), a **v41 container** dex is based at the container and bounded by `container_size` (siblings SHARE a data section, so its `string_ids_off` legitimately sits past its own `file_size`); ART's v41 header self-consistency block (`dex_file_verifier.cc:670`) is ported too. Verified against AOSP's own `art/test/dexdump/multidex-container.dex`: both dexes verify and load (HEAD verified only the first, loosely). **Two review-driven additions, both CONFIRMED by BOTH reviewers with a running SEGV:** (1) **`kMaxLoadedDexes` (65536)** — `AssertLoadedDexesWereVerified`'s null-item scan did `GetDexItem(static_cast<uint16_t>(i))`, and the core's dex_id plumbing is uint16_t throughout, so index 65536 WRAPPED to 0: the scan inspected dex 0 twice and a null `DexItem` at any id ≥ 65536 was never seen. Reproduced with 65536 valid dexes + one that `VerifyDex` accepts but the slicer rejects (`link_size`/`link_off`, outside every structural check) → `verify_report()` all-valid → `find_classes_by_name` → SIGSEGV; boundary pinned exactly (poison at 65535 throws, at 65536 escapes). Fixed by REFUSING the excess in `EmitSliceVerdicts` — a **session-total** running limit on `next_dex_id_`, not per-image (a reviewer's explicit follow-up: many small sources exceed it in aggregate too), so an unaddressable id is never handed out; `AssertLoadedDexesWereVerified` re-checks the bound rather than assuming it. (2) **an inflated v41 `container_size` is REJECTED, not clamped** — ART clamps (`min(size, container->End() - data)`), but the slicer's own `ValidateHeader` (`SLICER_CHECK_LE(ContainerSize() - ContainerOff(), size)`) does not, so clamping let `verify()` call a dex loadable that the loader then threw on — a break of the documented `verify()` ≡ `verify_report()` equality (reproduced with `container_size = 0xFFFFFF00`). A deliberate divergence from ART, catalogued in [docs/aosp-oob-divergences.md](docs/aosp-oob-divergences.md) A3/A4. **Measured:** a/b over 37 corpus sources × {identify, verify strict+lenient, load, dex_count, per-dex class hash, extract provenance + bytes} = **0 diff** (0 false-reject), load time 200.2ms → 195.2ms (noise), parity 28/28, sweep 25,309-class / 213,374-method 0-crash 0-timeout, pytest 261, determinism 3 processes byte-identical. Guards: [tests/test_verifier_logical_dex.py](tests/test_verifier_logical_dex.py) (9 of 11 verified to FAIL against a pre-fix rebuild; the 2 that pass are declared non-discriminating by design — the fixture sanity check and the corpus-wide row↔dex_id invariant, which must hold on both sides). **Known conservative limitation:** a v41 container whose sibling fails verification is rejected WHOLE (a container dex cannot be salvaged apart from the data section it shares), so recoverable dexes are dropped rather than risk cross-reading. It is a readable 1:1 port of AOSP ART `DexFileVerifier` (`art/libdexfile/dex/dex_file_verifier.cc`, `// ART :NNNN` anchors, AOSP as spec-reference not runtime dep): `CheckHeader`/`CheckMap`/`CheckIntraSection` (ids, string_data MUTF-8, type_list, class_def, class_data, code_item, encoded_array) / `CheckInterSection` (id ordering+uniqueness, descriptor-syntax for **every** `type_id` — `CheckInterTypeIdItem`, added for dexllm#23 — as well as the field/method/class_def references to one, member-name validity, class_def semantics). **One deliberate divergence:** `VerifyInsns` (instruction-operand bounds — register/index/branch/switch/array-data targets) is NOT in ART's *structural* verifier (those live in the 6032-line runtime method_verifier we refuse to vendor); it is our bounded checker anchored to the Dalvik bytecode spec via the slicer's VerifyFlags/IndexType tables. **Out of scope** (stated in the contract): instruction dataflow semantics, annotations, call_site/method_handle, debug_info, adler32. **Validated:** clean corpus 0 false-reject, parity 26/26 (incl. verifier regression+fuzz suite), 400+ fuzz 0-crash, full sweep 0-crash, **ASan corpus + malformed-dex fuzz = 0 heap-overflow/UAF/SEGV** (was 66/120 SEGV pre-verifier). The earlier scattered in-decode guards (builder `SafeAt`-style clamps, dexitem `SafeAt`, branch/payload bounds) were **removed as redundant** once the verifier owns structural validity — the decode path now has a "VerifyDex-validated input" precondition. The few kept guards are NOT redundant and documented in the contract: API-boundary `if(idx>=table.size())` (caller-supplied indices), builder `SafeWidth` (safe-wrapper for OOB-by-design `GetWidthFromBytecode`), and [instruction.cpp:274](native/dad_cpp/instruction.cpp#L274) IR null-guard on move-result-without-invoke (dataflow — structurally unverifiable).
+**Malformed-dex safety — a load-time structural verifier is the single gate (see [native/core_ext/dex_verifier.h](native/core_ext/include/dex_verifier.h), THE safety contract):** `dexkit::ext::VerifyDex(image, size, check_insns, header_off) → {ok, reason}` runs in `DexKitExt` *before* the core parses any dex — raw `.dex` before `AddImage`, each `classes*.dex` before feeding the core; a reject throws with a byte-level reason (siblings in an apk still load), surfaced via `dk.verify_report()`. **Once per LOGICAL dex, not per file (dexllm#25, 2026-08-08):** `AddImage` runs `ParseLogicalDexOffsets`, which splits ONE image into a `DexItem` per embedded `dex\n` header, so verifying the image once at offset 0 let every later logical dex reach the core UNVERIFIED — a crafted concatenation made `find_classes_by_name` SEGV on a file `verify_report()` called `valid: True` (the `DexItem` ctor throws inside AddImage's ThreadPool lambda, the exception is swallowed, and the core's search loops deref the null). `DexKitExt::CollectImage` now verifies every slice (`LogicalDexSlices` mirrors the core's split rule; `AssertLoadedDexesWereVerified` refuses the load if the mirror and the core ever disagree, or if any `DexItem` came back null). All-verified → the image is handed over WHOLE (no copy, byte-identical to before); some-rejected → the survivors are copied into images of their own (`image_origin_.base_offset` keeps `extract_dex()["offset"]` reporting the position in the ORIGINAL container). A v41 CONTAINER slice is not salvageable that way (its offsets address the container) so it is rejected alongside its sibling. `VerifyDex`'s span is now ART's `DexFile::GetDataRange` (`dex_file.cc:240`): a standard dex is bounded by its own `file_size` (ART's rule — the previous whole-image bound is what let a concatenated tail's sections roam), a **v41 container** dex is based at the container and bounded by `container_size` (siblings SHARE a data section, so its `string_ids_off` legitimately sits past its own `file_size`); ART's v41 header self-consistency block (`dex_file_verifier.cc:670`) is ported too. Verified against AOSP's own `art/test/dexdump/multidex-container.dex`: both dexes verify and load (HEAD verified only the first, loosely). **Two review-driven additions, both CONFIRMED by BOTH reviewers with a running SEGV:** (1) **`kMaxLoadedDexes` (65536)** — `AssertLoadedDexesWereVerified`'s null-item scan did `GetDexItem(static_cast<uint16_t>(i))`, and the core's dex_id plumbing is uint16_t throughout, so index 65536 WRAPPED to 0: the scan inspected dex 0 twice and a null `DexItem` at any id ≥ 65536 was never seen. Reproduced with 65536 valid dexes + one that `VerifyDex` accepts but the slicer rejects (`link_size`/`link_off`, outside every structural check) → `verify_report()` all-valid → `find_classes_by_name` → SIGSEGV; boundary pinned exactly (poison at 65535 throws, at 65536 escapes). Fixed by REFUSING the excess in `EmitSliceVerdicts` — a **session-total** running limit on `next_dex_id_`, not per-image (a reviewer's explicit follow-up: many small sources exceed it in aggregate too), so an unaddressable id is never handed out; `AssertLoadedDexesWereVerified` re-checks the bound rather than assuming it. (2) **an inflated v41 `container_size` is REJECTED, not clamped** — ART clamps (`min(size, container->End() - data)`), but the slicer's own `ValidateHeader` (`SLICER_CHECK_LE(ContainerSize() - ContainerOff(), size)`) does not, so clamping let `verify()` call a dex loadable that the loader then threw on — a break of the documented `verify()` ≡ `verify_report()` equality (reproduced with `container_size = 0xFFFFFF00`). A deliberate divergence from ART, catalogued in [docs/aosp-oob-divergences.md](docs/aosp-oob-divergences.md) A3/A4. **Measured:** a/b over 37 corpus sources × {identify, verify strict+lenient, load, dex_count, per-dex class hash, extract provenance + bytes} = **0 diff** (0 false-reject), load time 200.2ms → 195.2ms (noise), parity 28/28, sweep 25,309-class / 213,374-method 0-crash 0-timeout, pytest 261, determinism 3 processes byte-identical. Guards: [tests/test_verifier_logical_dex.py](tests/test_verifier_logical_dex.py) (9 of 11 verified to FAIL against a pre-fix rebuild; the 2 that pass are declared non-discriminating by design — the fixture sanity check and the corpus-wide row↔dex_id invariant, which must hold on both sides). **Known conservative limitation:** a v41 container whose sibling fails verification is rejected WHOLE (a container dex cannot be salvaged apart from the data section it shares), so recoverable dexes are dropped rather than risk cross-reading. It is a readable 1:1 port of AOSP ART `DexFileVerifier` (`art/libdexfile/dex/dex_file_verifier.cc`, `// ART :NNNN` anchors, AOSP as spec-reference not runtime dep): `CheckHeader`/`CheckMap`/`CheckIntraSection` (ids, string_data MUTF-8, type_list, class_def, class_data, code_item, encoded_array) / `CheckInterSection` (id ordering+uniqueness, descriptor-syntax for **every** `type_id` — `CheckInterTypeIdItem`, added for dexllm#23 — as well as the field/method/class_def references to one, member-name validity, class_def semantics). **One deliberate divergence:** `VerifyInsns` (instruction-operand bounds — register/index/branch/switch/array-data targets) is NOT in ART's *structural* verifier (those live in the 6032-line runtime method_verifier we refuse to vendor); it is our bounded checker anchored to the Dalvik bytecode spec via the slicer's VerifyFlags/IndexType tables. **Out of scope** (stated in the contract): instruction dataflow semantics, call_site/method_handle, debug_info, adler32, and ART's `offset_to_type_map_` (`CheckOffsetToTypeMap`) — the port is REFERENCE-driven where ART is MAP-driven, so the equivalent guarantee is per-structure and what is lost is type-confusion as a category. **`annotations` left that list in dexllm#56 (2026-08-18)** — see the section below; the short version is that "the core lazy-parses it" was the wrong test, and combined with the missing type map it was a SIGSEGV on a dex `verify()` called valid. **Validated:** clean corpus 0 false-reject, parity 26/26 (incl. verifier regression+fuzz suite), 400+ fuzz 0-crash, full sweep 0-crash, **ASan corpus + malformed-dex fuzz = 0 heap-overflow/UAF/SEGV** (was 66/120 SEGV pre-verifier). The earlier scattered in-decode guards (builder `SafeAt`-style clamps, dexitem `SafeAt`, branch/payload bounds) were **removed as redundant** once the verifier owns structural validity — the decode path now has a "VerifyDex-validated input" precondition. The few kept guards are NOT redundant and documented in the contract: API-boundary `if(idx>=table.size())` (caller-supplied indices), builder `SafeWidth` (safe-wrapper for OOB-by-design `GetWidthFromBytecode`), and [instruction.cpp:274](native/dad_cpp/instruction.cpp#L274) IR null-guard on move-result-without-invoke (dataflow — structurally unverifiable).
 
 **Adversarial-review hardening (2026-06-21):** a multi-agent code review found two crafted-input OOBs that random byte-flip fuzz never reached (now fixed + ASan-verified with the exact triggers; regression in `tests/test_verifier_oob.py`), plus a deep-recursion crash: (1) **`CheckHeader` ID-table span** — the section-bound check passed each table's element COUNT to `CheckValidOffsetAndSize`, which validates a BYTE size, so a dex whose `class_defs_size` fits as bytes but whose `count*sizeof(ClassDef=32)` overruns the file OOB-read *inside the verifier* (uncatchable by its try/catch). Fixed by also bounding the byte span with the overflow-safe `CheckListSize` for all six id tables ([dex_verifier.cpp](native/core_ext/dex_verifier.cpp) `CheckHeader`). (2) **payload parsers** — `ParsePackedSwitch/SparseSwitch/FillArrayPayload` ([method_snapshot_builder.cpp](native/dad_cpp/method_snapshot_builder.cpp)) trusted the payload's declared `size` ("fits by construction") but `VerifyInsns` only bounds a switch/fill-array *target* in-range, not that it points at a correctly-sized payload — a crafted target to a fabricated marker drove an unbounded heap-overread. Fixed by clamping each size-driven read to `end` (no-op on valid input; sweep 0-crash unchanged). (3) **emit-walk stack overflow** — the graph DFS/post_order passes were iterativized to survive large CFGs, but the structural emit walk (`Writer::VisitNode` / `JSONWriter::visit_node`) stayed recursive, so a crafted method with thousands of nested if/follow blocks overflows the native stack (an uncatchable SIGSEGV the per-method try/catch and `safe.py`'s hang-only wrapper can't contain). Fixed with a recursion-depth guard (cap 2000; throws → the existing catch yields an empty decompile; real methods never approach it — 0 hits across 25,309 classes, and the throw→catch path was verified by temporarily lowering the cap). All three fixes are DAD-parity-neutral (parity 28/28).
 
@@ -957,6 +957,167 @@ wrong first**: the generated per-case file sat in the same directory as the
 saved pre-fix `ThreadPool.h`, and a quoted `#include` searches the including
 file's own directory first — so BOTH halves compiled against the pre-fix header
 and the "post-fix" column was a copy of the "pre-fix" one.
+
+### The annotations subtree is verified — "the core lazy-parses it" was the wrong test (dexllm#56, 2026-08-18)
+
+`class_def.annotations_off` reached the decode path having been checked for
+NOTHING — not that it is in range, and not that it points at an
+annotations_directory rather than at some other section. It was excused as
+"annotations are lazy-parsed by the core", which is TRUE and IRRELEVANT: the core
+parses them (`Reader::ExtractAnnotations`, straight off the class_def, during
+`InitCache`), so "lazy" meant "later", not "never".
+
+**The result was a SIGSEGV on a dex `verify()` calls valid in BOTH modes** — the
+one failure this project's docs promise cannot happen ("0-crash on malformed
+dex", `VerifyDex` as "the single gate"). Reproduced exactly as filed: of 9 crafts
+(3 annotated corpus dexes x 3 target offsets, each a 4-byte offset-preserving
+repoint) **all 9 verified valid, 7 threw and 2 died**, the split decided by
+whichever `SLICER_CHECK` fired first rather than by any gate. Pre-existing — it
+reproduces on a rebuilt `7d5b34b`.
+
+**The channel needed TWO documented omissions at once**, either of which alone
+would have blocked every input: annotations, and ART's offset->map-type
+cross-check (`CheckOffsetToTypeMap` :2564). That second one is NOT ported and
+deliberately stays that way, but the reason had to be stated honestly:
+`docs/dexkit-vs-art-dex-handling.md` justified it as "contents are validated
+directly ... so it stays crash-safe", and that sentence was simply FALSE for
+annotations. Without a type map, "the contents are validated directly" has to
+hold for EVERY referenced structure; one exception is a crash.
+
+**Fix — walk the subtree, in the shape this port already uses.** ART is
+MAP-driven (iterate each section item by item, record `offset -> type`, then
+check every reference against it); this port is REFERENCE-driven (walk from the
+header's tables and validate what each offset points AT), which is why
+`VerifyClassData` / `VerifyEncodedArrayAt` / `VerifyTypeList` exist for the other
+four `class_def` offsets. `VerifyAnnotationsDirectory` ([dex_verifier.cpp](native/core_ext/dex_verifier.cpp))
+is the fifth: ART's `CheckIntraAnnotationsDirectoryItem` :2111 +
+`CheckIntraAnnotationItem` :2056 fused with the offset-following of
+`CheckInterAnnotationsDirectoryItem` :3276, because a reference-driven port has
+nowhere else to put the second half. Porting `offset_to_type_map_` instead was
+rejected: it would mean restructuring the whole verifier to be map-driven for one
+section. The walk covers **exactly** what `reader.cc` dereferences, verified line
+by line against it — directory header, `class_annotations_off`, the three
+per-member lists (bounded, index-checked, order-checked), each `annotations_off`
+-> set -> item -> visibility byte -> `encoded_annotation` through the existing
+depth-capped `VerifyEncodedValue`, and the parameter `set_ref_list` -> its sets.
+The bare `encoded_annotation` was factored out of the `0x1d` value case, since
+`annotation_item` stores that form raw exactly as `encoded_array_item` does.
+
+**Non-zero on the three per-member offsets is load-bearing, not ART parity.**
+ART checks them unconditionally and the slicer agrees by throwing
+(`SLICER_CHECK_NE(annotations, nullptr)`) — except for the parameter one, where
+`ExtractAnnotationSetRefList` has **no zero guard at all**, so offset 0 reads the
+dex HEADER as a set_ref_list and takes its element count from the magic bytes.
+Only `class_annotations_off` may legally be 0, and only a `set_ref_list` ENTRY
+may (it means "this parameter carries no annotations").
+
+**Measured (a/b OFF vs ON, SAME script, both `.so` md5-verified — `a2fab8b8...`
+OFF matching the md5 in the issue, `69aa8ffc...` ON, and the ON build
+bit-reproducing its md5 after the swap):** 34 sources x {strict verify, lenient
+verify, `verify_report`, `dex_count`, class list, whole-corpus smali render,
+whole-corpus decompile, class summaries} -> **0 differing records, 0
+false-reject** (the 9 invalid rows are the 3 resources-only containers, on both
+sides). Verify cost 157.0 -> 161.8 ms best-of-7 over the whole APK corpus (+3%).
+parity 29/29.
+
+**The 0-diff is required, so it proves nothing on its own** ([[ab-must-prove-the-mechanism-fires]]).
+What separates "the corpus is well formed and the walk accepts it" from "the walk
+is dead" is the count: across 23 sources it walks **23,411 directories / 43,575
+sets / 38,140 items / 10,325 parameter ref-lists**, every one accepted.
+
+**Fuzzed, because the claim is memory safety and 9 crafts are not a proof:** 1,500
+random multi-byte mutations confined to the annotation sections -> 123 still
+verify valid -> **0 killed by a signal**, 122 clean, 1 throw.
+
+**That 1 throw is a separate, pre-existing finding the fuzz surfaced.** The
+vendored slicer's `Reader::ParseEncodedValue` implements 16 of the 18
+`encoded_value` types: `0x15 METHOD_TYPE` and `0x16 METHOD_HANDLE` fall through
+to its `SLICER_CHECK(!"unexpected value type")`. Both are legal per the dex spec
+(invoke-dynamic constants, API 26+), so the verifier accepting them is CORRECT —
+rejecting them would false-reject real apps, which is strictly worse than a
+throw. 0 incidence across the bundled corpus, so it is latent. The gap is in the
+slicer, not the gate, and fixing it is out of #56's scope.
+
+**It also cost dexllm#55 its fixture, and that re-base is part of this change.**
+#55's guards crafted the SAME `annotations_off` repoint to make cache init throw;
+closing the channel made the fixture unbuildable and turned 9 tests into hard
+errors, correctly naming the reason. `tests/test_cache_init_failure.py` now
+retypes ONE annotation element to `0x16` — a **one-byte** craft, and a channel no
+future verifier improvement can take away, because closing it at the gate would
+be a false-reject. Strictly better than the vehicle it replaces.
+
+**Guards** (33 in [tests/test_verifier_annotations.py](tests/test_verifier_annotations.py)),
+crafted IN PLACE and length-preserving (a `u4` for a `u4`, a byte for a byte), each
+verifying its own premise (the UNMODIFIED source must verify valid, or the
+rejection is not attributable) and SKIPPING rather than failing when the sample
+lacks the shape (issue #46 — only 3 of the bundled bare dexes carry any
+annotation, and only 1 carries a parameter annotation). The crash guards run in a
+SUBPROCESS with a deadline and assert on the SIGNAL: an in-process assertion
+cannot survive the thing it asserts about.
+
+**23-mutant matrix, each BUILT and RUN — and the value was entirely in the
+survivors.** The first pass killed 9 and left 2 alive, both real holes the guards
+had missed: deleting the `VerifyAnnotationSetRefList` call outright (the
+parameter offset is the only path to a `set_ref_list`, so nothing else reaches
+it), and deleting the `CheckListSize` on `set->entries` — which is not merely a
+missed rejection but the VERIFIER ITSELF reading past the image while deciding
+whether the image is well formed, breaking the contract's first guarantee in the
+one function that exists to uphold it. A second pass then found `VerifyAnnotationItem`
+revertible to a visibility-byte check with the whole suite green — i.e. the
+CONTENT of the annotation was unguarded, while `dex::Reader::ParseAnnotation` is
+the exact frame the SIGSEGV backtrace bottoms out in. **Structure without content
+is not a bound.** All three are now pinned (a repointed parameter offset, four
+oversized-count cases, a bad `encoded_value` type code, an out-of-range element
+index).
+
+**One mutant is EQUIVALENT on output and was decided by measurement instead** —
+the per-kind memo, which no output test can catch. It is not decoration: on a
+craft the corpus itself yields (5,665 class_defs pointed at one 1,279-node
+subtree, length-preserving and still verify-valid) removing it costs **17.4 ms ->
+279.4 ms, 16x**, growing quadratically in both factors, while costing 3% on clean
+input — the `gt_budget` / `kMaxDeclaredIds` shape. Pinned by a RATIO guard (both
+verifies back to back in one process, so machine speed cancels; ~2.8x with the
+memo, ~45x without, threshold 15x) that skips unless the corpus can produce a
+genuinely amplifying craft. Finding that craft needed dexes from INSIDE the APKs
+— the first cut searched bare `.dex` only and silently skipped.
+
+**Two independent reviewers, and BOTH findings were in the GUARDS, not in the
+verifier** — the adversarial pass ran its attacks on reader-coverage, verifier
+totality, memo safety, recursion bounds and 0-false-reject and REFUTED all of
+them; the correctness pass independently rebuilt both sides, re-derived the
+0x1d refactor's depth arithmetic (identical cutoffs through the array path and
+the new annotation-item path), reproduced the pre-fix SIGSEGV, and re-ran the
+zero-offset asymmetry, the ordering predicate and a 128-case type-confusion
+sweep clean. What they found:
+
+- **CONFIRMED, and it is the shape this file keeps recording** — the three
+  `CheckIndex` calls on the directory MEMBER indices (`field_idx` / `method_idx`)
+  had **no guard at all**. The reviewer neutered all three to `if (false)`,
+  rebuilt, and every one of the 27 guards still passed; a `classes.dex` whose
+  LAST method-annotation entry carries `method_idx = 0xFFFFFF00` then verified
+  valid and **SIGSEGV'd** (`ExtractAnnotations` -> `ParseMethodAnnotation` ->
+  `GetMethodDecl` -> `MethodIds()[idx]`, unbounded in `reader.cc`). The
+  production code was correct throughout — the gap was that a change whose whole
+  discipline is "no load-bearing line without a mutant that kills it" had three
+  such lines. The ordering checks were in the same state (a mutant survives, but
+  ordering never reaches memory, so it is ART-parity rather than crash surface).
+  Both are pinned now, parametrised over field/method/parameter; the index guard
+  targets the **LAST** entry precisely because `i != 0 && last >= idx` cannot
+  fire there, so nothing but `CheckIndex` can be claiming the rejection.
+- **MEDIUM — the memo's ratio guard was a COIN FLIP, and the cause was a number
+  in this file's own first draft.** It claimed "~2.8x with the memo, ~45x
+  without"; the 45 was arithmetic across two DIFFERENT dexes (the big shared
+  craft's memo-off time over a small dex's baseline). Measured with both sides
+  being the same file it is ~0.9x vs ~15x — so the 15x threshold sat exactly on
+  the mutant, and the reviewer built it and ran the guard ten times: **5 failed,
+  5 passed**. Threshold is 5x now. The lesson is narrow and repeatable: a ratio
+  guard's margin has to be measured with the ratio the guard actually computes,
+  not assembled from two separate measurements.
+
+**Still out of scope, deliberately:** `CheckOffsetToTypeMap` (above), the
+annotation definer-match (`CheckInterAnnotationsDirectoryItem`'s "does this field
+annotation belong to the annotated class" — a wrong-answer gap, not crash
+surface), and `hiddenapi_class_data` (not parsed by the core).
 
 ### Skills
 

@@ -117,7 +117,7 @@ spec-reference not runtime dep), turned to **crash-safety**, not execution trust
 | Phase (ART `dex_file_verifier.cc`) | vs ART |
 |---|---|
 | `CheckHeader` / `CheckMap` | ✅ parity — magic/version/sizes/endian, section bounds, map ordering/alignment/required |
-| `CheckIntraSection` | ✅ parity — string_data MUTF-8, id indices, type_list, code_item, class_data, encoded_array · **⊕ plus `VerifyInsns`** (per-instruction operand bounds, which ART keeps in the *runtime* method verifier, not the structural one) |
+| `CheckIntraSection` | ✅ parity — string_data MUTF-8, id indices, type_list, code_item, class_data, encoded_array, annotations subtree · **⊕ plus `VerifyInsns`** (per-instruction operand bounds, which ART keeps in the *runtime* method verifier, not the structural one) |
 | `CheckInterSection` | ✅ parity — id ordering/uniqueness, descriptor syntax for **every** `type_id` (`CheckInterTypeIdItem`) as well as the field/method/class_def references to one, member-name syntax, class_def semantics (dup / self-inherit), and **every** `class_data` member's defining class (the definer half of `CheckInterClassDataItem`[^classdata]) |
 
 [^classdata]: The rest of ART's `CheckInterClassDataItem` is not ported: member
@@ -130,8 +130,17 @@ spec-reference not runtime dep), turned to **crash-safety**, not execution trust
 
 **Deliberately not checked** — execution-trust mechanics irrelevant to a read-only
 analyzer, or out of the structural scope: adler32/SHA-1 checksums, instruction
-*dataflow* semantics, annotations, debug_info, call_site/method_handle,
-proto shorty-match, access-flag bitmasks, and the offset→map-type cross-check.
+*dataflow* semantics, debug_info, call_site/method_handle,
+proto shorty-match, access-flag bitmasks, and the offset→map-type cross-check.[^ann]
+
+[^ann]: **annotations** were on that list until dexllm#56, excused as "lazy-parsed
+    by the core". They *are* parsed — `Reader::ExtractAnnotations` runs off
+    `class_def.annotations_off` during cache init — so a 4-byte repoint of that
+    offset yielded a dex `verify()` called valid in both modes on which the
+    slicer's annotation parser walked off the end. The subtree is now verified
+    (directory → sets → items → encoded_annotation), which is also what makes the
+    offset→map-type line above honest: without a type map, "the contents are
+    validated directly" has to be true of *every* referenced structure.
 
 **Validated:** clean corpus 0 false-reject · 29/29 C++ test suites · ASan corpus +
 malformed-dex fuzz **0 heap-overflow/UAF/SEGV** (the same fuzz segfaults 66/120
