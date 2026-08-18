@@ -167,7 +167,7 @@ keep-vs-remove decision.
   new REJECTION direction, which per dexllm#58 is the one way an added check can
   fail, so it needs its own a/b over every source with such a section. Recorded
   here rather than fixed inside dexllm#57, whose own comment used to justify
-  itself by misstating ART in exactly this way.
+  itself by misstating ART in exactly this way. **Filed as dexllm#62.**
 
 ---
 
@@ -203,7 +203,7 @@ CPython bounds), but they exist for memory safety and are part of the same
 | A1 mutf8 `cont()` | yes (ART `GetUtf16FromUtf8`) | yes (VerifyMutf8) | none | **yes — under review** |
 | A2 `SafeWidth`     | yes (slicer width)         | yes (VerifyInsns)  | none | low (3rd-party primitive) |
 | B1 `VerifyInsns`   | no (addition)              | n/a (IS the verifier) | n/a | no |
-| B2 `IsDataSectionType` | **yes** (ART :82 returns true for 3 types) | n/a (IS the verifier) | accepts a misaligned call_site/method_handle offset | **yes — needs its own a/b** |
+| B2 `IsDataSectionType` | **yes** (ART :82 returns true for 3 types) | n/a (IS the verifier) | accepts a misaligned call_site/method_handle offset | **yes — dexllm#62** |
 | C1 edge index      | no (DAD relies on Python)  | partial            | none | no (cheap, internal) |
 | C2 move-result null| no (matches DAD effective) | n/a                | none | no |
 

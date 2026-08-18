@@ -1404,9 +1404,10 @@ verify `True` and warm cleanly; `map_list` is covered anyway by `CheckHeader`'s
 4-aligned `map_off` check). It is **not** memory safety — the new extent bound
 spans those sections regardless of alignment, and an unaligned u2/u4 load is
 harmless on every supported target. Pre-existing (the exclusion predates this
-change), catalogued in [docs/aosp-oob-divergences.md](docs/aosp-oob-divergences.md),
-and the function's own comment used to justify itself by misstating ART the same
-way — that is fixed too. Variable-length sections cannot be
+change), catalogued as divergence B2 in
+[docs/aosp-oob-divergences.md](docs/aosp-oob-divergences.md) and filed as
+**dexllm#62**, and the function's own comment used to justify itself by misstating
+ART the same way — that is fixed too. Variable-length sections cannot be
 bounded this way (their `size` counts items of differing length) and are validated
 where they are parsed. **Contents stay out of scope** — this bounds only where the
 section ends, which is the minimum that makes `ArrayView`'s check mean something.
@@ -1571,8 +1572,9 @@ byte, so the payload is not skipped and the following values in that
 `encoded_array` desync. **Wrong-answer only** — verified rather than assumed: the
 caller is a count-bounded `for` loop with `value_count` clamped to
 `static_field_idxs.size()`, so it terminates, and `ReadIntLE` is `end`-bounded, so
-it cannot read out of range. Pre-existing, and reachable only from a
-`MethodHandle`/`MethodType` STATIC INITIALIZER, which javac does not produce.
+it cannot read out of range. Pre-existing, reachable only from a
+`MethodHandle`/`MethodType` STATIC INITIALIZER (which javac does not produce), and
+filed as **dexllm#63**.
 
 **Recorded, not fixed:** the slicer's own pointer guards are inert —
 `Reader::ptr<T>` is `SLICER_CHECK_GE(offset, 0 && offset + sizeof(T) <= size_)`,
