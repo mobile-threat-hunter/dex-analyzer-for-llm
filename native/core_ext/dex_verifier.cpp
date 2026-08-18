@@ -584,6 +584,45 @@ bool DexVerifier::CheckMap() {
         if (bit == 0) return Fail("Unknown map section type");
         if (used_bits & bit) return Fail("Duplicate map section");
         used_bits |= bit;
+        // EXTENT, not just the start, for the two fixed-size sections the HEADER
+        // does not describe (dexllm#57 review). ART bounds both too, and this is
+        // PARITY rather than an addition — it just lands somewhere else because
+        // ART is MAP-driven where this port is REFERENCE-driven: ART reaches them
+        // through CheckIntraSectionIterate (:2199, entered for both types at
+        // :2529-2530), which does CheckListSize(ptr_, 1, sizeof(CallSiteIdItem))
+        // at :2264 and opens CheckIntraMethodHandleItem with the same call at
+        // :1493. Neither is a DATA-section type, so ART's own CheckMap does not
+        // bound them either (only data-section types get its data_items_left
+        // budget) — this port simply never walked those sections, so it never
+        // reached the bound. Putting it here, where the map item is already in
+        // hand, is the same fusion the dexllm#56 annotation walk used.
+        // Every other fixed-size table has its span bounded by CheckHeader's
+        // CheckListSize off the header's own size/off pair; method_handle and
+        // call_site_id exist ONLY in the map, so `item->size` is the sole
+        // statement of how long they are — and
+        // `Reader::MethodHandles()` builds an ArrayView straight from it
+        // (`section<MethodHandle>(mi->offset, mi->size)`). Unbounded, that made
+        // ArrayView's own SLICER_CHECK_LT bound an index against ATTACKER data:
+        // an inflated count plus a large METHOD_HANDLE encoded_value index read
+        // ~134 MB past a 2.5 KB file. A verify()-valid dex, a SIGSEGV, and no
+        // catch(...) sees it — the defect class dexllm#56 closed, which the
+        // dexllm#57 parser fix woke up by calling GetMethodHandle at all.
+        // Variable-length sections cannot be bounded this way (their `size` is an
+        // item count over items of differing length); each is validated where it
+        // is parsed instead. CONTENTS stay out of scope: this bounds only where
+        // the section ENDS. ART's CheckIntraMethodHandleItem also rejects a
+        // method_handle_type > kLast (:1501) and bounds field_or_method_idx
+        // against field_ids/method_ids (:1512/:1521) — NOT ported, and the
+        // residual is a THROW not an OOB (ParseMethodHandle hands that index to
+        // GetFieldDecl/GetMethodDecl, where ArrayView bounds it against a
+        // header-validated table; measured: `SLICER_CHECK_LT [65535 < 243]`).
+        const size_t entry = item->type == kMethodHandleItem ? sizeof(dex::MethodHandle)
+                           : item->type == kCallSiteIdItem   ? sizeof(u4)
+                                                             : 0;
+        if (entry != 0 &&
+            !CheckListSize(OffsetToPtr(item->offset), item->size, entry, "map section span")) {
+            return false;
+        }
         last_offset = item->offset;
     }
 
@@ -1010,7 +1049,14 @@ bool DexVerifier::VerifyEncodedValue(const u1** pp, int depth) {
         case 0x04: case 0x10: return arg <= 3 ? skip(arg + 1) : Fail("encoded int/float size");
         case 0x06: case 0x11: return skip(arg + 1);                                // LONG/DOUBLE (≤8)
         case 0x15: return idx(header_->proto_ids_size, "encoded method_type idx");
-        case 0x16: return skip(arg + 1);  // METHOD_HANDLE: consume; idx not dereferenced (out of scope)
+        // METHOD_HANDLE: consume the index but do NOT bound it - the
+        // method_handle section is out of this verifier's documented scope. The
+        // slicer DOES dereference it since dexllm#57 (GetMethodHandle), so the
+        // bound that stops a crafted index is ArrayView's own SLICER_CHECK,
+        // which throws instead of reading out of range. Bounding it here would
+        // mean bringing method_handle into scope - a new section to validate,
+        // with its own false-reject risk - for a value nothing consumes.
+        case 0x16: return skip(arg + 1);
         case 0x17: return idx(header_->string_ids_size, "encoded string idx");
         case 0x18: return idx(header_->type_ids_size, "encoded type idx");
         case 0x19: case 0x1b: return idx(header_->field_ids_size, "encoded field/enum idx");

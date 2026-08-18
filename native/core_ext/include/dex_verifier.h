@@ -86,7 +86,19 @@
 //
 // ── OUT OF SCOPE (stated so the boundary is discoverable, not a silent gap) ──
 //   * Instruction type/dataflow semantics — runtime method_verifier, not ported.
-//   * call_site/method_handle — not dereferenced by the core.
+//   * call_site — not dereferenced by the core. Its section EXTENT is bounded
+//     in CheckMap (see below) but nothing reads its contents.
+//   * method_handle CONTENTS. This line used to read "call_site/method_handle —
+//     not dereferenced by the core", which dexllm#57 made FALSE: implementing the
+//     0x16 METHOD_HANDLE encoded_value means the core now resolves a handle
+//     through Reader::GetMethodHandle. That is why CheckMap gained the section's
+//     EXTENT bound (ART parity, reached at a different site — see the comment
+//     there): without it, ArrayView's index check was against the map's own
+//     attacker-supplied count and read past the file. Still NOT ported from ART's
+//     CheckIntraMethodHandleItem: method_handle_type <= kLast (:1501) and
+//     field_or_method_idx against field_ids/method_ids (:1512/:1521). The
+//     residual is a THROW, not an OOB — that index reaches GetFieldDecl/
+//     GetMethodDecl, where ArrayView bounds it against a header-validated table.
 //   * debug_info — dexllm never parses it; not verified by design.
 //   * adler32 checksum — intentionally not verified (project policy; ART itself
 //     only warns when verify_checksum=false — aosp-wiki dexfileverifier.md).

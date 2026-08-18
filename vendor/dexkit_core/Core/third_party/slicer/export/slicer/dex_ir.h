@@ -146,6 +146,11 @@ struct EncodedValue : public Node {
     EncodedArray* array_value;
     Annotation* annotation_value;
     bool bool_value;
+    // dexllm(#57): the two invoke-dynamic-era value types. Read-only - the
+    // writer has no case for either, so a dex carrying one can be parsed but
+    // not re-emitted (see WriteEncodedValue's default).
+    Proto* proto_value;
+    MethodHandle* method_handle_value;
   } u;
 
   SLICER_EXTRA(slicer::MemView original);

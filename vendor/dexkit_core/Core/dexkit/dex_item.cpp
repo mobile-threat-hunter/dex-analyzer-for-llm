@@ -863,7 +863,16 @@ AnnotationEncodeValueBean DexItem::GetAnnotationEncodeValueBean(ir::EncodedValue
         case 0x1d: bean.type = schema::AnnotationEncodeValueType::AnnotationValue; break;
         case 0x1e: bean.type = schema::AnnotationEncodeValueType::NullValue; break;
         case 0x1f: bean.type = schema::AnnotationEncodeValueType::BoolValue; break;
-        default: break;
+        // dexllm(#57): `type` is an UNINITIALISED member, so this arm must assign
+        // something or the bean is read indeterminate. Not a new hole, and the
+        // review corrected the first claim here: neither switch has a case for
+        // 0x19 VALUE_FIELD either, which the reader HAS always parsed - so the
+        // arm was already reachable, and 0x15/0x16 only widen it. The flatbuffer
+        // schema has no enumerator for the two new types (it is generated, and
+        // adding one is a Java-API contract change), so NullValue is the honest
+        // choice: it is the schema's own "no value". 0x19's own missing mapping
+        // is left alone - a separate, pre-existing wrong-ANSWER gap.
+        default: bean.type = schema::AnnotationEncodeValueType::NullValue; break;
     }
     switch (encoded_value->type) {
         case 0x00: bean.value = encoded_value->u.byte_value; break;
@@ -881,7 +890,7 @@ AnnotationEncodeValueBean DexItem::GetAnnotationEncodeValueBean(ir::EncodedValue
         case 0x1d: bean.value = std::make_unique<AnnotationBean>(GetAnnotationBean(encoded_value->u.annotation_value)); break;
         case 0x1e: bean.value = 0; break;
         case 0x1f: bean.value = encoded_value->u.bool_value; break;
-        default: break;
+        default: bean.value = 0; break;  // dexllm(#57), mirrors NullValue above
     }
     return bean;
 }

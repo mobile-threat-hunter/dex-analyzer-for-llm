@@ -57,6 +57,11 @@ constexpr u1 kEncodedInt            = 0x04;
 constexpr u1 kEncodedLong           = 0x06;
 constexpr u1 kEncodedFloat          = 0x10;
 constexpr u1 kEncodedDouble         = 0x11;
+// dexllm(#57): 0x15/0x16 are absent from upstream AOSP's dex_format.h too - the
+// header predates invoke-dynamic. Both are legal per the dex spec (API 26+):
+// METHOD_TYPE indexes proto_ids, METHOD_HANDLE indexes the method_handle section.
+constexpr u1 kEncodedMethodType     = 0x15;
+constexpr u1 kEncodedMethodHandle   = 0x16;
 constexpr u1 kEncodedString         = 0x17;
 constexpr u1 kEncodedType           = 0x18;
 constexpr u1 kEncodedField          = 0x19;

@@ -1036,7 +1036,9 @@ to its `SLICER_CHECK(!"unexpected value type")`. Both are legal per the dex spec
 (invoke-dynamic constants, API 26+), so the verifier accepting them is CORRECT —
 rejecting them would false-reject real apps, which is strictly worse than a
 throw. 0 incidence across the bundled corpus, so it is latent. The gap is in the
-slicer, not the gate, and fixing it is out of #56's scope.
+slicer, not the gate, and fixing it was out of #56's scope — **filed and then
+fixed as dexllm#57, see its section below**, which also re-based #55's fixture a
+second time (the craft is unchanged; only the layer that throws moved).
 
 **It also cost dexllm#55 its fixture, and that re-base is part of this change.**
 #55's guards crafted the SAME `annotations_off` repoint to make cache init throw;
@@ -1300,6 +1302,246 @@ nothing else building were clean (677 passed twice, the third cut by a harness
 timeout). The likely cause is the shared worktree — `pip install -e .` REPLACES
 the mmap'd `.so` under a running interpreter, which is a textbook `SIGBUS` — but
 that is a hypothesis, not a measurement.
+
+### The parser implements every `encoded_value` the gate accepts (dexllm#57, 2026-08-19)
+
+`Reader::ParseEncodedValue` implemented **16 of the dex spec's 18** `encoded_value`
+type codes. `0x15 METHOD_TYPE` and `0x16 METHOD_HANDLE` — legal since API 26
+(`const-method-handle` / `invoke-custom` constants) — fell to its
+`SLICER_CHECK(!"unexpected value type")`, and the vendored `dex_format.h` has no
+constant for either: the header predates invoke-dynamic. **Upstream AOSP's slicer
+has the SAME gap** (verified against the local checkout —
+`tools/dexter/slicer/reader.cc` ends in the same `default:`, and its
+`dex_format.h` stops at `kEncodedBoolean`), so this is an original fix, not a
+port. Found by the dexllm#56 annotation fuzz: of 1,500 mutations, 123 still
+verified and exactly 1 threw — this.
+
+**The verifier accepting both is CORRECT, and that is the whole shape of the
+issue.** Rejecting a spec-legal value at the gate would false-reject real apps,
+which this repo ranks as strictly worse than a throw — and dexllm#58, one section
+up, is what happens when an added check gets that wrong. So the fix had to be in
+the parser. A dex carrying one **in an annotation** verified clean in both modes,
+loaded, and then threw the moment anything walked its annotations:
+`warm_analysis_caches`, the caller/cross-ref family, `summarize_capabilities`,
+`find_*_by_annotation`. `list_classes` / `decompile_class` / `render_class_smali`
+answered normally, which is the split that made it survivable rather than
+obvious. `static_values` is NOT affected: the slicer would parse it in
+`ParseClass`, which DexKit never calls, and dexllm decodes static values with its
+own `DecodeEncodedValueText`.
+
+**Fix:** two constants in
+[dex_format.h](vendor/dexkit_core/Core/third_party/slicer/export/slicer/dex_format.h),
+two slots in the `ir::EncodedValue` union, and two cases in
+[reader.cc](vendor/dexkit_core/Core/third_party/slicer/reader.cc) — both plain
+`(arg+1)`-byte indices, resolved through `GetProto` / `GetMethodHandle`.
+
+## The review CRITICAL: the index was bounded against ATTACKER data
+
+The first cut rested on a safety claim that was **FALSE**, and an adversarial
+reviewer CONSTRUCTED and RAN the counter-example: a **SIGSEGV on a `verify()`-valid
+dex** — the exact defect class dexllm#56 closed, reintroduced.
+
+The claim was "what stops a crafted `METHOD_HANDLE` index is `ArrayView`'s own
+`SLICER_CHECK_LT` inside `MethodHandles()[]`, which throws rather than reading out
+of range". But `MethodHandles()` is
+`section<dex::MethodHandle>(mi->offset, mi->size)` — **the count comes straight
+from the map**, and nothing validated it: `CheckMap` checked
+`item->offset >= size_` and never the EXTENT, `CheckIntraSection` never touches
+the method_handle section (out of documented scope), and the slicer's own
+`Reader::ptr<T>` guard is inert (see below). So `ArrayView` bounded the index
+against attacker-controlled data.
+
+Reproduced (from AOSP `art/test/dexdump/const-method-handle.dex`): map count
+`1 → 0x2000000`, one annotation element retyped to `0x16` with `arg=2` and index
+`0xFFFFFF` → a read ~134 MB past a 2,524-byte file. `verify()` **valid**, 2
+classes load, then `warm_analysis_caches` / `summarize_capabilities` /
+`find_call_sites_to` all die with **exit 139**. I re-ran it before fixing
+anything: same result.
+
+**Attribution was proven by MUTANT, not by argument** — the reviewer disabled the
+`METHOD_HANDLE` reader case (= pre-#57) and the same input merely THREW. So the
+hole was dormant for as long as nothing called `GetMethodHandle`, and the parser
+fix woke it.
+
+**Fixed at the gate, which is where the contract lives** ([dex_verifier.cpp](native/core_ext/dex_verifier.cpp)
+`CheckMap`): bound the **EXTENT** of the two fixed-size sections the HEADER does
+not describe — `method_handle` (8 bytes/entry) and `call_site_id` (4). Every other
+fixed-size table has its span bounded by `CheckHeader`'s `CheckListSize` off the
+header's own size/off pair; these two exist ONLY in the map, so `item->size` is
+the sole statement of how long they are.
+
+**This is ART PARITY, not an addition** — a correction to how the first cut framed
+it. ART bounds both, just somewhere this port never goes: it is MAP-driven, so it
+reaches them through `CheckIntraSectionIterate` (`dex_file_verifier.cc:2199`,
+entered for both types at `:2529-2530`), which does
+`CheckListSize(ptr_, 1, sizeof(dex::CallSiteIdItem), …)` at `:2264` and opens
+`CheckIntraMethodHandleItem` with the same call at `:1493`. Neither type is a
+DATA-section type, so **ART's own `CheckMap` does not bound them either** (only
+data-section types get its `data_items_left` budget). This port is
+REFERENCE-driven and never walks those sections, so it never reached the check;
+putting it in `CheckMap`, where the map item is already in hand, is the same
+intra/inter fusion the dexllm#56 annotation walk used. Entry sizes confirmed
+against AOSP `dex_file_structs.h`: `MethodHandleItem` is 4 × uint16_t = 8 B,
+`CallSiteIdItem` is one uint32_t = 4 B. Variable-length sections cannot be
+bounded this way (their `size` counts items of differing length) and are validated
+where they are parsed. **Contents stay out of scope** — this bounds only where the
+section ends, which is the minimum that makes `ArrayView`'s check mean something.
+Post-fix all four of the reviewer's crafts are refused at load (`List too large:
+map section span`, or the pre-existing `Map item past end of file` / `encoded
+method_type idx`).
+
+**Why the first validation missed it, which is the durable lesson:** the a/b
+wrapped every axis in a `try/except`, and **an `except` cannot observe a SIGSEGV**
+— the process dies. Its 4 crafted inputs only ever retyped elements on bundled
+dexes with NO method_handle section, so `[index]` bounded against size 0 and
+always threw. The a/b proved "the corpus is quiet" and "these two crafts throw";
+the memory-safety property of the NEW dereference was never exercised. A crafted
+input set must include the shape that attacks the new dereference, not only the
+shape that exercises the new code path.
+
+## The two halves resolve differently, and the asymmetry IS the design
+
+* `METHOD_TYPE`'s index is bounded by `VerifyDex` (`case 0x15: return
+  idx(header_->proto_ids_size, …)`), so `GetProto` runs on verified input — the
+  same call every `ParseMethodDecl` already makes, over a table `CheckHeader`
+  spans.
+* `METHOD_HANDLE`'s index is not bounded against its table, so what stops a
+  crafted one is a leaf check — and **which** one depends on the width: `arg > 3`
+  throws first in `ParseIntValue`'s `SLICER_CHECK_LE(size, sizeof(u4))` (the
+  verifier's `0x16` arm uses `skip()`, not the `arg<=3` `idx()` the other index
+  types use), and `arg <= 3` reaches `ArrayView`. The first cut attributed the
+  throw solely to `ArrayView`; the correctness review corrected that.
+
+**Consequence, deliberate:** on a dex with NO method_handle section every `0x16`
+index is out of range, so such a value still throws — from the index bound instead
+of the missing case. That is the channel `tests/test_cache_init_failure.py`
+drives, so **the issue's "this fix needs a third vehicle for those nine guards"
+worry did not materialise**: the one-byte craft is unchanged, the verdict is
+unchanged, only the reason string moved. Both reviewers noted the vehicle rested
+on a CORPUS property, so that file's `_craft` now **refuses a source that has a
+method_handle section** — the mechanism is structural, and a future corpus dex
+with one cannot silently turn the vehicle into a no-op.
+
+**What is still NOT ported, and the scope line it forced:** ART's
+`CheckIntraMethodHandleItem` also rejects a `method_handle_type > kLast` (`:1501`)
+and bounds `field_or_method_idx` against `field_ids`/`method_ids`
+(`:1512`/`:1521`). Neither is ported. The residual is a **THROW, not an OOB** —
+that index reaches `GetFieldDecl`/`GetMethodDecl`, where `ArrayView` bounds it
+against a header-validated table (measured on a crafted garbage handle:
+`SLICER_CHECK_LT [65535 < 243]`). But `dex_verifier.h`'s out-of-scope list said
+*"call_site/method_handle — not dereferenced by the core"*, and this change makes
+that **false for method_handle**, so the line is rewritten to name exactly what is
+and is not bounded. Porting the ~20 remaining lines would convert those throws
+into gate rejections; **filed as dexllm#59** rather than folded in — it is a new
+rejection direction on a change that already grew once, and it needs its own a/b
+over the three files that have a method_handle section (a corpus-only a/b is blind
+to it: 0 of the 36 gitignored dexes has one).
+
+**Delta self-verification, because both delta reviewers died on API 529s:** eight
+crafted shapes aimed at the NEW dereference rather than the new code path, each run
+in a subprocess judged by EXIT STATUS (a `try/except` cannot see a SIGSEGV — the
+lesson above): extent exactly == EOF (accepted, as it should be — the handle's
+garbage contents then throw `[8302 < 243]`), extent one entry past EOF
+(**rejected**, so the boundary is exact), the section moved to overlap the header
+area (rejected by the pre-existing map-order check), count 0 with a large index
+(throws), a garbage `method_handle_type` + index (throws — this is what measures
+the un-ported contents check), an inflated `call_site_id` count (**rejected**, so
+that arm of the new check is live and not decoration), a `METHOD_TYPE` index one
+past `proto_ids_size` (rejected by the pre-existing bound), and the unmodified
+fixture (loads and warms). **0 signals.**
+
+**Read-only, and stated rather than discovered:** `WriteEncodedValue` has no case
+for either code, so such a value can now be PARSED but not re-emitted. That
+asymmetry is new; it is also strictly better than before (neither was possible),
+and the slicer's Writer is unreachable from dexllm. Noted in `dex_ir.h` beside the
+two union members.
+
+**One coupled fix, and the first comment for it was wrong:**
+`GetAnnotationEncodeValueBean` ([dex_item.cpp](vendor/dexkit_core/Core/dexkit/dex_item.cpp))
+ends both switches in `default: break` while `AnnotationEncodeValueBean::type` is
+an uninitialised member, so a newly-parseable type would be read INDETERMINATE.
+The arm now assigns `NullValue` + value 0 (the schema's own "no value"; it is
+generated and has no enumerator for either type, and adding one is a Java-API
+contract change). The first comment claimed the arm "is reachable where it never
+was before" — **the correctness review refuted that**: neither switch has a case
+for `0x19 VALUE_FIELD` either, which the reader has ALWAYS parsed, so the arm was
+already reachable and `bean.type` could already be read indeterminate. `0x19`'s
+own missing mapping is left alone (a separate, pre-existing wrong-ANSWER gap).
+Unreachable from dexllm either way — 0 call sites, that surface is DexKit's
+Java-facing annotation API — so this is defined-behaviour hygiene, not an output
+change, which is exactly why it needs a SOURCE-level guard (below).
+
+## Measured
+
+a/b OFF vs ON, SAME script, both `.so` md5-verified — `4e4a8d35…` OFF (=
+dexllm#58's build, i.e. HEAD) and `37667548…` ON, and the ON build bit-reproducing
+its md5 after the swap. **54 sources** — the whole bundled corpus, both committed
+fixtures, **every `art/test/dexdump/*.dex`** and the dexter testdata dex (the
+population the new extent bound could false-reject, including files with 2 and 29
+method_handle entries), and **4 crafted dexes** — × {both verify modes, load,
+class list, `warm_analysis_caches`, `find_classes_by_annotation`,
+`summarize_capabilities`, `find_call_sites_to`, and a smali + decompile digest
+over the first 40 classes} = **450 axis records**.
+
+* **39 corpus sources: 0 changed. 11 AOSP sources: 0 changed.** No false reject
+  from the new gate check, on real dexes that actually have the section.
+* **4 crafted sources: 16 records changed**, all 4 annotation axes on each.
+  `METHOD_TYPE` (index zeroed, i.e. a LEGAL value) `RAISED unexpected value type`
+  → **OK**; `METHOD_HANDLE` → `RAISED SLICER_CHECK_LT`, i.e. the value now parses
+  and the throw has moved to the index bound.
+
+The crafted sources are IN the a/b on purpose: a corpus-only run would have been
+byte-identical and would have proved only that the corpus is quiet
+([[ab-must-prove-the-mechanism-fires]]).
+
+parity 29/29, pytest 686 passed / 6 skipped, corpus-less 280 passed / 412 skipped,
+narrowed to `tests/data/multidex.apk` 589 passed, both touched guard files green
+narrowed to each of the 34 bundled samples one at a time, sweep 27,018-class /
+229,537 method-block 0-crash 0-timeout, determinism 3 `PYTHONHASHSEED`s
+byte-identical (same digest as before the change), lint trio clean.
+
+## Guards
+
+9 in [tests/test_encoded_value_method_types.py](tests/test_encoded_value_method_types.py),
+crafted in place and length-preserving — only the TYPE bits of one class-annotation
+element change; the `METHOD_TYPE` fixture additionally zeroes the payload, which is
+what turns it into a *legal* value rather than merely a parseable one.
+
+**A second committed fixture was needed**: `tests/data/invoke-custom.dex` (31,732 B,
+byte-identical to AOSP `art/test/dexdump/invoke-custom.dex`, Apache-2.0,
+provenance in [tests/data/README.md](tests/data/README.md)). **0 of the corpus's
+36 dexes has a method_handle section**, and two properties can only be tested with
+one: the SUCCESS path — a `0x16` whose index actually RESOLVES, which is what makes
+a real API-26+ dex load rather than throw, and which the correctness review found
+untested — and the CRITICAL above, whose craft needs a section to inflate.
+
+**The source-level trio is the durable part.**
+`test_the_parser_implements_every_value_the_verifier_accepts` states the invariant
+this issue was a violation of rather than the two codes: it derives the verifier's
+accepted set from `VerifyEncodedValue`'s cases and the reader's from
+`ParseEncodedValue`'s, resolving `kEncoded*` through `dex_format.h`, and requires
+`verifier ⊆ reader` with a non-vacuity floor of 18 on each side. `VerifyDex` is
+the documented single gate, so a code it lets through and the parser does not
+implement IS a dex that verifies, loads and throws later. The other two pin the
+two constants, and pin that the bean `default:` arm ASSIGNS — the last one exists
+because that path is unreachable from dexllm, so **reverting it passed the entire
+suite** until the source was pinned.
+
+**7 mutants, each BUILT and RUN, each killed:** pre-fix (6 fail); each reader case
+removed on its own (3 / 4); **the `CheckMap` extent bound removed — the CRITICAL —
+and the crafted dex goes back to `valid: True`** (1, the inflated-count guard);
+the bound kept for `call_site_id` but not `method_handle` (1, so the guard covers
+the section that matters and not merely the code shape); the bean arm reverted to
+`default: break` (1, source-level only); plus an unmutated control.
+
+**Recorded, not fixed:** the slicer's own pointer guards are inert —
+`Reader::ptr<T>` is `SLICER_CHECK_GE(offset, 0 && offset + sizeof(T) <= size_)`,
+whose second argument is `0 && …` = `0`, so it reduces to `offset >= 0`
+(`dataPtr` has the same shape). That is a pre-existing upstream typo in a SAFETY
+guard, and it is why the section start was only ever bounded by `CheckMap`'s
+`offset < size_`. Fixing it belongs in its own change with its own a/b — the risk
+is a false throw on some legitimate access, which is exactly the direction this
+section is about.
 
 ### Skills
 

@@ -15,21 +15,26 @@ well-formed offset holding the wrong structure — which worked only because
 the whole annotations subtree), so this fixture could no longer be built: the
 guards below went from green to nine hard errors, correctly naming the reason.
 
-The replacement is a channel #56 deliberately does NOT close, and cannot. The
-vendored slicer's `Reader::ParseEncodedValue` implements 16 of the 18 dex
-encoded_value types: `0x15 METHOD_TYPE` and `0x16 METHOD_HANDLE` are missing and
-hit its `SLICER_CHECK(!"unexpected value type")`. Both are legal per the dex
-spec (invoke-dynamic constants, API 26+), so the verifier accepting them is
-CORRECT — rejecting them at the gate would false-reject real apps, which is
-strictly worse than the throw. Retyping one annotation element to `0x16` is
-therefore a ONE-BYTE craft that yields a dex verifying valid in both modes, on
-which the annotation walk inside cache init throws — and, unlike the old
-vehicle, one no future verifier improvement can take away.
+The replacement is a channel #56 deliberately does NOT close, and cannot. An
+annotation element retyped to `0x16 METHOD_HANDLE` is a ONE-BYTE craft that
+yields a dex verifying valid in both modes and throwing inside cache init.
 
-(That the slicer does not implement two spec-legal value types is a separate,
-pre-existing gap: a genuine dex carrying a `MethodHandle` constant fails to load.
-It is 0-incidence across the bundled corpus, so nothing here depends on it being
-rare, only on it being a THROW rather than a crash.)
+WHY IT STILL WORKS AFTER dexllm#57 is worth stating, because that issue closed
+the reason it worked ORIGINALLY. When this vehicle was adopted, the slicer
+implemented 16 of the 18 encoded_value types and `0x16` hit its
+`SLICER_CHECK(!"unexpected value type")`. #57 implemented both missing types, so
+the value now PARSES — and still throws here, from one layer further in: a
+`METHOD_HANDLE` index is NOT bounded by the verifier (`method_handle` is out of
+its documented scope), so `GetMethodHandle` resolves it through `ArrayView`,
+whose own `SLICER_CHECK_LT` throws. No bundled dex has a method_handle section at
+all, so EVERY index is out of range on this corpus.
+
+What that means for these guards: the craft is unchanged, the verdict is
+unchanged, and only the reason string moved. What they depend on is that the
+verifier accepts the dex and something downstream throws — not on which layer
+throws. `tests/test_encoded_value_method_types.py` pins the distinction directly
+(the reason must NOT be "unexpected value type"), so if the vehicle ever changes
+character again it fails there rather than silently here.
 
 Every call that could hang runs in a SUBPROCESS with a deadline. A regression
 must FAIL the suite, not hang it — an in-process assertion cannot do that.
@@ -66,6 +71,17 @@ _SAME_WIDTH_AS_METHOD_HANDLE = frozenset(
 _ENCODED_METHOD_HANDLE = 0x16
 
 
+def _has_method_handle_section(raw: bytearray) -> bool:
+    """True when the map declares a `method_handle_item` section (type 0x0008)."""
+    map_off = struct.unpack_from("<I", raw, 0x34)[0]
+    count = struct.unpack_from("<I", raw, map_off)[0]
+    for i in range(count):
+        kind = struct.unpack_from("<H", raw, map_off + 4 + i * 12)[0]
+        if kind == 0x0008:
+            return True
+    return False
+
+
 def _uleb(raw: bytearray, off: int) -> tuple[int, int]:
     r = s = 0
     while True:
@@ -90,6 +106,14 @@ def _craft(src: pathlib.Path, dst: pathlib.Path) -> bool:
     """
     raw = bytearray(src.read_bytes())
     if raw[:4] != b"dex\n":
+        return False
+    # STRUCTURAL, not incidental (dexllm#57 review, both reviewers): what makes
+    # the crafted `0x16` throw is that its index cannot resolve, and that is only
+    # guaranteed while the source has NO method_handle section - with one, index 0
+    # resolves and the vehicle silently stops exercising a failure. No corpus dex
+    # has a section today; refusing such a source keeps that a property of the
+    # craft rather than of the corpus.
+    if _has_method_handle_section(raw):
         return False
 
     def u32(o: int) -> int:
