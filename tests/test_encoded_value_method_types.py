@@ -57,6 +57,28 @@ _FORMAT = (
 _VERIFIER = REPO_ROOT / "native/core_ext/dex_verifier.cpp"
 
 
+def _strip_comments(text: str) -> str:
+    """Remove // and /* */ comments, scanning left to right.
+
+    Two independent regex passes would be wrong: a `//` line can contain `/*`
+    (this repo has hit that trap), so the block and line forms must be resolved
+    in one pass, in source order.
+    """
+    out = []
+    i, n = 0, len(text)
+    while i < n:
+        if text.startswith("//", i):
+            j = text.find("\n", i)
+            i = n if j < 0 else j
+        elif text.startswith("/*", i):
+            j = text.find("*/", i + 2)
+            i = n if j < 0 else j + 2
+        else:
+            out.append(text[i])
+            i += 1
+    return "".join(out)
+
+
 def _uleb(raw: bytearray, off: int) -> tuple[int, int]:
     value = shift = 0
     while True:
@@ -194,13 +216,20 @@ def test_a_method_handle_value_no_longer_fails_as_an_unknown_type(method_handle_
 
 
 def _reader_case_codes() -> set[int]:
-    """Type codes `ParseEncodedValue` has a case for, resolved via dex_format.h."""
+    """Type codes `ParseEncodedValue` has a case for, resolved via dex_format.h.
+
+    Comments are stripped first: a `case` label inside a comment is not a case,
+    and counting one is the exact trap dexllm#32's opcode guard recorded ("a
+    reviewer reverted 6 fixes with the suite green"). The dexllm#57 delta review
+    hit it here too, with a mutant that COMMENTED OUT the METHOD_HANDLE case.
+    """
     names = dict(
         re.findall(
-            r"constexpr u1 (kEncoded\w+)\s*=\s*(0x[0-9a-fA-F]+);", _FORMAT.read_text()
+            r"constexpr u1 (kEncoded\w+)\s*=\s*(0x[0-9a-fA-F]+);",
+            _strip_comments(_FORMAT.read_text()),
         )
     )
-    body = _READER.read_text()
+    body = _strip_comments(_READER.read_text())
     body = body[body.index("Reader::ParseEncodedValue") :]
     body = body[: body.index("\n}\n")]
     return {
@@ -211,14 +240,17 @@ def _reader_case_codes() -> set[int]:
 
 
 def _verifier_accepted_codes() -> set[int]:
-    """Type codes `VerifyEncodedValue` does not send to its `default: Fail`."""
-    body = _VERIFIER.read_text()
+    """Type codes `VerifyEncodedValue` does not send to its `default: Fail`.
+
+    Comment-stripped for the same reason as `_reader_case_codes`.
+    """
+    body = _strip_comments(_VERIFIER.read_text())
     body = body[body.index("bool DexVerifier::VerifyEncodedValue") :]
     body = body[: body.index('default: return Fail("encoded_value bad type code")')]
     return {int(c, 16) for c in re.findall(r"case (0x[0-9a-fA-F]{2}):", body)}
 
 
-def test_the_parser_implements_every_value_the_verifier_accepts():
+def test_the_slicer_parser_implements_every_value_the_verifier_accepts():
     """The invariant this issue was a violation of, stated directly.
 
     `VerifyDex` is the documented single gate: whatever it accepts, the core
@@ -226,12 +258,21 @@ def test_the_parser_implements_every_value_the_verifier_accepts():
     implement is therefore a dex that verifies, loads, and throws later - which
     is exactly what 0x15 and 0x16 did. Deriving both sets from source means a
     future code added to one side without the other FAILS rather than shipping.
+
+    SCOPED TO THE SLICER's `ParseEncodedValue`, because this repo has TWO
+    encoded_value decoders: `core_ext/dexitem_code_source.cpp`'s
+    `DecodeEncodedValueText` reads static-field initializers for
+    `decompile_class` and is out of this guard's reach. It has the same gap (its
+    `default:` returns without skipping the payload, so following values in the
+    array desync) - wrong-answer only, bounded, and pre-existing.
     """
     reader = _reader_case_codes()
     verifier = _verifier_accepted_codes()
-    # Non-vacuity: both parses must have found the whole spec surface.
-    assert len(verifier) == 18, sorted(hex(c) for c in verifier)
-    assert len(reader) == 18, sorted(hex(c) for c in reader)
+    # Non-vacuity: a degraded parse finds few codes. `>=`, not `==`, so that a
+    # legitimately-added 19th code fails on the INVARIANT below with a useful
+    # message rather than here on an arithmetic identity.
+    assert len(verifier) >= 18, sorted(hex(c) for c in verifier)
+    assert len(reader) >= 18, sorted(hex(c) for c in reader)
     assert verifier - reader == set(), sorted(hex(c) for c in verifier - reader)
 
 
@@ -353,28 +394,6 @@ def test_the_unmodified_fixture_verifies(tmp_path):
 
 
 _BEAN = REPO_ROOT / "vendor" / "dexkit_core" / "Core" / "dexkit" / "dex_item.cpp"
-
-
-def _strip_comments(text: str) -> str:
-    """Remove // and /* */ comments, scanning left to right.
-
-    Two independent regex passes would be wrong: a `//` line can contain `/*`
-    (this repo has hit that trap), so the block and line forms must be resolved
-    in one pass, in source order.
-    """
-    out = []
-    i, n = 0, len(text)
-    while i < n:
-        if text.startswith("//", i):
-            j = text.find("\n", i)
-            i = n if j < 0 else j
-        elif text.startswith("/*", i):
-            j = text.find("*/", i + 2)
-            i = n if j < 0 else j + 2
-        else:
-            out.append(text[i])
-            i += 1
-    return "".join(out)
 
 
 def test_the_bean_default_arm_assigns_rather_than_falling_through():

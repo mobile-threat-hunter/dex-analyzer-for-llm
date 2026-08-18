@@ -1266,12 +1266,14 @@ after the numbers were measured), the `A == 5` framing that understated the defe
 to a one-arity problem, the index-comment overstatement, and a claim that the
 adjacent findings below had been "filed" when they had not.
 
-**Adjacent, found on the same walk and recorded here** (the same "the vendored
+**Adjacent, found on the same walk — filed as dexllm#60 (rendering) and dexllm#61
+(cross-reference)** after the first two `gh issue create` attempts were refused;
+this paragraph said "recorded here" until they existed. Same "the vendored
 toolchain predates invoke-dynamic" family as dexllm#57, where the slicer's
-`encoded_value` parser stops at 16 of 18 types). All are wrong-ANSWER or
-missing-output gaps — no crash, no load refusal — and all are **0-incidence across
-the bundled corpus** (see above), so no corpus a/b can see them; measured on the
-file this fix un-blocks (24 classes / 142 methods):
+`encoded_value` parser stopped at 16 of 18 types (now fixed). All are wrong-ANSWER
+or missing-output gaps — no crash, no load refusal — and all are **0-incidence
+across the bundled corpus** (see above), so no corpus a/b can see them; measured on
+the file this fix un-blocks (24 classes / 142 methods):
 * `render_*_smali` prints **16** lines of `invoke-polymorphic <unhandled-fmt-29>`
   — the smali emitter has no `k45cc`/`k4rcc` case.
 * **6 of 142 methods** emit `// DECOMPILE ERROR: malformed bytecode: null operand
@@ -1370,19 +1372,41 @@ fixed-size table has its span bounded by `CheckHeader`'s `CheckListSize` off the
 header's own size/off pair; these two exist ONLY in the map, so `item->size` is
 the sole statement of how long they are.
 
-**This is ART PARITY, not an addition** — a correction to how the first cut framed
-it. ART bounds both, just somewhere this port never goes: it is MAP-driven, so it
-reaches them through `CheckIntraSectionIterate` (`dex_file_verifier.cc:2199`,
-entered for both types at `:2529-2530`), which does
-`CheckListSize(ptr_, 1, sizeof(dex::CallSiteIdItem), …)` at `:2264` and opens
-`CheckIntraMethodHandleItem` with the same call at `:1493`. Neither type is a
-DATA-section type, so **ART's own `CheckMap` does not bound them either** (only
-data-section types get its `data_items_left` budget). This port is
-REFERENCE-driven and never walks those sections, so it never reached the check;
-putting it in `CheckMap`, where the map item is already in hand, is the same
-intra/inter fusion the dexllm#56 annotation walk used. Entry sizes confirmed
-against AOSP `dex_file_structs.h`: `MethodHandleItem` is 4 × uint16_t = 8 B,
-`CallSiteIdItem` is one uint32_t = 4 B. Variable-length sections cannot be
+**This is ART PARITY, not an addition — and the first TWO attempts to say why were
+both wrong.** The delta correctness review caught the second one, which claimed
+*"neither is a DATA-section type, so ART's own `CheckMap` does not bound them
+either"*. That is **backwards**: ART's `IsDataSectionType` (`:82`) returns TRUE for
+`kDexTypeCallSiteIdItem` (`:92`), `kDexTypeMethodHandleItem` (`:93`) and
+`kDexTypeMapList` (`:94`) — only the header and the six `*_id` tables are false.
+
+So **ART bounds these in TWO places, and this port reached NEITHER**:
+* ART's own `CheckMap`, through that `IsDataSectionType`: the `data_items_left`
+  budget (`:777`) and the 4-byte alignment check (`:798`). **This port's
+  `IsDataSectionType` excludes all three**, so neither applies — and there is no
+  `data_items_left` equivalent anywhere in the port.
+* ART's map-driven intra pass, `CheckIntraSectionIterate` (`:2199`, entered for
+  both at `:2529-2530`), which does
+  `CheckListSize(ptr_, 1, sizeof(dex::CallSiteIdItem), …)` at `:2265` and opens
+  `CheckIntraMethodHandleItem` with the same call at `:1493`. This port is
+  reference-driven and never walks those sections.
+
+The bound added here is the stronger of ART's two — a per-section byte span rather
+than a running item budget — and putting it in `CheckMap`, where the map item is
+already in hand, is the same intra/inter fusion the dexllm#56 annotation walk used.
+Entry sizes confirmed against AOSP `dex_file_structs.h`: `MethodHandleItem` is
+4 × uint16_t = 8 B, `CallSiteIdItem` is one uint32_t = 4 B.
+
+**The ALIGNMENT half stays diverged, now deliberately.** Because this port's
+`IsDataSectionType` excludes the three, `CheckMap`'s alignment branch never runs
+for them, so a misaligned `call_site_id` / `method_handle` section offset is
+ACCEPTED where ART rejects it (measured by the reviewer: `off+1`, `+2`, `+3` all
+verify `True` and warm cleanly; `map_list` is covered anyway by `CheckHeader`'s
+4-aligned `map_off` check). It is **not** memory safety — the new extent bound
+spans those sections regardless of alignment, and an unaligned u2/u4 load is
+harmless on every supported target. Pre-existing (the exclusion predates this
+change), catalogued in [docs/aosp-oob-divergences.md](docs/aosp-oob-divergences.md),
+and the function's own comment used to justify itself by misstating ART the same
+way — that is fixed too. Variable-length sections cannot be
 bounded this way (their `size` counts items of differing length) and are validated
 where they are parsed. **Contents stay out of scope** — this bounds only where the
 section ends, which is the minimum that makes `ArrayView`'s check mean something.
@@ -1516,11 +1540,16 @@ a real API-26+ dex load rather than throw, and which the correctness review foun
 untested — and the CRITICAL above, whose craft needs a section to inflate.
 
 **The source-level trio is the durable part.**
-`test_the_parser_implements_every_value_the_verifier_accepts` states the invariant
-this issue was a violation of rather than the two codes: it derives the verifier's
-accepted set from `VerifyEncodedValue`'s cases and the reader's from
+`test_the_slicer_parser_implements_every_value_the_verifier_accepts` states the
+invariant this issue was a violation of rather than the two codes: it derives the
+verifier's accepted set from `VerifyEncodedValue`'s cases and the reader's from
 `ParseEncodedValue`'s, resolving `kEncoded*` through `dex_format.h`, and requires
-`verifier ⊆ reader` with a non-vacuity floor of 18 on each side. `VerifyDex` is
+`verifier ⊆ reader` with a non-vacuity floor on each side. Two corrections from the
+delta review: it now **strips comments** before parsing (a mutant that COMMENTED
+OUT the METHOD_HANDLE case passed both source guards — the trap dexllm#32's opcode
+guard already recorded, recurring with the correct scanner sitting in the same
+file), and its name says SLICER, because this repo has **two** encoded_value
+decoders and the other is out of its reach — see below. `VerifyDex` is
 the documented single gate, so a code it lets through and the parser does not
 implement IS a dex that verifies, loads and throws later. The other two pin the
 two constants, and pin that the bean `default:` arm ASSIGNS — the last one exists
@@ -1533,6 +1562,17 @@ and the crafted dex goes back to `valid: True`** (1, the inflated-count guard);
 the bound kept for `call_site_id` but not `method_handle` (1, so the guard covers
 the section that matters and not merely the code shape); the bean arm reverted to
 `default: break` (1, source-level only); plus an unmutated control.
+
+**A SECOND decoder has the same gap, and it is out of that guard's reach** (delta
+adversarial review): `core_ext/dexitem_code_source.cpp`'s `DecodeEncodedValueText`
+reads static-field initializers for `decompile_class` and has no case for
+0x15/0x16 either. Its `default:` returns having advanced only past the header
+byte, so the payload is not skipped and the following values in that
+`encoded_array` desync. **Wrong-answer only** — verified rather than assumed: the
+caller is a count-bounded `for` loop with `value_count` clamped to
+`static_field_idxs.size()`, so it terminates, and `ReadIntLE` is `end`-bounded, so
+it cannot read out of range. Pre-existing, and reachable only from a
+`MethodHandle`/`MethodType` STATIC INITIALIZER, which javac does not produce.
 
 **Recorded, not fixed:** the slicer's own pointer guards are inert —
 `Reader::ptr<T>` is `SLICER_CHECK_GE(offset, 0 && offset + sizeof(T) <= size_)`,

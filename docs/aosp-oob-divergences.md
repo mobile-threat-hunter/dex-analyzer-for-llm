@@ -143,6 +143,32 @@ keep-vs-remove decision.
   contract. Not a removal candidate — listed here for completeness because its
   purpose is OOB prevention.
 
+### B2. `IsDataSectionType` excludes three types ART includes
+
+- **Where:** [`native/core_ext/dex_verifier.cpp`](../native/core_ext/dex_verifier.cpp)
+  `IsDataSectionType`, consumed only by `CheckMap`'s alignment branch.
+- **AOSP:** `dex_file_verifier.cc:82` returns **true** for
+  `kDexTypeCallSiteIdItem` (:92), `kDexTypeMethodHandleItem` (:93) and
+  `kDexTypeMapList` (:94) — only the header item and the six `*_id` tables are
+  false. Being data-section types subjects all three to ART's `CheckMap`
+  `data_items_left` budget (:777) and its 4-byte alignment check (:798).
+- **Our divergence:** this port returns false for those three, so neither applies.
+  There is no `data_items_left` equivalent anywhere in the port either.
+- **Observable cost, measured (dexllm#57 delta review):** a **misaligned**
+  `call_site_id` / `method_handle` section offset is ACCEPTED where ART rejects it
+  (`off+1`, `+2`, `+3` all verify valid and warm cleanly). `map_list` is covered
+  regardless by `CheckHeader`'s 4-aligned `map_off` check.
+- **Not memory safety.** The section EXTENT bound added for dexllm#57 spans both
+  sections whatever their alignment, and an unaligned `u2`/`u4` load is harmless on
+  every supported target. The byte-span bound is in fact STRONGER than ART's
+  running item budget; only the alignment half is missing.
+- **Assessment:** pre-existing, spec-fidelity only. **KEPT** for now — closing it
+  is a three-line edit (drop the three cases so they fall through to `true`) but a
+  new REJECTION direction, which per dexllm#58 is the one way an added check can
+  fail, so it needs its own a/b over every source with such a section. Recorded
+  here rather than fixed inside dexllm#57, whose own comment used to justify
+  itself by misstating ART in exactly this way.
+
 ---
 
 ## Type C — internal null/index guards (not AOSP-function divergences)
@@ -177,6 +203,7 @@ CPython bounds), but they exist for memory safety and are part of the same
 | A1 mutf8 `cont()` | yes (ART `GetUtf16FromUtf8`) | yes (VerifyMutf8) | none | **yes — under review** |
 | A2 `SafeWidth`     | yes (slicer width)         | yes (VerifyInsns)  | none | low (3rd-party primitive) |
 | B1 `VerifyInsns`   | no (addition)              | n/a (IS the verifier) | n/a | no |
+| B2 `IsDataSectionType` | **yes** (ART :82 returns true for 3 types) | n/a (IS the verifier) | accepts a misaligned call_site/method_handle offset | **yes — needs its own a/b** |
 | C1 edge index      | no (DAD relies on Python)  | partial            | none | no (cheap, internal) |
 | C2 move-result null| no (matches DAD effective) | n/a                | none | no |
 

@@ -92,9 +92,17 @@ u4 MapTypeToBitMask(u2 type) {
     }
 }
 
-// ART IsDataSectionType: index sections (header, map_list, the *_id tables) are
-// not in the data section; everything else (lists, class_data, code, strings,
-// debug, annotations, encoded_array, hiddenapi) is.
+// A DELIBERATE DIVERGENCE FROM ART, and its comment used to misstate ART as the
+// justification (caught by the dexllm#57 delta review). ART's IsDataSectionType
+// (dex_file_verifier.cc:82) returns TRUE for kDexTypeCallSiteIdItem (:92),
+// kDexTypeMethodHandleItem (:93) and kDexTypeMapList (:94) — only the header and
+// the six *_id tables are false. This port returns false for those three as well.
+// The single consumer is CheckMap's alignment branch, so the OBSERVABLE cost is
+// that a misaligned call_site_id / method_handle section offset is ACCEPTED where
+// ART rejects it (map_list is covered anyway by CheckHeader's 4-aligned map_off
+// check). Not memory safety — the extent bound added for dexllm#57 spans those
+// sections regardless of alignment, and an unaligned u2/u4 load is harmless on
+// every supported target. Catalogued in docs/aosp-oob-divergences.md.
 bool IsDataSectionType(u2 type) {
     switch (type) {
         case kHeaderItem:
@@ -585,17 +593,23 @@ bool DexVerifier::CheckMap() {
         if (used_bits & bit) return Fail("Duplicate map section");
         used_bits |= bit;
         // EXTENT, not just the start, for the two fixed-size sections the HEADER
-        // does not describe (dexllm#57 review). ART bounds both too, and this is
-        // PARITY rather than an addition — it just lands somewhere else because
-        // ART is MAP-driven where this port is REFERENCE-driven: ART reaches them
-        // through CheckIntraSectionIterate (:2199, entered for both types at
-        // :2529-2530), which does CheckListSize(ptr_, 1, sizeof(CallSiteIdItem))
-        // at :2264 and opens CheckIntraMethodHandleItem with the same call at
-        // :1493. Neither is a DATA-section type, so ART's own CheckMap does not
-        // bound them either (only data-section types get its data_items_left
-        // budget) — this port simply never walked those sections, so it never
-        // reached the bound. Putting it here, where the map item is already in
-        // hand, is the same fusion the dexllm#56 annotation walk used.
+        // does not describe (dexllm#57 review). ART bounds both too, in TWO places,
+        // and this port reached NEITHER — the first rationale written here claimed
+        // ART's own CheckMap does not bound them, which is backwards:
+        //   * ART's CheckMap DOES, because its IsDataSectionType (:82) returns true
+        //     for both (:92/:93), which subjects them to the data_items_left budget
+        //     (:777) and the 4-byte alignment check (:798). This port's
+        //     IsDataSectionType excludes them — see its comment above — so neither
+        //     applies here, and there is no data_items_left equivalent at all.
+        //   * ART's intra pass does too, via CheckIntraSectionIterate (:2199,
+        //     entered for both at :2529-2530): CheckListSize(ptr_, 1,
+        //     sizeof(CallSiteIdItem)) at :2265, and the same call opening
+        //     CheckIntraMethodHandleItem at :1493. This port is REFERENCE-driven
+        //     and never walks those sections, so it never got there either.
+        // The bound below is the stronger of ART's two (a per-section byte span
+        // rather than a running item budget); putting it here, where the map item
+        // is already in hand, is the same intra/inter fusion the dexllm#56
+        // annotation walk used. The alignment half stays diverged, deliberately.
         // Every other fixed-size table has its span bounded by CheckHeader's
         // CheckListSize off the header's own size/off pair; method_handle and
         // call_site_id exist ONLY in the map, so `item->size` is the sole

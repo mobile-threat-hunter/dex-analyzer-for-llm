@@ -92,9 +92,13 @@
 //     not dereferenced by the core", which dexllm#57 made FALSE: implementing the
 //     0x16 METHOD_HANDLE encoded_value means the core now resolves a handle
 //     through Reader::GetMethodHandle. That is why CheckMap gained the section's
-//     EXTENT bound (ART parity, reached at a different site — see the comment
-//     there): without it, ArrayView's index check was against the map's own
-//     attacker-supplied count and read past the file. Still NOT ported from ART's
+//     EXTENT bound: without it, ArrayView's index check was against the map's own
+//     attacker-supplied count and read past the file. ART bounds these in TWO
+//     places and this port reached neither — its CheckMap (via an
+//     IsDataSectionType that, unlike ours, returns true for both) and its
+//     map-driven intra pass. See the CheckMap comment; the alignment half of
+//     ART's CheckMap treatment stays diverged (docs/aosp-oob-divergences.md).
+//     Still NOT ported from ART's
 //     CheckIntraMethodHandleItem: method_handle_type <= kLast (:1501) and
 //     field_or_method_idx against field_ids/method_ids (:1512/:1521). The
 //     residual is a THROW, not an OOB — that index reaches GetFieldDecl/
