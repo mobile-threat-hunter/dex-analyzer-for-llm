@@ -366,6 +366,7 @@ def extract_iocs(
     buckets = _scan_value_strings(dk.list_value_strings(), denoise, dex_packages)
 
     xref_budget = xref_limit
+    xref_ever_worked = False
     result: dict[str, list[dict[str, Any]]] = {}
     for cat in _XREF_PRIORITY:
         rows: list[dict[str, Any]] = []
@@ -381,9 +382,18 @@ def extract_iocs(
                         m.descriptor if hasattr(m, "descriptor") else str(m)
                         for m in hits
                     ]
-                except (
-                    Exception
-                ):  # noqa: BLE001 — one bad query must not abort the report
+                    xref_ever_worked = True
+                except Exception:  # noqa: BLE001
+                    # One bad query must not abort the report — but a failure
+                    # before ANY query has ever worked is not one bad query, it
+                    # is the whole cross-reference layer being unavailable
+                    # (dexllm#55: a dex whose cache init fails now RAISES here
+                    # instead of hanging). Swallowing that would hand back every
+                    # indicator with `methods: []` and no error, which reads as
+                    # "this indicator appears in no code" — the exact ambiguity
+                    # `declared_in` was added to remove.
+                    if not xref_ever_worked:
+                        raise
                     methods = []
                 # dexllm#20 — the method xref searches the const-string BYTECODE index,
                 # so an indicator kept only as a `static final String` constant (never

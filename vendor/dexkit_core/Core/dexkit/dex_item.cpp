@@ -268,7 +268,10 @@ uint32_t DexItem::BeginInitCache(uint32_t init_flags) {
     std::unique_lock lock(init_cache_state_mutex);
     while (true) {
         auto ready_flags = dex_flag.load(std::memory_order_acquire);
-        auto missing_flags = init_flags & ~ready_flags;
+        // dexllm(#55): a flag that already FAILED is not claimed again — the
+        // failure is sticky, so WaitInitCache reports it instead of re-running
+        // work that is known to throw on this dex.
+        auto missing_flags = init_flags & ~ready_flags & ~init_cache_failed_flags;
         if (missing_flags == 0) {
             return 0;
         }
@@ -291,12 +294,61 @@ void DexItem::FinishInitCache(uint32_t init_flags) {
     init_cache_state_cv.notify_all();
 }
 
-void DexItem::WaitInitCache(uint32_t init_flags) const {
-    std::unique_lock lock(init_cache_state_mutex);
-    init_cache_state_cv.wait(lock, [this, init_flags] {
+void DexItem::AbortInitCache(uint32_t init_flags, std::string reason) {
+    {
+        std::lock_guard lock(init_cache_state_mutex);
         auto ready_flags = dex_flag.load(std::memory_order_acquire);
-        return (ready_flags & init_flags) == init_flags;
-    });
+        auto failed_flags = init_flags & ~ready_flags;
+        if (failed_flags != 0) {
+            // NOTE: InitCache builds a whole claimed SET and publishes it in one
+            // Finish, so a throw anywhere in it fails the whole set — including
+            // parts that had already been built. Deliberately conservative (a
+            // half-built cache must never look ready), but it means one broken
+            // section can retire an unrelated capability for the process
+            // lifetime; only the flags a PREVIOUS round published stay usable.
+            init_cache_failed_flags |= failed_flags;
+            if (init_cache_error.empty()) {
+                // Never store an EMPTY reason: a failed flag then always
+                // carries one, which is what lets the throw below read the
+                // message directly. FIRST reason wins — which is what keeps the
+                // task's own diagnosis from being overwritten by the generic
+                // post-join retire, at the cost of a later, unrelated failure
+                // being reported with the earlier one's message.
+                init_cache_error = reason.empty() ? std::string("unknown error") : std::move(reason);
+            }
+        }
+        init_cache_inflight_flags &= ~init_flags;
+    }
+    init_cache_state_cv.notify_all();
+}
+
+void DexItem::ReleaseInitClaim(uint32_t init_flags) {
+    {
+        std::lock_guard lock(init_cache_state_mutex);
+        init_cache_inflight_flags &= ~init_flags;
+    }
+    init_cache_state_cv.notify_all();
+}
+
+void DexItem::WaitInitCache(uint32_t init_flags) const {
+    bool failed;
+    std::string error;
+    {
+        std::unique_lock lock(init_cache_state_mutex);
+        init_cache_state_cv.wait(lock, [this, init_flags] {
+            auto ready_flags = dex_flag.load(std::memory_order_acquire);
+            return ((ready_flags | init_cache_failed_flags) & init_flags) == init_flags;
+        });
+        // dexllm(#55): keyed on the FLAG, never on the message. AbortInitCache
+        // never stores an empty reason, so the two are equivalent TODAY — the
+        // flag is used because it is the state that means "failed", and a
+        // message-keyed test would silently stop raising if that ever changed.
+        failed = (init_cache_failed_flags & init_flags) != 0;
+        error = init_cache_error;
+    }
+    if (failed) {
+        throw std::runtime_error("dex cache init failed: " + error);
+    }
 }
 
 void DexItem::InitCache(uint32_t init_flags) {
@@ -536,7 +588,8 @@ uint32_t DexItem::BeginPutCrossRef(uint32_t put_cross_flag) {
     std::unique_lock lock(cross_ref_state_mutex);
     while (true) {
         auto ready_flags = dex_cross_flag.load(std::memory_order_acquire);
-        auto missing_flags = put_cross_flag & ~ready_flags;
+        // dexllm(#55): see BeginInitCache — a failed flag is sticky.
+        auto missing_flags = put_cross_flag & ~ready_flags & ~cross_ref_failed_flags;
         if (missing_flags == 0) {
             return 0;
         }
@@ -559,12 +612,48 @@ void DexItem::FinishPutCrossRef(uint32_t put_cross_flag) {
     cross_ref_state_cv.notify_all();
 }
 
-void DexItem::WaitPutCrossRef(uint32_t put_cross_flag) const {
-    std::unique_lock lock(cross_ref_state_mutex);
-    cross_ref_state_cv.wait(lock, [this, put_cross_flag] {
+void DexItem::AbortPutCrossRef(uint32_t put_cross_flag, std::string reason) {
+    {
+        std::lock_guard lock(cross_ref_state_mutex);
         auto ready_flags = dex_cross_flag.load(std::memory_order_acquire);
-        return (ready_flags & put_cross_flag) == put_cross_flag;
-    });
+        auto failed_flags = put_cross_flag & ~ready_flags;
+        if (failed_flags != 0) {
+            cross_ref_failed_flags |= failed_flags;
+            if (cross_ref_error.empty()) {
+                // Never store an EMPTY reason: a failed flag then always
+                // carries one, which is what lets the throw below read the
+                // message directly.
+                cross_ref_error = reason.empty() ? std::string("unknown error") : std::move(reason);
+            }
+        }
+        cross_ref_inflight_flags &= ~put_cross_flag;
+    }
+    cross_ref_state_cv.notify_all();
+}
+
+void DexItem::ReleaseCrossRefClaim(uint32_t put_cross_flag) {
+    {
+        std::lock_guard lock(cross_ref_state_mutex);
+        cross_ref_inflight_flags &= ~put_cross_flag;
+    }
+    cross_ref_state_cv.notify_all();
+}
+
+void DexItem::WaitPutCrossRef(uint32_t put_cross_flag) const {
+    bool failed;
+    std::string error;
+    {
+        std::unique_lock lock(cross_ref_state_mutex);
+        cross_ref_state_cv.wait(lock, [this, put_cross_flag] {
+            auto ready_flags = dex_cross_flag.load(std::memory_order_acquire);
+            return ((ready_flags | cross_ref_failed_flags) & put_cross_flag) == put_cross_flag;
+        });
+        failed = (cross_ref_failed_flags & put_cross_flag) != 0;
+        error = cross_ref_error;
+    }
+    if (failed) {
+        throw std::runtime_error("dex cross-ref build failed: " + error);
+    }
 }
 
 void DexItem::PutCrossRef(uint32_t put_cross_flag) {

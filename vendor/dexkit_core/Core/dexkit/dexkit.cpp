@@ -230,7 +230,23 @@ DexKit::QueryExecutionGuard DexKit::EnterQueryExecution(uint32_t required_flags)
                 pending_warmup_flags = 0;
                 warmup_inflight = true;
                 lock.unlock();
-                InitDexCache(warmup_flags);
+                // dexllm(#55): InitDexCache can now THROW (a failed cache init
+                // reports instead of blocking). Leaving warmup_inflight set on
+                // that path would replace the old hang with a new one, in
+                // EnterQueryExecution's own wait — so retire it either way.
+                try {
+                    InitDexCache(warmup_flags);
+                } catch (...) {
+                    lock.lock();
+                    warmup_inflight = false;
+                    // dexllm(#55): the ticket is owned by a LOCAL, so leaving it
+                    // in the wait queue on the way out strands it there — every
+                    // later query's is-it-my-turn test then fails forever, which
+                    // is the same permanent block by another route.
+                    (void) dequeue_shared_pool_admission_ticket();
+                    query_execution_cv.notify_all();
+                    throw;
+                }
                 lock.lock();
                 warmup_inflight = false;
                 query_execution_cv.notify_all();
@@ -1437,7 +1453,8 @@ uint32_t DexKit::BeginBuildCrossRefAggregates(uint32_t aggregate_flags) {
     std::unique_lock lock(cross_ref_aggregate_state_mutex);
     while (true) {
         auto ready_flags = cross_ref_aggregate_flag.load(std::memory_order_acquire);
-        auto missing_flags = aggregate_flags & ~ready_flags;
+        // dexllm(#55): see DexItem::BeginInitCache — a failed flag is sticky.
+        auto missing_flags = aggregate_flags & ~ready_flags & ~cross_ref_aggregate_failed_flags;
         if (missing_flags == 0) {
             return 0;
         }
@@ -1460,12 +1477,37 @@ void DexKit::FinishBuildCrossRefAggregates(uint32_t aggregate_flags) {
     cross_ref_aggregate_state_cv.notify_all();
 }
 
-void DexKit::WaitBuildCrossRefAggregates(uint32_t aggregate_flags) const {
-    std::unique_lock lock(cross_ref_aggregate_state_mutex);
-    cross_ref_aggregate_state_cv.wait(lock, [this, aggregate_flags] {
+void DexKit::AbortBuildCrossRefAggregates(uint32_t aggregate_flags, std::string reason) {
+    {
+        std::lock_guard lock(cross_ref_aggregate_state_mutex);
         auto ready_flags = cross_ref_aggregate_flag.load(std::memory_order_acquire);
-        return (ready_flags & aggregate_flags) == aggregate_flags;
-    });
+        auto failed_flags = aggregate_flags & ~ready_flags;
+        if (failed_flags != 0) {
+            cross_ref_aggregate_failed_flags |= failed_flags;
+            if (cross_ref_aggregate_error.empty()) {
+                cross_ref_aggregate_error = reason.empty() ? std::string("unknown error") : std::move(reason);
+            }
+        }
+        cross_ref_aggregate_inflight_flags &= ~aggregate_flags;
+    }
+    cross_ref_aggregate_state_cv.notify_all();
+}
+
+void DexKit::WaitBuildCrossRefAggregates(uint32_t aggregate_flags) const {
+    bool failed;
+    std::string error;
+    {
+        std::unique_lock lock(cross_ref_aggregate_state_mutex);
+        cross_ref_aggregate_state_cv.wait(lock, [this, aggregate_flags] {
+            auto ready_flags = cross_ref_aggregate_flag.load(std::memory_order_acquire);
+            return ((ready_flags | cross_ref_aggregate_failed_flags) & aggregate_flags) == aggregate_flags;
+        });
+        failed = (cross_ref_aggregate_failed_flags & aggregate_flags) != 0;
+        error = cross_ref_aggregate_error;
+    }
+    if (failed) {
+        throw std::runtime_error("dex cross-ref aggregate build failed: " + error);
+    }
 }
 
 void DexKit::BuildCrossRefAggregates(uint32_t aggregate_flags) {
@@ -1643,6 +1685,49 @@ void DexKit::BuildCrossRefAggregates(uint32_t aggregate_flags) {
     }
 }
 
+// dexllm(#55): the reason a failed init publishes, so WaitInitCache can report
+// WHAT went wrong rather than blocking. Only valid inside a catch block.
+static std::string DescribeCurrentException() {
+    try {
+        throw;
+    } catch (const std::exception &e) {
+        auto what = std::string(e.what());
+        return what.empty() ? std::string("unknown exception") : what;
+    } catch (...) {
+        return "unknown exception";
+    }
+}
+
+// dexllm(#55): retire every claim a job list still owns. Idempotent by
+// construction — AbortInitCache never marks a flag that is already ready, and a
+// claim it already retired is simply not there any more.
+static void RetireInitClaims(const std::vector<std::pair<DexItem *, uint32_t>> &jobs) {
+    for (auto &[dex_item, claimed_flags]: jobs) {
+        dex_item->AbortInitCache(claimed_flags, "cache init task did not run");
+    }
+}
+
+static void RetireCrossRefClaims(const std::vector<std::pair<DexItem *, uint32_t>> &jobs) {
+    for (auto &[dex_item, claimed_flags]: jobs) {
+        dex_item->AbortPutCrossRef(claimed_flags, "cross-ref task did not run");
+    }
+}
+
+// dexllm(#55): the ABANDON counterpart. Used where the pool itself could not be
+// built or filled — the caller is rethrowing, so nobody will wait for a verdict
+// and latching one would make a momentary "out of threads" permanent.
+static void ReleaseInitClaims(const std::vector<std::pair<DexItem *, uint32_t>> &jobs) {
+    for (auto &[dex_item, claimed_flags]: jobs) {
+        dex_item->ReleaseInitClaim(claimed_flags);
+    }
+}
+
+static void ReleaseCrossRefClaims(const std::vector<std::pair<DexItem *, uint32_t>> &jobs) {
+    for (auto &[dex_item, claimed_flags]: jobs) {
+        dex_item->ReleaseCrossRefClaim(claimed_flags);
+    }
+}
+
 void DexKit::InitDexCache(uint32_t init_flags) {
     uint32_t cross_ref_flags = init_flags & (kCallerMethod | kRwFieldMethod);
     auto thread_num = NormalizeThreadNum(_thread_num.load(std::memory_order_acquire));
@@ -1656,13 +1741,42 @@ void DexKit::InitDexCache(uint32_t init_flags) {
     }
 
     if (!init_jobs.empty()) {
-        ThreadPool pool(std::min(static_cast<size_t>(thread_num), init_jobs.size()));
-        for (auto &[dex_item, claimed_flags]: init_jobs) {
-            pool.enqueue([dex_item, claimed_flags]() {
-                dex_item->InitCache(claimed_flags);
-                dex_item->FinishInitCache(claimed_flags);
-            });
+        // dexllm(#55): a claim must be retired on EVERY exit from this block,
+        // including the ones where the pool itself throws — its constructor
+        // when the process is out of threads, or `pool.enqueue` (it allocates
+        // twice) with half the jobs unsubmitted. Their claims would otherwise
+        // stay in `init_cache_inflight_flags` forever, a permanent block for
+        // every later BeginInitCache: exactly the hang this change removes,
+        // reached by the path that installs the cure.
+        //
+        // Note WHICH retire: the exception path RELEASES without latching a
+        // failure, because it rethrows and nobody will wait for a verdict —
+        // latching would turn a one-instant resource shortage into a permanently
+        // dead DexKit. The normal path below LATCHES, because the Wait* that
+        // follows needs a verdict or it blocks.
+        try {
+            ThreadPool pool(std::min(static_cast<size_t>(thread_num), init_jobs.size()));
+            for (auto &[dex_item, claimed_flags]: init_jobs) {
+                // A throw here used to be swallowed by the packaged_task whose
+                // future InitDexCache discards, leaving the claim unretired and
+                // every WaitInitCache blocked forever.
+                pool.enqueue([dex_item, claimed_flags]() {
+                    try {
+                        dex_item->InitCache(claimed_flags);
+                        dex_item->FinishInitCache(claimed_flags);
+                    } catch (...) {
+                        dex_item->AbortInitCache(claimed_flags, DescribeCurrentException());
+                    }
+                });
+            }
+        } catch (...) {
+            ReleaseInitClaims(init_jobs);
+            throw;
         }
+        // The pool is joined, so every task has run. A claim still outstanding
+        // here published no outcome, so retire it now — a no-op for the flags
+        // the task itself already published.
+        RetireInitClaims(init_jobs);
     }
     for (auto &dex_item: dex_items) {
         dex_item->WaitInitCache(init_flags);
@@ -1681,13 +1795,23 @@ void DexKit::InitDexCache(uint32_t init_flags) {
         }
     }
     if (!cross_ref_jobs.empty()) {
-        ThreadPool pool(std::min(static_cast<size_t>(thread_num), cross_ref_jobs.size()));
-        for (auto &[dex_item, claimed_flags]: cross_ref_jobs) {
-            pool.enqueue([dex_item, claimed_flags]() {
-                dex_item->PutCrossRef(claimed_flags);
-                dex_item->FinishPutCrossRef(claimed_flags);
-            });
+        try {
+            ThreadPool pool(std::min(static_cast<size_t>(thread_num), cross_ref_jobs.size()));
+            for (auto &[dex_item, claimed_flags]: cross_ref_jobs) {
+                pool.enqueue([dex_item, claimed_flags]() {
+                    try {
+                        dex_item->PutCrossRef(claimed_flags);
+                        dex_item->FinishPutCrossRef(claimed_flags);
+                    } catch (...) {
+                        dex_item->AbortPutCrossRef(claimed_flags, DescribeCurrentException());
+                    }
+                });
+            }
+        } catch (...) {
+            ReleaseCrossRefClaims(cross_ref_jobs);
+            throw;
         }
+        RetireCrossRefClaims(cross_ref_jobs);
     }
     for (auto &dex_item: dex_items) {
         dex_item->WaitPutCrossRef(cross_ref_flags);
@@ -1695,8 +1819,16 @@ void DexKit::InitDexCache(uint32_t init_flags) {
 
     auto aggregate_flags = BeginBuildCrossRefAggregates(cross_ref_flags);
     if (aggregate_flags != 0) {
-        BuildCrossRefAggregates(aggregate_flags);
-        FinishBuildCrossRefAggregates(aggregate_flags);
+        // dexllm(#55): this one runs on the CALLING thread, so a throw already
+        // reached the caller — but it left the claim outstanding, so every
+        // OTHER thread waiting on the same aggregate blocked forever.
+        try {
+            BuildCrossRefAggregates(aggregate_flags);
+            FinishBuildCrossRefAggregates(aggregate_flags);
+        } catch (...) {
+            AbortBuildCrossRefAggregates(aggregate_flags, DescribeCurrentException());
+            throw;
+        }
     }
     WaitBuildCrossRefAggregates(cross_ref_flags);
 }

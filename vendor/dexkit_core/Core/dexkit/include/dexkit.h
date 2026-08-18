@@ -144,6 +144,9 @@ private:
     mutable std::mutex cross_ref_aggregate_state_mutex;
     mutable std::condition_variable cross_ref_aggregate_state_cv;
     uint32_t cross_ref_aggregate_inflight_flags = 0;
+    // dexllm(#55): see DexItem::AbortInitCache — the same claim/publish pair.
+    uint32_t cross_ref_aggregate_failed_flags = 0;
+    std::string cross_ref_aggregate_error;
 
     void InitDexCache(uint32_t init_flags);
     [[nodiscard]] QueryExecutionGuard EnterQueryExecution(uint32_t required_flags);
@@ -154,8 +157,11 @@ private:
 #if DEXKIT_ENABLE_INTERNAL_METRICS
     void RecordQueryMetrics(const QueryContext &query_context);
 #endif
+    // Same contract as DexItem::BeginInitCache: 0 == ready OR permanently
+    // failed, so the matching Wait* is what reports the failure.
     uint32_t BeginBuildCrossRefAggregates(uint32_t aggregate_flags);
     void FinishBuildCrossRefAggregates(uint32_t aggregate_flags);
+    void AbortBuildCrossRefAggregates(uint32_t aggregate_flags, std::string reason);
     void WaitBuildCrossRefAggregates(uint32_t aggregate_flags) const;
     void BuildCrossRefAggregates(uint32_t aggregate_flags);
 

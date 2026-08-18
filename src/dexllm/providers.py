@@ -131,6 +131,7 @@ def detect_content_providers(
     hits = match_content_uris(dk.list_value_strings(), data_dir=data_dir)
 
     budget = xref_limit
+    xref_ever_worked = False
     result: list[dict[str, Any]] = []
     for uri, family in hits:  # already sorted by URI
         methods: list[str] = []
@@ -142,7 +143,14 @@ def detect_content_providers(
                 methods = [
                     m.descriptor if hasattr(m, "descriptor") else str(m) for m in found
                 ]
-            except Exception:  # noqa: BLE001 — one bad query must not abort the report
+                xref_ever_worked = True
+            except Exception:  # noqa: BLE001
+                # See ioc.py: one bad query is swallowed, but a failure before
+                # any query has ever worked means the cross-reference layer is
+                # unavailable (dexllm#55) and every row would silently claim the
+                # URI is referenced nowhere.
+                if not xref_ever_worked:
+                    raise
                 methods = []
             budget -= 1
         result.append({"uri": uri, "family": family, "methods": methods})

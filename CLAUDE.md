@@ -20,7 +20,7 @@ A `PreToolUse` hook injects a DAD reminder when editing `vendor/dexkit_core/Core
 
 ### Port status — `native/dad_cpp/` (COMPLETE — end-to-end pipeline working)
 
-All 12 DAD modules ported. `dk.decompile_method(descriptor)` returns DAD-quality Java text on real APKs. 28 parity suites pass (25 DAD-module + 1 verifier regression/fuzz + 1 return-literal beyond-DAD + 1 MUTF-8 decoder differential-vs-ART; ~790+ cumulative checks), 0 regressions.
+All 12 DAD modules ported. `dk.decompile_method(descriptor)` returns DAD-quality Java text on real APKs. 28 parity suites pass (25 DAD-module + 1 verifier regression/fuzz + 1 return-literal beyond-DAD + 1 MUTF-8 decoder differential-vs-ART; ~790+ cumulative checks), 0 regressions. `ctest` reports **29** — the 29th is `thread_pool_selfdestruct_test`, a concurrency regression (dexllm#50), not a parity suite.
 
 | C++ Module | DAD source | Status |
 |---|---|---|
@@ -668,6 +668,296 @@ dexllm#32 asked where this primitive should live, offering **(a) keep and harden
 
 **Still hand-maintained, now merely checked:** the enumeration is not derived at runtime from slicer's tables, so the invariant lives in a test rather than in the type system. That is the accepted residue of choosing option (a) — see the decision record above.
 
+### A cache-init failure REPORTS — it no longer blocks every waiter forever (dexllm#55, 2026-08-18)
+
+`DexKit::InitDexCache` published a dex's "cache ready" flag ONLY on the success
+path. `DexItem::BeginInitCache` CLAIMS the flags it is about to build
+(`init_cache_inflight_flags`), `FinishInitCache` is the only publisher and is the
+task's LAST statement, and `DexItem::WaitInitCache` is a `cv.wait` with no
+timeout and no failure state. So a task that did not reach its last statement —
+for any reason — left the claim outstanding and every waiter blocked **forever**,
+silently: `ThreadPool::enqueue` wraps the task in a `std::packaged_task`, so a
+throw is captured into a future, and `InitDexCache` **discards the future**.
+Nothing observed it, the worker survived, and the process did not abort.
+
+**Reachable from a `verify()`-valid dex, and reproduced deterministically.**
+Repointing one class_def's `annotations_off` at the map_list — a well-formed
+offset holding the wrong structure — yields a dex the structural verifier calls
+valid in BOTH strict and lenient mode (annotations are documented out of its
+scope), on which `warm_analysis_caches` / `find_call_sites_to` /
+`resolve_call_args` / `summarize_capabilities` never return, while
+`list_classes` / `render_class_smali` / `decompile_class` / `list_value_strings`
+answer normally — the split the issue measured, and itself evidence that the task
+aborts inside a specific `InitCache` branch rather than being skipped wholesale.
+
+**Fix — publish the OUTCOME, not only success.** Each of the three
+claim/publish state machines gains a failure half:
+`DexItem::AbortInitCache` / `AbortPutCrossRef` / `DexKit::AbortBuildCrossRefAggregates`
+retire the claim and record `*_failed_flags` + the reason; the matching `Wait*`
+waits on `(ready | failed)` and THROWS `std::runtime_error` naming the cause
+(pybind → `RuntimeError`); `Begin*` excludes an already-failed flag, so the
+failure is sticky and a retry reports instead of re-running work known to throw.
+Two things make the publish unconditional rather than best-effort: the task body
+runs under a `try`/`catch(...)` that aborts the claim, and the enqueuing thread
+retires every claim again once the pool is JOINED — a no-op for flags the task
+already published, and the net for a task that never ran at all. **A review
+found the second one was not actually unconditional**: it sat after the pool's
+scope, so a throw from `pool.enqueue` itself (it allocates twice) skipped it
+entirely and stranded the claims of every job not yet submitted — the same
+permanent block, reached through the code that installs the cure. The retire is
+now in a `catch (...)` + rethrow on both job loops.
+`WaitInitCache` keys the throw on the **FLAG, never on the message** — the flag
+is the state that means "failed", and `Abort*` never stores an empty reason, so
+a caller can never proceed on a cache that was not built.
+
+**The fix had to close a hang it would otherwise have CREATED.**
+`EnterQueryExecution` sets `warmup_inflight = true`, unlocks, calls
+`InitDexCache`, and clears the flag after it returns. Making `InitDexCache` throw
+would leave that flag set forever, so every later query would block in
+`EnterQueryExecution`'s own wait — the same hang moved one frame up. It is now
+retired on both paths.
+
+**Measured (a/b OFF vs ON, SAME script, both `.so` md5-verified — `feda34d3…`
+OFF, `5d0f0942…` ON, and the ON build bit-reproduced its md5 after the swap):**
+34 bundled sources (31 loadable) × 13 axes — verify_report, class list, value
+strings, `warm_analysis_caches`, external refs, call sites, resolved call args,
+field xref, capabilities, IOCs, permission callers, decompile, smali = **406
+records, identical sha256, 0 diff**. Required to be identical: the failure is
+crafted-input-only, so this proves 0 regression and **nothing** about the
+mechanism — the crafted guard does. parity 29/29, pytest 631 passed.
+
+**The first a/b was WRONG and its own axis proved it**: `json.dumps(…,
+default=str)` renders a `set` through `str()`, whose order follows per-process
+string hashing, so the capability axis reported 4 spurious differences that
+reproduced across three `PYTHONHASHSEED` values on ONE build. Canonicalised
+(sets sorted) before re-measuring both sides.
+
+**Guards** ([tests/test_cache_init_failure.py](tests/test_cache_init_failure.py),
+10 cases): every call that could hang runs in a **SUBPROCESS with a deadline**, so
+a regression FAILS the suite instead of hanging it — an in-process assertion
+cannot do that. The fixture crafts the dex IN PLACE and length-preserving, tries
+each bare `.dex` in turn, and requires the craft to ACTUALLY break cache init
+before using it (otherwise the guards would pass vacuously); 3 of the corpus's 9
+bare dexes carry the shape. The fixture separates THREE outcomes, which the
+first cut conflated into one and a review took apart: no bare `.dex` at all (the
+corpus-less CI leg) SKIPS — it is an environment fact; bare dexes that exist but
+are not craftable go through `require_corpus_shape`; and a craftable dex whose
+probe HANGS FAILS unconditionally, narrowing or not, because that is a fact
+about the product. The first cut instead `continue`d past a hang, so a real #55
+regression was reported as "no shape in the bundled corpus" — and SKIPPED
+outright under a narrowing (reproduced: pre-fix + `$DEXLLM_TEST_APK` gave 10
+green tests). It also globbed a RELATIVE path, so the corpus-less leg hit
+`pytest.fail` rather than a skip — the issue #46 trap, in a file written after
+reading the rule.
+
+**Mutation matrix — and the three survivors are the interesting part.** Killed:
+the pre-fix module (9 errors — the fixture itself can no longer be built, which
+is the hang), the `EnterQueryExecution` try/catch (2 failures), and the task's
+own try/catch (M7). **Survivors, each investigated rather than waved away:**
+
+- **the in-flight retire and the sticky exclusion MASK EACH OTHER.** Removing
+  either alone changes nothing observable — stickiness makes `BeginInitCache`
+  return before it ever consults the leaked claim, and retiring the claim makes
+  stickiness unnecessary for liveness. Verified they are not merely
+  hard-to-reach: no single-threaded ordering hangs (4 API orderings tried), and
+  neither does an 8-thread concurrent warm (`EnterQueryExecution` serialises the
+  warmup, so the second claimant never races the first). Only the COMBINED
+  mutant hangs, and the second-call guard kills it. Same shape as the
+  ThreadPool handler pair already recorded in this file.
+- **the flag-keyed throw was UNGUARDED**, because no crafted input produces an
+  empty reason. Rather than leave an untested branch, `Abort*` now never stores
+  an empty reason (`"unknown error"` if one arrives), which makes the
+  message-keyed variant a provably EQUIVALENT mutant instead of an escape, and
+  deletes the dead `error.empty()` fallback at both throw sites. The flag is
+  still what the throw reads: it is the state that means "failed", and a
+  message-keyed test would silently stop raising if that ever changed.
+
+**Known costs and gaps, stated rather than discovered — several of them by the
+review, not by the design:**
+
+- **the sticky failure is COARSE.** `InitCache` builds a whole claimed SET and
+  publishes it in ONE `Finish`, so a throw anywhere fails the set, including
+  parts already built. Measured: on a crafted dex `find_methods_using_strings`
+  returns 683 hits in a fresh process, and 0 (raises) if a failing
+  `warm_analysis_caches` ran first — one broken annotation table retires string
+  search for the process lifetime. Deliberately conservative (a half-built cache
+  must never look ready) and no worse than the pre-fix hang, but it is a real
+  loss of function, not merely a diagnostic. Flags a PREVIOUS round published
+  stay usable — `Abort*` never marks a ready flag, verified.
+- **a `Begin*` return of 0 no longer means "ready"** — it means ready OR
+  permanently failed, so a caller MUST pair it with the matching `Wait*`. All
+  three call sites do; the contract is now on the declarations.
+- **partially-built caches became OBSERVABLE** where they used to be unreachable
+  behind the hang: `InitCache` resizes `method_caller_ids` / `method_invoking_ids`
+  long before the throw point, and `GetCallMethods` / `GetInvokeMethods` guard on
+  `!empty()` rather than on `dex_flag`. Every Python path reaches them through a
+  warmup that raises first, so it is not reachable today; it is recorded because
+  the guard is not the flag.
+- **one error slot per DexItem** — the FIRST reason wins, which is what keeps the
+  task's own diagnosis from being overwritten by the generic post-join retire,
+  at the cost of a later unrelated failure being reported with the earlier
+  message.
+- **`PutCrossRef` and `BuildCrossRefAggregates` have no test of their own.** They
+  are changed for CONSISTENCY; no crafted input is known that reaches them (they
+  run off maps `InitCache` already built, so a corruption fails earlier).
+- **the post-join retire is a NET with no test either.** On this input the
+  in-task `catch` always publishes first. Its real reason is the enqueue-throws
+  path above — NOT, as the first cut's code comment claimed, `ThreadPool::enqueue`
+  dropping a task: `enqueue` drops nothing, the skip is evaluated in the task
+  body, and these pools pass no skip function at all, so that branch is dead.
+
+**What a second, adversarial review found — three of them defects the fix
+itself introduced or depended on, all fixed here:**
+
+- **`ThreadPool`'s CONSTRUCTOR was not exception-safe, which silently voided the
+  recovery above.** `std::thread`'s ctor throws when the process is out of
+  threads (RLIMIT_NPROC, a container pids limit); unwinding out of a partially
+  built pool destroys a still-JOINABLE `std::thread`, which is
+  `std::terminate()` — the process dies before ANY caller's catch runs.
+  Reproduced with a real `RLIMIT_NPROC`: failing the FIRST pool thread was
+  already survivable, failing the SECOND aborted, and 2+ threads is the normal
+  configuration for a multi-dex source. The spawn loop now stops, notifies and
+  joins what it built before rethrowing.
+- **a TRANSIENT failure was latched permanently.** The sticky exclusion is
+  justified by "work known to throw on this dex", which is false for "out of
+  threads" — and the new catch was exactly what converted a one-instant blip
+  into a dead `DexKit` for its lifetime, told to the caller as the generic
+  "cache init task did not run". The exception path now RELEASES the claim
+  without latching a verdict (it rethrows, so nobody waits for one), while the
+  post-join path still latches (the `Wait*` after it needs a verdict).
+  Verified: the blip reports `Resource temporarily unavailable`, and the retry
+  after it succeeds.
+- **`extract_iocs` SWALLOWED the new exception**, turning a loud hang into a
+  silently wrong triage report: its per-query `except Exception` ("one bad query
+  must not abort the report") caught a systematic cache-init failure too, so
+  every indicator came back with `methods: []` and no error — which reads as
+  "this indicator appears in no code", the exact ambiguity `declared_in` was
+  added to remove. Both it and `detect_content_providers` now re-raise when NO
+  query has ever succeeded, which is the difference between one bad query and
+  the whole cross-reference layer being unavailable.
+
+Also from that pass: the `AbortInitCache` contract comment overstated safety
+(it is safe only for flags THIS caller claimed — the retire clears them from a
+shared mask), and the section's pytest count was stale.
+
+**Not the whole story — a SEGV on the same crafted family is filed separately.**
+Two other `annotations_off` corruptions SIGSEGV instead of throwing, on a
+`verify()`-valid dex, and reproduce identically on the pre-fix build: a signal
+never unwinds, so no exception path can contain it. ART's own `DexFileVerifier`
+DOES check annotations (`CheckIntraAnnotationsDirectoryItem`, and
+`dex_file_verifier.cc:2969`'s `CheckOffsetToTypeMap(annotations_off,
+kDexTypeAnnotationsDirectoryItem)`), which is precisely what this port lists as
+out of scope alongside the offset→map-type cross-check.
+
+### A pool destroyed on its own worker DETACHES instead of joining itself (dexllm#50, 2026-08-18)
+
+`ThreadPool::~ThreadPool` joined every worker unconditionally. A pool task can
+hold the last reference to its own pool — `QueryScheduler::EnqueueDispatchTasks`
+captures a `shared_ptr` to the scheduler into a lambda that runs ON the pool, and
+the scheduler owns the pool — so when `DexKit` drops its references while a
+dispatched lambda is still alive, the last scheduler reference is the one inside
+that lambda. Destroying it on the worker destroys the pool THERE, and the
+destructor then joined the thread it was executing on: `std::system_error`
+"Resource deadlock avoided", uncaught in a thread, `std::terminate`.
+
+**Reproduced deterministically — the issue's own precondition for a fix.** #50
+was filed on the code path, observed once and never reproduced ("without that, a
+fix cannot be shown to work"). A 30-line standalone program that lets a task own
+its pool aborts **10/10** with the exact reported message, and the
+scheduler-shaped variant (task → intermediate owner → pool) does too.
+
+**Fix — the shared state OUTLIVES the object.** Everything a worker touches
+(queue, mutex, condition, `stop`, `should_skip_task`, `thread_ids`) moved into a
+`State` held by `shared_ptr`; the worker lambda captures `state` and NOT `this`,
+and so does the packaged task (a queued task can outlive the object, so reading
+`should_skip_task` through `this` was a latent use-after-free of its own). The
+destructor then detaches the ONE worker it is running on and joins the rest: that
+worker's loop reads only `State`, which its own reference keeps alive, and `stop`
+is already set, so it exits as soon as the queue drains. Destruction from a
+non-worker is **unchanged** — it still joins every worker, which is the contract
+the rest of the core relies on.
+
+**Accepted costs, two of them found by review rather than stated up front:**
+(1) the self-destruct path leaves one DETACHED thread where before there were
+none, so if the process calls `exit()` in that window a detached thread can run
+during static destruction. (2) On that path the destructor no longer implies
+"every queued task has finished" — the detached worker keeps draining the queue
+AFTER the destructor returns and the owner is gone (measured: with a
+single-worker pool, 0 tasks done at return and the rest run afterwards). Only a
+single-worker pool can reach it (any other worker drains before its join
+returns), and DexKit cannot, because a queued dispatch lambda holds a reference
+that would have kept the pool alive. Destruction from a NON-worker is unchanged
+and still joins. The queue is deliberately not cleared instead: dropping a
+queued task leaves its `std::future` unsatisfied forever, which is the failure
+mode dexllm#55 exists to remove.
+
+**Why not the other two directions the issue listed:** a `weak_ptr` capture at
+the dispatch is not sufficient — `TaskCompletionGuard` must hold a STRONG
+reference while it reports completion, and any strong reference on a worker can
+become the last one. Keeping the pool alive past the scheduler does not help
+either, because the scheduler holds a reference to the pool, so a scheduler
+destroyed on a worker takes the pool with it wherever the owner's own references
+went. Fixing it inside `ThreadPool` covers every present and future ownership
+mistake instead of one call site.
+
+**Measured:** the same 406-record a/b as dexllm#55 above (both fixes were built
+and measured together) — **identical sha256, 0 diff**. ASan and TSan on the
+reproducer: **clean, 5 runs each**. parity 29/29 (the suite gains
+`thread_pool_selfdestruct_test`; `ctest` now reports 29), pytest 619 passed.
+
+**A second UAF the detach opened, found by review and fixed here.**
+`ReleaseMatcherThreadLocalCaches(_thread_ids)` used to run after EVERY worker was
+joined, i.e. once they were all dead. With one worker detached, the same call
+deleted the matcher cache of a thread that is still RUNNING — and
+`dex_item_matcher.cpp` holds it in a `thread_local` RAW pointer that no other
+thread can reset, so the detached worker would dereference freed memory on its
+next task (reviewer's ASan repro: `heap-use-after-free ... thread T1`).
+Now only the ids of threads that were actually JOINED are released; the detached
+worker keeps its cache — one leaked cache on a teardown-only path instead of a
+use-after-free. Verified with an instrumented registry: the live worker's id is
+released 0 times with the fix and 1 time without it. `thread_ids` left `State`
+entirely with that change — the destructor reads the ids off the `std::thread`
+objects, which is race-free and, unlike a slot each worker fills in itself,
+already correct before a worker has started.
+
+**Guards**
+([tests/parity/thread_pool_selfdestruct_test.cpp](tests/parity/thread_pool_selfdestruct_test.cpp),
+7 cases, registered explicitly rather than through the `*_parity_test.cpp` glob —
+it includes a DexKit third_party header, which `dexkit_dad` must not carry, and
+it STUBS the matcher-cache registry instead of linking `dexkit_static` so a case
+can assert WHICH thread ids the destructor released; without that the live-thread
+fix above survived a reviewer's mutant 15/15). Every self-destruct case now
+PARKS its task until the enqueuing thread has released and then ASSERTS which
+thread ran the destructor — without the barrier the last reference can land on
+the MAIN thread and the case passes having exercised nothing (it did: the
+released-ids case failed the moment it started checking). A seventh case
+calibrates `RLIMIT_NPROC` in-process (a `ps`-based estimate misses the one-value
+window — measured: it passed against the defect) and pins that the constructor
+REPORTS being out of threads rather than terminating.
+Cases 1 and 2 (the direct and scheduler-shaped ownership edges) **abort 5/5
+against the pre-fix header and pass 5/5 after**, verified per case. **Case 3
+exists because a reviewer showed the first four guarded only HALF the fix**:
+reverting the worker's capture from `state` to `this` passed the whole file 5/5
+in a normal build and was caught only under ASan, because cases 1 and 2 destroy
+the pool with an EMPTY queue so the detached worker exits immediately. Case 3
+destroys a single-worker pool with 16 tasks still queued, so the detached worker
+keeps running them against an object that no longer exists — it kills that
+mutant **5/5 with a SIGSEGV in a plain build**. Cases 4 and 5 are
+non-discriminating BY DESIGN and say so: they pin the contract the fix must not
+break — destruction from a non-worker still joins every task, and a task
+enqueued from inside a task still runs.
+
+**The first cut of the guard observed the wrong moment**, and only a per-case
+matrix showed it: a flag set by the task (or by the intermediate owner's
+destructor) fires BEFORE the pool is destroyed, so the test could reach its end
+and exit while the dangerous destruction had not happened yet — case 2 then
+passed against the pre-fix header. Every case now signals from a `shared_ptr`
+DELETER, which runs strictly AFTER `~ThreadPool` returns. **The matrix itself was
+wrong first**: the generated per-case file sat in the same directory as the
+saved pre-fix `ThreadPool.h`, and a quoted `#include` searches the including
+file's own directory first — so BOTH halves compiled against the pre-fix header
+and the "post-fix" column was a copy of the "pre-fix" one.
+
 ### Skills
 
 `dexkit-build` is the production rebuild loop (ninja + pip install). Use `/dexkit-build` after any C++ change.
@@ -748,14 +1038,14 @@ Last run: 31,639 methods across 4 APKs — 0 leaks (DexKit code), 0 UAF, 0 inval
 
 ## Regression verification
 
-Default success criterion for any decompiler change: **28 parity suites in `tests/parity/` must remain at 0 failures**, and end-to-end decompilation on `test_apk/APK/com.example.android.tvleanback.apk` must not crash.
+Default success criterion for any decompiler change: **29 C++ suites in `tests/parity/` must remain at 0 failures** (28 DAD/regression parity + the dexllm#50 `thread_pool_selfdestruct_test`), and end-to-end decompilation on `test_apk/APK/com.example.android.tvleanback.apk` must not crash.
 
-Run parity sweep (build + run all 28 via CMake/CTest):
+Run parity sweep (build + run all 29 via CMake/CTest):
 ```bash
 cd build/cp*-cp*-* && \
     ninja parity_tests && ctest --output-on-failure
 ```
-Expected tail: `100% tests passed, 0 tests failed out of 28`.
+Expected tail: `100% tests passed, 0 tests failed out of 29`.
 
 End-to-end smoke check:
 ```bash

@@ -80,7 +80,7 @@ false fail). When a port RAISES convergence, ratchet the floor up in the baselin
 ## The gate (run for EVERY ported jadx feature)
 
 Porting a jadx algorithm is a production C++ change, so it already goes through a/b
-0-regression + parity 28/28 + 0-crash sweep + the ≥2-reviewer adversarial gate + HACK
+0-regression + parity 29/29 + 0-crash sweep + the ≥2-reviewer adversarial gate + HACK
 self-check. The jadx-parity gate ADDS, on top:
 
 1. **Baseline** — before the port, record `jadx_parity.py` (the whole metric) AND, for a curated

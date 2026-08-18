@@ -181,13 +181,13 @@ Ordered by likelihood. These are why this needs iteration, not a one-shot push:
 2. Land B1/B2/B6 → push → read the first MSVC error wall.
 3. Layer B3 (zlib) once the source compiles → link stage.
 4. Iterate to a green **build + import + identify**, then green **ctest parity** on
-   Windows (the real correctness gate — same 28 suites as Linux/macOS).
+   Windows (the real correctness gate — same 29 suites as Linux/macOS).
 5. Add B4/B5 wheel build; confirm a `delvewheel`-repaired wheel imports on a clean
    runner.
 6. Only then merge to master and add `windows-latest` to `release.yml`'s wheel
    matrix.
 
-Success = the 28 parity suites pass on Windows **and** a cp39–cp313 AMD64 wheel
+Success = the 29 C++ suites pass on Windows **and** a cp39–cp313 AMD64 wheel
 builds, repairs, imports, and runs `identify()`.
 
 ---

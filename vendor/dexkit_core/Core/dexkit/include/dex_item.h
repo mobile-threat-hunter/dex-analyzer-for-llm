@@ -316,11 +316,33 @@ public:
     void PutCrossRef(uint32_t put_cross_flag);
     [[nodiscard]] bool NeedInitCache(uint32_t need_flag) const;
     void InitCache(uint32_t init_flags);
+    // dexllm(#55): a 0 return no longer means "already built". It means
+    // `init_flags` is covered by (ready | PERMANENTLY FAILED), so a caller MUST
+    // still call the matching WaitInitCache, which is what turns the failed
+    // half into a throw. Using a 0 return as "the cache is ready" would read a
+    // resized-but-unpopulated cache.
     uint32_t BeginInitCache(uint32_t init_flags);
     void FinishInitCache(uint32_t init_flags);
+    // dexllm(#55): publish FAILURE for flags a Begin* claimed but no Finish*
+    // reached. Without it the claim is never retired and every waiter blocks
+    // forever. A flag already published ready is never contradicted, and the
+    // claim is retired either way — but pass ONLY the flags THIS caller
+    // claimed: the retire clears them from the shared in-flight mask, so
+    // passing another thread's claim would release its waiters while its work
+    // is still running.
+    void AbortInitCache(uint32_t init_flags, std::string reason);
+    // Retire a claim WITHOUT latching a failure — for the caller that is
+    // abandoning the attempt and rethrowing, so nothing will wait on a verdict.
+    // A latch here would turn a momentary environmental failure (out of threads,
+    // out of memory) into a permanent one: the sticky exclusion is justified by
+    // "work known to throw on this dex", which is false for those.
+    void ReleaseInitClaim(uint32_t init_flags);
     void WaitInitCache(uint32_t init_flags) const;
+    // Same contract as BeginInitCache: 0 == ready OR permanently failed.
     uint32_t BeginPutCrossRef(uint32_t put_cross_flag);
     void FinishPutCrossRef(uint32_t put_cross_flag);
+    void AbortPutCrossRef(uint32_t put_cross_flag, std::string reason);
+    void ReleaseCrossRefClaim(uint32_t put_cross_flag);
     void WaitPutCrossRef(uint32_t put_cross_flag) const;
 
 private:
@@ -431,9 +453,14 @@ private:
     mutable std::mutex init_cache_state_mutex;
     mutable std::condition_variable init_cache_state_cv;
     uint32_t init_cache_inflight_flags = 0;
+    // dexllm(#55): the failure half of the ready/failed pair a waiter observes.
+    uint32_t init_cache_failed_flags = 0;
+    std::string init_cache_error;
     mutable std::mutex cross_ref_state_mutex;
     mutable std::condition_variable cross_ref_state_cv;
     uint32_t cross_ref_inflight_flags = 0;
+    uint32_t cross_ref_failed_flags = 0;
+    std::string cross_ref_error;
 
     uint32_t empty_string_id = dex::kNoIndex;
     uint32_t annotation_target_class_id = dex::kNoIndex;
