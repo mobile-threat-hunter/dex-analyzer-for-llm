@@ -1,4 +1,4 @@
-"""dexllm(#57) - the parser must implement every encoded_value the gate accepts.
+"""dexllm(#57, #63) - every decoder must implement every encoded_value the gate accepts.
 
 `Reader::ParseEncodedValue` implemented 16 of the dex spec's 18 `encoded_value`
 type codes. `0x15 METHOD_TYPE` and `0x16 METHOD_HANDLE` - legal since API 26
@@ -29,6 +29,17 @@ Consequence, and it is deliberate: on a dex with NO method_handle section every
 the index bound now instead of from the missing case. That is the channel
 `tests/test_cache_init_failure.py` drives, and it is why fixing this issue did
 not take those nine guards away.
+
+**dexllm#63 closed the SAME gap in the OTHER decoder.** This repo has three
+encoded_value decoders. `core_ext/dexitem_code_source.cpp`'s
+`DecodeEncodedValueText` (static-field initializers, behind `decompile_class`)
+also lacked 0x15/0x16, and its `default:` returned WITHOUT skipping the payload,
+so the values after one shifted - a silently wrong constant rather than a throw.
+`dexkit_ext.cpp`'s `ScanEncodedValueStrings` (the string surfaces) never carried
+it, because its `default:` advances. The guards below therefore come in two
+layers: a source-level invariant across the case-per-type decoders, and crafted
+dexes that exercise what a case-label check cannot see - whether the payload is
+consumed, and how MUCH of it.
 """
 
 from __future__ import annotations
@@ -43,6 +54,7 @@ from conftest import REPO_ROOT, require_corpus_shape
 
 _ENCODED_METHOD_TYPE = 0x15
 _ENCODED_METHOD_HANDLE = 0x16
+_ENCODED_METHOD = 0x1A
 
 # encoded_value types whose payload is exactly `arg + 1` bytes - the ones a
 # retype leaves byte-for-byte the same length.
@@ -55,6 +67,8 @@ _FORMAT = (
     REPO_ROOT / "vendor/dexkit_core/Core/third_party/slicer/export/slicer/dex_format.h"
 )
 _VERIFIER = REPO_ROOT / "native/core_ext/dex_verifier.cpp"
+_CORE_EXT = REPO_ROOT / "native/core_ext/dexitem_code_source.cpp"
+_DEXKIT_EXT = REPO_ROOT / "native/core_ext/dexkit_ext.cpp"
 
 
 def _strip_comments(text: str) -> str:
@@ -239,6 +253,22 @@ def _reader_case_codes() -> set[int]:
     }
 
 
+def _core_ext_case_codes() -> set[int]:
+    """Type codes `DecodeEncodedValueText` has a case for.
+
+    The SECOND encoded_value decoder in this repo (dexllm#63). It reads
+    static-field initializers for `decompile_class`, is a wholly separate
+    implementation from the slicer's, and had the same gap: 0x15 / 0x16 fell to
+    its `default:`, which consumed the header byte and left the payload unread,
+    so every FOLLOWING value in the same `encoded_array` decoded from the wrong
+    offset. Comment-stripped for the same reason as the others.
+    """
+    body = _strip_comments(_CORE_EXT.read_text())
+    body = body[body.index("std::string DecodeEncodedValueText") :]
+    body = body[: body.index("        default:")]
+    return {int(c, 16) for c in re.findall(r"case (0x[0-9a-fA-F]{2}):", body)}
+
+
 def _verifier_accepted_codes() -> set[int]:
     """Type codes `VerifyEncodedValue` does not send to its `default: Fail`.
 
@@ -250,30 +280,88 @@ def _verifier_accepted_codes() -> set[int]:
     return {int(c, 16) for c in re.findall(r"case (0x[0-9a-fA-F]{2}):", body)}
 
 
-def test_the_slicer_parser_implements_every_value_the_verifier_accepts():
-    """The invariant this issue was a violation of, stated directly.
+@pytest.mark.parametrize(
+    "decoder, codes",
+    [
+        ("slicer ParseEncodedValue", _reader_case_codes),
+        ("core_ext DecodeEncodedValueText", _core_ext_case_codes),
+    ],
+    ids=["slicer", "core_ext"],
+)
+def test_every_decoder_implements_every_value_the_verifier_accepts(decoder, codes):
+    """The invariant this issue was a violation of, stated once for ALL decoders.
 
-    `VerifyDex` is the documented single gate: whatever it accepts, the core
-    then parses. A type code the verifier lets through and the parser does not
-    implement is therefore a dex that verifies, loads, and throws later - which
-    is exactly what 0x15 and 0x16 did. Deriving both sets from source means a
-    future code added to one side without the other FAILS rather than shipping.
+    `VerifyDex` is the documented single gate: whatever it accepts, something
+    behind it then decodes. A type code the verifier lets through and a decoder
+    does not implement is therefore a dex that verifies, loads, and then either
+    throws (the slicer, dexllm#57) or silently mis-decodes everything after it
+    (core_ext, dexllm#63 - its `default:` left the payload unread, so the values
+    following it in the array shifted by one field).
 
-    SCOPED TO THE SLICER's `ParseEncodedValue`, because this repo has TWO
-    encoded_value decoders: `core_ext/dexitem_code_source.cpp`'s
-    `DecodeEncodedValueText` reads static-field initializers for
-    `decompile_class` and is out of this guard's reach. It has the same gap (its
-    `default:` returns without skipping the payload, so following values in the
-    array desync) - wrong-answer only, bounded, and pre-existing.
+    Both sides are derived FROM SOURCE, so a future code added to the verifier
+    without a decoder FAILS rather than shipping. It was scoped to the slicer
+    alone until dexllm#63 fixed the second decoder.
+
+    SCOPED TO THE CASE-PER-TYPE DECODERS, which is narrower than "all". A THIRD
+    encoded_value decoder exists - `ScanEncodedValueStrings` in
+    `native/core_ext/dexkit_ext.cpp`, behind `list_value_strings` /
+    `list_class_strings` / `find_classes_declaring_strings` - and it is
+    deliberately NOT listed here: it has cases for only the 5 codes it cares
+    about, so the `>= 18` floor would reject it. It is IMMUNE to this bug class
+    for a structural reason rather than by enumeration - its `default:` ADVANCES
+    by the payload width instead of returning - which is pinned separately by
+    `test_the_third_decoder_cannot_desync_by_construction`.
     """
-    reader = _reader_case_codes()
+    implemented = codes()
     verifier = _verifier_accepted_codes()
     # Non-vacuity: a degraded parse finds few codes. `>=`, not `==`, so that a
     # legitimately-added 19th code fails on the INVARIANT below with a useful
     # message rather than here on an arithmetic identity.
     assert len(verifier) >= 18, sorted(hex(c) for c in verifier)
-    assert len(reader) >= 18, sorted(hex(c) for c in reader)
-    assert verifier - reader == set(), sorted(hex(c) for c in verifier - reader)
+    assert len(implemented) >= 18, (decoder, sorted(hex(c) for c in implemented))
+    assert verifier - implemented == set(), (
+        decoder,
+        sorted(hex(c) for c in verifier - implemented),
+    )
+
+
+@pytest.mark.parametrize(
+    "path, function",
+    [
+        (_DEXKIT_EXT, "void ScanEncodedValueStrings"),
+        (_CORE_EXT, "std::string DecodeEncodedValueText"),
+    ],
+    ids=["ScanEncodedValueStrings", "DecodeEncodedValueText"],
+)
+def test_a_decoder_cannot_desync_by_construction(path, function):
+    """A `default:` that ADVANCES makes the invariant a property of the code.
+
+    `ScanEncodedValueStrings` is the one decoder of the three that never carried
+    this bug, and not because it enumerates more codes (it has cases for 5): its
+    `default:` advances by the payload width instead of returning, so an
+    unhandled code costs a missing VALUE and never a shifted array. Nothing
+    pinned that, so reverting it to a bare `return;` would reintroduce dexllm#63
+    on `list_class_strings` / `find_classes_declaring_strings` with a green suite
+    - a correctness reviewer's finding, since this change is what makes the
+    property load-bearing enough to state.
+
+    `DecodeEncodedValueText` was given the same arm by dexllm#63, and it needs
+    this guard MORE, not less: its `default:` is unreachable on any loadable dex
+    (the gate rejects every code outside the 18), so no runtime test can kill a
+    mutant that removes it - verified, the mutant passes the whole file. An
+    unreachable defence still has to be pinned somewhere, and source is the only
+    place left.
+    """
+    body = _strip_comments(path.read_text())
+    body = body[body.index(function) :]
+    body = body[: body.index("\n}\n")]
+    tail = body[body.rindex("default:") :]
+    assert (
+        "ReadIntLE(p, end, nbytes)" in tail or "p += std::min(nbytes, avail)" in tail
+    ), (
+        function,
+        tail,
+    )
 
 
 def test_the_two_new_codes_are_named_and_wired():
@@ -421,3 +509,236 @@ def test_the_bean_default_arm_assigns_rather_than_falling_through():
     # Non-vacuity: the slice must actually be that function, with both switches.
     assert fn.count("switch (encoded_value->type)") == 2, fn.count("switch")
     assert "NullValue" in fn
+
+
+# -- dexllm#63: the SECOND decoder left the payload unread ---------------------
+
+_CRAFT_CLASS = "LTestLinkerMethodMinimalArguments;"
+
+
+def _first_static_value(raw: bytes, descriptor: str) -> tuple[int, int]:
+    """(offset of the first static value's header byte, declared value count).
+
+    Located by walking `class_defs` rather than hard-coded, so a substituted or
+    regenerated fixture fails loudly here instead of being patched at a wrong
+    offset. Asserts every shape the crafts need: FOUR values (the bodies index
+    `lines[0..3]`, and the desync is only observable through the values that
+    FOLLOW the crafted one), a first value that is a 1-byte INT so a retype is
+    length-preserving, and a first payload byte small enough to be a legal index
+    into `proto_ids` / `method_ids` - without which the 0x15 and 0x1a legs would
+    hard-FAIL on `assert row["valid"]` instead of reporting the real reason.
+    """
+
+    def uleb(off: int) -> tuple[int, int]:
+        value = shift = 0
+        while True:
+            byte = raw[off]
+            off += 1
+            value |= (byte & 0x7F) << shift
+            shift += 7
+            if not byte & 0x80:
+                return value, off
+
+    type_ids_off = struct.unpack_from("<I", raw, 0x44)[0]
+    string_ids_off = struct.unpack_from("<I", raw, 0x3C)[0]
+    defs_size, defs_off = struct.unpack_from("<II", raw, 0x60)
+
+    def descriptor_of(type_idx: int) -> str:
+        str_idx = struct.unpack_from("<I", raw, type_ids_off + type_idx * 4)[0]
+        data = struct.unpack_from("<I", raw, string_ids_off + str_idx * 4)[0]
+        n, q = uleb(data)
+        return raw[q : q + n].decode("utf-8", "replace")
+
+    for i in range(defs_size):
+        base = defs_off + i * 32
+        if descriptor_of(struct.unpack_from("<I", raw, base)[0]) != descriptor:
+            continue
+        static_values_off = struct.unpack_from("<I", raw, base + 28)[0]
+        assert static_values_off, f"{descriptor} has no static_values"
+        count, header = uleb(static_values_off)
+        assert count >= 4, (
+            f"{descriptor} now has {count} static value(s); the bodies index "
+            "four, and the desync is only observable through the values that "
+            "FOLLOW the crafted one"
+        )
+        assert raw[header] == 0x04, (
+            f"{descriptor}'s first static value is no longer a 1-byte INT "
+            f"({raw[header]:#04x}), so a retype would not be length-preserving"
+        )
+        index = raw[header + 1]
+        protos = struct.unpack_from("<I", raw, 0x48)[0]
+        methods = struct.unpack_from("<I", raw, 0x58)[0]
+        assert index < min(protos, methods), (
+            f"{descriptor}'s first payload byte ({index}) is not a legal index "
+            f"into proto_ids ({protos}) or method_ids ({methods}), so a retype "
+            "would be rejected by the verifier rather than decoded"
+        )
+        return header, count
+    raise AssertionError(f"{descriptor} is not in the fixture")
+
+
+def _retype_first_static_value(value_type: int, dst: pathlib.Path) -> None:
+    """Rewrite 5 bits of ONE byte: the first static value's type code.
+
+    `arg` is left alone, so the payload keeps its width and every later offset,
+    section size and `static_values` boundary is untouched - the dex still
+    verifies, which is the premise every assertion below rests on.
+
+    CONSEQUENCE, and it is why a second craft exists: the fixture's `arg` is 0,
+    so this helper can only ever produce a ONE-byte payload. A decoder that
+    hard-codes that width passes every guard built on it - see
+    `test_a_multi_byte_index_payload_is_consumed_in_full`.
+    """
+    raw = bytearray(_INVOKE_CUSTOM.read_bytes())
+    header, _count = _first_static_value(bytes(raw), _CRAFT_CLASS)
+    raw[header] = (raw[header] & 0xE0) | value_type
+    dst.write_bytes(bytes(raw))
+
+
+def _static_finals(path: pathlib.Path) -> list[str]:
+    import dexllm
+
+    src = dexllm.DexKit(str(path)).decompile_class(_CRAFT_CLASS)
+    return [line.strip() for line in src.split("\n") if "static final" in line]
+
+
+@pytest.mark.parametrize(
+    "value_type",
+    [_ENCODED_METHOD_TYPE, _ENCODED_METHOD_HANDLE, _ENCODED_METHOD],
+    ids=["method_type_0x15", "method_handle_0x16", "method_0x1a"],
+)
+def test_a_no_literal_static_value_does_not_shift_the_values_after_it(
+    tmp_path, value_type
+):
+    """dexllm#63: the payload must be consumed even when nothing is rendered.
+
+    Pre-fix the `default:` arm consumed the header byte only, so the 1-byte
+    payload was read as the NEXT value's header: the first following field lost
+    its initializer outright and the two after it took their predecessor's
+    constant - `FAILURE_TYPE_NONE = 2` for a field that is 0. Silently wrong,
+    which is worse than garbled: an analyst gets a confident wrong fact with no
+    error anywhere.
+
+    `0x1a` is here because this change MODIFIED it (its advance moved from an
+    unbounded `p += nbytes` to `ReadIntLE`) and nothing exercised it - an
+    adversarial reviewer built the mutant that drops 0x1a's consume alone and it
+    passed the entire suite AND ART's own fuzz corpus.
+    """
+    dst = tmp_path / f"retyped-{value_type:#04x}.dex"
+    _retype_first_static_value(value_type, dst)
+
+    import dexllm
+
+    row = dexllm.verify(str(dst))[0]
+    assert row["valid"], row  # the premise: a length-preserving retype still verifies
+
+    lines = _static_finals(dst)
+    # The crafted value renders NOTHING - a MethodType / MethodHandle / method
+    # reference has no Java literal form, so the field correctly loses its
+    # initializer...
+    assert lines[0].endswith("RETURNS_NULL;"), lines
+    # ...and the three that FOLLOW it keep their own values. This is the assertion
+    # the fix is about; the one above passes pre-fix too.
+    assert lines[1].endswith("= 2;"), lines
+    assert lines[2].endswith("= 0;"), lines
+    assert lines[3].endswith("= 3;"), lines
+
+
+# The width the guard above CANNOT reach: its craft preserves `arg`, which is 0
+# in the fixture, so a decoder hard-coding a 1-byte payload passes it. Both
+# reviewers found that hole independently, and it is not academic - a proto index
+# >= 256 is ordinary, and the verifier's `idx` lambda does not require a minimal
+# encoding, so `arg >= 1` is legal for any of the three.
+#
+# This replacement array is byte-for-byte the same length as the original
+# `04 01 | 04 02 | 04 00 | 04 03` and still declares FOUR values:
+#
+#     35 01 00   0x15 METHOD_TYPE, arg=1  -> a TWO-byte proto index (= 1)
+#     17 02      0x17 STRING,      arg=0  -> string index 2
+#     04 03      0x04 INT,         arg=0  -> 3
+#     1e         0x1e NULL,        no payload
+#
+# so the string lands on the SECOND field if and only if the two-byte index was
+# consumed in full. That is an assertion about the right answer, not merely a
+# difference from some mutant.
+_WIDE_ARRAY = bytes([0x35, 0x01, 0x00, 0x17, 0x02, 0x04, 0x03, 0x1E])
+_WIDE_STRING_INDEX = 2
+
+
+def _wide_craft(dst: pathlib.Path) -> str:
+    """Write the fixture with the wide-index array spliced in; return the string."""
+    raw = bytearray(_INVOKE_CUSTOM.read_bytes())
+    header, count = _first_static_value(bytes(raw), _CRAFT_CLASS)
+    assert count == 4, count  # the replacement array below declares four values
+    original = bytes(raw[header : header + len(_WIDE_ARRAY)])
+    assert len(original) == len(_WIDE_ARRAY)
+    raw[header : header + len(_WIDE_ARRAY)] = _WIDE_ARRAY
+    dst.write_bytes(bytes(raw))
+
+    string_ids_off = struct.unpack_from("<I", bytes(raw), 0x3C)[0]
+    data = struct.unpack_from(
+        "<I", bytes(raw), string_ids_off + _WIDE_STRING_INDEX * 4
+    )[0]
+    length = raw[data]  # single-byte uleb for a short string
+    assert length < 0x80, "the oracle string's uleb length is not one byte"
+    return bytes(raw[data + 1 : data + 1 + length]).decode()
+
+
+def test_a_multi_byte_index_payload_is_consumed_in_full(tmp_path):
+    """The payload WIDTH, which the `arg`-preserving craft cannot express.
+
+    A decoder that consumes one byte instead of `arg + 1` desyncs exactly as
+    pre-fix, and the guard above cannot see it. Here the second field's value is
+    a STRING whose position depends on the first value's width, so getting the
+    width wrong moves it - and the assertion names the string.
+    """
+    dst = tmp_path / "wide-index.dex"
+    expected = _wide_craft(dst)
+
+    import dexllm
+
+    row = dexllm.verify(str(dst))[0]
+    assert row["valid"], row
+
+    lines = _static_finals(dst)
+    assert lines[0].endswith("RETURNS_NULL;"), lines
+    assert lines[1].endswith(f'= "{expected}";'), lines
+    assert lines[2].endswith("= 3;"), lines
+    assert lines[3].endswith("= null;"), lines
+
+
+def test_the_wide_index_craft_agrees_with_an_INDEPENDENT_decoder(tmp_path):
+    """Adjudicated by a decoder that is NOT the one under test.
+
+    `list_class_strings` reads the same `static_values` array through
+    `ScanEncodedValueStrings` (dexkit_ext.cpp) - the third decoder, which never
+    carried this bug because its `default:` advances. If it reports the string
+    and `decompile_class` puts it on the right field, two independent
+    implementations agree on where the array's values begin.
+    """
+    dst = tmp_path / "wide-oracle.dex"
+    expected = _wide_craft(dst)
+
+    import dexllm
+
+    reported = dexllm.DexKit(str(dst)).list_class_strings(_CRAFT_CLASS)
+    assert expected in reported, (expected, reported)
+    # ...and it is genuinely the CRAFT that put it there.
+    assert expected not in dexllm.DexKit(str(_INVOKE_CUSTOM)).list_class_strings(
+        _CRAFT_CLASS
+    )
+
+
+def test_the_uncrafted_fixture_renders_every_initializer():
+    """Non-discriminating BY DESIGN - the baseline the craft is measured against.
+
+    Without it, "the values after the crafted one are 2/0/3" could be asserting
+    a coincidence rather than a restoration.
+    """
+    lines = _static_finals(_INVOKE_CUSTOM)
+    assert [line.rsplit("= ", 1)[-1] for line in lines] == [
+        "1;",
+        "2;",
+        "0;",
+        "3;",
+    ], lines

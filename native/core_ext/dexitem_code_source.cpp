@@ -282,9 +282,47 @@ std::string DecodeEncodedValueText(const U1*& p,
             out.append(strings[f.name_idx]);
             return out;
         }
-        case 0x1a: {  // METHOD — no Java literal form (method reflection isn't
-                      // a valid initializer expression). Skip.
-            p += nbytes;
+        case 0x15:   // METHOD_TYPE   — an index into proto_ids
+        case 0x16:   // METHOD_HANDLE — an index into the method_handle section
+        case 0x1a: { // METHOD        — an index into method_ids
+            // All three are (arg+1)-byte indices with NO Java literal form: a
+            // MethodType / MethodHandle / method reference cannot be written as
+            // an initializer expression, so rendering one would put invalid Java
+            // into a field declaration. Returning {} tells the caller "no
+            // initializer" — but the payload MUST still be consumed, or every
+            // following value in the same encoded_array decodes from the wrong
+            // offset.
+            //
+            // The width the merged body must survive is NOT uniform: 0x15 and
+            // 0x1a go through VerifyEncodedValue's `idx` lambda, which rejects
+            // arg > 3, but 0x16 uses `skip(arg + 1)` with no arg cap, so an
+            // EIGHT-byte "index" passes the gate. ReadIntLE reads (arg+1) bytes
+            // into a uint64 in every case, so the consumption matches the gate's
+            // for all three and cannot overflow.
+            //
+            // KNOWN COST, deliberate and pre-existing for 0x1a/0x1c/0x1d: the
+            // caller cannot tell "this field has no initializer" from "this
+            // field's initializer is unrenderable", and decompile_class is the
+            // ONLY surface that reads static values at all (render_class_smali
+            // emits none), so the dropped constant is not recoverable elsewhere.
+            // Both reviewers raised it; dexllm#63 scopes rendering OUT by its own
+            // terms ("whether to RENDER anything is a separate question"), and it
+            // sits against this repo's own make-ignorance-representable precedent
+            // (dexllm#41, dexllm#49). A marker comment or a MethodType rendered
+            // through proto_ids would close it — a separate decision, not a
+            // silent one. 0x15/0x16 were missing entirely and fell to `default:`,
+            // which consumed only the header byte (dexllm#63); they are legal
+            // since API 26 and VerifyEncodedValue accepts both, so the invariant
+            // "whatever the gate accepts, every decoder behind it handles" was
+            // broken here exactly as dexllm#57 broke it in the slicer's decoder.
+            //
+            // ReadIntLE rather than `p += nbytes` (which is what 0x1a did on its
+            // own): it is the `end`-bounded advance every other payload read in
+            // this file uses. Forced by the merge rather than chosen — the three
+            // share one body — and strictly safer, since the unbounded form
+            // could form a pointer past `end` on input this decoder does not
+            // itself validate.
+            (void)ReadIntLE(p, end, nbytes);
             return {};
         }
         case 0x1c: {  // ARRAY — skip body
@@ -317,6 +355,17 @@ std::string DecodeEncodedValueText(const U1*& p,
                      // literals "true"/"false".
             return value_arg ? std::string("true") : std::string("false");
         default:
+            // An unknown type code costs a missing RENDER; it must not cost a
+            // DESYNC. `nbytes` is the (arg+1) width of every fixed-payload
+            // encoded_value, so advancing by it keeps the cursor on a value
+            // boundary for anything the gate might accept in future — the same
+            // structural defence `ScanEncodedValueStrings` (dexkit_ext.cpp), the
+            // THIRD encoded_value decoder in this repo, already has, and the
+            // reason that one never carried this bug while this one did.
+            // Unreachable today: `VerifyEncodedValue` rejects every code outside
+            // the 18 the switch now covers, and `static_values_off` is verified.
+            // Defence in depth for the NEXT code, not a fix for a live path.
+            (void)ReadIntLE(p, end, nbytes);
             return {};
     }
 }

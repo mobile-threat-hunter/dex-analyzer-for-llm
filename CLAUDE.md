@@ -1541,16 +1541,19 @@ a real API-26+ dex load rather than throw, and which the correctness review foun
 untested — and the CRITICAL above, whose craft needs a section to inflate.
 
 **The source-level trio is the durable part.**
-`test_the_slicer_parser_implements_every_value_the_verifier_accepts` states the
-invariant this issue was a violation of rather than the two codes: it derives the
+`test_the_slicer_parser_implements_every_value_the_verifier_accepts` (renamed to
+`test_every_decoder_implements_every_value_the_verifier_accepts` and
+parametrised over both decoders by dexllm#63) states the invariant this issue was
+a violation of rather than the two codes: it derives the
 verifier's accepted set from `VerifyEncodedValue`'s cases and the reader's from
 `ParseEncodedValue`'s, resolving `kEncoded*` through `dex_format.h`, and requires
 `verifier ⊆ reader` with a non-vacuity floor on each side. Two corrections from the
 delta review: it now **strips comments** before parsing (a mutant that COMMENTED
 OUT the METHOD_HANDLE case passed both source guards — the trap dexllm#32's opcode
 guard already recorded, recurring with the correct scanner sitting in the same
-file), and its name says SLICER, because this repo has **two** encoded_value
-decoders and the other is out of its reach — see below. `VerifyDex` is
+file), and its name SAID SLICER, because this repo has **two** encoded_value
+decoders and the other was out of its reach at the time — dexllm#63 fixed that
+decoder and widened this guard to cover both. `VerifyDex` is
 the documented single gate, so a code it lets through and the parser does not
 implement IS a dex that verifies, loads and throws later. The other two pin the
 two constants, and pin that the bean `default:` arm ASSIGNS — the last one exists
@@ -1573,8 +1576,9 @@ byte, so the payload is not skipped and the following values in that
 caller is a count-bounded `for` loop with `value_count` clamped to
 `static_field_idxs.size()`, so it terminates, and `ReadIntLE` is `end`-bounded, so
 it cannot read out of range. Pre-existing, reachable only from a
-`MethodHandle`/`MethodType` STATIC INITIALIZER (which javac does not produce), and
-filed as **dexllm#63**.
+`MethodHandle`/`MethodType` STATIC INITIALIZER (which javac does not produce),
+filed as **dexllm#63** — and **CLOSED there**, along with the guard's scoping: the
+invariant is now stated once for both decoders. See its section below.
 
 **Recorded, not fixed:** the slicer's own pointer guards are inert —
 `Reader::ptr<T>` is `SLICER_CHECK_GE(offset, 0 && offset + sizeof(T) <= size_)`,
@@ -1754,6 +1758,155 @@ input that moves in the whole 1,413-dex census is ART's own fuzz-corpus seed** �
 an earlier draft claimed "no behaviour change on any real input", which a
 reviewer showed is literally false for exactly that file. The accurate claim is
 the weaker one: everything that moves is malformed, and ART already refuses it.
+
+### The OTHER encoded_value decoder consumes what it does not render (dexllm#63, 2026-08-19)
+
+dexllm#57 fixed the SLICER's `Reader::ParseEncodedValue`. This repo has **two**
+`encoded_value` decoders, and only one of them was fixed — the delta review of
+that change said so, and this closes the other half.
+`core_ext/dexitem_code_source.cpp`'s **`DecodeEncodedValueText`** reads
+static-field initializers for `decompile_class` (the `= …` on a field
+declaration) and is a wholly separate implementation. It had no case for
+`0x15 METHOD_TYPE` or `0x16 METHOD_HANDLE`, both legal since API 26 and both
+ACCEPTED by `VerifyEncodedValue`. They fell to `default: return {};`, which had
+already consumed the header byte (`U1 header = *p++;`) and left the
+`(arg+1)`-byte payload unread.
+
+**The failure is not garbling — the values SHIFT.** The next value's decode
+starts inside the previous payload, so the first following field loses its
+initializer outright and the ones after it are rendered with a constant that
+belongs to a predecessor. Measured on the crafted fixture:
+`FAILURE_TYPE_LINKER_METHOD_THROWS` loses its initializer,
+`FAILURE_TYPE_NONE` reads **`= 2`** where it is 0, and
+`FAILURE_TYPE_TARGET_METHOD_THROWS` reads **`= 0`** where it is 3. That is a
+confident WRONG FACT handed to an analyst or an LLM with no error anywhere —
+strictly worse than the "garbled initializer" the issue predicted. (An earlier
+draft of this paragraph said "EVERY following field took its predecessor's
+constant", which the adversarial reviewer corrected from the measurement: the
+first one takes nothing at all.)
+
+**Bounded, and verified rather than assumed** (this is why it is a wrong-ANSWER
+finding and not a crash one): the caller is a count-bounded `for` whose
+`value_count` is clamped to `static_field_idxs.size()`, so it terminates, and
+`ReadIntLE` is `end`-bounded with `sv_end` clamped to the real mmap end, so it
+cannot read out of range. Field ASSOCIATION is by loop POSITION, not by
+accumulation, so an empty render is correctly "this field has no initializer" and
+does not itself mis-associate anything.
+
+**Fix:** merge both into the existing `0x1a METHOD` case. All three are
+`(arg+1)`-byte indices with **no Java literal form** — a `MethodType`,
+`MethodHandle` or method reference cannot be written as an initializer
+expression, so rendering one would put invalid Java into a field declaration.
+`{}` means "no initializer" to the caller, which is exactly right; what was
+missing is that the payload must be consumed anyway. The shared case's advance
+also moved from an unbounded `p += nbytes` (0x1a's own) to the file's
+`end`-bounded `ReadIntLE(p, end, nbytes)` — forced by the merge rather than
+chosen, and an EQUIVALENT mutant on reachable input (a reviewer built it: on a
+verified dex `p + nbytes` cannot pass `end`), so the comment's "strictly safer"
+is a defence, not a fix. The width the merged body must survive is **not
+uniform**: 0x15/0x1a go through the gate's `idx` lambda (arg <= 3) but 0x16 uses
+`skip(arg+1)` with no cap, so an EIGHT-byte "index" is gate-legal — `ReadIntLE`
+reads `arg+1` into a `uint64` in every case, so consumption matches the gate for
+all three.
+
+**And the bug CLASS was closed, not just this instance.** `default:` now advances
+by `nbytes` too — the same structural defence the THIRD encoded_value decoder in
+this repo (`ScanEncodedValueStrings`, `dexkit_ext.cpp`, behind
+`list_class_strings` / `find_classes_declaring_strings`) already had, which is
+exactly why that one never carried this bug while this one did. Unreachable
+today (the gate rejects every code outside the 18, verified by a reviewer's
+crafted retypes to 0x01/0x05/0x12/0x14, refused strict AND lenient), so it is
+defence for the NEXT code rather than a live fix.
+
+**KNOWN COST, accepted and stated rather than discovered.** Rendering nothing
+means the caller cannot tell "this field has no initializer" from "this field's
+initializer is unrenderable", and `decompile_class` is the ONLY surface that
+reads static values at all (`render_class_smali` emits none), so the dropped
+constant is not recoverable through another API. Both reviewers raised it; it
+sits against this repo's own make-ignorance-representable precedent (dexllm#41's
+`access_flags → None`, dexllm#49's `dropped_touches`), and the asymmetry is real
+— a `MethodType` COULD render as valid Java through `proto_ids`, a `MethodHandle`
+could not. dexllm#63 scopes rendering out in its own words ("whether to RENDER
+anything is a separate question"), so this change keeps the 0x1a precedent and
+records the residual instead of widening silently.
+
+**Reachability:** a static initializer whose constant is a `MethodType` or a
+`MethodHandle`, which javac does not produce (a compile-time constant field is a
+primitive or a `String`). **0 incidence across the corpus and every AOSP sample**,
+so it is latent — reachable by construction and by any non-javac producer.
+
+**Measured (a/b OFF vs ON, SAME script, both `.so` md5-verified — `920fe5b2…`
+OFF, `6141dc8e…` ON, and the ON build bit-reproducing its md5 after the swap):**
+58 real sources × {verify, class count, and a hash over **every static-field
+declaration line of every class**} = **222 axis records / 123,555 initializer
+lines → 0 changed**. 2 crafted sources → **both changed**, and the change is the
+shift above being repaired. A 0-diff on the real half is required (0 incidence);
+the crafted half is what proves the mechanism fires
+[[ab-must-prove-the-mechanism-fires]].
+
+**Guards** (13 cases in
+[tests/test_encoded_value_method_types.py](tests/test_encoded_value_method_types.py),
+which already owned this subject). Two layers, and the matrix proves they are
+complementary rather than redundant:
+
+- **behavioural** — a length-preserving retype of ONE byte (5 bits: the first
+  static value's type code) in the committed `tests/data/invoke-custom.dex`,
+  parametrised over 0x15 and 0x16. `_first_static_value` LOCATES the byte by
+  walking `class_defs` instead of hard-coding it, and asserts the shape the craft
+  needs — at least TWO values, since the desync is only observable through the
+  value that FOLLOWS the crafted one, and a first value that is an INT so the
+  retype keeps the payload width. A fixture that ever stops offering that fails
+  loudly instead of being patched at a wrong offset.
+- **source-level** — `test_the_slicer_parser_implements_every_value_the_verifier_accepts`
+  became **`test_every_decoder_implements_every_value_the_verifier_accepts`**,
+  parametrised over BOTH decoders, which is what the issue asked for: the
+  invariant "whatever the gate accepts, every decoder behind it handles" stated
+  once. Its docstring used to DOCUMENT this gap as out of reach. The
+  parametrisation is also what keeps a THIRD decoder from being added silently —
+  it would have to be listed there.
+
+**Two more guards, and BOTH reviewers had to construct the holes.** The first cut
+had 5 mutants and 13 cases; both reviewers independently built a SIXTH that
+survived the entire suite, and the adversarial one a SEVENTH:
+
+- **the payload WIDTH was unguarded.** `_retype_first_static_value` preserves
+  `arg` by design, and the fixture's first value has `arg == 0`, so the craft can
+  only ever produce a ONE-byte payload — a decoder hard-coding
+  `ReadIntLE(p, end, 1)` passed everything. Not academic: a proto index >= 256 is
+  ordinary, and the gate does not require a minimal encoding, so `arg >= 1` is
+  legal for all three codes. Closed by a SECOND craft that replaces the whole
+  8-byte array with `35 01 00 | 17 02 | 04 03 | 1e` — same length, still four
+  values, and the second value is a STRING whose position depends on the first
+  value's width. So the assertion names the string and states the RIGHT ANSWER
+  rather than a difference from some mutant. A sibling guard adjudicates it
+  against `list_class_strings`, which reads the same array through the THIRD
+  decoder — an implementation that is not the one under test.
+- **`0x1a` — the case this change actually MODIFIED — was exercised by nothing.**
+  Its advance moved from an unbounded `p += nbytes` to `ReadIntLE`, and a mutant
+  dropping only its consume passed the whole suite AND ART's own fuzz corpus (the
+  one real `0x1a` static value in AOSP is the LAST value of its array, so nothing
+  follows it to shift). Fixed by one entry in the parametrisation.
+
+**8 mutants, each BUILT and RUN with a DISTINCT `.so` md5, each killed:** pre-fix
+(5 fail), 0x15 dropped (1), 0x16 dropped (1), the cases present but the payload
+not consumed (4), **the width hard-coded to 1 (1)**, **0x1a's consume dropped
+(1)**, **the `default:` arm reverted to a bare return (1)**, plus a control.
+
+Two things that matrix says. The single-case drops fail only ONE test each —
+because the hardened `default:` now consumes, so dropping a case is behaviourally
+correct and only the source invariant catches it, which is the hardening working
+rather than a guard weakening. And the `default:` mutant is killed only at the
+SOURCE level, necessarily: that arm is unreachable on any loadable dex, so an
+unreachable defence has nowhere else to be pinned.
+
+parity 29/29, pytest **728 passed / 10 skipped**, corpus-less **322 / 416**,
+narrowed to `tests/data/multidex.apk` 631, the guard file green narrowed to each
+bundled sample one at a time, determinism (3 processes x 3 `PYTHONHASHSEED`s ->
+one digest, unchanged from before the fix), sweep 25,309-class 0-crash 0-timeout,
+lint trio clean. No API, `.pyi`, SDK or MCP surface moves — the change is two
+switch arms in a decoder behind `decompile_class`, and a reviewer traced the
+blast radius closed: `DecodeEncodedValueText` is file-local with exactly one
+caller, which itself has exactly one.
 
 ### Skills
 
