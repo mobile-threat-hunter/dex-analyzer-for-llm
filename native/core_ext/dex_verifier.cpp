@@ -941,16 +941,29 @@ bool DexVerifier::VerifyInsns(const u2* insns, u4 insns_size, u2 registers_size)
                 }
             }
 
-            // Index operand — only the kinds the const-pool path dereferences
-            // (matches method_snapshot_builder ResolveConstRef: pick vC for
-            // k22c/k22cs, else vB). Out-of-table index → reject so the core never
-            // asks the slicer for a nonexistent id — FOR THOSE KINDS. The default
-            // arm is not "no index": kIndexMethodAndProtoRef (invoke-polymorphic)
-            // and kIndexCallSiteRef (invoke-custom) carry indices that are bounded
-            // by NOTHING here. That is safe only because nothing dereferences them
-            // (ResolveConstRef returns monostate; the invoke collectors gate on the
-            // 0x6E-0x72 / 0x74-0x78 opcodes), so a consumer that starts reading
-            // them must add the bound in the same change.
+            // Index operand — the kinds something dereferences. Out-of-table index
+            // → reject so the core never asks the slicer for a nonexistent id.
+            // `ridx` matches method_snapshot_builder's ResolveConstRef (vC for
+            // k22c/k22cs, else vB).
+            //
+            // kIndexMethodAndProtoRef (invoke-polymorphic, 0xFA/0xFB) is bounded
+            // HERE rather than in the default arm because dexllm#61 taught the
+            // invoke collectors to read it: this comment used to say those
+            // collectors "gate on the 0x6E-0x72 / 0x74-0x78 opcodes, so a consumer
+            // that starts reading them must add the bound in the same change" —
+            // dexllm#61 is that consumer. Without the bound a STRICT-verified dex
+            // yields a call site whose callee_descriptor is empty (constructed: one
+            // 0xFA's BBBB patched to 0xFFFF in method_handles.dex verifies valid and
+            // `find_call_sites_from` reports the site with no callee). Only the
+            // METHOD half is bounded; the proto index sits in arg[4], is not `ridx`,
+            // and is still dereferenced by nothing.
+            //
+            // kIndexCallSiteRef (invoke-custom) and kIndexMethodHandleRef /
+            // kIndexProtoRef stay in the default arm on the ORIGINAL terms: nothing
+            // reads them (ResolveConstRef returns monostate, and every invoke gate
+            // excludes 0xFC/0xFD precisely because their operand is not a method
+            // reference). Same rule as before — a consumer that starts reading one
+            // adds its bound in the same change.
             const u4 ridx = (fmt == dex::k22c || fmt == dex::k22cs) ? d.vC : d.vB;
             switch (dex::GetIndexTypeFromOpcode(op)) {
                 case dex::kIndexStringRef:
@@ -963,10 +976,11 @@ bool DexVerifier::VerifyInsns(const u2* insns, u4 insns_size, u2 registers_size)
                     if (ridx >= header_->field_ids_size) return Fail("code: field index out of range");
                     break;
                 case dex::kIndexMethodRef:
+                case dex::kIndexMethodAndProtoRef:  // dexllm#61 — see above
                     if (ridx >= header_->method_ids_size) return Fail("code: method index out of range");
                     break;
                 default:
-                    break;  // proto/callsite/methodhandle/none — not dereferenced
+                    break;  // callsite/methodhandle/proto/none — not dereferenced
             }
 
             // Branch / switch / array-data target — relative code-unit offset by

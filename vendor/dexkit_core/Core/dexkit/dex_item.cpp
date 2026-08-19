@@ -476,8 +476,15 @@ void DexItem::InitCache(uint32_t init_flags) {
                     }
 
                     if (need_method_invoking) {
+                        // dexllm#61: every opcode whose BBBB is a method_ids index.
+                        // invoke-polymorphic (0xFA/0xFB) was missing, so a
+                        // MethodHandle.invoke call site reached neither
+                        // method_invoking_ids nor method_caller_ids and
+                        // find_call_sites_to answered 0 for it. invoke-custom
+                        // (0xFC/0xFD) stays OUT — its BBBB is a call_site index.
                         if ((op >= 0x6e && op <= 0x72) // invoke-kind
-                            || (op >= 0x74 && op <= 0x78)) { // invoke-kind/range
+                            || (op >= 0x74 && op <= 0x78) // invoke-kind/range
+                            || op == 0xfa || op == 0xfb) { // invoke-polymorphic[/range]
                             auto index = ReadShort(ptr);
                             // dexllm: bound the method operand — same rationale as field;
                             // unbounded it OOB-indexes method_caller_ids at load time.
@@ -1335,32 +1342,6 @@ const std::vector<uint32_t> &DexItem::GetLazyMethodUsingStringIds(uint32_t metho
     return *slot.data;
 }
 
-std::vector<uint32_t> DexItem::GetInvokeMethodsFromCode(uint32_t method_idx) {
-    auto code = method_codes[method_idx];
-    if (code == nullptr) {
-        return {};
-    }
-    std::vector<uint32_t> invoke_methods;
-    auto p = code->insns;
-    auto end_p = p + code->insns_size;
-    while (p < end_p) {
-        auto op = (uint8_t) *p;
-        auto ptr = p;
-        auto width = GetBytecodeWidth(ptr++);
-        auto op_format = ins_formats[op];
-        if (op_format == dex::k35c // invoke-kind
-            || op_format == dex::k3rc) { // invoke-kind/range
-            auto index = ReadShort(ptr);
-            // dexllm: bound — method_codes is sized to MethodIds().size(); lenient
-            // skips VerifyInsns so an OOB invoke operand must not reach consumers.
-            if (index < method_codes.size())
-                invoke_methods.emplace_back(index);
-        }
-        p += width;
-    }
-    return std::move(invoke_methods);
-}
-
 void PushEncodeNumber(dex::InstructionFormat op_format, uint8_t op, const uint16_t *ptr, std::vector<EncodeNumber> *using_numbers) {
     switch (op_format) {
         // using number
@@ -1907,7 +1888,9 @@ DexItem::EnumerateInvokeSites(uint32_t method_idx) const {
         const dex::u2* ptr = p;
         size_t width = GetBytecodeWidth(ptr++);
         if (width == 0) break;  // malformed / NOP-data
-        if ((op >= 0x6e && op <= 0x72) || (op >= 0x74 && op <= 0x78)) {
+        // dexllm#61: same set as the InitCache collector above — see there.
+        if ((op >= 0x6e && op <= 0x72) || (op >= 0x74 && op <= 0x78)
+            || op == 0xfa || op == 0xfb) {
             InvokeSite site;
             site.method_idx = ReadShort(ptr);
             site.bytecode_offset = static_cast<uint32_t>((p - base) * 2);

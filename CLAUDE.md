@@ -463,7 +463,7 @@ ART's `CheckInterClassDataItem` (`dex_file_verifier.cc:3208`, field loop `:3226`
 
 Exposed via `dexllm.DexKit(apk_path)`. The constructor identifies the file **by content, not extension** — a `dex\n` magic loads as a bare `.dex` via the core's `AddImage`; otherwise it must prove out as a real zip/apk container (PK signature + parseable central directory via `ZipArchive::Open`) and carry at least one sequential `classes*.dex`. A disguised `.apk` (renamed, wrong, or absent extension) therefore still loads; a non-dex/non-zip file or a zip with no `classes*.dex` now raises a clear `std::runtime_error` (the error reports whether `AndroidManifest.xml` was present) instead of the old silent 0-dex load. Detection lives in `DexKitExt::DexKitExt` ([dexkit_ext.cpp](native/core_ext/dexkit_ext.cpp)). Arg name stays `apk_path` for backward compatibility.
 
-**Multi-source / packer-unpack load.** `DexKit(sources: list[str], lenient=False)` loads several sources (each a `.dex` or zip/apk) **in order** — earlier sources get lower dex_ids, so first-wins prefers them. List a runtime-decrypted/dumped dex BEFORE the original apk to make the unpacked class win a collision (mirrors ART, where the packer orders the decrypted dex first). `lenient=True` runs the verifier in **ART-structural-equivalent** mode (`VerifyDex(..., check_insns=false)` — skips `VerifyInsns`, the one part beyond ART's structural `DexFileVerifier`) so a *partially*-decrypted dump (valid structure, garbage method bodies) still loads, exactly as ART loads it; header/ids/code_item bounds stay verified. A **concatenated** dump (several dexes in one file — what unpackers actually produce) is verified per LOGICAL dex, and the ones that verify still load even when a sibling is rejected (dexllm#25); `lenient` was the mode that walked straight into that hole. **Lenient memory-safety:** skipping `VerifyInsns` lets unvalidated instruction operands reach the core's cross-ref collectors, so those bound each operand index at the source ([dex_item.cpp](vendor/dexkit_core/Core/dexkit/dex_item.cpp) `InitBaseCache` / `GetUsingStringsFromCode` / `GetInvokeMethodsFromCode`): an out-of-range `const-string` string index, `iget/sget` field index, or `invoke-*` method index is dropped so `method_using_string_ids` / `method_using_field_ids` / `method_invoking_ids` never feed an OOB id into the load-time cross-ref maps (`field_get/put_method_ids`, `method_caller_ids`) or the L7 matchers — without this a crafted dump OOB-read the string pool (SEGV on a 32-bit `const-string/jumbo` index) or OOB-indexed the caller maps at load. The decompile path was already safe (snapshot `ResolveConstRef` + adapter getters bound-check); this extends the guarantee to `list_value_strings` / L7 search / IOC-xref / `dangerous_*`. A second-pass review also bounded `BuildMethodSignature` in [dexkit_ext.cpp](native/core_ext/dexkit_ext.cpp) (it OOB-read `MethodIds()` for a `resolve_call_args` `ArgOrigin` whose `method_idx` is a raw `invoke` operand — its sibling `BuildFieldSignature` already had the guard). Bounds are no-ops on strict-verified input. (Session adversarial-review finding; regression `test_lenient_oob_operand_does_not_crash` in [tests/test_lenient_verify.py](tests/test_lenient_verify.py) exercises `list_value_strings` / `find_methods_using_strings` / `decompile` / `resolve_call_args` / `extract_iocs` on crafted OOB-operand dumps.) `dexllm.add_dumped_dexes(dk, dumps, prefer=True, lenient=True)` ([packer.py](src/dexllm/packer.py)) is the "re-analyze after dumping" verb — returns a fresh `DexKit` over `dumps + dk.sources()` (clean rebuild → consistent caches). Both constructors share `CollectSource` (per-source probe + VerifyDex + collect). The constructor refactor and these knobs are the packer-analysis scaffold ([[project-packer-analysis-direction]]); `detect_packer` (attachBaseContext + unpacker-API signals) is the next step.
+**Multi-source / packer-unpack load.** `DexKit(sources: list[str], lenient=False)` loads several sources (each a `.dex` or zip/apk) **in order** — earlier sources get lower dex_ids, so first-wins prefers them. List a runtime-decrypted/dumped dex BEFORE the original apk to make the unpacked class win a collision (mirrors ART, where the packer orders the decrypted dex first). `lenient=True` runs the verifier in **ART-structural-equivalent** mode (`VerifyDex(..., check_insns=false)` — skips `VerifyInsns`, the one part beyond ART's structural `DexFileVerifier`) so a *partially*-decrypted dump (valid structure, garbage method bodies) still loads, exactly as ART loads it; header/ids/code_item bounds stay verified. A **concatenated** dump (several dexes in one file — what unpackers actually produce) is verified per LOGICAL dex, and the ones that verify still load even when a sibling is rejected (dexllm#25); `lenient` was the mode that walked straight into that hole. **Lenient memory-safety:** skipping `VerifyInsns` lets unvalidated instruction operands reach the core's cross-ref collectors, so those bound each operand index at the source ([dex_item.cpp](vendor/dexkit_core/Core/dexkit/dex_item.cpp) `InitBaseCache` / `GetUsingStringsFromCode`; a third, `GetInvokeMethodsFromCode`, was bounded by the same pass and turned out to be dead code — deleted in dexllm#61): an out-of-range `const-string` string index, `iget/sget` field index, or `invoke-*` method index is dropped so `method_using_string_ids` / `method_using_field_ids` / `method_invoking_ids` never feed an OOB id into the load-time cross-ref maps (`field_get/put_method_ids`, `method_caller_ids`) or the L7 matchers — without this a crafted dump OOB-read the string pool (SEGV on a 32-bit `const-string/jumbo` index) or OOB-indexed the caller maps at load. The decompile path was already safe (snapshot `ResolveConstRef` + adapter getters bound-check); this extends the guarantee to `list_value_strings` / L7 search / IOC-xref / `dangerous_*`. A second-pass review also bounded `BuildMethodSignature` in [dexkit_ext.cpp](native/core_ext/dexkit_ext.cpp) (it OOB-read `MethodIds()` for a `resolve_call_args` `ArgOrigin` whose `method_idx` is a raw `invoke` operand — its sibling `BuildFieldSignature` already had the guard). Bounds are no-ops on strict-verified input. (Session adversarial-review finding; regression `test_lenient_oob_operand_does_not_crash` in [tests/test_lenient_verify.py](tests/test_lenient_verify.py) exercises `list_value_strings` / `find_methods_using_strings` / `decompile` / `resolve_call_args` / `extract_iocs` on crafted OOB-operand dumps.) `dexllm.add_dumped_dexes(dk, dumps, prefer=True, lenient=True)` ([packer.py](src/dexllm/packer.py)) is the "re-analyze after dumping" verb — returns a fresh `DexKit` over `dumps + dk.sources()` (clean rebuild → consistent caches). Both constructors share `CollectSource` (per-source probe + VerifyDex + collect). The constructor refactor and these knobs are the packer-analysis scaffold ([[project-packer-analysis-direction]]); `detect_packer` (attachBaseContext + unpacker-API signals) is the next step.
 
 `dexllm.identify(path)` is the load-free probe behind the same logic — returns `{format: "dex"|"zip"|"unknown", is_apk, has_manifest, dex_count, source}` without constructing a `DexKit` (`source` echoes the path, so a probe result can say what it describes — dexllm#26's lesson, and what lets `dk.source_info()` reuse the shape). Use it to pre-filter resources-only containers (0-dex) before loading, e.g. in sweep harnesses (`dexkit_ext.cpp::Identify`, bound in [module.cpp](native/binding/module.cpp)).
 
@@ -1281,17 +1281,20 @@ the file this fix un-blocks (24 classes / 142 methods):
   `move-result-object` finds no invoke and hits the documented null-guard at
   [instruction.cpp:274](native/dad_cpp/instruction.cpp#L274). Contained and
   reported, but the method is lost.
-* `DexItem::GetInvokeMethodsFromCode` selects invokes by FORMAT (`k35c || k3rc`),
-  which is wrong in both directions. `invoke-polymorphic` is missed entirely:
-  `MethodHandle;->invoke` / `invokeExact` are both in
-  `list_external_method_refs()` and 16 methods carry the opcode, yet
-  `find_call_sites_to` answers **0** for each — so the caller xref, and every
-  consumer built on it, is silently blind to those sites. Conversely
-  `invoke-custom` (0xFC) IS `k35c`, but its `BBBB` is a **call_site** index, so an
-  unrelated method id enters `method_invoking_ids` — bounded, and absorbed
-  downstream (the visible paths re-enumerate real invoke opcodes, so no bogus
-  `find_call_sites_to` row was observed on `invoke-custom.dex`), i.e. wrong data
-  in the index rather than in an answer.
+* the invoke cross-reference misses `invoke-polymorphic` entirely:
+  `MethodHandle;->invoke` / `invokeExact` are both in `list_external_method_refs()`
+  and 16 methods carry the opcode, yet `find_call_sites_to` answers **0** for each
+  — so the caller xref, and every consumer built on it, is silently blind to those
+  sites. **This paragraph originally blamed `DexItem::GetInvokeMethodsFromCode`,
+  which selects by FORMAT (`k35c || k3rc`), and claimed `invoke-custom`'s
+  `call_site` index therefore entered `method_invoking_ids`. Both halves were wrong
+  and dexllm#61 proved it**: that function has no caller (and had none in the fork
+  snapshot either), so it produced no edge at all, and `method_invoking_ids` is
+  built by an OPCODE-keyed collector that never admitted `invoke-custom`. The real
+  defect was in four other, live gates. Fixed in dexllm#61 — see its section below.
+  The format proxy's own over-admission is real but was worse than recorded: it
+  also takes `filled-new-array` (a TYPE index, 624 live corpus sites) and
+  `invoke-virtual-quick` (a vtable offset).
 
 **Two notes so they are not rediscovered as regressions of this change:**
 `art/test/dexdump/all.dex` is refused on BOTH builds (`code: vC wide register out
@@ -1907,6 +1910,223 @@ lint trio clean. No API, `.pyi`, SDK or MCP surface moves — the change is two
 switch arms in a decoder behind `decompile_class`, and a reviewer traced the
 blast radius closed: `DecodeEncodedValueText` is file-local with exactly one
 caller, which itself has exactly one.
+
+### "Is this an invoke" is spelled four times, and all four missed `invoke-polymorphic` (dexllm#61, 2026-08-20)
+
+`find_call_sites_to("Ljava/lang/invoke/MethodHandle;->invoke(...)")` answered **0**
+on a dex that plainly calls it — the target sits in `list_external_method_refs()`,
+16 methods carry the opcode, and the xref was silent. Every consumer built on the
+caller index (`resolve_call_args`, `permission_callers`,
+`summarize_capabilities`, the IOC cross-reference) inherited the blind spot.
+
+**The issue's own diagnosis was half wrong, and the correction is the useful part.**
+dexllm#61 named `DexItem::GetInvokeMethodsFromCode`, which selects by instruction
+FORMAT (`k35c`/`k3rc`) and claimed that made `invoke-custom`'s `call_site` index a
+wrong edge in the cross-reference maps. **That function is DEAD** — 2 mentions
+repo-wide (one definition, one declaration), 0 callers, 0 undefined-symbol
+references in the built `.so`, and **0 callers in the fork snapshot at `a6f8c3c`
+either**, so it never produced an edge at all. `method_invoking_ids` is built at
+`dex_item.cpp:479` by an OPCODE-range gate, which is why no phantom exists.
+
+The format proxy was also wrong in a way the issue missed, and wrong from before
+invoke-dynamic existed. Derived from slicer's own table rather than by hand, the
+format predicate admits **six** opcodes it should not — and one of them is
+ordinary:
+
+| opcode | fmt | what BBBB really is | corpus |
+|---|---|---|---:|
+| `0x24/0x25 filled-new-array` | 35c/3rc | **type** index | **624 sites / 4 sources** |
+| `0xE9/0xEA invoke-virtual-quick` | 35c/3rc | **vtable offset** | 0 |
+| `0xFC/0xFD invoke-custom` | 35c/3rc | **call_site** index | 46 (committed fixture) |
+
+`filled-new-array` was `k35c` + `kIndexTypeRef` in the very table the function
+consults, on the day it was vendored. Had it ever been called, one real corpus
+site (`filled-new-array {v1, v4}, [Ljava/lang/String;` → type_idx 6870 →
+`method_ids[6870]`) would have asserted that a method "calls
+`MenuBuilder.add`". The correct key was one field over in the same row the code
+was already reading.
+
+**The real defect is in FOUR live gates**, none of them the named function — the
+hand-maintained-enumeration shape dexllm#32 already records:
+
+| site | role |
+|---|---|
+| `dex_item.cpp:479` | builds `method_invoking_ids` → `method_caller_ids` |
+| `dex_item.cpp:1910` `EnumerateInvokeSites` | turns a claimed caller into per-site rows |
+| `invoke_args.cpp:116` `BuildCfg` | marks a block as needing the extractor |
+| `invoke_args.cpp:591/625` | extracts the arguments |
+
+`find_call_sites_to` needs the first two; `resolve_call_args` needs 1, 3 and 4.
+
+**Fix.** All four now admit `invoke-polymorphic` (0xFA `k45cc`, 0xFB `k4rcc`) and
+still exclude `invoke-custom`. The extractor needed no new arm: `k45cc` is
+`AG op | BBBB | FEDC | HHHH` and `k4rcc` is `AA op | BBBB | CCCC | HHHH` —
+**byte-identical to `k35c`/`k3rc` on code units 0..2**, with a proto unit at index
+3 that no gate reads and that `GetOpcodeLen` already accounts for (it returns 4),
+so 0xFA joins the 35c arm and 0xFB the 3rc arm. Verified against the slicer's own
+`DecodeInstruction`, not assumed.
+
+**One bound the change was OBLIGED to add.** `VerifyInsns` left
+`kIndexMethodAndProtoRef` unbounded and said why, with the condition attached:
+*"that is safe only because nothing dereferences them ... so a consumer that starts
+reading them must add the bound in the same change."* dexllm#61 is that consumer.
+Both reviewers found it independently and both CONSTRUCTED it: a 2-byte
+length-preserving patch of one 0xFA's BBBB to 0xFFFF in `method_handles.dex`
+verifies **valid in STRICT mode** and then yields a `find_call_sites_from` row whose
+`callee_descriptor` is **empty** — a shape previously reachable only under
+`lenient=True`, since every opcode that reached the site enumerators had a
+VerifyInsns-bounded index. Not a crash (`BuildMethodSignature` is bounded and
+returns `{}`) but a wrong answer on strict-verified input, and the safety contract's
+own justification had silently become false. `kIndexMethodAndProtoRef` now shares
+the `kIndexMethodRef` bound; the PROTO half (`arg[4]`, not `ridx`) stays unbounded
+because nothing reads it, and `kIndexCallSiteRef` stays in the default arm on the
+original terms — restated in the comment rather than left stale. **0 false-reject**
+over the corpus plus every AOSP dexdump / dexter dex.
+
+**The dead function is DELETED, with a tombstone.** It is a strictly-worse third
+implementation of a question two live functions already answer
+(`EnumerateInvokeSites`, `GetInvokeMethods`), it is the only format-keyed one, and
+it cannot be guarded because no test can call it. Deleting upstream code from the
+vendored fork has precedent (the access-flags `Modifier` rewrite), and the
+tombstone convention is the one `dex_item.h:169` already uses for the dexllm#32
+move. **dexllm#65 was filed off this**: the fork records no upstream baseline, so
+its 54 divergences cannot be catalogued, rebased, or upstreamed — a removal is the
+least visible kind, and the convention that records it is not itself checked.
+
+**Guard: the invariant, not the instance** ([tests/test_invoke_opcode_gates.py](tests/test_invoke_opcode_gates.py),
+16 cases). The truth set is DERIVED from slicer's table — the opcodes whose index
+kind is `kIndexMethodRef` or `kIndexMethodAndProtoRef` — which is a source
+independent of the gates under audit, since they read a different field of the
+same rows; and it is PINNED as a literal beside it, so widening the derivation
+rule is a two-place edit and a future Dalvik invoke form fails CLOSED. Each gate's
+selected set is extracted from the source (comments stripped with
+`test_arg_opcode_coverage`'s scanner — the trap dexllm#32 already paid for) and
+asserted EQUAL. A separate test bans the format-keyed shape by name so the failure
+says the cause, not an opcode diff.
+
+**Measured (a/b OFF=`a922a4dde248` vs ON, SAME script, both md5-verified, the ON
+build bit-reproducing its md5 after the halves were swapped back):** 59 entries —
+the whole bundled corpus, the committed fixtures, every `art/test/dexdump/*.dex`
+and every `tools/dexter/testdata/*.dex` — x 10 axes (load, class count, every
+`find_call_sites_to` row with its caller/offset/opcode over external AND declared
+targets, the opcode histogram, `resolve_call_args` rows, `permission_callers`,
+`summarize_capabilities`) = **590 records, 4 sources changed**:
+
+| source | call sites | arg rows | opcodes gained |
+|---|---|---|---|
+| `method_handles.dex` | 237 -> **253** | 195 -> **211** | `0xFA` x16 |
+| `invoke-custom.dex` | 493 -> **495** | 441 -> **443** | `0xFA` x2 |
+| `const-method-handle.dex` | 22 -> **24** | 18 -> **20** | `0xFA` x2 |
+| `invoke-polymorphic.dex` | 1 -> **4** | 1 -> **4** | `0xFA` x2, **`0xFB` x1** |
+
+**0 rows removed and no pre-existing opcode count moves**; `permission_callers` and
+`summarize_capabilities` are unchanged on every source; the entire bundled corpus is
+byte-identical — required, since it carries **0** invoke-polymorphic sites. That is
+why the fixtures are IN the a/b: without them a flat result would prove only that
+the corpus is quiet [[ab-must-prove-the-mechanism-fires]].
+
+**It is NOT purely additive, and the first draft of this paragraph said it was.** An
+adversarial reviewer decomposed `const-method-handle.dex` past the row count and
+found an ORDINARY `invoke-virtual` whose second argument moves `Unknown` ->
+`MethodReturn`: 0xFA now joins the arm that sets `has_last_invoke` /
+`last_invoke_callee`, so a `move-result-object` following a polymorphic call finally
+resolves. That is an improvement, and it is `Unknown` -> concrete rather than
+concrete -> a DIFFERENT concrete (the shape dexllm#16's gate exists for) — but it is
+a value change on a site the change does not otherwise touch, and it belonged in the
+record.
+
+**The first diff of this a/b reported 3 sources, not 4** — the capture was right and
+the DIFF HARNESS lied. It keyed each row on the file's BASENAME, and two different
+files are named `invoke-polymorphic.dex` (AOSP's, which loads, and dexter's, which
+this repo's verifier rejects for an unrelated `outs_size > registers_size`); the
+collision let the second overwrite the first, and the surviving row was identical in
+both halves. The one source that exercises **0xFB at all** was therefore reported as
+unchanged, and the summary claim "only 0xFA rows appear" followed from it.
+[[ab-harness-must-itself-be-deterministic]] — the collision shape, not the ordering
+one.
+
+**Two more committed fixtures were needed, and neither is optional.**
+
+`tests/data/method_handles.dex` (28,228 B, AOSP `tools/dexter/testdata/`,
+Apache-2.0). The already-committed `invoke-custom.dex` does carry two polymorphic
+sites — but in blocks that also hold an ordinary invoke, so reverting the CFG mark
+is **MASKED** there (`resolve_call_args` stays at 2). On this file the same revert
+takes it 10 -> 0, the only behavioural evidence that gate is load-bearing. Its 16
+sites are all in ONE of its 24 classes and all arity 3, which is why it is not
+sufficient on its own.
+
+`tests/data/invoke-polymorphic.dex` (1,160 B, AOSP `art/test/dexdump/`,
+Apache-2.0). Both reviewers found, independently, that **0xFB
+(`invoke-polymorphic/range`) had ZERO behavioural coverage anywhere in the repo** —
+not in the other fixtures, not in the corpus, not in dexllm#58's verifier guard,
+which is 0xFA-only. Two mutants survived the whole suite on that alone: moving
+`case 0xFB` into the 45cc arm (the source guard sees the arms' UNION, so it passes)
+and excluding 0xFB with `&& op != 0xfb` while leaving its literal in place. This
+file kills both — its one range site has a **7-register window** the arm swap
+collapses to empty — and it is the only fixture with a 45cc at **A=5**, where the G
+nibble is a real argument rather than padding. Note that dexter ships a file of the
+same name that is NOT usable: this repo's verifier rejects it (`outs_size >
+registers_size`).
+
+**16 mutants, each BUILT and RUN with a distinct `.so` md5, each killed by its
+intended guard.** Eight from the diff — the four gate reverts, the dead function
+restored, the derivation rule widened to admit a `call_site` operand, and
+`invoke-custom` added to one gate and then to two. **Eight more that both reviewers
+CONSTRUCTED, every one of which passed the first cut of the guards in full:**
+
+| escape | why it was invisible | now killed by |
+|---|---|---|
+| an emit arm opening `if (!emit) break;` (39 fabricated rows on the committed fixture) | the locator stopped at the first `break;` | brace-matched arm bodies |
+| a SECOND collector after the first write in the same block | the locator sliced up to that write | the whole `if` block |
+| a second `in.invoke` statement | the locator read one assignment | every `in.invoke` statement, unioned |
+| `&& op != 0xfb` with the `op == 0xfb` literal left in place | a negated clause makes the extracted set LARGER | `_opcodes_in_condition` REFUSES unmodelled `op` comparisons |
+| `case 0xFB` moved into the 45cc arm | the source guard sees the arms' UNION | the 7-register range assertion |
+| the 45cc count read from `AA` instead of the B nibble | both behavioural tests asserted only `all(r.args)` | per-row register lists |
+| the verifier bound reverted | nothing tested it | the crafted OOB-BBBB rejection |
+| a format-keyed gate spelled `ins_formats[op] ==` | the shape test matched only the `op_format` local | both spellings |
+
+**Three defects were in the HARNESS or the GUARDS, found only by RUNNING mutants:**
+a `needs_rebuild=no` mutant ran against the PREVIOUS mutant's `.so` (always
+rebuild); the "restore the dead function" mutant did not COMPILE, so it was never a
+mutant (a build failure is not a kill); and the phantom-edge guard swept only
+EXTERNAL refs and was empty — a `call_site` index is small, so it lands on a low
+`method_ids` entry, i.e. an app method, and the 40 fabricated rows were all
+invisible to it.
+
+**Both reviewers, and every CONFIRMED finding was in the guards, the measurement or
+the prose — none in the opcode set or the decode.** They independently re-derived
+the 12-opcode truth set from the table, verified the 45cc/4rcc layout against an
+oracle built from ART's own `GetVarArgs` (21/21 sites over three files, including
+arity 4, arity 5 and the 7-register range form), fuzzed 500 crafted retypings with
+subprocess exit-status judging (0 nonzero exits), and refuted the deletion's
+behaviour-neutrality attack. What they found: the missing verifier bound (both,
+CONFIRMED, fixed above), the eight guard escapes in the table, the a/b's
+basename collision, the "all additive" overstatement, a `__repr__`-slicing target
+list, a test docstring that contradicted `tests/data/README.md`, a README claim that
+the 16 sites are "across 24 classes" when they are all in ONE, and two prose lists
+that omitted `invoke-virtual-quick`. All fixed here.
+
+parity **29/29**, pytest **744 passed / 10 skipped**, corpus-less **338 passed /
+416 skipped** (+16, the guard file runs there because it uses committed fixtures
+only), narrowed to `tests/data/multidex.apk` **647**, the guard file green narrowed
+to **each of the 38 bundled samples one at a time**, sweep **25,309-class /
+213,374-method 0-crash 0-timeout**, determinism 3 `PYTHONHASHSEED`s -> one digest,
+lint trio clean. The a/b was re-captured on the FINAL build (with the verifier
+bound) and is **identical on all 59 entries** to the capture taken before it — the
+bound is a no-op on every real input, which is the 0-false-reject claim restated as
+a measurement.
+
+**Observable change, deliberately:** `CallSite.invoke_opcode` can now be `0xFA`
+(250) or `0xFB`, values a consumer switching on the opcode has never seen —
+documented in [docs/api.md](docs/api.md), which previously described the field as
+"e.g. 110 = invoke-virtual" and said nothing about the admissible set. And
+`find_call_sites_to` / `resolve_call_args` now ANSWER where they used to be
+silent, for any dex using `MethodHandle`/`VarHandle` (API 26+). Release-notes
+material.
+
+**dexllm#60 stays open** — the smali emitter still prints `invoke-polymorphic
+<unhandled-fmt-29>` and the IR builder still fails to decompile the six methods
+whose `move-result` follows one. Same family, different layers.
 
 ### Skills
 

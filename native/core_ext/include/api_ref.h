@@ -37,7 +37,7 @@ struct CallSite {
     std::string caller_descriptor;         // "Lcom/x/Y;->foo(I)V"
     std::string callee_descriptor;         // resolved full API signature
     int32_t bytecode_offset = -1;          // L2.5
-    uint8_t invoke_opcode = 0;             // L2.5: 0x6E~0x72 family
+    uint8_t invoke_opcode = 0;             // L2.5: 0x6E~0x72, 0x74~0x78, 0xFA/0xFB
 };
 
 // L1.5 — convenience summary of a single class, suitable for source-style

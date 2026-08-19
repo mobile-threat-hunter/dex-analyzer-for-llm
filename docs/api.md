@@ -1097,7 +1097,7 @@ Field: class/name/type descriptors + `signature`. Type: `descriptor` +
 | `caller_dex_id` | `int` | dex the caller lives in |
 | `caller_method_idx` | `int` | **dex-local** `method_ids` index — only meaningful paired with `caller_dex_id`, not a stable global id |
 | `bytecode_offset` | `int` | byte offset of the invoke, always **inside the caller** |
-| `invoke_opcode` | `int` | Dalvik opcode (e.g. 110 = `invoke-virtual`) |
+| `invoke_opcode` | `int` | Dalvik opcode — one of `0x6E`–`0x72` (invoke-kind), `0x74`–`0x78` (…/range), or `0xFA`/`0xFB` (`invoke-polymorphic`, i.e. a `MethodHandle`/`VarHandle` call — reported since dexllm#61). `invoke-custom` is NOT among them: its operand is a `call_site` index, not a method reference |
 
 **Which half is fixed depends on the producing direction** — `find_call_sites_to(X)`
 fixes `callee_descriptor` and varies `caller_*` ("who calls X");

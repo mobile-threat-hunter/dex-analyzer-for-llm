@@ -113,7 +113,14 @@ Cfg BuildCfg(const dex::Code* code, const dex::u1* img_end) {
         Insn in;
         in.off = static_cast<uint32_t>((p - base) * 2);
         in.next = static_cast<uint32_t>(in.off + width * 2);
-        in.invoke = (op >= 0x6E && op <= 0x72) || (op >= 0x74 && op <= 0x78);
+        // Every opcode whose BBBB is a method_ids index: the 10 invoke-kind forms
+        // plus invoke-polymorphic (0xFA/0xFB, dexllm#61). NOT invoke-custom
+        // (0xFC/0xFD) — its BBBB is a call_site index, so the extractor below has
+        // nothing to resolve there. This set is the same in all four gates that
+        // spell it, and tests/test_invoke_opcode_gates.py derives it from slicer's
+        // own table rather than trusting any of them.
+        in.invoke = (op >= 0x6E && op <= 0x72) || (op >= 0x74 && op <= 0x78)
+                    || op == 0xFA || op == 0xFB;
         const int64_t off = in.off;
         switch (op) {
             case 0x0E: case 0x0F: case 0x10: case 0x11:  // return*
@@ -588,7 +595,10 @@ std::vector<InvokeSiteWithArgs> AnalyzeInvokes(const dex::Code* code,
                 }
 
                 // ---- invoke-kind {C..G}, method@BBBB (format 35c) ----
-                case 0x6E: case 0x6F: case 0x70: case 0x71: case 0x72: {
+                // invoke-polymorphic (0xFA, k45cc) joins it: `AG op BBBB FEDC HHHH`
+                // is byte-identical to 35c for units 0..2, and the extra proto unit
+                // is not read here (GetBytecodeWidth already returns 4 for it).
+                case 0x6E: case 0x6F: case 0x70: case 0x71: case 0x72: case 0xFA: {
                     uint8_t arg_count = B;  // high nibble of insn>>8
                     uint8_t G = A;          // low nibble of insn>>8
                     uint16_t callee_idx = *(q + 1);
@@ -622,7 +632,9 @@ std::vector<InvokeSiteWithArgs> AnalyzeInvokes(const dex::Code* code,
                     break;
                 }
                 // ---- invoke-kind/range {CCCC..NNNN}, method@BBBB (format 3rc) ----
-                case 0x74: case 0x75: case 0x76: case 0x77: case 0x78: {
+                // invoke-polymorphic/range (0xFB, k4rcc) joins it for the same reason
+                // as 0xFA above: `AA op BBBB CCCC HHHH` matches 3rc on units 0..2.
+                case 0x74: case 0x75: case 0x76: case 0x77: case 0x78: case 0xFB: {
                     uint8_t arg_count = AA;
                     uint16_t callee_idx = *(q + 1);
                     uint16_t first_reg = *(q + 2);

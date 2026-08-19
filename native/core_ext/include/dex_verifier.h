@@ -67,8 +67,12 @@
 //   bounded checker, anchored to the Dalvik bytecode spec via the slicer's
 //   VerifyFlags/IndexType tables (dex_bytecode.h): per decoded instruction it
 //   bounds-checks register operands (< registers_size), index operands (< the
-//   id-table named by GetIndexTypeFromOpcode), and branch/switch/array-data
-//   targets (in-bounds + aligned). This is the one spot where the verifier uses
+//   id-table named by GetIndexTypeFromOpcode) and branch/switch/array-data
+//   targets (in-bounds + aligned). The index half covers the kinds something
+//   DEREFERENCES — string / type / field / method, and since dexllm#61
+//   method-and-proto, because the invoke collectors began reading
+//   invoke-polymorphic's operand; call_site / method_handle / proto are not
+//   bounded here, and the rule for adding one is stated at the switch itself. This is the one spot where the verifier uses
 //   slicer *logic* (DecodeInstruction/GetWidthFromBytecode), not just the
 //   dex_format.h PODs — justified: hand-rolling a 256-opcode format table would
 //   be larger AND less traceable than reusing the table the core already ships.

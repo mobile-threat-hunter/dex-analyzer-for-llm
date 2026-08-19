@@ -161,10 +161,21 @@ public:
     struct InvokeSite {
         uint32_t method_idx;       // callee method_idx in this dex
         uint32_t bytecode_offset;  // byte offset within insns
-        uint8_t opcode;            // invoke-* opcode (0x6E~0x72, 0x74~0x78)
+        uint8_t opcode;            // 0x6E~0x72, 0x74~0x78, or 0xFA/0xFB (dexllm#61)
     };
     [[nodiscard]] std::vector<InvokeSite>
     EnumerateInvokeSites(uint32_t method_idx) const;
+
+    // Upstream's `GetInvokeMethodsFromCode` was REMOVED from here (dexllm#61). It
+    // selected invokes by instruction FORMAT (k35c/k3rc), which is not what BBBB
+    // means: `filled-new-array` carries a TYPE index, `invoke-custom` a CALL_SITE
+    // index and `invoke-virtual-quick` a VTABLE OFFSET — all three are k35c/k3rc, so
+    // all three would have been recorded as method references, while
+    // `invoke-polymorphic` (k45cc/k4rcc) was missed. It had no
+    // caller in the fork snapshot either, so removing it changes no behaviour.
+    // Use EnumerateInvokeSites above, or GetInvokeMethods() which reads the
+    // already-built index. tests/test_invoke_opcode_gates.py keeps every remaining
+    // gate selecting exactly what slicer's own table says carries a method index.
 
     // The L4 argument-origin analysis that used to be declared here moved to
     // native/core_ext/include/invoke_args.h (dexllm#32). It is a dexllm analysis, not
@@ -355,7 +366,6 @@ private:
 
     std::vector<uint8_t> GetOpSeqFromCode(uint32_t method_idx);
     std::vector<uint32_t> GetUsingStringsFromCode(uint32_t method_idx);
-    std::vector<uint32_t> GetInvokeMethodsFromCode(uint32_t method_idx);
     // These helpers are the "member-scoped lazy" exceptions to the global warm-up barrier.
     const std::vector<uint8_t> &GetLazyMethodOpCodes(uint32_t method_idx);
     const std::vector<uint32_t> &GetLazyMethodUsingStringIds(uint32_t method_idx);
