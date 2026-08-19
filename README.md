@@ -130,8 +130,17 @@ spec-reference not runtime dep), turned to **crash-safety**, not execution trust
 
 **Deliberately not checked** — execution-trust mechanics irrelevant to a read-only
 analyzer, or out of the structural scope: adler32/SHA-1 checksums, instruction
-*dataflow* semantics, debug_info, call_site/method_handle,
-proto shorty-match, access-flag bitmasks, and the offset→map-type cross-check.[^ann]
+*dataflow* semantics, debug_info, the *contents* of call_site/method_handle
+entries,[^handle] proto shorty-match, access-flag bitmasks, and the offset→map-type
+cross-check.[^ann]
+
+[^handle]: Those two sections' **extent** is bounded and their **alignment** is
+    checked (dexllm#57 and dexllm#62 — the latter because ART's
+    `IsDataSectionType` covers both and this port's did not, so a misaligned
+    offset was accepted); what is not read is what the entries *say*. ART's
+    `data_items_left` item budget stays unported on purpose, since this port
+    consumes a section's item count only where it already has a tighter byte-span
+    bound — [docs/aosp-oob-divergences.md](docs/aosp-oob-divergences.md) B2b.
 
 [^ann]: **annotations** were on that list until dexllm#56, excused as "lazy-parsed
     by the core". They *are* parsed — `Reader::ExtractAnnotations` runs off

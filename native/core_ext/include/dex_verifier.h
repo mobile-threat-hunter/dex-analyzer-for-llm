@@ -86,8 +86,9 @@
 //
 // ── OUT OF SCOPE (stated so the boundary is discoverable, not a silent gap) ──
 //   * Instruction type/dataflow semantics — runtime method_verifier, not ported.
-//   * call_site — not dereferenced by the core. Its section EXTENT is bounded
-//     in CheckMap (see below) but nothing reads its contents.
+//   * call_site — not dereferenced by the core. Its section EXTENT and its
+//     4-byte ALIGNMENT are checked in CheckMap (see below) but nothing reads its
+//     contents.
 //   * method_handle CONTENTS. This line used to read "call_site/method_handle —
 //     not dereferenced by the core", which dexllm#57 made FALSE: implementing the
 //     0x16 METHOD_HANDLE encoded_value means the core now resolves a handle
@@ -95,10 +96,11 @@
 //     EXTENT bound: without it, ArrayView's index check was against the map's own
 //     attacker-supplied count and read past the file. ART bounds these in TWO
 //     places and this port reached neither — its CheckMap (via an
-//     IsDataSectionType that, unlike ours, returns true for both) and its
-//     map-driven intra pass. See the CheckMap comment; the alignment half of
-//     ART's CheckMap treatment stays diverged (docs/aosp-oob-divergences.md).
-//     Still NOT ported from ART's
+//     IsDataSectionType that returned true for both where ours returned false)
+//     and its map-driven intra pass. dexllm#62 closed the CheckMap half: the
+//     predicate now matches ART :82, so a MISALIGNED section offset is rejected
+//     as ART rejects it. ART's data_items_left budget stays unported on purpose
+//     (docs/aosp-oob-divergences.md B2b). Still NOT ported from ART's
 //     CheckIntraMethodHandleItem: method_handle_type <= kLast (:1501) and
 //     field_or_method_idx against field_ids/method_ids (:1512/:1521). The
 //     residual is a THROW, not an OOB — that index reaches GetFieldDecl/
@@ -106,6 +108,12 @@
 //   * debug_info — dexllm never parses it; not verified by design.
 //   * adler32 checksum — intentionally not verified (project policy; ART itself
 //     only warns when verify_checksum=false — aosp-wiki dexfileverifier.md).
+//   * ART's CheckIntraSectionIterate data-section rules (:2354) — a data-section
+//     item at offset 0 is rejected (:2356) and every one is recorded in
+//     offset_to_type_map_. Neither is ported: they belong to the map-driven intra
+//     pass this port does not have (next bullet). dexllm#62 widened
+//     IsDataSectionType to ART's own set, which does NOT bring these with it —
+//     it only means ART applies them to three more types than we do.
 //   * ART's offset_to_type_map_ / CheckOffsetToTypeMap (:2564) — NOT ported, and
 //     the reason is structural rather than an omission: ART is MAP-driven (it
 //     walks every section item by item and records offset -> map type, then

@@ -92,17 +92,41 @@ u4 MapTypeToBitMask(u2 type) {
     }
 }
 
-// A DELIBERATE DIVERGENCE FROM ART, and its comment used to misstate ART as the
-// justification (caught by the dexllm#57 delta review). ART's IsDataSectionType
-// (dex_file_verifier.cc:82) returns TRUE for kDexTypeCallSiteIdItem (:92),
-// kDexTypeMethodHandleItem (:93) and kDexTypeMapList (:94) — only the header and
-// the six *_id tables are false. This port returns false for those three as well.
-// The single consumer is CheckMap's alignment branch, so the OBSERVABLE cost is
-// that a misaligned call_site_id / method_handle section offset is ACCEPTED where
-// ART rejects it (map_list is covered anyway by CheckHeader's 4-aligned map_off
-// check). Not memory safety — the extent bound added for dexllm#57 spans those
-// sections regardless of alignment, and an unaligned u2/u4 load is harmless on
-// every supported target. Catalogued in docs/aosp-oob-divergences.md.
+// ART :82 — the false arm is EXACTLY ART's: the header item and the six *_id
+// tables. Everything else, INCLUDING kCallSiteIdItem (:92), kMethodHandleItem
+// (:93) and kMapList (:94), is a data-section type. Those three used to sit in
+// the false arm here (dexllm#62), with a comment that justified the divergence by
+// misstating ART; the single consumer is CheckMap's alignment branch, so the
+// observable cost was that a MISALIGNED call_site_id / method_handle section
+// offset was accepted where ART rejects it. Never memory safety — the extent
+// bound in CheckMap spans both sections whatever their alignment, and an
+// unaligned u2/u4 load is harmless on every supported target — so this is spec
+// fidelity, and it is the direction an added check can get WRONG (dexllm#58), not
+// a crash fix. kMapList is NOT the no-op it first looked like — the a/b measured
+// it: CheckHeader's CheckValidOffsetAndSize(map_off, ..., 4, "map") runs first and
+// covers the HEADER field, but the map_list item's own SELF-REFERENTIAL offset is
+// a separate u4 that nothing compared against it, so misaligning that one is
+// accepted pre-fix and rejected now (27 crafted sources). Real input is unaffected
+// (the two agree in every dex a compiler emits), which is why the corpus half of
+// the a/b is flat.
+//
+// ART calls this predicate in TWO more places, and NEITHER is ported:
+//   * :775 — the same CheckMap block, where it also gates the data_items_left
+//     budget (:777): the SUM of every data section's item COUNT bounded by the
+//     data segment's byte size. It guards nothing here. This port is
+//     REFERENCE-driven and reads item->size for exactly the two fixed-size
+//     sections the header does not describe, where CheckMap's per-section
+//     byte-span bound is strictly TIGHTER than a running item budget; for every
+//     variable-length section the count is never consumed at all. Adding it
+//     would be a pure new rejection direction with no reachable defect behind it.
+//   * :2354 — CheckIntraSectionIterate, which rejects a data-section item at
+//     offset 0 (:2356) and populates offset_to_type_map_. Both belong to ART's
+//     MAP-driven intra pass, which this port does not have at all (see
+//     dex_verifier.h's out-of-scope list). Widening the predicate here does NOT
+//     bring them with it — it only means ART applies them to three more types
+//     than this port does.
+// Catalogued as B2b in docs/aosp-oob-divergences.md (B2, this alignment gap, is
+// CLOSED there).
 bool IsDataSectionType(u2 type) {
     switch (type) {
         case kHeaderItem:
@@ -112,9 +136,6 @@ bool IsDataSectionType(u2 type) {
         case kFieldIdItem:
         case kMethodIdItem:
         case kClassDefItem:
-        case kCallSiteIdItem:
-        case kMethodHandleItem:
-        case kMapList:
             return false;
         default:
             return true;
@@ -582,6 +603,10 @@ bool DexVerifier::CheckMap() {
     for (u4 i = 0; i < count; ++i, ++item) {
         if (i != 0 && last_offset >= item->offset) return Fail("Out of order map item");
         if (item->offset >= size_) return Fail("Map item past end of file");
+        // ART :785 — the switch naming the five variable-length item types that
+        // align to 1; every other data-section type aligns to 4, which since
+        // dexllm#62 includes call_site_id and method_handle (ART :92/:93). The
+        // rejection itself is :798.
         if (IsDataSectionType(item->type)) {
             size_t align = (item->type == kClassDataItem || item->type == kStringDataItem ||
                             item->type == kDebugInfoItem || item->type == kAnnotationItem ||
@@ -598,9 +623,10 @@ bool DexVerifier::CheckMap() {
         // ART's own CheckMap does not bound them, which is backwards:
         //   * ART's CheckMap DOES, because its IsDataSectionType (:82) returns true
         //     for both (:92/:93), which subjects them to the data_items_left budget
-        //     (:777) and the 4-byte alignment check (:798). This port's
-        //     IsDataSectionType excludes them — see its comment above — so neither
-        //     applies here, and there is no data_items_left equivalent at all.
+        //     (:777) and the 4-byte alignment check (:798). The alignment half is
+        //     ported as of dexllm#62 (the loop above now reaches both); the budget
+        //     is deliberately not — see IsDataSectionType's comment for why it
+        //     guards nothing in a reference-driven port.
         //   * ART's intra pass does too, via CheckIntraSectionIterate (:2199,
         //     entered for both at :2529-2530): CheckListSize(ptr_, 1,
         //     sizeof(CallSiteIdItem)) at :2265, and the same call opening
@@ -609,7 +635,7 @@ bool DexVerifier::CheckMap() {
         // The bound below is the stronger of ART's two (a per-section byte span
         // rather than a running item budget); putting it here, where the map item
         // is already in hand, is the same intra/inter fusion the dexllm#56
-        // annotation walk used. The alignment half stays diverged, deliberately.
+        // annotation walk used.
         // Every other fixed-size table has its span bounded by CheckHeader's
         // CheckListSize off the header's own size/off pair; method_handle and
         // call_site_id exist ONLY in the map, so `item->size` is the sole

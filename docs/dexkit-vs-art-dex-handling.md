@@ -109,8 +109,10 @@ that ART keeps in the *runtime* method_verifier (deliberately not vendored), her
 re-derived from the Dalvik bytecode spec. **Intentional differences from ART:**
 adler32/SHA-1 still **not** checked (policy — checksums are not a crash vector and
 malware routinely lies about them); instruction *dataflow* semantics,
-call_site/method_handle, debug_info are out of scope (documented in
-`dex_verifier.h`). Annotations were on that list until dexllm#56 — see the
+call_site/method_handle CONTENTS and debug_info are out of scope (documented in
+`dex_verifier.h`) — for those two sections the EXTENT is bounded and, since
+dexllm#62, the 4-byte ALIGNMENT is checked, which is what ART's `CheckMap` does;
+what is not read is what the entries say. Annotations were on that list until dexllm#56 — see the
 `annotation_item` row below for why "the core lazy-parses it" was the wrong test. The slicer's own `Reader::ValidateHeader()` still runs after as
 a second cheap sanity layer; per-item decode problems beyond the verifier's scope
 still surface lazily as `SLICER_CHECK` → `std::runtime_error`, skipping that method.
@@ -138,7 +140,7 @@ Legend: ✅ ported (behavioural parity) · ⊕ beyond ART's *structural* verifie
 | every section offset+size (overflow-safe `CheckValidOffsetAndSize`) | ✅ |
 | type_ids / proto_ids < 65536 (`CheckSizeLimit`) | ✅ |
 | adler32 checksum / SHA-1 signature | ⊖ (not a crash vector; malware forges them) |
-| map ordering / in-bounds / alignment / unknown+dup types / required sections | ✅ |
+| map ordering / in-bounds / alignment / unknown+dup types / required sections | ✅ — the alignment half only became complete in dexllm#62: `IsDataSectionType` had `call_site_id` / `method_handle` / `map_list` in its *false* arm where ART :82 has them true, and that predicate gates the alignment branch, so a misaligned offset on any of the three was accepted. ART's other use of the predicate, the `data_items_left` item budget (:777), stays unported on purpose — see `docs/aosp-oob-divergences.md` B2b |
 
 **CheckIntraSection (ART :2450)**
 
@@ -169,7 +171,7 @@ Legend: ✅ ported (behavioural parity) · ⊕ beyond ART's *structural* verifie
 | class_data — EVERY member's defining class (`CheckInterClassDataItem` :3208, field loop :3226 / method loop :3244) | ✅ `CheckClassDataDefiners` (added for dexllm#48 — the port previously compared only the FIRST member, ART's `FindFirstClassDataDefiner` :2579, so a class_data whose first entry was its own could declare another class's members and still verify) |
 | class_data — member access flags (`CheckFieldAccessFlags` / `CheckMethodAccessFlags` :934/:961) · `CheckStaticFieldTypes` :1289 (a static field's declared type vs its `encoded_array` initializer) · orphan class_data (ART drives from the MAP and requires a `class_def`; this port drives from `class_defs`) | ◐ not checked — wrong-answer gaps, not crash surface. The `CheckStaticFieldTypes` one is *relied upon* today: `tests/test_mutf8_identifiers.py::test_astral_type_in_a_field_initializer_decompiles` retypes a static value `0x17`→`0x18` and expects the dex to load. Orphan class_data is inert (the core walks `class_defs`, never the map) |
 | proto shorty ↔ descriptor match | ◐ correctness-only (descriptors themselves are verified) |
-| annotations definer-match · call_site / method_handle inter | ◐ not dereferenced |
+| annotations definer-match · call_site / method_handle CONTENTS (`CheckIntraMethodHandleItem` :1493 — handle type ≤ kLast :1501, `field_or_method_idx` bounds :1512/:1521) | ◐ not checked. The two sections' EXTENT and ALIGNMENT are (`CheckMap`, dexllm#57 and dexllm#62); a garbage handle's index is a THROW at `GetFieldDecl`/`GetMethodDecl`, not an OOB — filed as dexllm#59 |
 | `CheckOffsetToTypeMap` (offset matches its declared map-item type) | ⚠ not checked — contents are validated directly (`VerifyTypeList`/`VerifyClassData`/`VerifyEncodedArrayAt`/`VerifyAnnotationsDirectory`) so it stays crash-safe, but type-confusion of an offset is caught by ART, not here. **That sentence was false for annotations until dexllm#56** and the gap was exactly this one plus the missing walk: with no type map, "the contents are validated directly" has to hold for *every* referenced structure, and one exception is a crash. ART is map-driven (walk each section, record `offset -> type`, check references against it); this port is reference-driven (walk from the header's tables, validate what each offset points at) — so a section the port never walks is a section nothing checks at all |
 
 **Bottom line:** the structural crash surface is at ART parity (plus `VerifyInsns`

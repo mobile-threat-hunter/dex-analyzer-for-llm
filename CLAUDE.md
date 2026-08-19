@@ -1585,6 +1585,176 @@ guard, and it is why the section start was only ever bounded by `CheckMap`'s
 is a false throw on some legitimate access, which is exactly the direction this
 section is about.
 
+### A data section's offset is aligned the way ART aligns it (dexllm#62, 2026-08-19)
+
+`IsDataSectionType` is a port of ART's `dex_file_verifier.cc:82`, whose false arm
+is the header item and the six `*_id` tables and nothing else. This port had
+**three more** in that arm — `kCallSiteIdItem` (ART :92), `kMethodHandleItem`
+(:93) and `kMapList` (:94) — and the predicate's single consumer is `CheckMap`'s
+alignment branch, so the branch never ran for them and a **MISALIGNED**
+`call_site_id` / `method_handle` section offset was ACCEPTED where ART rejects
+it. Pre-existing (introduced with the verifier in `0b75133`); what dexllm#57
+changed is that the function became load-bearing enough for the gap to matter.
+The comment above it justified the divergence by **misstating ART** in exactly
+the way the dexllm#57 delta review caught one file over, and that false claim is
+how it stayed unexamined.
+
+**Not memory safety, and the direction matters.** dexllm#57's EXTENT bound spans
+both fixed-size sections whatever their alignment, and an unaligned `u2`/`u4`
+load is harmless on every supported target — so this is a false-ACCEPT, not a
+crash. What it needed was the measurement, because **an added check can only fail
+in the direction ART's own verifier cannot: by REJECTING something ART accepts**
+(dexllm#58's whole lesson).
+
+**Fix:** drop the three `case` labels so they fall through to `default: return
+true`; the existing branch then applies ART's own rule (1 byte for the five
+variable-length types it names at :798, 4 for everything else).
+
+**ART calls the predicate in TWO more places and NEITHER is ported** — the first
+draft said "ART's OTHER use", singular, which a reviewer refuted from the
+checkout. (1) `:775`, the same `CheckMap` block, where it also gates the
+`data_items_left` budget (`:777`) — the SUM of every data section's item COUNT
+bounded by the data segment's byte size. It guards nothing here: this port is
+REFERENCE-driven and reads `item->size` for exactly the two fixed-size sections
+the header does not describe, where `CheckMap`'s per-section byte-span bound is
+strictly TIGHTER than a running item budget; for every variable-length section
+the count is never consumed at all, so porting it would be a pure new rejection
+direction with no reachable defect behind it. Catalogued as the new **B2b** in
+[docs/aosp-oob-divergences.md](docs/aosp-oob-divergences.md), where B2 is now
+closed. (2) `:2354`, inside `CheckIntraSectionIterate`, which rejects a
+data-section item at offset 0 (`:2356`) and populates `offset_to_type_map_` —
+both belong to ART's MAP-driven intra pass, which this port does not have at all,
+so widening the predicate does NOT bring them along; it only means ART applies
+them to three more types than we do. Added to `dex_verifier.h`'s out-of-scope
+list, where it was missing.
+
+**One claim the CONTROLS corrected, before review saw it.** The first cut wrote
+that `kMapList` is "a no-op in practice", because `CheckHeader`'s
+`CheckValidOffsetAndSize(map_off, …, 4, "map")` runs first — which the issue said
+too. It covers the HEADER field ONLY: the map_list item's own
+**self-referential** offset is a separate `u4` nothing compares against it, so
+misaligning THAT one was accepted before and is rejected now (27 crafted
+sources). Rejecting it is right — it is what ART does, and a map whose
+self-reference disagrees with the header is malformed — but the rationale was
+wrong, and a control craft is what said so.
+
+**Measured (a/b OFF vs ON, SAME script, both `.so` md5-verified — `37667548…`
+OFF, `920fe5b2…` ON, and the ON build bit-reproducing its md5 after the swap):**
+58 real sources — the whole bundled corpus, both committed fixtures, every
+`art/test/dexdump/*.dex` and every `tools/dexter/testdata/*.dex` — × {strict
+verify, lenient verify, `verify_report`, `dex_count`, class list,
+`warm_analysis_caches`, and a smali + decompile digest over the first 40 classes}
+= **439 axis records, 0 changed, 0 false-reject**, including the **4** carriers
+inside that population (`tests/data/invoke-custom.dex`, AOSP
+`const-method-handle.dex` / `invoke-custom.dex`, dexter `method_handles.dex`).
+**0 of the 36 gitignored corpus dexes carries either section**, which is why a
+corpus-only a/b is blind to this by construction and the AOSP files are evidence
+rather than decoration. The a/b globs `*.dex`, so it misses the 6 further carriers
+the wider census below finds inside `.jar`s and the fuzz corpora — that population
+is covered by the oracle instead, which is the stronger instrument here anyway
+since the delta is a pure format property.
+
+**Independent oracle, and it is what actually bounds the risk** (a map-list
+parser that never goes through the binary under test — the change's COMPLETE
+observable delta is "a map item whose type ART aligns to 4 sits at an offset that
+is not"). Over **1,413 logical dexes in 1,256 containers** — the whole local AOSP
+tree plus the corpus and both fixtures — there is exactly **1** such item, and it
+is an ART **dex-verifier FUZZ CORPUS** input (`art/tools/fuzzer/dex-verifier-corpus/b391842969.dex`,
+`call_site_id` at 6998), i.e. a file whose purpose is to be rejected and which ART
+rejects at the identical check. **That file is the best evidence the change has**,
+because it is unmodified and real where everything else is crafted: OFF it
+verifies valid in both modes, ON it is `Misaligned map item`. The map_list item's
+self-referential offset equals the header's `map_off` on **1,413/1,413**. So
+0-false-reject is a property of the format, not a lucky sample. (A reviewer
+independently swept 5,567 files / 1,089 logical dexes and reached the same single
+hit.)
+
+**84 CRAFTED sources / 686 axis records → 41 changed**, and the split is the
+point ([[ab-must-prove-the-mechanism-fires]] — a flat a/b here would prove only
+that the corpus is quiet):
+
+| craft | OFF → ON | n |
+|---|---|---|
+| `call_site_id` / `method_handle` offset `+1/+2/+3` | valid → `Misaligned map item` | **12** |
+| `map_list` item's own offset `+1` | → `Misaligned map item` | **29** |
+| same section shifted `+4` (still 4-aligned) | valid → valid | 4 |
+| a byte-aligned section (`class_data` / `string_data` / …) `+1` | unchanged | 39 |
+
+12 + 29 + 4 + 39 = 84, changed = 12 + 29 = 41. (An earlier draft wrote 27 for the
+map_list row, which did not sum — an adversarial reviewer caught it. 27 of the 29
+were valid before; the other 2 were ALREADY rejected for an unrelated pre-existing
+reason and now report the alignment one first, so they are a reason change, not an
+accept → reject.) The last two rows are the isolation: a check that rejected any
+MOVED section, or that aligned every data type to 4, satisfies the first two rows
+and fails these.
+
+**Guards** (37 collected cases, 33 run / 4 skipped, in
+[tests/test_verifier_section_alignment.py](tests/test_verifier_section_alignment.py)),
+crafted from `tests/data/invoke-custom.dex` — the committed fixture, which is the
+ONLY source carrying BOTH sections — so they hold in the corpus-less CI leg and
+under any `$DEXLLM_TEST_APK` narrowing. The craft rewrites **one `u4`**, the
+section's offset field inside its map item, and leaves the COUNT alone: the
+extent still fits, so dexllm#57's span bound cannot be what rejects, and
+alignment is isolated as the only thing that moved. `_shift` asserts its own
+premises (the section exists, starts out 4-aligned, still ends inside the file,
+does not collide with the next section), so a fixture that ever stops offering
+the shape fails loudly instead of turning a guard vacuous. The 4 skips are
+byte-aligned section types the fixture happens not to carry 4-aligned — which one
+a dex carries is a property of the sample.
+
+`test_the_uncrafted_fixture_verifies` is non-discriminating BY DESIGN and says so,
+but it is not idle: the fixture's `string_data`, `annotation`, `class_data` and
+`encoded_array` sections are **genuinely unaligned**, so ART's 1-byte list is
+exercised by the pristine file rather than only by a craft.
+
+**The guard an adversarial reviewer had to CONSTRUCT, and the one that matters
+most.** The tests above pin the three cases dexllm#62 REMOVED. Nothing pinned the
+arm as a PARTITION — so the SYMMETRIC edit, removing a FOURTH case on the same
+lines, was invisible: deleting `case kStringIdItem:` makes the verifier reject a
+misaligned `string_id` map offset that ART accepts (the exact false-reject
+direction this change is about) and passed **the entire 688-test suite**. No
+corpus guard can ever reach it either, because a real dex's `string_id` map offset
+duplicates a header field `CheckHeader` already forces 4-aligned. Closed by
+`test_every_section_type_is_classified_the_way_ART_classifies_it`: **one craft per
+map type in the fixture**, judged against `_ART_ALIGNMENT` — ART's WHOLE
+classification (:82 plus the :791-798 switch) pinned as a LITERAL, because a guard
+parametrised over the production predicate cannot catch an edit OF it. A sibling
+reads the `MapType` enum out of the C++ and requires the table to cover it, so a
+new map type cannot be added on one side only.
+
+**9 mutants, each BUILT and RUN, each killed by its intended guard:** the pre-fix
+predicate (14 fail), each of the three cases restored ALONE (call_site 6,
+method_handle 6, **map_list 2** — which is why the map-self guard exists),
+alignment forced to 4 for every data type (13, including the pristine premise),
+forced to 1 (18), and the reviewer's three — **`string_id` dropped from the false
+arm (1, the partition guard and nothing else)**, `code_item` ADDED to the 1-byte
+list (1) and `debug_info` REMOVED from it (3). Plus an unmutated control. The last
+two are the 1-byte list pinned in BOTH directions; before the partition guard the
+add-direction was unguarded, which the change is responsible for because it is
+what routes three more types through that branch.
+
+**One observable change beyond the verdict (dexllm#48's precedent that a moved
+rejection reason is release-notes material):** the alignment check runs BEFORE
+`MapTypeToBitMask`, the duplicate check and dexllm#57's extent bound, so a dex
+that is misaligned AND otherwise malformed now reports `Misaligned map item`
+where it used to report the other reason. Measured: 2 of the 84 crafted sources,
+and a hand-built `method_handle` that is misaligned AND carries an inflated count
+moves from `List too large: map section span` to `Misaligned map item`. Nothing
+in the repo asserts those strings (`tests/test_encoded_value_method_types.py`'s
+span guard touches the COUNT, not the offset, so it is unaffected — verified by
+construction and by the suite), but an out-of-tree consumer matching on them
+would see it.
+
+parity 29/29, pytest **719 passed / 10 skipped**, corpus-less **313 passed / 416
+skipped**, narrowed to `tests/data/multidex.apk` 622 passed, the guard file green
+narrowed to **each of the 38 bundled samples one at a time**, determinism (3
+processes x 3 `PYTHONHASHSEED`s -> one digest), sweep 25,309-class /
+213,374-method 0-crash 0-timeout, lint trio clean, doc fences 78. **The only real
+input that moves in the whole 1,413-dex census is ART's own fuzz-corpus seed** —
+an earlier draft claimed "no behaviour change on any real input", which a
+reviewer showed is literally false for exactly that file. The accurate claim is
+the weaker one: everything that moves is malformed, and ART already refuses it.
+
 ### Skills
 
 `dexkit-build` is the production rebuild loop (ninja + pip install). Use `/dexkit-build` after any C++ change.

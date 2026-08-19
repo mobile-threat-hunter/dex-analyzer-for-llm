@@ -143,31 +143,60 @@ keep-vs-remove decision.
   contract. Not a removal candidate — listed here for completeness because its
   purpose is OOB prevention.
 
-### B2. `IsDataSectionType` excludes three types ART includes
+### B2. ~~`IsDataSectionType` excludes three types ART includes~~ — CLOSED (dexllm#62)
 
 - **Where:** [`native/core_ext/dex_verifier.cpp`](../native/core_ext/dex_verifier.cpp)
   `IsDataSectionType`, consumed only by `CheckMap`'s alignment branch.
-- **AOSP:** `dex_file_verifier.cc:82` returns **true** for
+- **What it was:** ART's `dex_file_verifier.cc:82` returns **true** for
   `kDexTypeCallSiteIdItem` (:92), `kDexTypeMethodHandleItem` (:93) and
   `kDexTypeMapList` (:94) — only the header item and the six `*_id` tables are
-  false. Being data-section types subjects all three to ART's `CheckMap`
-  `data_items_left` budget (:777) and its 4-byte alignment check (:798).
-- **Our divergence:** this port returns false for those three, so neither applies.
-  There is no `data_items_left` equivalent anywhere in the port either.
-- **Observable cost, measured (dexllm#57 delta review):** a **misaligned**
-  `call_site_id` / `method_handle` section offset is ACCEPTED where ART rejects it
-  (`off+1`, `+2`, `+3` all verify valid and warm cleanly). `map_list` is covered
-  regardless by `CheckHeader`'s 4-aligned `map_off` check.
-- **Not memory safety.** The section EXTENT bound added for dexllm#57 spans both
-  sections whatever their alignment, and an unaligned `u2`/`u4` load is harmless on
-  every supported target. The byte-span bound is in fact STRONGER than ART's
-  running item budget; only the alignment half is missing.
-- **Assessment:** pre-existing, spec-fidelity only. **KEPT** for now — closing it
-  is a three-line edit (drop the three cases so they fall through to `true`) but a
-  new REJECTION direction, which per dexllm#58 is the one way an added check can
-  fail, so it needs its own a/b over every source with such a section. Recorded
-  here rather than fixed inside dexllm#57, whose own comment used to justify
-  itself by misstating ART in exactly this way. **Filed as dexllm#62.**
+  false. This port had all three in its *false* arm, so the alignment check never
+  reached them and a **misaligned** section offset was ACCEPTED where ART rejects
+  it. Never memory safety (dexllm#57's extent bound spans both fixed-size sections
+  whatever their alignment, and an unaligned `u2`/`u4` load is harmless on every
+  supported target) — spec fidelity.
+- **Resolved:** the three cases were dropped, so the predicate is now byte-for-byte
+  ART's. **Measured (a/b OFF vs ON, same script, both `.so` md5-verified):** 58
+  real sources / 439 axis records — the whole bundled corpus, both committed
+  fixtures, every `art/test/dexdump/*.dex` and the dexter testdata dexes — **0
+  changed, 0 false-reject**. 41 of 84 crafted sources flip to `Misaligned map
+  item`. A format-level census over **1,413 logical dexes in 1,256 containers**
+  (the whole local AOSP tree plus the corpus) finds exactly **one** item the new
+  rule rejects, and it is an ART **dex-verifier fuzz-corpus** input
+  (`art/tools/fuzzer/dex-verifier-corpus/b391842969.dex`) — a real, unmodified
+  file that ART rejects at the identical check, and the strongest single piece of
+  evidence for the fix.
+- **One claim the controls corrected:** `map_list` looked like a no-op, because
+  `CheckHeader`'s `CheckValidOffsetAndSize(map_off, …, 4, "map")` runs first. It
+  covers the HEADER field only — the map_list item's own **self-referential**
+  offset is a separate `u4` nothing compares against it, and misaligning that one
+  was accepted before and is rejected now (27 crafted sources).
+
+### B2b. ART's `data_items_left` budget is not ported
+
+> **Category note:** B2 and B2b sit under a "validation ADDED beyond AOSP" heading
+> but are both validations **OMITTED** relative to AOSP. The miscategorisation is
+> inherited from B2's original filing; kept here so the IDs stay stable rather
+> than renumbering the whole document.
+
+- **AOSP:** `dex_file_verifier.cc:777` — `CheckMap` keeps a running budget seeded
+  from the data segment's byte size and subtracts every data section's item
+  COUNT, rejecting when the sum exceeds it. A coarse sanity bound (each item is
+  at least one byte), reachable only through `IsDataSectionType`.
+- **Our divergence:** no equivalent exists anywhere in the port. ART has a THIRD
+  call site too — `:2354`, in `CheckIntraSectionIterate`, which rejects a
+  data-section item at offset 0 (`:2356`) and fills `offset_to_type_map_`. Also
+  unported, and for a structural reason: this port has no map-driven intra pass
+  (see D1 / `dex_verifier.h`). dexllm#62 widened the predicate to ART's own set,
+  which does not bring either consumer with it.
+- **Assessment:** deliberately **KEPT**, decided while closing B2 rather than
+  inherited. This port is REFERENCE-driven and consumes `item->size` for exactly
+  the two fixed-size sections the header does not describe — where `CheckMap`'s
+  per-section BYTE-SPAN bound (dexllm#57) is strictly tighter than a running item
+  budget — while for every variable-length section the count is never read at
+  all, so an absurd one is inert. Porting it would be a pure new rejection
+  direction with no reachable defect behind it, and a new rejection direction is
+  the one way an added check can fail (dexllm#58).
 
 ---
 
@@ -203,7 +232,8 @@ CPython bounds), but they exist for memory safety and are part of the same
 | A1 mutf8 `cont()` | yes (ART `GetUtf16FromUtf8`) | yes (VerifyMutf8) | none | **yes — under review** |
 | A2 `SafeWidth`     | yes (slicer width)         | yes (VerifyInsns)  | none | low (3rd-party primitive) |
 | B1 `VerifyInsns`   | no (addition)              | n/a (IS the verifier) | n/a | no |
-| B2 `IsDataSectionType` | **yes** (ART :82 returns true for 3 types) | n/a (IS the verifier) | accepts a misaligned call_site/method_handle offset | **yes — dexllm#62** |
+| B2 `IsDataSectionType` | ~~yes~~ **none** | n/a (IS the verifier) | ~~accepts a misaligned call_site/method_handle offset~~ | **CLOSED — dexllm#62** |
+| B2b `data_items_left` | **yes** (ART :777 budget) | n/a (IS the verifier) | none — the count is never consumed for a variable-length section, and the fixed-size ones have a tighter span bound | no (deliberate) |
 | C1 edge index      | no (DAD relies on Python)  | partial            | none | no (cheap, internal) |
 | C2 move-result null| no (matches DAD effective) | n/a                | none | no |
 
