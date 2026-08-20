@@ -2128,6 +2128,131 @@ material.
 <unhandled-fmt-29>` and the IR builder still fails to decompile the six methods
 whose `move-result` follows one. Same family, different layers.
 
+### `invoke-polymorphic` renders its operands (dexllm#60, smali half, 2026-08-20)
+
+`render_*_smali` printed **`invoke-polymorphic <unhandled-fmt-29>`** — the mnemonic
+with no operands at all, 16 times on `method_handles.dex`. The listing is what an
+analyst or an LLM reads, so a call whose whole point is the method handle it invokes
+rendered as a bare word. `FormatOperands`' format switch had no case for
+`k45cc` / `k4rcc`; before dexllm#58 no dex carrying one could load, so it had never
+been observed on a real file.
+
+**The register set differs from `k35c` even though the raw bytes do not.** slicer's
+`DecodeInstruction` puts C in `vC` and D..G in `arg[0..3]` for `k45cc`, where `k35c`
+puts C..G in `arg[0..4]` — so an arm that reuses the k35c walk prints the **proto
+index as a register**. `k4rcc` is `{vC .. vC+vA-1}` with the proto likewise in
+`arg[4]`.
+
+**Both operands are emitted, because one cannot be derived from the other.** A
+signature-polymorphic method's `method_ids` entry is the DECLARATION
+(`invoke([Ljava/lang/Object;)Ljava/lang/Object;`) while the actual call signature is
+the separate `proto_ids` operand. `FormatProto` was factored out of
+`FormatMethodRef` (which already rendered a proto) so both share one implementation,
+and `emit_index` gained `kIndexMethodAndProtoRef` for the BBBB half. Output is
+baksmali-shaped: `invoke-polymorphic {v0, v2, v3, v4}, Lcls;->m(...)R, (DI)I`.
+
+**Measured (a/b OFF=HEAD `d1b3ff357f02` vs ON `4d280b8fd662`, SAME script, both
+md5-verified):** 63 entries x {class count, whole-source smali sha256,
+`<unhandled-fmt-` count} — **7 changed, all of them carriers** (4 distinct files;
+three appear at two paths each). Every change is `unhandled N -> 0`. **The whole
+bundled corpus's smali is byte-identical**, so the `FormatMethodRef` refactor is
+neutral, and **0 `<unhandled-fmt-` remain across all 63 entries**.
+
+**Guard: the invariant, not the two formats**
+([tests/test_smali_instruction_formats.py](tests/test_smali_instruction_formats.py),
+16 cases). Derived from slicer's own table: **every format a named (non-`unused`)
+opcode uses must appear in the switch** — 26/26 today, and a future Dalvik format is
+a FAILURE rather than a silent degradation. The behavioural half runs on the three
+committed fixtures (corpus-less, narrowing-proof) and pins the three rendered lines
+as LITERALS. A proto-derived oracle checks the register COUNT against the call-site
+signature (receiver + parameters, `J`/`D` counted twice) — worth having, but its
+limit is stated in the test rather than discovered later: it CANNOT catch a
+re-indexing that preserves the count, which is exactly the k35c-layout mutant, and
+that one dies only on the pinned literals.
+
+**Both reviewers independently CONFIRMED the same HIGH, and this change introduced
+it: the `k45cc` arm did not clamp the argument count.** `insn.arg` is `u4 arg[5]`
+and `vA` is a 4-bit NIBBLE, so `vA >= 6` walks past the array — into the struct's
+own `opcode` field and then off the end of a STACK object. Nothing upstream stops
+it, and the neighbouring `k35c` arm is safe for a reason rather than by luck:
+slicer's decoder ends its 35c count switch in `SLICER_CHECK(!"Invalid arg count")`,
+so a >5 count throws before the renderer runs, while **k45cc has no such check** and
+`VerifyInsns`' own vararg loop CLAMPS (`k < d.vA && k < 5`) instead of failing. A
+one-nibble length-preserving patch therefore yields a dex that `verify()` calls
+**valid** and whose listing prints `v250` (the `opcode` field) and then process
+addresses that CHANGE BETWEEN RUNS — an OOB read, an address leak into a primary
+output, and a determinism break at once, with an ASan `stack-buffer-overflow` at
+the exact line. Fixed with `&& i < 5`, the same bound `VerifyInsns` already applies
+to the same operand. Negative controls, both RUN: the OFF build renders
+`<unhandled-fmt-29>` (its `default:` arm read no array at all, so the defect is
+this change's), and the identical patch on a `k35c` invoke is refused at LOAD by
+slicer's check.
+
+**A second CONFIRMED (MEDIUM): the `<bad-proto-idx>` bound had no guard.** dexllm#61
+deliberately left the PROTO half of a polymorphic operand unbounded in the verifier
+— the method half is bounded there because an out-of-range one produced an EMPTY
+`callee_descriptor`, indistinguishable from a real value, whereas this one has a
+visible sentinel. That makes the sentinel load-bearing, and deleting its one line
+left the whole suite green (347 passed) while a crafted `proto@0xFFFF` on a
+`verify()`-valid dex threw `SLICER_CHECK_LT` out of `ArrayView` and killed the
+entire class listing. The verifier comment claiming that operand is "dereferenced
+by nothing" was made FALSE by this change and is corrected rather than left stale;
+the asymmetry between the two halves is now stated as a decision.
+
+**Also fixed from review, none of it in the layout:** a `vA == 0` range invoke
+printed `{v0 .. v4294967295}` (`kVerifyVarArgRangeNonZero` is NOT enforced —
+`VerifyInsns` guards on `d.vA > 0`), which the pre-existing `k3rc` arm does too and
+which is corrected in both rather than left as the thing the new one was copied
+from; `_proto_register_width` counted `[J` as two registers, a false positive
+against CORRECT output waiting for a `long[]` parameter; the doc comment
+`// Format a method's full smali ref` stayed behind with `FormatProto` when the
+body moved; and the prose named a function (`RenderInstructionOperands`) that does
+not exist.
+
+**What the reviewers could NOT break** — built, not argued: the register layout (an
+independent spec decoder over 44 sites in 7 files, 0 mismatch, plus agreement with
+AOSP dexdump's own committed expected output), the refactor's byte-identity, every
+index bound inside `FormatProto`, the reachability of `kIndexMethodAndProtoRef`
+from any other format, and the a/b, which one of them reproduced from its own two
+builds.
+
+**10 mutants, each BUILT and RUN with a distinct `.so` md5, each killed by its
+intended guard:** the first six (each arm removed, the k35c register layout, the
+`emit_index` case, the proto operand, a `FormatProto` regression) plus the four the
+review forced — the clamp removed (4 arity cases fail), the `<bad-proto-idx>` line
+deleted, the range-underflow guard removed, and an arm wrong ONLY at arity 1.
+
+**The crafted guards cover the arities the fixtures cannot.** The three committed
+files carry A in {1, 3, 4, 5} and one 7-register range; **A > 5 appears nowhere**,
+which is exactly why the HIGH passed 9/9. The new cases patch a single nibble or
+`u2` IN PLACE — section sizes and offsets untouched, so nothing but the intended
+operand can be what changed — and they assert on the RESULT (at most five
+registers, no register number outside a Dalvik frame, and the same bytes rendering
+identically in a FRESH PROCESS) rather than on "it did not crash", which is the
+property no crash-check would give.
+
+parity **29/29**, pytest **760 passed / 10 skipped**, corpus-less **354 / 416**,
+narrowed to `tests/data/multidex.apk` **663**, the guard file green narrowed to
+each of the 38 bundled samples, sweep **25,309-class 0-crash 0-timeout**,
+determinism 3 `PYTHONHASHSEED`s -> one digest, lint trio clean. The a/b was
+re-captured after the review fixes and is **identical to the pre-fix capture on all
+63 entries** — the clamp and the range guard are no-ops on every real input, which
+is the 0-regression claim restated as a measurement.
+
+**`invoke-custom` still renders its operand as `@N`** — its BBBB is a `call_site_ids`
+index, and rendering the call site's contents needs a `call_site_ids` reader this
+port does not have. Honest and out of scope; the issue does not ask for it.
+
+**The IR half of dexllm#60 is NOT done and the issue stays open.** Six methods still
+emit `// DECOMPILE ERROR: malformed bytecode: null operand to MoveExpression`,
+because the IR builder does not model 0xFA and the following `move-result-object`
+finds no invoke. That needs the CALL-SITE proto in the snapshot ABI —
+`MethodConst` carries the method's own proto, and for a polymorphic call the
+argument grouping (a `J`/`D` occupies two registers) and the return type come from
+`proto_ids[HHHH]` instead — so it touches `IDexCodeSource`, the hexagonal port, and
+`MockCodeSource` with it. androguard's DAD table is 227 entries and has no 0xFA
+handler, so it is beyond-DAD with no `// DAD:` analogue.
+
 ### Skills
 
 `dexkit-build` is the production rebuild loop (ninja + pip install). Use `/dexkit-build` after any C++ change.

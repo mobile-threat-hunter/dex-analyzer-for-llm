@@ -958,12 +958,19 @@ bool DexVerifier::VerifyInsns(const u2* insns, u4 insns_size, u2 registers_size)
             // METHOD half is bounded; the proto index sits in arg[4], is not `ridx`,
             // and is still dereferenced by nothing.
             //
+            // The PROTO half of a polymorphic operand (arg[4], not `ridx`) IS read
+            // now — dexllm#60's smali arms render it — but it is bounded AT THE
+            // READER: FormatProto returns "<bad-proto-idx>" for an out-of-range
+            // index, which is a visible, distinguishable value rather than the
+            // empty descriptor that made the METHOD half a wrong ANSWER. That is
+            // the deliberate difference; the two halves are asymmetric on purpose.
+            //
             // kIndexCallSiteRef (invoke-custom) and kIndexMethodHandleRef /
             // kIndexProtoRef stay in the default arm on the ORIGINAL terms: nothing
             // reads them (ResolveConstRef returns monostate, and every invoke gate
             // excludes 0xFC/0xFD precisely because their operand is not a method
             // reference). Same rule as before — a consumer that starts reading one
-            // adds its bound in the same change.
+            // bounds it in the same change, here or at the reader.
             const u4 ridx = (fmt == dex::k22c || fmt == dex::k22cs) ? d.vC : d.vB;
             switch (dex::GetIndexTypeFromOpcode(op)) {
                 case dex::kIndexStringRef:

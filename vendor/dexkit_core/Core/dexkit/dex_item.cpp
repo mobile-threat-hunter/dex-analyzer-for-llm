@@ -1612,20 +1612,16 @@ std::string FormatMethodAccessFlags(uint32_t flags) {
     return out;
 }
 
-// Format a method's full smali ref: "Lcls;->name(args)Ret".
-std::string FormatMethodRef(const dex::Reader& reader,
-                            const std::vector<std::string_view>& type_names,
-                            const std::vector<std::string_view>& strings,
-                            uint32_t method_idx) {
-    if (method_idx >= reader.MethodIds().size()) return "<bad-method-idx>";
-    const auto& m = reader.MethodIds()[method_idx];
-    const auto& proto = reader.ProtoIds()[m.proto_idx];
-
-    std::string out;
-    out += SmaliIdent(type_names[m.class_idx]);
-    out += "->";
-    out += SmaliIdent(strings[m.name_idx]);
-    out += '(';
+// dexllm#60: format one proto as "(params)Ret". Factored out of FormatMethodRef
+// because invoke-polymorphic renders a proto that belongs to no method_id — its
+// HHHH operand is a proto_ids index naming the CALL SITE's signature, which for a
+// signature-polymorphic method differs from the method_id's own descriptor.
+std::string FormatProto(const dex::Reader& reader,
+                        const std::vector<std::string_view>& type_names,
+                        uint32_t proto_idx) {
+    if (proto_idx >= reader.ProtoIds().size()) return "<bad-proto-idx>";
+    const auto& proto = reader.ProtoIds()[proto_idx];
+    std::string out = "(";
     if (proto.parameters_off != 0) {
         const auto* type_list =
             reader.dataPtr<dex::TypeList>(proto.parameters_off);
@@ -1637,6 +1633,21 @@ std::string FormatMethodRef(const dex::Reader& reader,
     }
     out += ')';
     out += SmaliIdent(type_names[proto.return_type_idx]);
+    return out;
+}
+
+// Format a method's full smali ref: "Lcls;->name(args)Ret".
+std::string FormatMethodRef(const dex::Reader& reader,
+                            const std::vector<std::string_view>& type_names,
+                            const std::vector<std::string_view>& strings,
+                            uint32_t method_idx) {
+    if (method_idx >= reader.MethodIds().size()) return "<bad-method-idx>";
+    const auto& m = reader.MethodIds()[method_idx];
+    std::string out;
+    out += SmaliIdent(type_names[m.class_idx]);
+    out += "->";
+    out += SmaliIdent(strings[m.name_idx]);
+    out += FormatProto(reader, type_names, m.proto_idx);
     return out;
 }
 
@@ -1654,6 +1665,17 @@ std::string FormatFieldRef(const dex::Reader& reader,
     out += ':';
     out += SmaliIdent(type_names[f.type_idx]);
     return out;
+}
+
+// Render a range-invoke's register window. A 0-count range would underflow
+// `first + count - 1` and print `{v0 .. v4294967295}`; VerifyInsns' range branch
+// is guarded on `d.vA > 0`, so such a dex verifies valid and reaches here.
+void EmitRegisterRange(std::ostringstream& o, uint32_t first, uint32_t count) {
+    if (count == 0) {
+        o << "{}";
+        return;
+    }
+    o << "{v" << first << " .. v" << (first + count - 1) << "}";
 }
 
 // Render the operand portion of one instruction based on its format and
@@ -1683,6 +1705,9 @@ std::string FormatOperands(const dex::Instruction& insn,
                 o << FormatFieldRef(reader, type_names, strings, v);
                 break;
             case kIndexMethodRef:
+            case kIndexMethodAndProtoRef:  // dexllm#60 — BBBB half; the proto
+                                           // (HHHH) is emitted by the k45cc /
+                                           // k4rcc arms, which own that operand
                 o << FormatMethodRef(reader, type_names, strings, v);
                 break;
             default:
@@ -1749,8 +1774,49 @@ std::string FormatOperands(const dex::Instruction& insn,
             break;
         }
         case k3rc: {
-            o << "{v" << insn.vC << " .. v" << (insn.vC + insn.vA - 1) << "}, ";
+            EmitRegisterRange(o, insn.vC, insn.vA);
+            o << ", ";
             emit_index(insn.vB);
+            break;
+        }
+        // dexllm#60: invoke-polymorphic {vC, vD..vG}, meth@BBBB, proto@HHHH.
+        // NOTE the register set differs from k35c even though the raw bytes do
+        // not: slicer's DecodeInstruction puts C in `vC` and D..G in arg[0..3]
+        // for k45cc, where k35c puts C..G in arg[0..4]. Reading arg[0..4] here
+        // would emit the proto index as a register.
+        case k45cc: {
+            // CLAMP to 5. `insn.arg` is `u4 arg[5]` and vA is a 4-bit nibble, so
+            // vA >= 6 indexes past the array — into the struct's own `opcode`
+            // field and then off the end of a STACK object, printing process
+            // addresses into the listing and making the render non-deterministic.
+            // The k35c arm above needs no clamp for a different reason, not by
+            // luck: slicer's DecodeInstruction ends its 35c count switch in
+            // `SLICER_CHECK(!"Invalid arg count")`, so a >5 count throws before
+            // this code runs. k45cc has NO such check, and VerifyInsns' own vararg
+            // loop CLAMPS (`k < d.vA && k < 5`) rather than rejecting — so a dex
+            // with vA = 15 here verifies VALID. 5 is exactly what the verifier
+            // guarantees, which is why it is the bound. (Found by review; the
+            // unclamped form leaked stack contents on a `verify()`-valid dex.)
+            o << "{";
+            for (uint32_t i = 0; i < insn.vA && i < 5; ++i) {
+                if (i) o << ", ";
+                o << "v" << (i == 0 ? insn.vC : insn.arg[i - 1]);
+            }
+            o << "}, ";
+            emit_index(insn.vB);
+            o << ", " << FormatProto(reader, type_names, insn.arg[4]);
+            break;
+        }
+        case k4rcc: {
+            // vA == 0 would underflow `vC + vA - 1`. VerifyInsns' range branch is
+            // `if (d.vA > 0 && ...)`, so a 0-count range invoke verifies valid;
+            // the k3rc arm above has the same expression and the same hole, and it
+            // is corrected there too rather than left as the thing this one was
+            // copied from. Output-only (no OOB), 0 corpus impact.
+            EmitRegisterRange(o, insn.vC, insn.vA);
+            o << ", ";
+            emit_index(insn.vB);
+            o << ", " << FormatProto(reader, type_names, insn.arg[4]);
             break;
         }
         case k51l:
