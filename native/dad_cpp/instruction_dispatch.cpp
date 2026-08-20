@@ -64,11 +64,20 @@ MethodRef BuildMethodRef(const MethodConst& mc) {
     // return a single-element list and GetArgs would drop arguments.
     // Use the proper Dalvik parser here so invoke args are preserved;
     // GetParamsType remains available for parity tests of the DAD quirk.
-    m.param_type = ParseParamsType(std::string(mc.triple[2]));
-    auto paren = mc.triple[2].rfind(')');
+    // dexllm#60: for invoke-polymorphic the SIGNATURE comes from the call site,
+    // not from the method_id. `MethodHandle.invoke` is declared
+    // `([Ljava/lang/Object;)Ljava/lang/Object;` for every call, so using the
+    // declaration would group N arguments as one and type every result Object;
+    // the call-site proto is what says how many registers each argument occupies
+    // (a `J`/`D` takes two) and what the result really is. Identity — cls, name,
+    // triple — stays the method's, because that IS what is called.
+    std::string_view sig =
+        mc.call_site_proto.empty() ? mc.triple[2] : mc.call_site_proto;
+    m.param_type = ParseParamsType(std::string(sig));
+    auto paren = sig.rfind(')');
     m.ret_type = (paren == std::string_view::npos)
                      ? "V"
-                     : std::string(mc.triple[2].substr(paren + 1));
+                     : std::string(sig.substr(paren + 1));
     // InvokeInstruction::Triple is {cls, name, proto} — Smali form preserved.
     m.triple = {std::string(mc.triple[0]),
                 std::string(mc.triple[1]),
@@ -111,6 +120,21 @@ std::vector<std::string> BuildRangeRegs(uint32_t count, uint32_t first_reg) {
 struct InvokeRegs {
     std::string c, d, e, f, g;
 };
+// dexllm#60: k45cc's register set is {vC, arg[0..3]} — NOT arg[0..4]. slicer
+// decodes the two formats differently from the same raw bytes, and arg[4] holds
+// the proto index, so reusing the k35c walk would pass a proto index as a
+// register. Same trap the smali renderer has to avoid.
+InvokeRegs BuildPolymorphicRegs(const dex::Instruction& dec) {
+    InvokeRegs r;
+    uint32_t count = dec.vA;
+    if (count > 0) r.c = RegName(dec.vC);
+    if (count > 1) r.d = RegName(dec.arg[0]);
+    if (count > 2) r.e = RegName(dec.arg[1]);
+    if (count > 3) r.f = RegName(dec.arg[2]);
+    if (count > 4) r.g = RegName(dec.arg[3]);
+    return r;
+}
+
 InvokeRegs BuildInvokeRegs(const dex::Instruction& dec) {
     InvokeRegs r;
     uint32_t count = dec.vA;
@@ -376,6 +400,25 @@ IRFormPtr DispatchInstruction(const RawIns& ri,
         }
 
         // ── Invoke-kind (35c) ──────────────────────────────────────────
+        // dexllm#60: invoke-polymorphic is a virtual call on a MethodHandle
+        // receiver, so the existing virtual handlers model it exactly once
+        // BuildMethodRef has taken the signature from the call site. beyond-DAD:
+        // androguard's own instruction table is 227 entries and stops before
+        // 0xFA, so there is no `// DAD:` analogue to anchor to.
+        case K::InvokePolymorphic: {
+            const MethodConst* mc = AsMethod(ri.const_ref);
+            if (!mc) return std::make_shared<NopExpression>();
+            MethodRef m = BuildMethodRef(*mc);
+            auto regs = BuildPolymorphicRegs(d);
+            return InvokeVirtual(m, regs.c, regs.d, regs.e, regs.f, regs.g,
+                                 gen_ret, vmap);
+        }
+        case K::InvokePolymorphicRange: {
+            const MethodConst* mc = AsMethod(ri.const_ref);
+            if (!mc) return std::make_shared<NopExpression>();
+            MethodRef m = BuildMethodRef(*mc);
+            return InvokeVirtualRange(m, BuildRangeRegs(d.vA, d.vC), gen_ret, vmap);
+        }
         case K::InvokeVirtual:
         case K::InvokeSuper:
         case K::InvokeDirect:

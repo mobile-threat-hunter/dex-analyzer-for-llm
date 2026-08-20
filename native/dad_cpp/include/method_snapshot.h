@@ -49,6 +49,22 @@ struct FieldConst    {
 struct MethodConst   {
     std::array<std::string_view, 3> triple{};  // (cls, name, proto)
     uint32_t raw_idx = 0;
+    // dexllm#60: invoke-polymorphic's CALL-SITE proto (`proto_ids[HHHH]`), which
+    // belongs to no method_id and so has no place in `triple`. A
+    // signature-polymorphic method's own descriptor is the DECLARATION
+    // (`([Ljava/lang/Object;)Ljava/lang/Object;`), while the argument grouping —
+    // a `J`/`D` occupies two registers — and the result type come from this one.
+    // A VIEW, like `triple` — the adapter returns it out of the same
+    // pointer-stable proto cache, so it outlives the snapshot. Empty for every
+    // other opcode, and empty for a source that cannot resolve protos.
+    //
+    // ASYMMETRY, deliberate: `triple` stays the METHOD's own descriptor because it
+    // is the method's IDENTITY, so `decompile_method_ast` reports a proto naming
+    // one `Object` parameter beside N actual params. The argument LIST is built
+    // from this field and both emitters agree on it; only the identity triple
+    // differs. Carrying the call-site proto into the AST node is a schema change
+    // (androguard's nested-list shape has no slot for it) and is not done.
+    std::string_view call_site_proto;
 };
 using ConstRef = std::variant<std::monostate,
                               StringConst, TypeConst,

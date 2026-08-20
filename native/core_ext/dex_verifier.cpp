@@ -958,12 +958,12 @@ bool DexVerifier::VerifyInsns(const u2* insns, u4 insns_size, u2 registers_size)
             // METHOD half is bounded; the proto index sits in arg[4], is not `ridx`,
             // and is still dereferenced by nothing.
             //
-            // The PROTO half of a polymorphic operand (arg[4], not `ridx`) IS read
-            // now — dexllm#60's smali arms render it — but it is bounded AT THE
-            // READER: FormatProto returns "<bad-proto-idx>" for an out-of-range
-            // index, which is a visible, distinguishable value rather than the
-            // empty descriptor that made the METHOD half a wrong ANSWER. That is
-            // the deliberate difference; the two halves are asymmetric on purpose.
+            // The PROTO half (arg[4], not `ridx`) has TWO readers now — dexllm#60's
+            // smali arms, which render "<bad-proto-idx>" for an out-of-range index,
+            // and its IR arms, which CANNOT signal that way (an unresolved proto
+            // silently becomes the method's declaration). The second reader is why
+            // it is bounded just above rather than left to the readers; the
+            // asymmetry this comment used to describe did not survive it.
             //
             // kIndexCallSiteRef (invoke-custom) and kIndexMethodHandleRef /
             // kIndexProtoRef stay in the default arm on the ORIGINAL terms: nothing
@@ -971,6 +971,21 @@ bool DexVerifier::VerifyInsns(const u2* insns, u4 insns_size, u2 registers_size)
             // excludes 0xFC/0xFD precisely because their operand is not a method
             // reference). Same rule as before — a consumer that starts reading one
             // bounds it in the same change, here or at the reader.
+            // dexllm#60 (IR half): the PROTO operand of a polymorphic invoke is now
+            // read by a SECOND consumer — the IR builder — and unlike the smali
+            // renderer it cannot yield a distinguishable value: an unresolvable
+            // proto makes BuildMethodRef fall back to the method's DECLARATION,
+            // and `MethodHandle.invoke` declares one Object parameter, so a
+            // 4-argument call silently renders with ONE. That is the wrong-ANSWER
+            // shape dexllm#61 bounded the method half for. Bounded here on the
+            // same terms; `<bad-proto-idx>` is now unreachable on strict input,
+            // exactly like `<bad-method-idx>`.
+            if (fmt == dex::k45cc || fmt == dex::k4rcc) {
+                if (d.arg[4] >= header_->proto_ids_size) {
+                    return Fail("code: proto index out of range");
+                }
+            }
+
             const u4 ridx = (fmt == dex::k22c || fmt == dex::k22cs) ? d.vC : d.vB;
             switch (dex::GetIndexTypeFromOpcode(op)) {
                 case dex::kIndexStringRef:

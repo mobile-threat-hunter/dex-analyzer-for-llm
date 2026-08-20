@@ -181,7 +181,16 @@ ConstRef ResolveConstRef(const dex::Instruction& decoded, dex::Opcode op,
         }
         case dex::kIndexMethodRef: {
             uint32_t i = pick_idx();
-            return MethodConst{src.GetMethodRefTriple(dex_id, i), i};
+            return MethodConst{src.GetMethodRefTriple(dex_id, i), i, {}};
+        }
+        case dex::kIndexMethodAndProtoRef: {
+            // dexllm#60: invoke-polymorphic carries TWO indices — meth@BBBB in vB
+            // and proto@HHHH in arg[4] (both k45cc and k4rcc; see slicer's
+            // DecodeInstruction). The method identifies what is called, the proto
+            // says with what.
+            uint32_t i = decoded.vB;
+            return MethodConst{src.GetMethodRefTriple(dex_id, i), i,
+                               src.GetProto(dex_id, decoded.arg[4])};
         }
         case dex::kIndexFieldRef: {
             uint32_t i = pick_idx();

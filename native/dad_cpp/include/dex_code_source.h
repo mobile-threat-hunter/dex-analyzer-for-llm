@@ -72,6 +72,20 @@ public:
     }
 
     // ─── Const-pool resolution (string_views point into source's tables) ─
+    // dexllm#60: one proto by PROTO index, as "(params)Ret". Distinct from
+    // GetMethodProto, which takes a METHOD index — invoke-polymorphic's second
+    // operand names a proto directly. Defaulted (like IsAssignable) so a source
+    // that cannot resolve protos keeps working: an empty result makes the IR fall
+    // back to the method's own descriptor, which for a polymorphic call loses BOTH
+    // the argument grouping and the result type (`MethodHandle.invoke` declares
+    // one Object parameter returning Object). That is what every source did before
+    // dexllm#60, and on a loadable dex the production adapter always resolves —
+    // VerifyInsns bounds the proto operand, so the fallback is reachable only from
+    // a source that does not override this.
+    virtual std::string_view   GetProto(uint16_t /*dex_id*/, uint32_t /*proto_idx*/) {
+        return {};
+    }
+
     virtual std::string_view   GetString(uint16_t dex_id, uint32_t idx) = 0;
     virtual std::string_view   GetTypeName(uint16_t dex_id, uint32_t idx) = 0;
     // Returns (class_descriptor, name, proto). Class is in Smali form

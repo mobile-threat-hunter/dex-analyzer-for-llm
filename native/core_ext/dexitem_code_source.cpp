@@ -548,6 +548,16 @@ std::string DexItemCodeSource::GetMethodProto(uint16_t dex_id,
     return BuildProto(*item, proto_ids[pidx]);
 }
 
+// dexllm#60: one proto by PROTO index. GetMethodProto above takes a METHOD index
+// and reaches the proto through it; invoke-polymorphic's second operand names a
+// proto directly. Routed through the same pointer-stable cache GetMethodRefTriple
+// uses, so the result outlives any snapshot and needs no owned copy — and the
+// cache already bounds `proto_idx`, which matters here because VerifyInsns
+// deliberately does NOT bound the proto half of a polymorphic operand (dexllm#61).
+std::string_view DexItemCodeSource::GetProto(uint16_t dex_id, uint32_t pidx) {
+    return GetProtoCached(dex_id, pidx);
+}
+
 const dex::Code* DexItemCodeSource::GetMethodCode(uint16_t dex_id,
                                                   uint32_t midx) {
     DexItem* item = SafeGetDexItem(core_, dex_id);

@@ -310,25 +310,28 @@ def test_an_oversized_arg_count_cannot_walk_past_the_register_array(
 
 
 def test_an_out_of_range_proto_index_is_reported_not_dereferenced(crafted) -> None:
-    """`FormatProto`'s bound is the ONLY defence for this operand.
+    """`FormatProto`'s sentinel, now reachable only under `lenient=True`.
 
-    dexllm#61 deliberately left the proto half of a polymorphic operand unbounded
-    in `VerifyInsns` — the method half is bounded there because an out-of-range one
-    produced an EMPTY `callee_descriptor`, indistinguishable from a real value,
-    while this one has a visible sentinel instead. That makes the sentinel
-    load-bearing, and a review found that DELETING it left the whole suite green
-    (347 passed) while a crafted `proto@0xFFFF` on a `verify()`-valid dex threw
+    It used to be reachable on a strict-verified dex, and DELETING its one line
+    left the whole suite green while a crafted `proto@0xFFFF` threw
     `SLICER_CHECK_LT` out of `ArrayView` and killed the entire class listing.
+
+    dexllm#60's IR half then BOUNDED that operand in `VerifyInsns` — because the IR
+    is a second reader and, unlike this one, cannot signal an unresolved proto — so
+    strict input can no longer reach here and this test was silently SKIPPING. A
+    skip is not a pass. Retargeted at `lenient=True`, which skips `VerifyInsns`
+    wholesale and is exactly the packer-dump mode where the sentinel still earns
+    its place.
     """
     dexllm = pytest.importorskip("dexllm")
     raw, off, tmp_path = crafted
     _patch(raw, off + 6, 0xFFFF, width=2)  # the HHHH proto operand
     dst = tmp_path / "badproto.dex"
     dst.write_bytes(bytes(raw))
-    if not dexllm.verify(str(dst))[0]["valid"]:  # pragma: no cover
-        pytest.skip("the craft no longer verifies — the fixture changed")
+    assert not dexllm.verify(str(dst))[0]["valid"], "the gate should refuse this"
+    assert dexllm.verify(str(dst), lenient=True)[0]["valid"]
 
-    dk = dexllm.DexKit(str(dst))
+    dk = dexllm.DexKit(str(dst), lenient=True)
     rendered = "".join(dk.render_class_smali(c) for c in dk.list_classes())
     assert "<bad-proto-idx>" in rendered
 

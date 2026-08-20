@@ -2243,15 +2243,136 @@ is the 0-regression claim restated as a measurement.
 index, and rendering the call site's contents needs a `call_site_ids` reader this
 port does not have. Honest and out of scope; the issue does not ask for it.
 
-**The IR half of dexllm#60 is NOT done and the issue stays open.** Six methods still
-emit `// DECOMPILE ERROR: malformed bytecode: null operand to MoveExpression`,
-because the IR builder does not model 0xFA and the following `move-result-object`
-finds no invoke. That needs the CALL-SITE proto in the snapshot ABI —
-`MethodConst` carries the method's own proto, and for a polymorphic call the
-argument grouping (a `J`/`D` occupies two registers) and the return type come from
-`proto_ids[HHHH]` instead — so it touches `IDexCodeSource`, the hexagonal port, and
-`MockCodeSource` with it. androguard's DAD table is 227 entries and has no 0xFA
-handler, so it is beyond-DAD with no `// DAD:` analogue.
+**The IR half followed in the same series — see the section below.**
+
+### The IR models `invoke-polymorphic`, so a `move-result` after one resolves (dexllm#60, IR half, 2026-08-20)
+
+Six of `method_handles.dex`'s 142 methods emitted `// DECOMPILE ERROR: malformed
+bytecode: null operand to MoveExpression` — the builder had no handler for 0xFA/0xFB,
+so the following `move-result-object` found no invoke and hit the documented
+null-guard at [instruction.cpp:274](native/dad_cpp/instruction.cpp#L274). The guard
+was doing its job; the method was still lost, and these are exactly the methods a
+`MethodHandle` sample is interesting for. Both reviewers measured a second, QUIETER loss and gave different counts, so it was
+re-derived here rather than either published: across the three committed fixtures
+**18 methods carry a polymorphic call, and before this change all 18 were broken** —
+7 loudly (`DECOMPILE ERROR`) and **11 silently**, the call simply ABSENT from the
+emitted body with no error at all (a `NopExpression`). After: **0 and 0**. The error
+count alone therefore understates the change by more than half — `Jazzer.exploreState`
+gains its whole `invokeExact(...)`, `TestUninitializedCallSite` gains
+`.getTarget().invoke()`, and `displayMethodHandle` rendered
+`append(Float.valueOf(12300f))` where the truth is `append(p3.invoke(...))`.
+
+**The signature comes from the CALL SITE, and that is the whole design.** Every
+`MethodHandle.invoke` shares one declaration,
+`([Ljava/lang/Object;)Ljava/lang/Object;`, so taking the signature from the method
+would group N arguments as ONE and type every result `Object`. `invoke-polymorphic`
+carries a second operand — a `proto_ids` index — that says how many registers each
+argument occupies (a `J`/`D` takes two) and what the result really is. Measured on
+the fixture: `{v0 .. v6}` (SEVEN registers) + `(Ljava/lang/String;DILjava/lang/Object;I)Ljava/lang/String;`
+renders exactly **five** arguments with the `double` consuming two of them.
+
+| layer | change |
+|---|---|
+| snapshot ABI | `MethodConst::call_site_proto` — a VIEW into the adapter's existing pointer-stable proto cache, so no owned copy and the same lifetime `triple[2]` already has |
+| the port | `IDexCodeSource::GetProto` with a **DEFAULT** returning `{}` |
+| adapter | delegates to the pre-existing `GetProtoCached`, which already bounds the index |
+| builder | `ResolveConstRef` resolves `kIndexMethodAndProtoRef` — method from `vB`, proto from `arg[4]` |
+| dispatch | `BuildMethodRef` prefers the call-site proto; `BuildPolymorphicRegs` uses `{vC, arg[0..3]}`; both kinds route to the EXISTING virtual handlers |
+
+**The defaulted virtual is what keeps this cheap.** `MockCodeSource` and all 29
+parity suites are untouched, so extending the hexagonal port cost nothing on the
+test side — and `scripts/check_dad_boundary.sh` stays clean, because the new method
+is on the port rather than a DexKit include.
+
+**beyond-DAD, with no `// DAD:` analogue**: androguard's own instruction table is
+**227 entries** and stops before 0xFA, so there is nothing upstream to be faithful
+to. Verified against the installed androguard, not assumed.
+
+**Measured (a/b OFF=`49d30d4b9454` vs ON, SAME script, both md5-verified):** 63
+entries x {class count, whole-source decompiled-Java sha256, `DECOMPILE ERROR`
+count} -> **7 changed, all carriers** (4 distinct files): `method_handles.dex`
+**6 -> 0** errors, `invoke-polymorphic.dex` **1 -> 0**, total **24 -> 10**. The
+residual 10 are `invoke-custom` (0xFC), whose operand is a `call_site_ids` index —
+the vendored slicer has no call-site reader at all, so modelling it is a separate
+piece of work and a guard pins that boundary explicitly. **The bundled corpus is
+byte-identical**: it carries 0 polymorphic sites, so the fixtures are the only
+evidence the mechanism fires [[ab-must-prove-the-mechanism-fires]].
+
+**The sister commit's HIGH was checked for here FIRST, and is absent.** `ce7a43d`
+(the smali half) walked `arg[0..vA-1]` while `vA` is a 4-bit nibble and `arg` is
+`u4 arg[5]` — a stack overread on a `verify()`-valid dex. `BuildPolymorphicRegs`
+reads at most `arg[3]` whatever `vA` says, which a reviewer confirmed by crafting
+`vA` = 6 and 15 (both verify VALID, since `kVerifyVarArgNonZero` is not enforced)
+and finding the output byte-identical to the unpatched fixture. It is now pinned by
+a crafted guard rather than left to inspection.
+
+**A crafted proto index made the IR emit a plausible, silently WRONG argument list
+— and it broke a rule this series had written down one commit earlier.** The smali
+half's verifier comment justified leaving the proto operand unbounded because its
+one reader yields `<bad-proto-idx>`, "a visible, distinguishable value rather than
+the empty descriptor that made the METHOD half a wrong ANSWER". The IR is a SECOND
+reader and cannot signal that way: an unresolvable proto falls back to
+`MethodHandle.invoke`'s declaration, so a 4-argument call renders with ONE while the
+smali view of the same instruction says `<bad-proto-idx>`. Constructed by a reviewer
+on a **strict-verify-valid** dex. `VerifyInsns` now bounds the proto half on exactly
+the terms dexllm#61 bounded the method half (`code: proto index out of range`; 0
+false-reject over the corpus plus every AOSP dexdump/dexter dex), the comment is
+rewritten to enumerate both readers, and the smali guard that pinned the sentinel was
+**silently SKIPPING** afterwards — a skip is not a pass — so it is retargeted at
+`lenient=True`, where `VerifyInsns` is off and the sentinel still earns its place.
+
+**Review also found the ret-type half completely UNGUARDED.** A mutant forcing every polymorphic result to `int` turns
+`Object v0 = ...CONSUME.invokeExact(p2, p3)` into uncompilable Java and **passed the
+whole file**; a subtler one taking the return type from the DECLARATION passed too
+AND produced byte-identical output, because the only live non-void call-site return
+in the fixtures happens to BE `Object`. The first is now killed by an assertion on
+that line; the second is **currently unkillable from the committed corpus** and is
+recorded as a known gap in the test rather than papered over — closing it needs a
+fixture with a live, non-`Object`, non-void polymorphic result. The void-site test's
+docstring claimed to distinguish the ret half and did not (DCE removes an unread
+value whatever its type); corrected.
+
+**Also from review:** `#include <string>` had been deleted from a header that still
+declares three `std::string` members (it compiled only transitively, through
+libstdc++ internals and a vendored slicer header) — restored, and it was never part
+of this change; `docs/architecture.md` called the port "Pure abstract (`= 0`)",
+untrue since `IsAssignable` and now wrong for a third method; and the AST reports
+the METHOD's proto beside call-site-derived params, which is deliberate (the triple
+is identity) but was undocumented — now stated at the ABI, with a guard pinning that
+the two emitters agree on the argument LIST even though the identity triple differs.
+
+**Also from the adversarial pass:** deleting the arm that supplies the FIFTH
+argument register passed the whole file while turning three real arguments into
+`unknownType v` on both fixtures — the argument test checked only slots 0 and 1, so
+the last slot was unasserted at every arity; it now pins every slot as a literal
+list. Two comments disagreed about what the empty-proto fallback loses (grouping
+only, vs grouping AND result type — the latter is right, demonstrated with a crafted
+`(BB)B` call site). The crafted guards located their instruction with a bare
+whole-file `0xFA` byte scan; they now assert the shape first, as the repo's own
+crafting helpers do. And the non-range dispatch arm had been placed under the
+`Invoke-range (3rc)` banner.
+
+**14 mutants, each BUILT and RUN with a distinct `.so` md5:** 13 killed — the k35c
+register walk, 0xFA undispatched, 0xFB undispatched, the `kIndexMethodAndProtoRef`
+case removed, `GetProto` returning empty, the proto read from `arg[3]`, the register
+window shifted so `vC` is dropped, `param_type` from the declaration, the receiver
+treated as an argument, the result forced to `int`, an unclamped register walk, and the fifth argument
+register dropped. The 14th is the declaration-vs-call-site RETURN type, proven
+EQUIVALENT on these fixtures rather than escaping.
+
+parity **29/29** (this touches `dad_cpp`, so it is the real gate), pytest **772
+passed / 10 skipped**, corpus-less **366 / 416**, narrowed to
+`tests/data/multidex.apk` **675**, both guard files green narrowed to each of the 38
+bundled samples, sweep **25,309-class 0-crash 0-timeout**, determinism 3
+`PYTHONHASHSEED`s -> one digest, `scripts/check_dad_boundary.sh` clean. The a/b was
+re-captured on the FINAL build (with the verifier bound and every review fix) and is
+**identical on all 63 entries** to the capture taken before them.
+
+**Still not modelled, deliberately:** `invoke-custom` (0xFC/0xFD). Its operand names
+a call site, not a method, and resolving one means reading `call_site_ids` and its
+bootstrap `encoded_array` — a section the vendored slicer does not expose at all.
+Five methods in `invoke-custom.dex` still fail for that reason, and the guard asserts
+they fail for THAT reason rather than any other.
 
 ### Skills
 

@@ -1196,7 +1196,11 @@ const std::array<OpcodeKind, 256> kInstructionSet = []() {
     t[0xE0] = K::ShlIntLit8;
     t[0xE1] = K::ShrIntLit8;
     t[0xE2] = K::UShrIntLit8;
-    // 0xE3-0xFF stay Unused (filled by t.fill above)
+    // dexllm#60: invoke-polymorphic / -range. beyond-DAD — DAD's array stops at
+    // 227 entries, so these have no upstream slot to be faithful to.
+    t[0xFA] = K::InvokePolymorphic;
+    t[0xFB] = K::InvokePolymorphicRange;
+    // 0xE3-0xF9 / 0xFC-0xFF stay Unused (filled by t.fill above)
     return t;
 }();
 

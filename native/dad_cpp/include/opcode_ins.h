@@ -709,6 +709,8 @@ enum class OpcodeKind : uint16_t {
     InvokeVirtual, InvokeSuper, InvokeDirect, InvokeStatic, InvokeInterface,
     InvokeVirtualRange, InvokeSuperRange, InvokeDirectRange,
     InvokeStaticRange, InvokeInterfaceRange,
+    // dexllm#60 (beyond-DAD — androguard's table is 227 entries and has no 0xFA)
+    InvokePolymorphic, InvokePolymorphicRange,
     NegInt, NotInt, NegLong, NotLong, NegFloat, NegDouble,
     IntToLong, IntToFloat, IntToDouble,
     LongToInt, LongToFloat, LongToDouble,
