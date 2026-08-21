@@ -583,6 +583,12 @@ print(dk.render_method_smali(
 
 Returns `""` for external / missing classes.
 
+Every index operand is resolved or labelled — `const-method-type` renders its
+proto, and `const-method-handle` / `invoke-custom` / the ODEX quick forms render
+`method_handle@N` / `call_site@N` / `field_off@N` / `vtable@N` rather than a bare
+`@N` that does not say what the number indexes (dexllm#66). See the operand
+contract in [api.md](api.md#dkrender_class_smaliclass_descriptor-str---str).
+
 ---
 
 ## L6 — Java decompilation (DAD port — complete)

@@ -965,12 +965,26 @@ bool DexVerifier::VerifyInsns(const u2* insns, u4 insns_size, u2 registers_size)
             // it is bounded just above rather than left to the readers; the
             // asymmetry this comment used to describe did not survive it.
             //
-            // kIndexCallSiteRef (invoke-custom) and kIndexMethodHandleRef /
-            // kIndexProtoRef stay in the default arm on the ORIGINAL terms: nothing
-            // reads them (ResolveConstRef returns monostate, and every invoke gate
-            // excludes 0xFC/0xFD precisely because their operand is not a method
-            // reference). Same rule as before — a consumer that starts reading one
-            // bounds it in the same change, here or at the reader.
+            // kIndexCallSiteRef (invoke-custom) and kIndexMethodHandleRef stay in
+            // the default arm on the ORIGINAL terms: nothing DEREFERENCES them
+            // (ResolveConstRef returns monostate, every invoke gate excludes
+            // 0xFC/0xFD precisely because their operand is not a method reference,
+            // and dexllm#66's smali arms render only a `call_site@N` /
+            // `method_handle@N` LABEL, which reads no table).
+            //
+            // kIndexProtoRef (const-method-type, 0xFF) DOES have a reader now —
+            // dexllm#66 renders it through FormatProto — so this comment no longer
+            // says "nothing reads them" for it. The rule is unchanged and is
+            // satisfied at the READER, which the rule permits: FormatProto bounds
+            // the index itself and yields the distinguishable `<bad-proto-idx>`,
+            // and it is the ONLY reader. That is exactly where the polymorphic
+            // proto stood before dexllm#60's IR half added a SECOND reader that
+            // could not signal — which is what moved that one, and only that one,
+            // to the gate. A future second reader of 0xFF's operand moves this one
+            // too, in the same change.
+            //
+            // Same rule as before — a consumer that starts reading one bounds it in
+            // the same change, here or at the reader.
             // dexllm#60 (IR half): the PROTO operand of a polymorphic invoke is now
             // read by a SECOND consumer — the IR builder — and unlike the smali
             // renderer it cannot yield a distinguishable value: an unresolvable
@@ -1002,7 +1016,9 @@ bool DexVerifier::VerifyInsns(const u2* insns, u4 insns_size, u2 registers_size)
                     if (ridx >= header_->method_ids_size) return Fail("code: method index out of range");
                     break;
                 default:
-                    break;  // callsite/methodhandle/proto/none — not dereferenced
+                    // callsite/methodhandle/none — not dereferenced. proto is
+                    // read by ONE reader that bounds it itself (dexllm#66, above).
+                    break;
             }
 
             // Branch / switch / array-data target — relative code-unit offset by

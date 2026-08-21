@@ -1710,7 +1710,54 @@ std::string FormatOperands(const dex::Instruction& insn,
                                            // k4rcc arms, which own that operand
                 o << FormatMethodRef(reader, type_names, strings, v);
                 break;
+            // dexllm#66 — five kinds used to fall to `default:` and render a bare
+            // `@N`, which does not even say what table N indexes. The listing is a
+            // primary output, so `@0` is strictly less informative than
+            // `call_site@0` for the same reason `<unhandled-fmt-N>` was.
+            case kIndexProtoRef:
+                // const-method-type. FULLY resolvable — its operand is a proto_ids
+                // index, the same thing invoke-polymorphic's HHHH is, so the
+                // FormatProto dexllm#60 factored out renders it exactly as AOSP
+                // dexdump does. FormatProto owns the bound and yields
+                // `<bad-proto-idx>`, which is why this reader needs no gate change:
+                // the verifier's rule is "bounded here or AT THE READER", and this
+                // is the only reader (ResolveConstRef returns monostate for 0xFF).
+                o << FormatProto(reader, type_names, v);
+                break;
+            case kIndexMethodHandleRef:  // const-method-handle
+                // A LABEL, not a resolution. Resolving it needs a kind→text mapping
+                // over Reader::MethodHandles(); AOSP dexdump does not resolve it
+                // either ("too large to detail in disassembly"). Nothing
+                // DEREFERENCES the index here, so the gate's "nothing reads them"
+                // still holds for this kind and for the call site below.
+                o << "method_handle@" << v;
+                break;
+            case kIndexCallSiteRef:  // invoke-custom[/range]
+                o << "call_site@" << v;
+                break;
+            // The two ODEX quick kinds. Modern ART deleted them (0xE3-0xF2 are
+            // `unused-e3` there, and its dexdump has no arm for them), but the
+            // VENDORED slicer table still names all 16 opcodes and that table is
+            // what this decoder consults — so they are named opcodes here and the
+            // index-kind invariant covers them. Their operand is an OFFSET, not an
+            // index into any table, which makes a bare `@N` not merely uninformative
+            // but wrong: it reads as an id. Reachable on a STRICT-verified dex —
+            // VerifyInsns bounds registers and indices and has no opcode-legality
+            // gate (there is none in ART's structural verifier either), so an
+            // odex-derived packer dump carries them; see dexllm#32, which handles
+            // the same opcodes in the argument analyzer for the same reason.
+            case kIndexFieldOffset:   // iget/iput-*-quick
+                o << "field_off@" << v;
+                break;
+            case kIndexVtableOffset:  // invoke-virtual[/range]-quick
+                o << "vtable@" << v;
+                break;
             default:
+                // Unreachable for a named opcode once the five above are handled:
+                // what is left is kIndexNone (emit_index is never called),
+                // kIndexUnknown (the 15 `unused-*` rows) and kIndexVaries /
+                // kIndexInlineMethod, which no row in the table uses. Kept as a
+                // defence; the SOURCE guard is what fails closed on a future kind.
                 o << "@" << v;
                 break;
         }

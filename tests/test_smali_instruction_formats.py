@@ -34,6 +34,10 @@ _TABLE = (
 _DEX_ITEM = REPO_ROOT / "vendor/dexkit_core/Core/dexkit/dex_item.cpp"
 
 _FIXTURES = ("invoke-polymorphic.dex", "method_handles.dex", "invoke-custom.dex")
+# Every committed sample. The three above are the POLYMORPHIC carriers, which the
+# register-window oracle needs (it has a non-vacuity floor and would fail on a
+# sample carrying none); the sweeps that only assert an ABSENCE take all five.
+_ALL_FIXTURES = _FIXTURES + ("const-method-handle.dex", "multidex.apk")
 
 # The exact lines the polymorphic fixture must render. Pinned as literals rather
 # than recomputed, because the thing most likely to break them is the register
@@ -86,7 +90,7 @@ def test_the_emitter_handles_every_format_a_real_opcode_uses() -> None:
     )
 
 
-@pytest.mark.parametrize("name", _FIXTURES)
+@pytest.mark.parametrize("name", _ALL_FIXTURES)
 def test_a_fixture_renders_no_unhandled_format(name) -> None:
     dexllm = pytest.importorskip("dexllm")
     path = REPO_ROOT / "tests" / "data" / name
@@ -407,3 +411,363 @@ def test_a_zero_count_range_invoke_does_not_underflow(crafted) -> None:
     )
     assert "4294967295" not in line, line
     assert "{}" in line, line
+
+
+# ==============================================================================
+# The INDEX-kind analogue (dexllm#66).
+#
+# `FormatOperands`' inner `emit_index` lambda has the same shape as the format
+# switch above and had the same gap: five index kinds fell to `default:` and
+# rendered a bare `@N`, which does not even say what table N indexes. `@0` is
+# strictly less informative than `call_site@0` — it does not distinguish a call
+# site from a proto from a method handle, and for the two OFFSET kinds it is not
+# merely uninformative but wrong, since `@N` reads as an id into some table.
+#
+# The truth set is derived from TWO independent places — slicer's instruction
+# table (which index kind each opcode carries) and the format switch (which arms
+# actually call `emit_index`) — and each is also PINNED as a literal, so a mutant
+# that shrinks a derivation instead of adding a case fails here rather than
+# silently narrowing the audit.
+# ==============================================================================
+
+# Every index kind a NAMED opcode can carry into `emit_index`. Pinned so that
+# widening the derivation (e.g. gutting a format arm so it no longer calls
+# `emit_index`) is a two-place edit rather than a silent shrink — the device
+# `test_arg_opcode_coverage` uses for the same reason.
+_INDEX_KINDS_REACHING_EMIT_INDEX = {
+    "kIndexStringRef",
+    "kIndexTypeRef",
+    "kIndexFieldRef",
+    "kIndexMethodRef",
+    "kIndexMethodAndProtoRef",
+    "kIndexProtoRef",  # const-method-type
+    "kIndexMethodHandleRef",  # const-method-handle
+    "kIndexCallSiteRef",  # invoke-custom[/range]
+    # The two ODEX quick kinds. Modern ART deleted them (0xE3-0xF2 are `unused-e3`
+    # there), but the VENDORED slicer table still names all 16 opcodes and that
+    # table is what this decoder consults, so they are named opcodes HERE. dexllm#32
+    # covers the same opcodes in the argument analyzer and records why they are
+    # reachable on a STRICT-verified dex: `VerifyInsns` has no opcode-legality gate,
+    # so an odex-derived packer dump carries them.
+    "kIndexFieldOffset",
+    "kIndexVtableOffset",
+}
+
+_EMIT_INDEX_FORMATS = {"21c", "22c", "31c", "35c", "3rc", "45cc", "4rcc"}
+
+_ROW_IDX = re.compile(
+    r'\s*V\(\s*0x[0-9A-Fa-f]{2},\s*\w+,\s*"([^"]*)",\s*k(\w+),\s*(k\w+)'
+)
+
+
+def _formats_that_call_emit_index() -> set[str]:
+    src = _strip_comments(_DEX_ITEM.read_text())
+    i = src.index("switch (fmt) {")
+    j = src.index("return o.str();", i)
+    body = src[i:j]
+    out = set()
+    for m in re.finditer(r"case k(\w+):", body):
+        nxt = body.find("case k", m.end())
+        arm = body[m.end() : nxt if nxt > 0 else len(body)]
+        # Only up to this arm's own `break;` — a fall-through label shares the arm
+        # below it, and `case k21c:` is not the one that emits for `case k10x:`.
+        if "emit_index(" in arm.split("break;")[0]:
+            out.add(m.group(1))
+    return out
+
+
+def _index_kinds_named_opcodes_carry(formats: set[str]) -> set[str]:
+    rows = [
+        m.groups() for m in map(_ROW_IDX.match, _TABLE.read_text().splitlines()) if m
+    ]
+    assert len(rows) == 256, f"the slicer table parsed to {len(rows)} rows, not 256"
+    return {
+        idx
+        for mnemonic, fmt, idx in rows
+        if fmt in formats and not mnemonic.startswith("unused")
+    }
+
+
+def _index_kinds_the_emitter_handles() -> set[str]:
+    src = _strip_comments(_DEX_ITEM.read_text())
+    i = src.index("auto emit_index = [&](uint32_t v) {")
+    j = src.index("switch (fmt) {", i)
+    return set(re.findall(r"case (kIndex\w+):", src[i:j]))
+
+
+def test_the_derivation_of_the_index_kind_truth_set_has_not_shrunk() -> None:
+    """Both halves of the derivation, pinned.
+
+    A guard parametrised over the production source cannot catch an EDIT of that
+    source. If a format arm stops calling `emit_index`, or the table stops giving an
+    opcode its kind, the invariant below would go vacuously green while the output
+    degraded. Pinning both sets makes either a deliberate two-place edit.
+    """
+    assert _formats_that_call_emit_index() == _EMIT_INDEX_FORMATS
+    assert (
+        _index_kinds_named_opcodes_carry(_EMIT_INDEX_FORMATS)
+        == _INDEX_KINDS_REACHING_EMIT_INDEX
+    )
+
+
+def test_the_emitter_handles_every_index_kind_a_real_opcode_can_carry() -> None:
+    """The invariant. A missing arm renders a bare `@N`.
+
+    Derived from the table, so it fails CLOSED the same way its format sibling
+    does: an index kind introduced by a future Dalvik version arrives as a failure
+    here rather than as an operand nobody can identify.
+    """
+    used = _index_kinds_named_opcodes_carry(_formats_that_call_emit_index())
+    handled = _index_kinds_the_emitter_handles()
+    assert used, "parsed no index kinds — the table locator moved"
+    assert handled, "parsed no cases — the emit_index locator moved"
+    missing = sorted(used - handled)
+    assert not missing, (
+        f"these index kinds render as a bare @N: {missing}. `@0` does not say "
+        "whether 0 is a call site, a proto, a method handle or an offset."
+    )
+
+
+# The lines the three carriers must render. Pinned as literals for the same reason
+# the polymorphic ones are: what a derived check would move with is exactly what is
+# most likely to break.
+_EXPECTED_INDEX_LINES = {
+    "const-method-handle.dex": (
+        "0x0: const-method-handle v0, method_handle@0",
+        # Fully RESOLVED, not labelled. Its operand is a proto_ids index — the same
+        # thing invoke-polymorphic's HHHH is — so `FormatProto` renders it with the
+        # bound already in place. The PROTO matches AOSP dexdump's own committed
+        # expected output for this file character for character
+        # (`art/test/dexdump/const-method-handle.txt`); the whole LINE does not, and
+        # is not meant to: dexdump appends a `// proto@0011` provenance comment,
+        # which this renderer has no convention for on any operand.
+        "0x0: const-method-type v0, (CSIJFDLjava/lang/Object;)Z",
+    ),
+    "method_handles.dex": ("0x24: const-method-handle v3, method_handle@1",),
+    "invoke-custom.dex": ("0xe: invoke-custom {}, call_site@0",),
+}
+
+
+@pytest.mark.parametrize("name", sorted(_EXPECTED_INDEX_LINES))
+def test_the_index_kind_lines_render_exactly(name) -> None:
+    """The three kinds that have a REAL carrier. The other two are crafted below."""
+    dexllm = pytest.importorskip("dexllm")
+    path = REPO_ROOT / "tests" / "data" / name
+    if not path.is_file():  # pragma: no cover - the files are committed
+        pytest.skip(f"{name} missing")
+    dk = dexllm.DexKit(str(path))
+    rendered = {
+        ln.strip()
+        for c in dk.list_classes()
+        for ln in dk.render_class_smali(c).split("\n")
+    }
+    for want in _EXPECTED_INDEX_LINES[name]:
+        assert want in rendered, want
+
+
+# `emit_index`'s output is the LAST thing on the line for five of the seven
+# formats that call it — but k45cc / k4rcc append ", (proto)" after it, so an
+# end-anchored pattern swept 5 of 7 while its docstring claimed all. Accept a
+# following comma too (a correctness review found this; not a live hole, since
+# `_EXPECTED_LINES` pins both polymorphic operands, but the sweep now matches
+# what it says it does).
+_BARE_INDEX = re.compile(r", @\d+(?:,|$)")
+
+
+@pytest.mark.parametrize("name", _ALL_FIXTURES)
+def test_a_fixture_renders_no_unidentified_index(name) -> None:
+    """No operand may come back as a bare `@N` — the `default:` arm's shape.
+
+    Complements the pinned literals: they say the five kinds render correctly, this
+    says nothing ELSE fell through. Both are needed — a sixth kind added to the
+    table with no arm would satisfy every literal above.
+    """
+    dexllm = pytest.importorskip("dexllm")
+    path = REPO_ROOT / "tests" / "data" / name
+    if not path.is_file():  # pragma: no cover - the files are committed
+        pytest.skip(f"{name} missing")
+    dk = dexllm.DexKit(str(path))
+    bad = [
+        ln.strip()
+        for c in dk.list_classes()
+        for ln in dk.render_class_smali(c).split("\n")
+        if _BARE_INDEX.search(ln.strip())
+    ]
+    assert not bad, bad[:5]
+
+
+# -- the two ODEX quick kinds, which no real dex in reach carries ---------------
+#
+# 0 incidence across the whole gitignored corpus and every committed fixture (the
+# only textual hits are `"application/x-quicktime-tx3g"` string literals), so a
+# craft is the only proof — the dexllm#57 / dexllm#60 shape. Both are ONE byte and
+# format-preserving: `iget-object` (0x54) and `iget-object-quick` (0xE5) are both
+# k22c, `invoke-virtual` (0x6E) and `invoke-virtual-quick` (0xE9) are both k35c, so
+# every width, offset and section size is untouched and the dex still verifies
+# STRICT-valid. That it verifies is the point: `VerifyInsns` has no
+# opcode-legality gate, so these reach the renderer in both modes.
+
+_OPERAND_CRAFTS = (
+    # (fixture, mnemonic, opcode before, opcode after, expected label)
+    ("method_handles.dex", "iget-object", 0x54, 0xE5, "field_off@"),
+    ("invoke-custom.dex", "invoke-virtual", 0x6E, 0xE9, "vtable@"),
+    # No RETYPE (0xFE -> 0xFE) — only the operand is written. The two real
+    # `const-method-handle` sites in reach carry 0 and 1, and a review's `v & 0xF`
+    # mutant is EQUIVALENT on both, so the value half of that arm was unguardable
+    # from the fixtures as they stand. Writing the operand makes it guardable.
+    ("const-method-handle.dex", "const-method-handle", 0xFE, 0xFE, "method_handle@"),
+)
+
+_INSN_LINE = re.compile(r"^\s*0x([0-9a-f]+): (\S+)")
+
+# The operand the quick crafts write. 10811 = 0x2A3B: above 15 (so a `v & 0xF`
+# truncation shows), not round (so an off-by-one or a shift shows), and its
+# decimal spelling differs from its hex one (so a `std::hex` rewrite shows).
+_OPERAND = 10811
+
+
+def _retype_first(path, mnemonic: str, old: int, new: int, dst):
+    """Retype the first `mnemonic` in `path` to opcode `new`, in place.
+
+    The instruction is located through its DECLARING method's `code_off`
+    (`class_defs` -> `class_data`, each member list restarting its own delta chain)
+    plus the rendered offset, not by scanning the file for a loose `old` byte: a
+    raw scan lands on data as readily as on an opcode.
+
+    `raw0[pos] != old` is a candidate FILTER, not a premise check — this SEARCHES
+    for a usable site and a method whose `code_off` cannot be resolved is simply
+    not one. The loud failure on drift is the caller's `assert meth`. (An earlier
+    docstring called it an assertion, which would have named the wrong cause.)
+    """
+    from test_arg_quick_opcodes import _code_off, _method_idx
+
+    import dexllm as _d
+
+    raw0 = path.read_bytes()
+    dk = _d.DexKit(str(path))
+    for c in dk.list_classes():
+        for meth in dk.list_class_methods(c):
+            for ln in dk.render_method_smali(meth).split("\n"):
+                m = _INSN_LINE.match(ln)
+                if not m or m.group(2) != mnemonic:
+                    continue
+                mi = _method_idx(raw0, meth)
+                co = _code_off(raw0, mi) if mi is not None else None
+                if co is None:
+                    continue
+                pos = co + 16 + int(m.group(1), 16)  # code_item header is 16 bytes
+                if raw0[pos] != old:
+                    continue
+                raw = bytearray(raw0)
+                raw[pos] = new
+                # WRITE the index operand rather than hoping the fixture supplies a
+                # distinctive one — the first `iget-object` in this fixture carries
+                # 0, and 0 is exactly the value that cannot tell a correct render
+                # from `<< 0` or from `v & 0xF`. `_OPERAND` is > 15, is not a round
+                # number, and differs in decimal from its own hex spelling, so it
+                # separates all three mutant shapes at once. Safe to write anything:
+                # both target opcodes carry an OFFSET, which `VerifyInsns` leaves in
+                # its `default:` arm precisely because nothing dereferences it — the
+                # craft is asserted STRICT-valid below, which is what proves that.
+                # The operand is the u2 at code unit 1 for every format reaching
+                # `emit_index` (k21c BBBB, k22c CCCC, k35c/k3rc BBBB), so one
+                # expression serves both crafts.
+                raw[pos + 2] = _OPERAND & 0xFF
+                raw[pos + 3] = _OPERAND >> 8
+                dst.write_bytes(bytes(raw))
+                return meth, _OPERAND
+    return None, None
+
+
+@pytest.mark.parametrize(
+    "name,mnemonic,old,new,want", _OPERAND_CRAFTS, ids=lambda v: str(v)[:24]
+)
+def test_a_crafted_labelled_operand_renders_the_value_that_was_written(
+    name, mnemonic, old, new, want, tmp_path
+) -> None:
+    """The label AND the value, on kinds no dex in reach exercises adequately.
+
+    The two ODEX quick kinds have no real carrier at all; `const-method-handle` has
+    two, but both hold a value <= 15 (see `_OPERAND_CRAFTS`).
+
+    An OFFSET rendered as `@N` reads as a table id, which is worse than useless.
+
+    These two kinds are the ones the issue did not name: dexllm#66 scoped itself to
+    the three invoke-dynamic kinds, but the index-kind invariant it proposed does
+    not close at three — the vendored slicer still names all 16 ODEX quick opcodes
+    (modern ART deleted them, so its own dexdump has no arm either) and this
+    decoder consults that table. Handling them is what makes the invariant a total
+    function instead of one needing an exception list.
+    """
+    dexllm = pytest.importorskip("dexllm")
+    path = REPO_ROOT / "tests" / "data" / name
+    if not path.is_file():  # pragma: no cover - the files are committed
+        pytest.skip(f"{name} missing")
+    dst = tmp_path / f"quick{new:02x}.dex"
+    meth, operand = _retype_first(path, mnemonic, old, new, dst)
+    assert meth, f"{name} no longer carries a {mnemonic} — the fixture changed"
+    assert operand == _OPERAND
+    assert dexllm.verify(str(dst))[0][
+        "valid"
+    ], "the craft must stay STRICT-valid, or it proves nothing about reachability"
+
+    dk = dexllm.DexKit(str(dst))
+    lines = [
+        ln.strip() for ln in dk.render_method_smali(meth).split("\n") if want in ln
+    ]
+    assert lines, "the retyped instruction vanished from the listing"
+    # The whole TAIL, not the label prefix. `o << "<label>@" << v` has two halves and
+    # only the first is a constant; an adversarial review built four mutants that
+    # rewrote the VALUE (`<< 0`, `& 0xF`, `std::hex`) and passed the entire file
+    # against a prefix check. The craft knows the operand it left in place — the u2
+    # at code unit 1, which is BBBB for k35c and CCCC for k22c alike — so the
+    # expected value is computed from the BYTES rather than from the renderer.
+    assert lines[0].endswith(f"{want}{operand}"), (lines[0], f"want …{want}{operand}")
+
+
+_LABELLED = re.compile(r"^0x([0-9a-f]+): \S+ .*?(method_handle|call_site)@(\d+)$")
+
+
+@pytest.mark.parametrize("name", sorted(_EXPECTED_INDEX_LINES))
+def test_a_labelled_operand_carries_the_value_the_instruction_holds(name) -> None:
+    """Every labelled site's VALUE, against the bytes rather than a pinned literal.
+
+    `o << "<label>@" << v` has two halves and pinning one line only pins the half
+    that is a constant. An adversarial review built `v & 0xF`, which moves 30 of
+    this fixture's 46 `call_site@` lines and yet passes every literal above,
+    because the one pinned value is `call_site@0` and `0 & 0xF == 0`. Hex mutants
+    are killed by those literals only by luck of the same value.
+
+    So the expected value is decoded INDEPENDENTLY: the index operand is the u2 at
+    code unit 1 for every format that reaches `emit_index`, and the instruction is
+    located through its declaring method's `code_off` (`class_defs` -> `class_data`,
+    each member list restarting its own delta chain), never through the renderer.
+    Covers every site rather than one, so a mutant wrong at any index dies.
+    """
+    dexllm = pytest.importorskip("dexllm")
+    from test_arg_quick_opcodes import _code_off, _method_idx
+
+    path = REPO_ROOT / "tests" / "data" / name
+    if not path.is_file():  # pragma: no cover - the files are committed
+        pytest.skip(f"{name} missing")
+    raw = path.read_bytes()
+    dk = dexllm.DexKit(str(path))
+    checked = 0
+    for c in dk.list_classes():
+        for meth in dk.list_class_methods(c):
+            mi = _method_idx(raw, meth)
+            co = _code_off(raw, mi) if mi is not None else None
+            if co is None:
+                continue
+            for ln in dk.render_method_smali(meth).split("\n"):
+                m = _LABELLED.match(ln.strip())
+                if not m:
+                    continue
+                pos = co + 16 + int(m.group(1), 16)
+                want = raw[pos + 2] | (raw[pos + 3] << 8)
+                assert int(m.group(3)) == want, (
+                    f"{meth} {ln.strip()}: rendered {m.group(3)}, the instruction "
+                    f"holds {want}"
+                )
+                checked += 1
+    assert checked, f"{name} rendered no labelled operand — the fixture changed"

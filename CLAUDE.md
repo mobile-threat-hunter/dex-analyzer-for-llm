@@ -2239,9 +2239,13 @@ re-captured after the review fixes and is **identical to the pre-fix capture on 
 63 entries** — the clamp and the range guard are no-ops on every real input, which
 is the 0-regression claim restated as a measurement.
 
-**`invoke-custom` still renders its operand as `@N`** — its BBBB is a `call_site_ids`
+**`invoke-custom`'s operand is not RESOLVED here** — its BBBB is a `call_site_ids`
 index, and rendering the call site's contents needs a `call_site_ids` reader this
 port does not have. Honest and out of scope; the issue does not ask for it.
+(dexllm#66 later replaced the bare `@N` with the LABEL `call_site@N`, which is a
+different claim — the second clause above survives, the "renders as `@N`" headline
+this paragraph used to carry does not. Found by a correctness review as a stale
+mirror, the pattern this file records elsewhere.)
 
 **The IR half followed in the same series — see the section below.**
 
@@ -2373,6 +2377,214 @@ a call site, not a method, and resolving one means reading `call_site_ids` and i
 bootstrap `encoded_array` — a section the vendored slicer does not expose at all.
 Five methods in `invoke-custom.dex` still fail for that reason, and the guard asserts
 they fail for THAT reason rather than any other.
+
+### Every index operand is resolved or LABELLED, never a bare `@N` (dexllm#66, 2026-08-22)
+
+`FormatOperands`' inner `emit_index` lambda had the same gap its format sibling
+did: index kinds fell to `default:` and rendered a bare **`@N`**, which does not
+even say what table `N` indexes — `invoke-custom {}, @0` where AOSP dexdump says
+`call_site@0000`. The listing is a primary output, so `@0` is strictly less
+informative than `call_site@0`: it does not distinguish a call site from a proto
+from a method handle.
+
+**The issue named three kinds; its own proposed guard does not close at three.**
+Deriving "every index kind a named opcode can carry into `emit_index`" from the
+VENDORED slicer table yields **five**: the three invoke-dynamic kinds plus
+`kIndexFieldOffset` (14 opcodes) and `kIndexVtableOffset` (2) — the ODEX quick
+forms. Modern ART DELETED those (0xE3-0xF2 are `unused-e3` there, and its own
+dexdump has no arm for them, which is why dexdump could not be the oracle for
+that half) but the vendored table still names all 16, and that table is what this
+decoder consults. Their operand is an **OFFSET**, so `@N` there is not merely
+uninformative but wrong — it reads as an id into a table. Handling them is what
+makes the invariant a TOTAL function instead of one needing an exception list this
+repo requires to be JUSTIFIED, not merely listed; and there is no justification
+for rendering an offset as an index. They are reachable on a STRICT-verified dex
+for the reason dexllm#32 already records (`VerifyInsns` has no opcode-legality
+gate), so an odex-derived packer dump carries them.
+
+| operand | before | after |
+|---|---|---|
+| `const-method-type` (`kIndexProtoRef`) | `@17` | **`(CSIJFDLjava/lang/Object;)Z`** — fully RESOLVED |
+| `const-method-handle` | `@1` | `method_handle@1` |
+| `invoke-custom[/range]` | `@45` | `call_site@45` |
+| `iget/iput-*-quick` † | `@2` | `field_off@2` |
+| `invoke-virtual[/range]-quick` † | `@182` | `vtable@182` |
+
+† crafted — the two quick kinds have **0 incidence** anywhere in reach (the only
+textual corpus hits are `"application/x-quicktime-tx3g"` string literals), so these
+two rows are one-byte format-preserving retypes of a committed fixture
+(`iget-wide` 0x53 -> `iget-wide-quick` 0xE4 and `invoke-virtual` 0x6E ->
+`invoke-virtual-quick` 0xE9, both keeping their format and their operand), each
+asserted STRICT-valid. Every row quotes a real operand a real site holds; the
+guards additionally WRITE a distinctive one, see below.
+
+`const-method-type` is the one that RESOLVES, and it is one line: its operand is a
+`proto_ids` index — the same thing `invoke-polymorphic`'s HHHH is — so the
+`FormatProto` dexllm#60 factored out renders it with the bound already inside. The
+PROTO matches dexdump's own committed expected output for this fixture character
+for character (`art/test/dexdump/const-method-handle.txt`); **the whole LINE does
+not**, and is not meant to — dexdump appends a `// proto@0011` provenance comment,
+which this renderer has no convention for on any operand. (An earlier draft said
+"byte-for-byte as dexdump does" without that qualifier; a reviewer produced the
+`.txt`.) The same divergence is deliberate on the two LABELS: dexdump spells them
+`call_site@%0*x` / `method_handle@%0*x`, i.e. zero-padded HEX, and these are
+decimal because the surrounding `string@N` / `type@N` fallbacks in the same lambda
+are — house style beats matching a tool this listing is not otherwise shaped like
+(it is baksmali-shaped). The other four are LABELS. A method handle and a
+call site are not resolved because dexdump does not resolve them either ("too
+large to detail in disassembly"), and a call site additionally needs a
+`call_site_ids` reader the vendored slicer does not have (dexllm#67).
+
+**No verifier change — but its comment had to be corrected, and that was a
+precondition rather than tidying.** `VerifyInsns` leaves `kIndexProtoRef` in the
+`default:` arm justified as *"nothing reads them"*, with the standing rule *"a
+consumer that starts reading one bounds it in the same change, here or at the
+reader."* This IS that consumer for 0xFF, so the claim became FALSE and is
+rewritten. The obligation is discharged **at the reader**, which the rule permits
+and which is the right tier here: `FormatProto` bounds the index itself and yields
+the distinguishable `<bad-proto-idx>`, and it is the ONLY reader (`ResolveConstRef`
+returns `monostate` for 0xFF). That is exactly where the polymorphic proto stood
+before dexllm#60's IR half added a SECOND reader that could not signal — which is
+what moved that one, and only that one, to the gate. The two LABEL kinds
+dereference nothing, so "nothing reads them" still holds for them and is stated
+per-kind rather than as a group. [[a-rule-you-wrote-binds-your-next-commit]].
+
+**Fixture:** `tests/data/const-method-handle.dex` (2,524 B, AOSP
+`art/test/dexdump/const-method-handle.dex`, Apache-2.0, provenance in
+[tests/data/README.md](tests/data/README.md)). `const-method-type` has **0 sites**
+across the gitignored corpus, all three existing fixtures and `multidex.apk`, and
+it is the one kind that RESOLVES — so without a carrier the difference between
+resolving the proto and printing another label was unobservable. **What it does
+NOT close, checked rather than claimed:** dexllm#60 records a mutant it could not
+kill (a polymorphic return type taken from the signature-polymorphic DECLARATION)
+and says it needs "a fixture with a live, non-`Object`, non-void polymorphic
+result". This file has exactly that shape — `(Ljava/lang/Object;)Ljava/lang/Class;`
++ `move-result-object` — and it still does not kill it: `RegisterPropagation`
+inlines the result straight into a `StringBuilder.append(Object)` argument, so the
+type never reaches a declaration and both return types render identically. The gap
+STANDS; it was flagged as a likely bonus and the measurement refuted it.
+
+**Measured (a/b OFF vs ON, SAME script, both `.so` md5-verified — `add228b2` OFF
+and `d277837c` ON, and the ON build bit-reproducing its md5 after the halves were
+swapped back):** 60 entries (34 bundled corpus + 5 committed fixtures + 10
+`art/test/dexdump/*.dex` + 11 `tools/dexter/testdata/*.dex`; 55 loadable, the 5
+others being resources-only containers and the dexter file this verifier rejects
+for `outs_size > registers_size`) —
+x {load verdict, class count, whole-source smali sha256, bare-`@N` count, per-kind
+counts} = **6 changed, 0 load verdicts moved**, and the 6 are **3 distinct files**
+each present at two paths (the committed copy and the AOSP original — keyed on the
+full PATH, not the basename, which is the collision dexllm#61's diff harness hit).
+Bare `@N` across all 60: **100 -> 0**. A LINE-LEVEL diff over those three files
+(**4,504 lines**) resolves it exactly: **50 differing, 0 added, 0 removed**, every
+one a line whose OFF form ended in a bare `@N` and whose prefix (mnemonic +
+registers) is byte-identical — 46 `call_site@`, 3 `method_handle@`, 1 resolved
+proto (the 4,504 is lines COMPARED — the a/b holds one list per class, and a
+whole-file concatenation of the same text counts 4,467; a reviewer re-derived the
+second and it is the same bytes, differently delimited). **The 54 unchanged entries include the entire bundled APK corpus**, which
+carries 0 sites of all five kinds (the only textual hits are
+`"application/x-quicktime-tx3g"` string literals), so the fixtures are the sole
+evidence the mechanism fires [[ab-must-prove-the-mechanism-fires]].
+
+**Guards** (18 new cases, appended to
+[tests/test_smali_instruction_formats.py](tests/test_smali_instruction_formats.py)
+— the file that already states the FORMAT invariant, which this is the INDEX-kind
+analogue of; **16 -> 34** collected, 2 of them the pre-existing
+`<unhandled-fmt-N>` sweep widened to the two fixtures it did not cover). The truth set is derived from TWO independent
+places — slicer's table (which kind each opcode carries) and the format switch
+(which arms actually call `emit_index`) — and **each is also PINNED as a literal**,
+because a guard parametrised over the production source cannot catch an EDIT of it:
+a format arm that stops calling `emit_index` would narrow the derivation and turn
+the invariant vacuously green. The behavioural half pins the three real carriers'
+lines as literals, asserts no fixture renders a residual `, @N` (which the literals
+alone cannot say — a sixth kind added with no arm satisfies every one of them), and
+CRAFTS the two quick kinds, which no dex in reach carries: one byte and
+format-preserving (`iget-object` 0x54 -> `iget-object-quick` 0xE5, both k22c;
+`invoke-virtual` 0x6E -> `invoke-virtual-quick` 0xE9, both k35c), located through
+the declaring method's `code_off` rather than by scanning for a loose opcode byte,
+with the craft asserted STRICT-valid — that it verifies is the point.
+
+**16 mutants, each BUILT and RUN with a distinct `.so` md5, each killed.** Ten
+from the diff: the pre-fix arm set (9 fail — and its `.so` md5 reproduces the OFF
+build's exactly, which is also how the verifier edit is PROVEN comment-only), each
+of the five kinds dropped alone (3 / 5 / 3 / 2 / 2), `kIndexProtoRef` LABELLED as
+`proto@N` instead of resolved — the plausible half-fix (1), the two label strings
+SWAPPED (3), and the derivation shrunk by gutting the `k21c` arm (7). Plus an
+unmutated control.
+
+**Six more the adversarial review CONSTRUCTED, every one of which passed the whole
+file — and they are the finding.** `o << "<label>@" << v` has TWO halves and the
+guards pinned only the half that is a constant: the crafted quick tests asserted
+the label PREFIX (`want in line`), and its sibling `not _BARE_INDEX.search(...)`
+was IMPLIED by it, so **`<< v` — the load-bearing half of both offset arms — had
+no guard at all**. `<< 0` on either offset arm, `std::hex` on any arm, and
+`call_site@ (v & 0xF)` all passed 30/30. The truncation is a genuine escape rather
+than an equivalent mutant: `invoke-custom.dex` carries 46 distinct call-site
+indices up to 45, so `& 0xF` moves **30 of the 46 rendered lines**, and the one
+pinned literal is `call_site@0`, where `0 & 0xF == 0`. The hex mutants died only
+by luck of that same value. `std::hex` is the realistic future commit, since
+baksmali spells these `vtable@0x4`.
+
+**The SECOND reviewer found the same gap independently**, with three more escapes
+of its own (`call_site@ << 0`, and both offset arms emitting `insn.vA` — a register
+number where an index belongs), and made the sharpest statement of why it matters:
+under `call_site@ << 0` every one of `invoke-custom.dex`'s 46 sites renders the
+same operand and the whole suite is byte-for-byte as green as the unmutated build.
+That is **strictly worse output than the `@N` this change removes** — `@45` was
+uninformative, `call_site@0` for call site 45 is confidently wrong, and the thesis
+of the change is that the label makes `N` identifiable. All three die against the
+fix below.
+
+Closed at the CLASS rather than per mutant, two ways. (1) A VALUE ORACLE over
+every labelled site in every carrier: the index operand is the u2 at code unit 1
+for every format reaching `emit_index`, so the expected value is decoded from the
+BYTES — located through the declaring method's `code_off`, never through the
+renderer — and compared against what was rendered, at all 49 sites rather than
+one. (2) The crafts now WRITE the operand (`_OPERAND = 10811 = 0x2A3B`: above 15
+so a truncation shows, not round so a shift shows, decimal ≠ hex so a base change
+shows) instead of hoping the fixture supplies a distinctive one — the first
+`iget-object` in `method_handles.dex` carries **0**, exactly the value that cannot
+separate a correct render from `<< 0` or from `& 0xF`. A THIRD craft was added for
+`const-method-handle` (operand-only, no retype): its only two real sites hold 0
+and 1, so `method_handle@ (v & 0xF)` was EQUIVALENT on the corpus as it stands and
+that arm's value half was otherwise unguardable. **All nine value mutants across
+both reviews now die**; the fixes are guards and prose only, so the `.so` md5 is
+unchanged and the a/b above still stands.
+
+**Three further review findings, all in the guards or a mirror:** `_BARE_INDEX` was
+end-anchored, so the "no operand comes back as a bare `@N`" sweep covered 5 of the
+7 emitting formats — k45cc / k4rcc append `, (proto)` after `emit_index`'s output
+(not a live hole, since `_EXPECTED_LINES` pins both polymorphic operands, but the
+sweep now matches its docstring); `_retype_first`'s docstring called its
+`raw0[pos] != old` candidate FILTER an assertion, which would have named the wrong
+cause on fixture drift; and **the dexllm#60 smali-half section 135 lines above
+still said `invoke-custom` "renders its operand as `@N`"** — the one-mirror-updated
+pattern this file records, corrected there rather than only here.
+
+**Independently corroborated by the correctness review**, which built its own spec
+decoder (`class_defs` -> `class_data` -> `code_off`, its own width table, the index
+pulled from the format layout — never calling the code under test) and found **0
+mismatches over 100 sites** across the fixtures, every `art/test/dexdump` and
+`tools/dexter/testdata` dex and the whole 34-sample corpus (lenient where the
+strict gate refuses, so `all.dex` is covered), on mnemonic, register operands AND
+index value; plus **0 diff over 48 lines** against AOSP dexdump's own committed
+expected output after normalising its hex and `// proto@` comment. It also
+confirmed by CRAFT that `FormatProto`'s two un-bounded interior reads
+(`return_type_idx`, the type_list entries) are unreachable — both are rejected in
+`CheckIntraSection`, which is not gated on `check_insns_`, so they hold under
+`lenient=True` too — and that the k21c caller therefore carries exactly the
+guarantees the k45cc / k4rcc callers do.
+
+parity 29/29, pytest **790 passed / 10 skipped**, narrowed to
+`tests/data/multidex.apk` (689 passed), the guard file green narrowed to each of
+the **34** bundled samples one at a time plus the committed `multidex.apk` (25
+`.apk` + 9 bare `.dex` — the same 34 the a/b counts; a review caught this section
+quoting 34 and 38 for one population, the other four entries under `test_apk/APK`
+being a directory, two certificates and a jar), TRUE corpus-less (`test_apk` MOVED
+aside) **384 passed / 416 skipped / 0 failed** — the whole new block is
+corpus-independent, so all 34 of its cases run in the CI leg —
+sweep 25,350-class 0-crash 0-timeout,
+determinism (3 processes x 3 `PYTHONHASHSEED`s -> one digest), lint trio clean,
+doc fences 78.
 
 ### Skills
 

@@ -14,6 +14,7 @@ narrowed to the sample here.
 | `invoke-custom.dex` | 31,732 B | 29 `method_handle_item`s, `invoke-custom`, annotations |
 | `method_handles.dex` | 28,228 B | 16 `invoke-polymorphic` sites, all in ONE of its 24 classes |
 | `invoke-polymorphic.dex` | 1,160 B | 1 `invoke-polymorphic/range` (7 registers) + 2 `invoke-polymorphic` |
+| `const-method-handle.dex` | 2,524 B | the only `const-method-type` anywhere in reach |
 
 `multidex.apk` is deliberately the WORST case, not a convenient one: it is the
 sample that produced 17 of the failures in dexllm#46 (no `switch` header, no
@@ -66,6 +67,25 @@ site has a **7-register window** that the arm swap collapses to empty. It also
 carries the only 45cc with **A=5**, i.e. the only one where the G nibble is a real
 argument rather than padding.
 
+`const-method-handle.dex` is here for dexllm#66, which taught `emit_index` five
+index kinds that used to render a bare `@N`. Three of them had a carrier already
+(`invoke-custom.dex` has 46 `invoke-custom`, `method_handles.dex` has 2
+`const-method-handle`); **`const-method-type` (0xFF, `kIndexProtoRef`) had none** —
+0 sites across the gitignored corpus, the other three fixtures and `multidex.apk`.
+It is also the one kind that is fully RESOLVED rather than labelled, so without a
+carrier the difference between resolving the proto and printing another label was
+unobservable. Used UNMODIFIED.
+
+Note what it does NOT close, checked rather than assumed: dexllm#60 records a
+mutant it could not kill — taking a polymorphic call's return type from the
+signature-polymorphic DECLARATION instead of the call site — and says it needs "a
+fixture with a live, non-`Object`, non-void polymorphic result". This file has
+exactly that shape (`(Ljava/lang/Object;)Ljava/lang/Class;` followed by
+`move-result-object`), and it still does not kill the mutant: `RegisterPropagation`
+inlines the result straight into a `StringBuilder.append(Object)` argument, so the
+type never reaches a declaration and both return types render identically. The gap
+stands.
+
 ## Provenance
 
 `multidex.apk` is byte-identical (md5 `627622df6a7557fd0b85fdde6fccb7ad`) to
@@ -84,6 +104,9 @@ AOSP's `tools/dexter/testdata/method_handles.dex` — dexter's own test input, a
 **Apache-2.0**.
 
 `invoke-polymorphic.dex` is byte-identical (md5 `fd1f7a6de8a8b3ddd498264c411fedac`)
-to AOSP's `art/test/dexdump/invoke-polymorphic.dex`. Note that dexter ships a file
+to AOSP's `art/test/dexdump/invoke-polymorphic.dex`. `const-method-handle.dex` is
+byte-identical (md5 `8d5213617dd2b2a0f746be290312bc99`) to AOSP's
+`art/test/dexdump/const-method-handle.dex`, from the same directory and also
+**Apache-2.0**. Note that dexter ships a file
 of the same name which is NOT usable here — it fails this repo's verifier with
 `code: outs_size > registers_size`. See [LICENSE](../../LICENSE).

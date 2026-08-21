@@ -451,6 +451,33 @@ names were always name-validated, and since dexllm#23 every `type_id` descriptor
 too — on the DECODED code points, so an overlong that would decode to `"` or a
 newline is rejected at load rather than rendered here.
 
+**Operand contract (dexllm#66).** Every index operand a named opcode can carry is
+either RESOLVED or LABELLED — none renders as a bare `@N`, which does not say what
+table the number indexes:
+
+| operand | renders as |
+|---|---|
+| string / type / field / method | the resolved literal or descriptor |
+| `invoke-polymorphic`'s two operands | the method ref **and** the call-site proto |
+| `const-method-type` | the proto, e.g. `(CSIJFDLjava/lang/Object;)Z` |
+| `const-method-handle` | `method_handle@N` |
+| `invoke-custom[/range]` | `call_site@N` |
+| `iget/iput-*-quick` | `field_off@N` |
+| `invoke-virtual[/range]-quick` | `vtable@N` |
+
+The last four are **labels, not resolutions**. A method handle and a call site are
+not resolved here because AOSP's own dexdump does not resolve them either ("too
+large to detail in disassembly"), and a call site would additionally need a
+`call_site_ids` reader the vendored slicer does not have (dexllm#67). The label
+values are **decimal**, matching the `string@N` / `type@N` fallbacks alongside
+them, where dexdump uses zero-padded hex — this listing is baksmali-shaped, not
+dexdump-shaped, and carries no `// kind@N` provenance comment on any operand
+either. The last two
+are ODEX **offsets** rather than table indices — which is why `@N` was not merely
+uninformative there but actively wrong — and they are reachable on a
+strict-verified dex because `VerifyInsns` has no opcode-legality gate, so an
+odex-derived packer dump carries them.
+
 One thing this does **not** cover:
 - Only C0 is escaped. **DEL, the C1 range and the Unicode line separators U+2028 /
   U+2029 / U+0085 render as themselves**, and Python's `str.splitlines()` treats the
