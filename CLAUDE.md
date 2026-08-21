@@ -274,6 +274,247 @@ When a method reuses its receiver register p0 (`this`) as a scratch local — re
 
 The residual after the reused-`this` materialisation was dominated by a **second, distinct** DAD bug (218 bundled): a **void** `invoke-super/range` or `invoke-direct/range` on the receiver rendered as **`this = super.onListItemClick(...)`** (assignment to `this`, invalid Java). **Root cause — at the IR builder:** DAD's RANGE invoke handlers set `returned = base` for a void call — `invokesuperrange`/`invokedirectrange` ([opcode_ins.cpp](native/dad_cpp/opcode_ins.cpp) `InvokeSuperRange`/`InvokeDirectRange`) did `if ret_type != 'V': returned = ret.new() else: returned = base; ret.set_to(base)` — **unlike** the NON-range `invokesuper` (nulls `returned` for void) and `invokedirect` (nulls it when `base` is a `ThisParam`). So a void range invoke on `this` builds `AssignExpression(this, void_invoke)`. Confirmed identical bug in androguard DAD, so beyond-DAD. **Fix (IR builder — make the range handlers consistent with the non-range ones, NOT a Writer-side mask):** `InvokeSuperRange` now nulls `returned` for void (invoke-super is never `<init>`, so the receiver never needs to be the result); `InvokeDirectRange` now nulls `returned` for a void call when `base` is a `ThisParam` (a `this.<init>()`/`super()` delegation or a void `this.privateMethod()`), else keeps `returned = base` + `ret.set_to` (the `newObj = new X()` constructor pattern). A void invoke then builds `AssignExpression(None, invoke)` → renders the bare call `super.onListItemClick(...);` in **BOTH the text AND the AST** — the earlier iteration masked this in the Writer's `visit_assign` (dropping the LHS), which fixed the text but left `dast`/AST carrying `this = voidcall`; the root-cause IR fix corrects both and is the principled layer (CLAUDE.md: "structural defects must be fixed at the IR level, not in Writer output"). Removing `ret.set_to(base)` for void super-range is safe — no `move-result` follows a void call, so the `gen_ret` chain is unread. **This is a beyond-DAD IR divergence** (our AST now differs from androguard DAD's for these methods — DAD's AST has the bug); the 28 parity suites do NOT assert the range-invoke void `returned=base` case (only static/range `None` and direct-`<init>` `base` are unit-tested), so **parity 28/28 is unbroken** with no `*DADFaithful` sibling needed. **Measured (a/b, bundled):** `this =` **218 → 11** (207 void cases fixed; the 11 residual all non-void — `this = 0` / `this = new X()` / `this = method()` — the deferred genuine multi-type phi-web merges, correctly untouched), **text AND AST both carry the bare call**, ALL other invalid-Java buckets byte-unchanged (prim-used-as-object 55, ref-declared-int 23, `v<op>null` 3, `prim=new` 2), constructor patterns intact (super() 4714 + `newObj = new X()` 12120 corpus-wide, 0 broken `<init>`), parity 28/28, 0-crash/25,309. Combined with the materialisation fix, the `this =` bucket is **269 → 11** (258 fixed). Regression tests in `tests/test_this_reuse.py` (`this = super.` = 0, the onListItemClick repro renders `super.onListItemClick(...)`).
 
+### The IR models `invoke-custom`, so its bootstrap chain is reconstructed (dexllm#67, 2026-08-22)
+
+The residue dexllm#60 left, pinned there by a guard saying a future change should
+delete it. **Two failure modes, and the LOUD one was the smaller half.** 5 of
+`invoke-custom.dex`'s 144 methods emitted `// DECOMPILE ERROR` (a `move-result`
+after an unmodelled invoke, the documented null-guard at
+[instruction.cpp:274](native/dad_cpp/instruction.cpp#L274)). Another **6 lost the
+call SILENTLY** — a void or unconsumed `invoke-custom` produced a `NopExpression`
+and simply vanished, and in `TestLinkerUnrelatedBSM` the following `move-result`
+then bound to an EARLIER, unrelated temp, so the method read
+`assertEquals(2.5f, vtmp1)` with `vtmp1` a `getName()` String. A confident wrong
+answer with no error anywhere, and nothing in the issue predicted it.
+
+**The issue's decision #1 dissolved: no vendor change.** It assumed the one missing
+piece was `Reader::CallSiteIds()` in the vendored slicer. It is not — the section is
+a `u4` array found through the map, and `core_ext/dexitem_code_source.cpp` already
+reads raw sections that way (`BuildProto`'s `type_list`, the `static_values` walk).
+`GetCallSite` is implemented there, so the pile dexllm#65 records as uncataloguable
+gains nothing. What it DOES gain is a reader of UNVERIFIED bytes: `VerifyDex` bounds
+the `call_site_id` section's EXTENT (dexllm#57's `CheckMap`) and nothing else — ART's
+`CheckInterCallSiteIdItem` is not ported — so `data_off`, every element type code and
+every index inside are bounded at the reader, which is the tier the safety contract
+permits (dexllm#66's precedent).
+
+**Decision #2, the IR representation, was escalated to the user, who chose jadx
+parity** (CLAUDE.md already names jadx the reference oracle). An `invoke-custom`
+names a call SITE: at runtime the VM calls the site's BOOTSTRAP once with a
+`Lookup`, the target NAME and the call's METHOD TYPE (plus the site's extra
+arguments) and invokes the `CallSite` it returns with the instruction's registers.
+Every synthesized node is one of those steps, so nothing is invented — but it IS a
+reconstruction rather than instructions the dex contains, which is what the trailing
+**`/* invoke-custom */`** marker says (jadx marks it for the same reason). Built from
+EXISTING IR node types, so the AST schema is unchanged and both emitters read the same
+nodes. (**"agree by construction" was FALSE as first written** — see the float/double
+finding below; it is true now, and it was not.)
+
+```java
+TestLinkerMethodMinimalArguments.assertEquals((p4 + p5),
+    TestLinkerMethodMinimalArguments.linkerMethod(invoke.MethodHandles.lookup(), "_add",
+        invoke.MethodType.methodType(Integer.TYPE, Integer.TYPE, Integer.TYPE))
+    .dynamicInvoker().invoke(p4, p5) /* invoke-custom */);
+```
+
+**Two deliberate differences from jadx, both to stay consistent with THIS writer:**
+a class name goes through `GetType`, so `java.lang.invoke.X` prints as `invoke.X` —
+which is what every existing `invoke.CallSite` / `invoke.MethodHandles$Lookup` in the
+same file already reads (a pre-existing repo-wide rendering, not a new one); and
+`MethodHandle.invoke` is typed from the CALL SITE rather than as `Object` plus a cast
+at each use, the same call-site-over-declaration choice dexllm#60 made for 0xFA (it is
+also what makes the two float registers render `2f, 0.5f` instead of raw bits).
+
+**One IR mechanism was needed and it is INERT unless used:** `IRForm::set_synthetic_vid`.
+An IRForm keys its `var_map` by each child's `Vid()`, and the natural ids collide for
+exactly this shape — an invoke's id is `""` (unique as the single BASE, not as two
+ARGUMENTS, and `bsm(lookup(), name, methodType(…))` has two), while a Constant's is
+VALUE-derived, so a `String "2"` and the int `2` are both `c2`. Nothing the opcode
+handlers build ever sets it, so every existing id is exactly what it was.
+`InvokeInstruction::call_site_marker` is the same: one bool, false everywhere else.
+
+**A `MethodHandle` bootstrap argument has no Java literal at all**, and it is the
+COMMON shape in real invoke-dynamic (`LambdaMetafactory.metafactory` takes one), so
+refusing it would have made the fix useless for the one real-world case. It renders as
+the method reference it is — `Cls::name`, `Cls::new`, and `Cls.name` for the four FIELD
+kinds, which method-reference syntax cannot express — as a `BaseClass` node rather than
+a Constant, because that is what BOTH emitters render as a bare NAME (the Writer writes
+it unquoted; dast maps a descriptor-less one to `Local`). A String-typed Constant reads
+as `"Cls::name"`, a literal it is not.
+
+**An UNRESOLVED call site emits NOTHING** — the pre-dexllm#67 behaviour — rather than
+fabricating output for input we could not read, and `GetCallSite` returns a PRISTINE
+result on every failure path. That second half is not tidiness: the bootstrap is
+resolved BEFORE the name is checked, so returning the half-filled record hands a
+consumer a real bootstrap beside an empty name and an empty call type, which renders
+as a plausible and entirely fabricated `bsm(lookup(), "", methodType(Void.TYPE))`.
+**The mutation matrix found that** — the first guard crafted a site whose result is
+CONSUMED, where an unresolved site reads as void and the null-guard error reappears
+either way, so the bail looked unguarded until a VOID site was crafted too.
+
+**Measured (a/b OFF=`d277837c` vs ON=`39135671`, SAME script, both `.so` md5-verified
+and the ON build bit-reproducing its md5 after the halves were swapped back):** 60
+sources — the whole bundled corpus, the committed fixtures, every
+`art/test/dexdump/*.dex` and every `tools/dexter/testdata/*.dex` — x {both verify
+verdicts, class list, the whole decompiled Java, the whole smali, every method's AST,
+the `DECOMPILE ERROR` count} = **2 records changed, and they are the SAME FILE at two
+paths** (the committed fixture and its AOSP original). **smali, verify and class counts
+are identical on every source**, so dexllm#66's listing is untouched. A LINE-LEVEL diff
+over that file resolves the change exactly: **14 removed / 101 added**, the 14 being 5
+`DECOMPILE ERROR` lines plus 9 lines of the silent-loss kind, and **46 of the added
+lines carry the marker** — one per call site the fixture has. The bundled corpus carries
+**0** invoke-custom sites, so a flat corpus result is required and the fixtures are the
+only thing that can show the mechanism firing [[ab-must-prove-the-mechanism-fires]].
+
+**Measured (a/b OFF=`d277837c` vs ON=`413ff1bf`, SAME script, both `.so` md5-verified
+and the ON build bit-reproducing its md5 after every mutant):** 60 sources — the whole
+bundled corpus, the committed fixtures, every `art/test/dexdump/*.dex` and every
+`tools/dexter/testdata/*.dex` — x {both verify verdicts, load, class list, the whole
+decompiled Java, the whole smali, every method's AST, the `DECOMPILE ERROR` count} =
+**2 records changed, and they are the SAME FILE at two paths** (the committed fixture
+and its AOSP original). **smali, verify, load and class counts are identical on every
+source**, so dexllm#66's listing is untouched. A LINE-LEVEL diff over that file resolves
+it exactly: **14 removed / 101 added**, the 14 being 5 `DECOMPILE ERROR` lines plus 9
+lines of the silent-loss kind, and **46 of the added lines carry the marker** — one per
+call site the fixture has. The bundled corpus carries **0** invoke-custom sites, so a
+flat corpus result is REQUIRED and the fixtures are the only thing that can show the
+mechanism firing [[ab-must-prove-the-mechanism-fires]]. A correctness reviewer
+re-derived every number of this table independently and got the same values.
+
+parity **29/29**, pytest **821 passed / 10 skipped**, TRUE corpus-less (`test_apk` MOVED
+aside) **415 passed / 416 skipped / 0 failed**, narrowed to `tests/data/multidex.apk`
+**724 passed**, the guard files green narrowed to **each of the 34 bundled samples one at
+a time**, sweep **26,938-class / 186,367 method-block 0-crash 0-timeout 0-error**,
+determinism 3 processes x 3 `PYTHONHASHSEED`s -> one digest, lint trio clean (CI scope;
+the two pre-existing unformatted `scripts/` files untouched), doc fences 78,
+`scripts/check_dad_boundary.sh` clean.
+
+## What the two reviewers found — 2 real code defects, and 7 load-bearing lines with no guard
+
+**BOTH reviewers independently CONFIRMED the same bug, each against jadx as the oracle:
+a `CHAR` bootstrap argument was SIGN-extended and then masked.** CHAR is the one
+UNSIGNED member of the encoded_value integer family (ART reads it with
+`ReadUnsignedInt`; BYTE/SHORT/INT use `ReadSignedInt`), and a mask cannot undo a
+sign-extension — a one-byte `0x80` came out **65408** where ART reads **128**. **Not
+crafted-only**: d8 emits any char in 128..255 as exactly one byte, so this is reachable
+from an ordinarily compiled dex. Fixed by zero-extending; verified 0x41/0x7F/0x80/0xFF
+-> 65/127/128/255, matching jadx on the identical bytes.
+
+**A correctness reviewer CONFIRMED a second one, with a measurement I had not made:
+`SpanOf`'s base is wrong for a v41 CONTAINER slice.** The slicer's ctor sets
+`header_ = ptr<Header>(0)` — the SLICE — and only THEN `ValidateHeader` does
+`image_ -= header_->ContainerOff()`, so the header address is slice-relative while every
+offset it resolves is container-relative. On AOSP's own `multidex-container.dex` the
+second slice sits at +564 with `map_off` 1332 in a 1468-byte container, so a
+slice-based span rejects its own map and `GetCallSite` silently returns `{}` for every
+call site in a later slice; for a geometry where the sum lands back in range it would
+read ANOTHER slice's bytes and could fabricate a chain out of them. Fixed by
+subtracting `ContainerOff()` — which is the slicer's own `image_`. My comment there had
+asserted the opposite of the truth, in the sentence the reviewer disproved.
+
+**And the change's own claim about float/double was false.** `CallSiteArgToIr` builds
+`Constant(double, "F"/"D")`, whose Writer path is `%g` — six significant figures — while
+the AST renders the same node through `PyFloatRepr`. So `Double.MAX_VALUE` printed
+`1.79769e+308` in the text beside `1.7976931348623157e+308` in the AST: "the text and the
+AST agree by construction" was FALSE for exactly the values only this change can produce.
+The `%g` path was UNREACHABLE before it — every `const*` opcode builds an INTEGER-typed
+Constant — so the Writer now uses the round-trip `FormatFloatLiteral` / `FormatDoubleLiteral`
+it already had (which also render NaN/±Inf as valid Java instead of `nan`), reached
+through a new `Visitor::visit_constant_float` that DEFAULTS to the double path so no other
+implementer changed. The corpus a/b is byte-identical across that edit, which is the
+unreachability restated as a measurement.
+
+**One PLAUSIBLE was worth fixing rather than documenting:** a crafted call-site proto can
+declare more parameters than the instruction has registers, and `BuildInvokeRegs` always
+yields a 5-slot window with empty names, so `GetArgs` materialised `unknownType v`
+arguments no register holds. The window is truncated to `vA` now, so `GetArgs` bails and
+renders none — refusing beats inventing, the same rule the unresolved-site path follows.
+It WIDENED a pre-existing shape (dexllm#60 feeds `ptype` from an equally unverified proto
+operand) rather than creating one; the pre-existing half is not touched here.
+
+**And the standing rule bound this commit for the fourth time**
+[[a-rule-you-wrote-binds-your-next-commit]]: `dex_verifier.h` and `dex_verifier.cpp` both
+still said `call_site` is "not dereferenced by the core … nothing reads its contents",
+which `ResolveConstRef`'s new arm and `GetCallSite` make false. Both are rewritten to say
+what is now true and where the bound lives (at the READER, which the rule permits, and in
+`GetCallSite` rather than in `VerifyInsns` because the section is OPTIONAL — a dex with no
+invoke-custom has no `call_site_ids` at all).
+
+**Everything else they attacked, they REFUTED — with their own instruments.** Memory
+safety: **7,000+ and 500+ crafted inputs** across the two reviews, judged by SUBPROCESS
+EXIT STATUS (a `try/except` cannot see a SIGSEGV) — `data_off` at/past the end, a
+`0xFFFFFFFF` uleb count, truncated arrays, an 8-byte handle index, every id past its
+table, 3,000 append-and-repoint iterations, a 64 MB pad — **0 signals, 0 hangs, 0
+unbounded allocations**, and the extent bound proven EXACT (one-past-fit rejected,
+exactly-fits accepted). The reconstruction shape matches jadx 1.5.0 byte for byte modulo
+the documented `invoke.X` prefix; `set_synthetic_vid` is provably inert; the AST schema
+gains no node type; the chain survives RegisterPropagation / DCE / PlaceDeclarations; the
+CONCATENATED-source case (dexllm#25) was verified rather than assumed; and every headline
+a/b number re-derives.
+
+**Guards** (31 cases in [tests/test_invoke_custom_ir.py](tests/test_invoke_custom_ir.py),
+ALL on committed fixtures — corpus-less and narrowing-proof). dexllm#60's boundary test
+was DELETED as its own docstring instructed, and `ParseCallSiteArg` — the FOURTH
+encoded_value decoder — joined dexllm#63's parametrised desync guard rather than the
+case-per-type one: it implements the kinds a call site may LEGALLY carry, so its
+`default:` ADVANCES instead of enumerating all 18. Crafted IN PLACE and
+length-preserving for the four shapes the fixture does not have: **0xFD**
+(`invoke-custom/range`, **zero** sites in the fixture — retyped from 0xFC, both 3 code
+units, registers rewritten to a range that fits and the craft asserted to still verify);
+a **MethodHandle bootstrap argument** (zero — every handle there is element 0); a
+**short-encoded float** (every float there is full width, where a left- and a
+right-justified read AGREE — the last element of a site is shortened in place, and the
+two bytes it stops using are simply not read); and an **unresolvable** site in both the
+consumed and the void form.
+
+**24 mutants, each BUILT and RUN with a distinct `.so` md5, each killed by its intended
+guard**, and the matrix asserts a pinned control md5 before it starts AND after it ends.
+Fifteen from the diff: pre-fix, 0xFC dropped, 0xFD dropped, the `!info.ok` bail removed,
+the half-filled result, the invoke synthetic vids, the argument synthetic vid, the
+marker, the call-site `ptype`, the `methodType` return type moved LAST,
+`Integer.TYPE`->`int`, the float payload left-justified, the method reference quoted,
+`dynamicInvoker()` dropped, and `ParseCallSiteArg`'s advancing `default:`. Nine more for
+the review-driven fixes: CHAR sign-extended again, the container base reverted to the
+slice base, the register window untruncated, element 0 unchecked, element 2 unchecked,
+a handle always `::`, a constructor never `new`, the double back to `%g`, and a float
+through the double formatter. **M9 escaped the first matrix** — every `methodType` the fixture
+produces is HOMOGENEOUS (`(II)I` is three `Integer.TYPE`), so reordering is invisible
+there; it is now pinned on two deliberately MIXED signatures, `(I)V` and
+`(ILString;LDouble;)I`. **The reviewers found SEVEN more holes of the same shape**, each
+by building a mutant that passed the whole file: the element-0 and element-2 kind checks
+(only the middle one was guarded), the CHAR path (the fixture encodes every char argument
+as an INT, which is how its bug shipped), the field-handle `.` and constructor `::new`
+arms (**all 32 handles in all three committed fixtures are kind 4 or 5**, so two of the
+three rendering arms were dead by construction), the float/double precision, and the
+truncated register window. A guard of mine was also literally dead — `assert X or True` —
+and one parametrised case, `methodType(Integer.TYPE)`, passed against the PRE-FIX build
+because the fixture's own Java contains that call; every such assertion is scoped to the
+RECONSTRUCTED lines now. **The container-base fix is pinned at SOURCE level and says
+why**: no v41 container carrying a `call_site_ids` section exists in reach, and rebasing
+one is not a length-preserving craft, so its runtime sibling is an explicit
+non-discriminating floor while a reviewer's mutant is killed by the source pin
+[[pinned-literals-guard-only-the-constant-half]]. **The harness itself had to be rebuilt**: a timed-out foreground
+run left a mutant in the tree, a second run then snapshotted THAT as its baseline, and
+two leftover mutations (`(void)ReadIntLE` and `call_site_marker = false`) had to be
+found by diffing against a known-good copy — [[mutation-harness-restore-pitfalls]] with
+a new variant, two racing instances. The harness now asserts a pinned control md5
+before it starts and after it ends.
+
+**Adjacent, found while implementing this and deliberately NOT fixed here:**
+`DecodeEncodedValueText` — the SIBLING decoder in the same file — LEFT-justifies a
+float/double payload, where the dex spec and ART (`ReadUnsignedInt(..., fill_on_right)`)
+put the stored bytes at the MSB end. Corpus-manifest:
+`FloatingActionButtonImpl.SHOW_SCALE` reads **`2.27795078e-41f`** where AOSP declares
+`1f`, and **382** static float/double initializers across the corpus are short-encoded.
+It is a defect of its own with its own blast radius and its own a/b; this change's
+decoder is written correctly rather than bug-compatibly, and says so at the site.
+
+**Still not modelled, and now the list is short:** nothing in the `invoke-custom`
+family. `EnumerateInvokeSites` and the caller index still exclude 0xFC/0xFD on purpose
+(dexllm#61's truth set is derived from the operand's INDEX KIND, and a call-site index
+is not a method reference) — cross-referencing a call site to its bootstrap is a
+different capability, not a gap in this one.
+
 ### Writer constant/keyword nits — string `"true"` + `while(true)` (2026-06-17)
 
 Two text-Writer divergences surfaced by a same-line-count DAD differential:
@@ -2240,8 +2481,10 @@ re-captured after the review fixes and is **identical to the pre-fix capture on 
 is the 0-regression claim restated as a measurement.
 
 **`invoke-custom`'s operand is not RESOLVED here** — its BBBB is a `call_site_ids`
-index, and rendering the call site's contents needs a `call_site_ids` reader this
-port does not have. Honest and out of scope; the issue does not ask for it.
+index, and rendering the call site's contents needs a reader this port did not have
+at the time. Honest and out of scope; the issue does not ask for it. (dexllm#67 later
+built that reader for the IR, in `core_ext` rather than in the slicer, and
+deliberately left THIS listing alone: the smali view stays baksmali-shaped.)
 (dexllm#66 later replaced the bare `@N` with the LABEL `call_site@N`, which is a
 different claim — the second clause above survives, the "renders as `@N`" headline
 this paragraph used to carry does not. Found by a correctness review as a stale
@@ -2372,11 +2615,12 @@ bundled samples, sweep **25,309-class 0-crash 0-timeout**, determinism 3
 re-captured on the FINAL build (with the verifier bound and every review fix) and is
 **identical on all 63 entries** to the capture taken before them.
 
-**Still not modelled, deliberately:** `invoke-custom` (0xFC/0xFD). Its operand names
-a call site, not a method, and resolving one means reading `call_site_ids` and its
-bootstrap `encoded_array` — a section the vendored slicer does not expose at all.
-Five methods in `invoke-custom.dex` still fail for that reason, and the guard asserts
-they fail for THAT reason rather than any other.
+**`invoke-custom` (0xFC/0xFD) was left unmodelled here** — its operand names a call
+site, not a method — and pinned by a guard saying a future change should delete it.
+**dexllm#67 is that change** (see its section below); the guard is gone and its
+replacement lives in `tests/test_invoke_custom_ir.py`. The claim that resolving one
+needs a slicer accessor turned out to be FALSE: `core_ext` reads the section
+directly, the way it already reads `type_list` and `static_values`.
 
 ### Every index operand is resolved or LABELLED, never a bare `@N` (dexllm#66, 2026-08-22)
 
@@ -2432,8 +2676,9 @@ decimal because the surrounding `string@N` / `type@N` fallbacks in the same lamb
 are — house style beats matching a tool this listing is not otherwise shaped like
 (it is baksmali-shaped). The other four are LABELS. A method handle and a
 call site are not resolved because dexdump does not resolve them either ("too
-large to detail in disassembly"), and a call site additionally needs a
-`call_site_ids` reader the vendored slicer does not have (dexllm#67).
+large to detail in disassembly"), and a call site additionally needed a
+`call_site_ids` reader nothing in the tree had (dexllm#67, which added one to
+`core_ext` for the IR and left this listing as it is).
 
 **No verifier change — but its comment had to be corrected, and that was a
 precondition rather than tidying.** `VerifyInsns` leaves `kIndexProtoRef` in the

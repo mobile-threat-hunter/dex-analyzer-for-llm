@@ -1200,6 +1200,8 @@ const std::array<OpcodeKind, 256> kInstructionSet = []() {
     // 227 entries, so these have no upstream slot to be faithful to.
     t[0xFA] = K::InvokePolymorphic;
     t[0xFB] = K::InvokePolymorphicRange;
+    t[0xFC] = K::InvokeCustom;
+    t[0xFD] = K::InvokeCustomRange;
     // 0xE3-0xF9 / 0xFC-0xFF stay Unused (filled by t.fill above)
     return t;
 }();

@@ -49,6 +49,9 @@ const MethodConst* AsMethod(const ConstRef& cr) {
 const FieldConst* AsField(const ConstRef& cr) {
     return std::get_if<FieldConst>(&cr);
 }
+const CallSiteConst* AsCallSite(const ConstRef& cr) {
+    return std::get_if<CallSiteConst>(&cr);
+}
 
 // Build the MethodRef struct expected by InvokeVirtual / etc. Applies the
 // same util.get_type / util.get_params_type transforms DAD does.
@@ -84,6 +87,204 @@ MethodRef BuildMethodRef(const MethodConst& mc) {
                 std::string(mc.triple[2])};
     m.original_cls_descriptor = std::string(mc.triple[0]);
     return m;
+}
+
+// ─── dexllm#67 — invoke-custom: the bootstrap chain, reconstructed ───────
+//
+// beyond-DAD, with no `// DAD:` analogue: androguard's own instruction table is
+// 227 entries and stops before 0xFA, and its dex parser has no call_site or
+// method_handle support at all.
+//
+// An `invoke-custom` names a CALL SITE, not a method. At runtime the VM calls
+// the site's BOOTSTRAP method once, passing it a `Lookup`, the target NAME and
+// the call's METHOD TYPE (plus the site's extra arguments), and invokes the
+// `CallSite` it returns with the instruction's own registers. Every synthesized
+// node below is one of those steps, so nothing is invented — but it is a
+// RECONSTRUCTION rather than instructions the dex contains, which is what the
+// trailing `/* invoke-custom */` marker says. This is jadx's model (the
+// reference oracle CLAUDE.md names), reached with existing IR node types so the
+// AST schema is unchanged and the text and the AST agree by construction.
+//
+// TWO DELIBERATE DIFFERENCES FROM jadx, both to stay consistent with THIS
+// writer: a class name is rendered by `GetType` (so `java.lang.invoke.X` prints
+// as `invoke.X`, as it already does everywhere else), and `MethodHandle.invoke`
+// is typed from the call site rather than as `Object` + a cast at each use —
+// the same call-site-over-declaration choice dexllm#60 made for 0xFA.
+const char* PrimitiveClassLiteral(char desc) {
+    switch (desc) {
+        case 'Z': return "Boolean.TYPE";
+        case 'B': return "Byte.TYPE";
+        case 'S': return "Short.TYPE";
+        case 'C': return "Character.TYPE";
+        case 'I': return "Integer.TYPE";
+        case 'J': return "Long.TYPE";
+        case 'F': return "Float.TYPE";
+        case 'D': return "Double.TYPE";
+        case 'V': return "Void.TYPE";
+        default:  return nullptr;
+    }
+}
+
+// `Foo.class` / `Integer.TYPE`. Typed `Ljava/lang/Class;` so `Constant::Accept`
+// routes it to `visit_base_class`, which emits the text unquoted.
+IRFormPtr ClassLiteral(std::string_view desc) {
+    std::string text;
+    if (desc.size() == 1) {
+        if (const char* prim = PrimitiveClassLiteral(desc.front())) text = prim;
+    }
+    if (text.empty()) text = GetType(std::string(desc)) + ".class";
+    return std::make_shared<Constant>(ConstantValue{text}, "Ljava/lang/Class;",
+                                      std::nullopt, desc);
+}
+
+InvokeInstruction::Triple SynthTriple(std::string_view cls,
+                                      std::string_view name,
+                                      std::string_view proto) {
+    return {std::string(cls), std::string(name), std::string(proto)};
+}
+
+// `MethodType.methodType(Ret.class, P0.class, …)` — the call type spelled out.
+IRFormPtr MethodTypeCall(std::string_view proto) {
+    std::vector<IRFormPtr> args;
+    auto paren = proto.rfind(')');
+    args.push_back(ClassLiteral(paren == std::string_view::npos
+                                    ? std::string_view("V")
+                                    : proto.substr(paren + 1)));
+    for (const auto& pd : ParseParamsType(std::string(proto))) {
+        args.push_back(ClassLiteral(pd));
+    }
+    // Every argument is a class literal, so the value-derived Vids of two equal
+    // literals coincide on ONE node — which renders identically, so sharing is
+    // correct here and no synthetic id is needed.
+    std::vector<std::string> ptype(args.size(), "Ljava/lang/Class;");
+    auto call = std::make_shared<InvokeStaticInstruction>(
+        GetType("Ljava/lang/invoke/MethodType;"), "methodType",
+        std::make_shared<BaseClass>(GetType("Ljava/lang/invoke/MethodType;"),
+                                    "Ljava/lang/invoke/MethodType;"),
+        "Ljava/lang/invoke/MethodType;", ptype, args,
+        SynthTriple("Ljava/lang/invoke/MethodType;", "methodType",
+                    "([Ljava/lang/Class;)Ljava/lang/invoke/MethodType;"));
+    call->set_synthetic_vid("$methodType");
+    return call;
+}
+
+// One bootstrap argument as IR. A METHOD HANDLE has no Java literal at all, so
+// it is spelled as the method reference it is (`Cls::name`, `Cls::new`) — for
+// the four FIELD kinds, which method-reference syntax cannot express, as the
+// field access `Cls.name`.
+IRFormPtr CallSiteArgToIr(const IDexCodeSource::CallSiteArg& a,
+                          const std::string& vid) {
+    using Kind = IDexCodeSource::CallSiteArg::Kind;
+    IRFormPtr node;
+    switch (a.kind) {
+        case Kind::Int:
+            node = std::make_shared<Constant>(ConstantValue{a.ival}, "I");
+            break;
+        case Kind::Long:
+            node = std::make_shared<Constant>(ConstantValue{a.ival}, "J");
+            break;
+        case Kind::Float:
+            node = std::make_shared<Constant>(ConstantValue{a.dval}, "F");
+            break;
+        case Kind::Double:
+            node = std::make_shared<Constant>(ConstantValue{a.dval}, "D");
+            break;
+        case Kind::Bool:
+            node = std::make_shared<Constant>(ConstantValue{a.ival}, "Z");
+            break;
+        case Kind::String:
+            node = std::make_shared<Constant>(ConstantValue{a.text},
+                                              "Ljava/lang/String;");
+            break;
+        case Kind::Class:
+            node = ClassLiteral(a.text);
+            break;
+        case Kind::Proto:
+            node = MethodTypeCall(a.text);
+            break;
+        case Kind::Handle: {
+            // A method handle has NO Java literal, so it is spelled as the
+            // method reference it is. `ival` is the method_handle_type: 0x00-
+            // 0x03 name a FIELD (which method-reference syntax cannot express,
+            // so those read as the field access `Cls.name`), 0x06 is a
+            // constructor, everything else a method.
+            //
+            // A `BaseClass` rather than a `Constant`, because that is the node
+            // both emitters render as a BARE NAME: the Writer's
+            // `visit_base_class` writes it unquoted, and dast maps a
+            // descriptor-less one to `Local(name)`. A String-typed Constant
+            // would render `"Cls::name"`, which reads as a literal it is not.
+            std::string text = GetType(a.text);
+            text += (a.ival <= 0x03) ? "." : "::";
+            text += (a.ival == 0x06) ? "new" : a.member;
+            node = std::make_shared<BaseClass>(text);
+            break;
+        }
+    }
+    node->set_synthetic_vid(vid);
+    return node;
+}
+
+IRFormPtr BuildInvokeCustom(const CallSiteConst& cs,
+                            const std::vector<std::string>& largs,
+                            RetState& ret, Vmap& vmap) {
+    const auto& info = cs.info;
+
+    // bsm(MethodHandles.lookup(), "name", MethodType.methodType(…), extra…)
+    auto lookup = std::make_shared<InvokeStaticInstruction>(
+        GetType("Ljava/lang/invoke/MethodHandles;"), "lookup",
+        std::make_shared<BaseClass>(GetType("Ljava/lang/invoke/MethodHandles;"),
+                                    "Ljava/lang/invoke/MethodHandles;"),
+        "Ljava/lang/invoke/MethodHandles$Lookup;",
+        std::vector<std::string>{}, std::vector<IRFormPtr>{},
+        SynthTriple("Ljava/lang/invoke/MethodHandles;", "lookup",
+                    "()Ljava/lang/invoke/MethodHandles$Lookup;"));
+    lookup->set_synthetic_vid("$lookup");
+
+    auto name_const = std::make_shared<Constant>(ConstantValue{info.name},
+                                                 "Ljava/lang/String;");
+    name_const->set_synthetic_vid("$name");
+
+    std::vector<IRFormPtr> bsm_args{lookup, name_const,
+                                    MethodTypeCall(info.proto)};
+    for (size_t i = 0; i < info.args.size(); ++i) {
+        bsm_args.push_back(
+            CallSiteArgToIr(info.args[i], "$a" + std::to_string(i)));
+    }
+    auto bsm = std::make_shared<InvokeStaticInstruction>(
+        GetType(info.bootstrap[0]), info.bootstrap[1],
+        std::make_shared<BaseClass>(GetType(info.bootstrap[0]),
+                                    info.bootstrap[0]),
+        "Ljava/lang/invoke/CallSite;", ParseParamsType(info.bootstrap[2]),
+        bsm_args,
+        SynthTriple(info.bootstrap[0], info.bootstrap[1], info.bootstrap[2]));
+    bsm->set_synthetic_vid("$bootstrap");
+
+    auto dyn = std::make_shared<InvokeInstruction>(
+        GetType("Ljava/lang/invoke/CallSite;"), "dynamicInvoker", bsm,
+        "Ljava/lang/invoke/MethodHandle;", std::vector<std::string>{},
+        std::vector<IRFormPtr>{},
+        SynthTriple("Ljava/lang/invoke/CallSite;", "dynamicInvoker",
+                    "()Ljava/lang/invoke/MethodHandle;"));
+    dyn->set_synthetic_vid("$dynamicInvoker");
+
+    // The call's OWN signature is the site's method type — `MethodHandle.invoke`
+    // is signature-polymorphic, so its declaration says nothing about how many
+    // registers each argument occupies or what comes back.
+    std::vector<std::string> ptype = ParseParamsType(info.proto);
+    auto paren = info.proto.rfind(')');
+    std::string rtype = paren == std::string::npos
+                            ? "V"
+                            : info.proto.substr(paren + 1);
+    auto invoked = std::make_shared<InvokeInstruction>(
+        GetType("Ljava/lang/invoke/MethodHandle;"), "invoke", dyn, rtype, ptype,
+        GetArgs(vmap, ptype, largs),
+        SynthTriple("Ljava/lang/invoke/MethodHandle;", "invoke", info.proto));
+    invoked->call_site_marker = true;
+
+    IRFormPtr returned = (rtype == "V") ? IRFormPtr{} : ret.New();
+    return std::make_shared<AssignExpression>(std::move(returned),
+                                              std::move(invoked));
 }
 
 // Convert payload bytes to vector<int64_t> for FillArrayExpression.
@@ -418,6 +619,38 @@ IRFormPtr DispatchInstruction(const RawIns& ri,
             if (!mc) return std::make_shared<NopExpression>();
             MethodRef m = BuildMethodRef(*mc);
             return InvokeVirtualRange(m, BuildRangeRegs(d.vA, d.vC), gen_ret, vmap);
+        }
+        // dexllm#67: invoke-custom. Unlike every other invoke there is no
+        // method to resolve — the operand names a call SITE, and the IR is the
+        // bootstrap chain that site describes. An UNRESOLVED site (malformed,
+        // crafted, or carrying a bootstrap argument with no faithful Java
+        // literal) emits nothing, which leaves a following `move-result` at the
+        // documented null-guard: exactly the pre-dexllm#67 behaviour, and a
+        // deliberate refusal to fabricate output for input we could not read.
+        case K::InvokeCustom: {
+            const CallSiteConst* cc = AsCallSite(ri.const_ref);
+            if (!cc || !cc->info.ok) return std::make_shared<NopExpression>();
+            // Only the vA registers the instruction HAS. The call-site proto is
+            // unverified (ART's `CheckInterCallSiteIdItem` is not ported), so a
+            // crafted one can declare more parameters than there are registers;
+            // handing `GetArgs` the full 5-slot window with empty names then
+            // fabricates `unknownType v` arguments, while a truncated window
+            // makes it bail and render none. Refusing beats inventing — the same
+            // rule the unresolved-site path follows. (A correctness reviewer
+            // constructed the 1..5-parameter window on a `verify()`-valid dex.)
+            auto regs = BuildInvokeRegs(d);
+            const std::vector<std::string> all{regs.c, regs.d, regs.e, regs.f,
+                                               regs.g};
+            const size_t n = std::min<size_t>(d.vA, all.size());
+            return BuildInvokeCustom(
+                *cc, std::vector<std::string>(all.begin(), all.begin() + n),
+                gen_ret, vmap);
+        }
+        case K::InvokeCustomRange: {
+            const CallSiteConst* cc = AsCallSite(ri.const_ref);
+            if (!cc || !cc->info.ok) return std::make_shared<NopExpression>();
+            return BuildInvokeCustom(*cc, BuildRangeRegs(d.vA, d.vC), gen_ret,
+                                     vmap);
         }
         case K::InvokeVirtual:
         case K::InvokeSuper:

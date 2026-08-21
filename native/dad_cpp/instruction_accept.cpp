@@ -45,7 +45,13 @@ void Constant::Accept(Visitor& v) {
     if (std::holds_alternative<std::string>(cst_)) {
         v.visit_constant_string(std::get<std::string>(cst_));
     } else if (std::holds_alternative<double>(cst_)) {
-        v.visit_constant_double(std::get<double>(cst_));
+        // dexllm#67: a genuinely FLOAT-valued constant reaches an emitter only
+        // through the synthesized bootstrap arguments of an invoke-custom — every
+        // `const*` opcode builds an INTEGER-typed Constant, so this branch was
+        // unreachable before. Route by the declared type so the emitter can pick
+        // its float- or double-precision formatter rather than a lossy default.
+        if (type == "F") v.visit_constant_float(static_cast<float>(std::get<double>(cst_)));
+        else             v.visit_constant_double(std::get<double>(cst_));
     } else if (std::holds_alternative<int64_t>(cst_)) {
         v.visit_constant_int(std::get<int64_t>(cst_));
     }

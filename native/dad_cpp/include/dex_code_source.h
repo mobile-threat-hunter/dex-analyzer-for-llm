@@ -86,6 +86,60 @@ public:
         return {};
     }
 
+    // dexllm#67 — one BOOTSTRAP ARGUMENT of a call site, as a TYPED value
+    // rather than rendered text, so the IR builder turns each into the same
+    // `Constant` the text Writer and the AST both read. The dex spec admits
+    // exactly these kinds in a call_site's encoded_array; anything else makes
+    // the whole call site unresolved (see `CallSiteInfo::ok`).
+    struct CallSiteArg {
+        // No NULL: the dex spec does not admit one as a bootstrap argument, and
+        // the enum being exactly the renderable kinds is what makes the IR
+        // builder's switch exhaustive by construction rather than by review.
+        enum class Kind : uint8_t {
+            Int, Long, Float, Double, Bool, String, Class, Proto, Handle
+        };
+        Kind kind = Kind::Int;
+        int64_t     ival = 0;   // Int/Long/Bool; Handle: the method_handle_type
+        double      dval = 0.0; // Float/Double (decoded, NOT raw IEEE bits)
+        std::string text;       // String: the value. Class: the type DESCRIPTOR.
+                                // Proto: "(params)Ret". Handle: owner descriptor.
+        std::string member;     // Handle only: the field or method NAME.
+        std::string sig;        // Handle only: the member's proto (a method) or
+                                // type descriptor (a field).
+        // The RENDERING of a handle (`Cls::name`) is the IR builder's decision,
+        // not the source's — the source reports what the dex says and no more.
+    };
+
+    // dexllm#67 — a resolved `call_site_ids[N]` entry. ART's
+    // `CheckInterCallSiteIdItem` specifies the shape and doubles as the
+    // definition: element 0 is the BOOTSTRAP method handle, element 1 the
+    // target NAME, element 2 the call-site METHOD TYPE, and the rest are the
+    // bootstrap's extra arguments.
+    //
+    // `ok == false` means the entry could not be resolved — a malformed or
+    // crafted call site, or a bootstrap argument of a kind that has no faithful
+    // Java literal. The IR then emits nothing for the instruction, which is
+    // exactly what every source did before dexllm#67.
+    struct CallSiteInfo {
+        bool ok = false;
+        std::array<std::string, 3> bootstrap{};  // (cls, name, proto), Smali form
+        std::string name;                        // target name (element 1)
+        std::string proto;                       // call type (element 2)
+        std::vector<CallSiteArg> args;           // bootstrap args (element 3..)
+    };
+
+    // dexllm#67 — resolve one call site by `call_site_ids` index. Defaulted
+    // (like `GetProto`) so a source that cannot read the section keeps working:
+    // an unresolved entry leaves `invoke-custom` unmodelled, the pre-dexllm#67
+    // behaviour. Everything the implementation reads is UNVERIFIED — the
+    // structural verifier bounds the section's extent but not its contents (ART's
+    // `CheckInterCallSiteIdItem` is not ported) — so the implementation MUST
+    // bound every offset and index itself.
+    virtual CallSiteInfo GetCallSite(uint16_t /*dex_id*/,
+                                     uint32_t /*call_site_idx*/) {
+        return {};
+    }
+
     virtual std::string_view   GetString(uint16_t dex_id, uint32_t idx) = 0;
     virtual std::string_view   GetTypeName(uint16_t dex_id, uint32_t idx) = 0;
     // Returns (class_descriptor, name, proto). Class is in Smali form

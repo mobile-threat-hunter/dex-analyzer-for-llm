@@ -132,9 +132,16 @@ public:
         w_->Write(std::to_string(value));
     }
     void visit_constant_double(double value) override {
-        char buf[64];
-        std::snprintf(buf, sizeof(buf), "%g", value);
-        w_->Write(buf);
+        // dexllm#67: `%g` is six significant figures — `Double.MAX_VALUE` printed
+        // `1.79769e+308`, and the AST (which renders the same node through
+        // `PyFloatRepr`) disagreed with it. Use the round-trip formatter the
+        // return-literal and EncodedValue paths already use, which also renders
+        // NaN/±Inf as valid Java instead of `nan`/`inf`. Unreachable before this
+        // change: every `const*` opcode builds an INTEGER-typed Constant.
+        w_->Write(FormatDoubleLiteral(value));
+    }
+    void visit_constant_float(float value) override {
+        w_->Write(FormatFloatLiteral(value));
     }
     void visit_constant_string(std::string_view value) override {
         // DAD writer.py:734 visit_constant → `string(cst)` ALWAYS quotes/escapes
@@ -378,6 +385,14 @@ public:
             if (!emit_fp_const_typed(args[i], pt)) visit_ins(args[i]);
         }
         w_->Write(")");
+        // dexllm#67 (beyond-DAD): an invoke-custom's bootstrap chain is a
+        // RECONSTRUCTION of what the runtime does with the call site, not
+        // instructions the dex contains. Say so, as jadx does — without it the
+        // expanded chain reads as literal bytecode. Set on the outermost node of
+        // the chain only, and inert for every other invoke.
+        if (invokeInstr && invokeInstr->call_site_marker) {
+            w_->Write(" /* invoke-custom */");
+        }
     }
 
     void visit_return_void() override {

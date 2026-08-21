@@ -32,9 +32,9 @@
 
 #include "slicer/dex_bytecode.h"   // dex::Instruction, dex::Opcode
 
-namespace dexkit::dad {
+#include "dex_code_source.h"        // IDexCodeSource::CallSiteInfo (dexllm#67)
 
-class IDexCodeSource;  // dex_code_source.h
+namespace dexkit::dad {
 
 // ============================================================================
 // Const-pool reference — populated by builder per instruction (when relevant).
@@ -66,9 +66,19 @@ struct MethodConst   {
     // (androguard's nested-list shape has no slot for it) and is not done.
     std::string_view call_site_proto;
 };
+// dexllm#67: invoke-custom's operand is a `call_site_ids` index, which names
+// no method — it names an encoded_array describing the BOOTSTRAP that links the
+// call at runtime. Resolved once by the builder (see `IDexCodeSource::GetCallSite`)
+// and OWNED here rather than viewed, unlike its siblings: the rendered method
+// reference of a `Handle` argument is constructed, so there is no table for it to
+// point into, and one owned copy per invoke-custom is free (0 corpus incidence).
+struct CallSiteConst {
+    IDexCodeSource::CallSiteInfo info;
+    uint32_t raw_idx = 0;
+};
 using ConstRef = std::variant<std::monostate,
                               StringConst, TypeConst,
-                              FieldConst, MethodConst>;
+                              FieldConst, MethodConst, CallSiteConst>;
 
 // ============================================================================
 // Payload — fill-array-data / packed-switch / sparse-switch trailing data.

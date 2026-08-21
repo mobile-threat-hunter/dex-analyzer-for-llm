@@ -62,6 +62,10 @@ public:
     // C++: split into three overloads for type safety.
     virtual void visit_constant_int(int64_t /*value*/)              {}
     virtual void visit_constant_double(double /*value*/)            {}
+    // dexllm#67: a FLOAT-typed constant, so an emitter can use its own
+    // float-precision formatter. Defaults to the double path, which is exactly
+    // what every implementer did before, so none had to change.
+    virtual void visit_constant_float(float value) { visit_constant_double(value); }
     virtual void visit_constant_string(std::string_view /*value*/)  {}
     // Boolean (Constant.type == "Z") — emitted as the bare keyword true/false,
     // NOT as a quoted string. Kept separate from visit_constant_string so a real

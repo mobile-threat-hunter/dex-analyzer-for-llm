@@ -196,6 +196,17 @@ ConstRef ResolveConstRef(const dex::Instruction& decoded, dex::Opcode op,
             uint32_t i = pick_idx();
             return FieldConst{src.GetFieldRefTriple(dex_id, i), i};
         }
+        case dex::kIndexCallSiteRef: {
+            // dexllm#67: invoke-custom (0xFC/0xFD). The operand names a
+            // `call_site_ids` entry, not a method, so there is no triple to
+            // resolve — the source reads the bootstrap, the target name and the
+            // call type out of the entry's encoded_array. An unresolved entry
+            // still yields a CallSiteConst (with `ok == false`), so the dispatch
+            // arm can tell "this is an invoke-custom we could not read" from
+            // "this opcode carries no const-pool reference at all".
+            uint32_t i = decoded.vB;
+            return CallSiteConst{src.GetCallSite(dex_id, i), i};
+        }
         default:
             return std::monostate{};
     }

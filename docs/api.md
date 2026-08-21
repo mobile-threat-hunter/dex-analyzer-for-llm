@@ -467,8 +467,9 @@ table the number indexes:
 
 The last four are **labels, not resolutions**. A method handle and a call site are
 not resolved here because AOSP's own dexdump does not resolve them either ("too
-large to detail in disassembly"), and a call site would additionally need a
-`call_site_ids` reader the vendored slicer does not have (dexllm#67). The label
+large to detail in disassembly"). **The smali listing stays this way on purpose**:
+dexllm#67 built a `call_site_ids` reader for the DECOMPILER, and deliberately did
+not feed it into this view, which is baksmali-shaped. The label
 values are **decimal**, matching the `string@N` / `type@N` fallbacks alongside
 them, where dexdump uses zero-padded hex — this listing is baksmali-shaped, not
 dexdump-shaped, and carries no `// kind@N` provenance comment on any operand

@@ -171,12 +171,26 @@ public:
     // BaseClass, the raw register name for Variable). Polymorphic accessor so
     // AssignExpression / MoveExpression / etc. can key var_map without
     // downcasting.
-    virtual std::string Vid() const { return {}; }
+    virtual std::string Vid() const { return synthetic_vid_; }
+
+    // dexllm#67 — a SYNTHESIZED node's id. An IRForm keys its `var_map` by the
+    // Vid of each child, and the natural ids collide for exactly the shape
+    // invoke-custom's reconstructed bootstrap call has: an invoke's id is ""
+    // (fine as the single BASE, not as two ARGUMENTS), and a Constant's is
+    // VALUE-derived, so a `String "2"` and the int `2` are both `c2`. Nothing
+    // the opcode handlers build ever sets this, so every id stays exactly what
+    // it was; only `BuildInvokeCustom` assigns one, where it can guarantee
+    // uniqueness within the call it is building.
+    void set_synthetic_vid(std::string vid) { synthetic_vid_ = std::move(vid); }
 
     // Polymorphic str()-equivalent — Variable/Constant/etc. override.
     // Used by AssignExpression / MoveExpression __str__ to format children.
     virtual std::string ToString() const { return {}; }
 
+protected:
+    std::string synthetic_vid_;
+
+public:
     // DAD: instruction.py:23 self.var_map — dict keyed by the .v field of
     // each contained IRForm. Set by AssignExpression / MoveExpression / etc.
     std::unordered_map<std::string, IRFormPtr> var_map;
@@ -226,7 +240,9 @@ public:
     const ConstantValue& cst() const noexcept { return cst_; }
     int64_t cst2() const noexcept { return cst2_; }
     const std::string& v() const noexcept { return v_; }
-    std::string Vid() const override { return v_; }
+    std::string Vid() const override {
+        return synthetic_vid_.empty() ? v_ : synthetic_vid_;  // dexllm#67
+    }
     const std::string& clsdesc() const noexcept { return clsdesc_; }
 
 private:
@@ -251,7 +267,9 @@ public:
 
     const std::string& cls() const noexcept { return cls_; }
     const std::string& v() const noexcept { return v_; }
-    std::string Vid() const override { return v_; }
+    std::string Vid() const override {
+        return synthetic_vid_.empty() ? v_ : synthetic_vid_;  // dexllm#67
+    }
     const std::string& clsdesc() const noexcept { return clsdesc_; }
 
 private:
@@ -595,6 +613,12 @@ public:
     const std::vector<std::string>& ptype() const noexcept { return ptype_; }
     const std::vector<std::string>& args()  const noexcept { return args_; }
     const Triple& triple() const noexcept { return triple_; }
+
+    // dexllm#67 — renders a trailing `/* invoke-custom */` after this call's
+    // arguments. The bootstrap chain is a RECONSTRUCTION of what the runtime
+    // does with the call site, not instructions the dex contains, and jadx
+    // marks it for the same reason. Inert for every other invoke.
+    bool call_site_marker = false;
 
 protected:
     std::string cls_;

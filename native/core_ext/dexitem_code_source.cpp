@@ -445,6 +445,251 @@ DecodeStaticInitMap(const dexkit::DexItem& item,
     return init_map;
 }
 
+
+// ─── dexllm#67 — call-site reading (invoke-custom's operand) ─────────────
+//
+// Read WITHOUT touching the vendored slicer. `Reader` exposes no call-site
+// accessor, and the issue assumed one had to be added; it does not, because
+// the section is a `u4` array found through the map and this file already
+// reads raw sections that way (`BuildProto`'s type_list, the static_values
+// walk). One fewer entry for the pile dexllm#65 records as uncataloguable.
+//
+// EVERYTHING READ HERE IS UNVERIFIED. `VerifyDex` bounds the call_site_id
+// section's EXTENT (dexllm#57's `CheckMap`) and nothing else — ART's
+// `CheckInterCallSiteIdItem` is not ported — so `data_off`, the element type
+// codes and every index inside are attacker-controlled. Each is bounded here,
+// which is the reader tier the safety contract permits (dexllm#66's
+// precedent); a failure reports `ok == false` rather than guessing.
+constexpr uint16_t kMapCallSiteIdItem = 0x0007;
+
+// method_handle_type codes (dex spec §method_handle_item). 0x00-0x03 name a
+// FIELD, 0x04 and up name a METHOD.
+constexpr uint16_t kMhFirstMethodKind = 0x04;
+constexpr uint16_t kMhInvokeConstructor = 0x06;
+
+// The mapping's bounds for one logical dex, as a SIZE so an offset is bounded
+// before a pointer is formed from it. Upper end is the real mmap end, which is
+// the same clamp `BuildProto` and the static_values walk already use.
+struct ImageSpan {
+    const U1* base = nullptr;
+    size_t avail = 0;
+    explicit operator bool() const { return base != nullptr; }
+};
+
+ImageSpan SpanOf(const dexkit::DexItem& item) {
+    dexkit::MemMap* img = item.GetImage();
+    if (img == nullptr || !img->ok()) return {};
+    // The base every offset in this dex resolves against — the slicer's own
+    // `image_`. NOT `dataPtr<U1>(0)`: its guard is
+    // `SLICER_CHECK_GE(offset, header_->data_off && …)`, which rejects offset 0
+    // outright.
+    //
+    // `Header()` alone is WRONG for a v41 CONTAINER slice, and the slicer proves
+    // it: `Reader`'s ctor sets `header_ = ptr<Header>(0)` (the SLICE) and only
+    // then `ValidateHeader` does `image_ -= header_->ContainerOff()` — so the
+    // header address is slice-relative while every offset is container-relative.
+    // On AOSP's own `multidex-container.dex` the second slice sits at +564 with
+    // `map_off` 1332 in a 1468-byte container, so a slice-based span rejects its
+    // own map; a container geometry where the sum lands back in range would read
+    // ANOTHER slice's bytes and could fabricate a bootstrap chain from them.
+    // (Found by a correctness reviewer, with that measurement.)
+    const dex::Header* hdr = item.GetReader().Header();
+    if (hdr == nullptr) return {};
+    const U1* base = reinterpret_cast<const U1*>(hdr) - hdr->ContainerOff();
+    const U1* img_end = reinterpret_cast<const U1*>(img->data()) + img->len();
+    if (base == nullptr || base >= img_end) return {};
+    return {base, static_cast<size_t>(img_end - base)};
+}
+
+// (offset, count) of one map section, or nullopt when the map does not carry
+// it — which is the ordinary case: a dex with no invoke-custom has no
+// call_site_id section at all.
+std::optional<std::pair<uint32_t, uint32_t>>
+FindMapSection(const dexkit::DexItem& item, uint16_t want_type) {
+    const dex::Header* hdr = item.GetReader().Header();
+    ImageSpan span = SpanOf(item);
+    if (hdr == nullptr || !span) return std::nullopt;
+    if (hdr->map_off >= span.avail ||
+        span.avail - hdr->map_off < sizeof(uint32_t)) {
+        return std::nullopt;
+    }
+    const U1* mp = span.base + hdr->map_off;
+    uint32_t nitems;
+    std::memcpy(&nitems, mp, sizeof(nitems));
+    const size_t room = span.avail - hdr->map_off - sizeof(uint32_t);
+    if (nitems > room / sizeof(dex::MapItem)) return std::nullopt;
+    for (uint32_t i = 0; i < nitems; ++i) {
+        dex::MapItem mi;
+        std::memcpy(&mi, mp + sizeof(uint32_t) + i * sizeof(dex::MapItem),
+                    sizeof(mi));
+        if (mi.type == want_type) return std::make_pair(mi.offset, mi.size);
+    }
+    return std::nullopt;
+}
+
+// uleb128, bounded. A truncated stream stops at `end` and yields what it read,
+// which the caller then fails on (the element count will not be satisfiable).
+uint32_t ReadULeb128(const U1*& p, const U1* end) {
+    uint32_t result = 0;
+    for (unsigned shift = 0; shift < 32 && p < end; shift += 7) {
+        U1 b = *p++;
+        result |= static_cast<uint32_t>(b & 0x7F) << shift;
+        if ((b & 0x80) == 0) break;
+    }
+    return result;
+}
+
+// Sign-extend the low `nbytes` of a little-endian payload, which is what an
+// encoded BYTE/SHORT/INT/LONG is (CHAR is the one unsigned member and its
+// caller masks instead).
+int64_t SignExtend(uint64_t v, size_t nbytes) {
+    if (nbytes == 0 || nbytes >= 8) return static_cast<int64_t>(v);
+    const unsigned shift = static_cast<unsigned>(64 - 8 * nbytes);
+    return static_cast<int64_t>(v << shift) >> shift;  // arithmetic, C++20
+}
+
+// A float/double payload is "zero-extended to the RIGHT" (dex spec): the stored
+// bytes are the MOST significant ones and the omitted low-order bytes are the
+// zeros. ART reads them the same way (`EncodedArrayValueIterator` ->
+// `ReadUnsignedInt(..., fill_on_right = true)`), so a 2-byte `80 3F` is
+// 0x3F800000 = 1.0f and NOT the 0x00003F80 denormal a left-justified read gives.
+//
+// KNOWN DIVERGENCE, deliberate: `DecodeEncodedValueText` in this same file
+// left-justifies, so a short-encoded static float initializer renders as a
+// denormal (corpus-manifest — `FloatingActionButtonImpl.SHOW_SCALE = 1f` reads
+// `2.27795078e-41f`). That is a pre-existing defect of its own with its own
+// blast radius (382 initializers across the corpus) and is NOT fixed here; this
+// decoder is written correctly rather than bug-compatibly.
+double DecodeEncodedFloat(uint64_t raw, size_t nbytes) {
+    uint32_t bits = nbytes >= 4
+                        ? static_cast<uint32_t>(raw)
+                        : static_cast<uint32_t>(raw << (8 * (4 - nbytes)));
+    float f;
+    std::memcpy(&f, &bits, sizeof(f));
+    return static_cast<double>(f);
+}
+
+double DecodeEncodedDouble(uint64_t raw, size_t nbytes) {
+    uint64_t bits = nbytes >= 8 ? raw : (raw << (8 * (8 - nbytes)));
+    double d;
+    std::memcpy(&d, &bits, sizeof(d));
+    return d;
+}
+
+// One `method_handle_item`, resolved to (owner, member, signature) + its kind.
+// The section's EXTENT is verifier-bounded (dexllm#57's `CheckMap`); the INDEX
+// inside it is not, so it is bounded here, and the member index is bounded by
+// `Get*RefTriple` itself.
+bool ResolveMethodHandle(DexItemCodeSource& src, const dexkit::DexItem& item,
+                         uint16_t dex_id, uint32_t mh_idx,
+                         dad::IDexCodeSource::CallSiteArg& out) {
+    const auto handles = item.GetReader().MethodHandles();
+    if (mh_idx >= handles.size()) return false;
+    const dex::MethodHandle& mh = handles[mh_idx];
+    const auto triple =
+        mh.method_handle_type >= kMhFirstMethodKind
+            ? src.GetMethodRefTriple(dex_id, mh.field_or_method_id)
+            : src.GetFieldRefTriple(dex_id, mh.field_or_method_id);
+    if (triple[0].empty() || triple[1].empty()) return false;
+    out.kind = dad::IDexCodeSource::CallSiteArg::Kind::Handle;
+    out.ival = mh.method_handle_type;
+    out.text = std::string(triple[0]);
+    out.member = std::string(triple[1]);
+    out.sig = std::string(triple[2]);
+    return true;
+}
+
+// One encoded_value of a call_site's array, as a TYPED value.
+//
+// Returns false for a type code that has no faithful Java literal, which makes
+// the whole call site unresolved. `p` is advanced past the payload EITHER WAY,
+// so the parse cannot desync — the dexllm#63 property, and the reason this
+// decoder belongs to the `ScanEncodedValueStrings` family rather than the
+// case-per-type one (it implements the codes a call site may legally carry,
+// not all 18).
+bool ParseCallSiteArg(const U1*& p, const U1* end,
+                      DexItemCodeSource& src, const dexkit::DexItem& item,
+                      uint16_t dex_id,
+                      dad::IDexCodeSource::CallSiteArg& out) {
+    using Kind = dad::IDexCodeSource::CallSiteArg::Kind;
+    if (p >= end) return false;
+    const U1 header = *p++;
+    const size_t nbytes = static_cast<size_t>((header >> 5) & 0x07) + 1;
+    switch (header & 0x1F) {
+        case 0x03: {  // CHAR — the ONE unsigned member: zero-extended, never
+                      // sign-extended (ART reads it with `ReadUnsignedInt`).
+                      // Masking a sign-extended value cannot undo the damage —
+                      // a 1-byte 0x80 becomes 0xFF80 = 65408 instead of 128,
+                      // which d8 emits for any char in 128..255.
+            out.kind = Kind::Int;
+            out.ival = static_cast<int64_t>(ReadIntLE(p, end, nbytes) & 0xFFFF);
+            return true;
+        }
+        case 0x00:   // BYTE
+        case 0x02:   // SHORT
+        case 0x04: { // INT — signed
+            out.kind = Kind::Int;
+            out.ival = SignExtend(ReadIntLE(p, end, nbytes), nbytes);
+            return true;
+        }
+        case 0x06: {  // LONG
+            out.kind = Kind::Long;
+            out.ival = SignExtend(ReadIntLE(p, end, nbytes), nbytes);
+            return true;
+        }
+        case 0x10: {  // FLOAT — zero-extended to the RIGHT, like every other
+            out.kind = Kind::Float;  // encoded float in this file.
+            out.dval = DecodeEncodedFloat(ReadIntLE(p, end, nbytes), nbytes);
+            return true;
+        }
+        case 0x11: {  // DOUBLE
+            out.kind = Kind::Double;
+            out.dval = DecodeEncodedDouble(ReadIntLE(p, end, nbytes), nbytes);
+            return true;
+        }
+        case 0x17: {  // STRING
+            uint64_t idx = ReadIntLE(p, end, nbytes);
+            out.kind = Kind::String;
+            out.text = std::string(src.GetString(dex_id, static_cast<uint32_t>(idx)));
+            return true;
+        }
+        case 0x18: {  // TYPE — a class literal
+            uint64_t idx = ReadIntLE(p, end, nbytes);
+            out.kind = Kind::Class;
+            out.text = std::string(src.GetTypeName(dex_id, static_cast<uint32_t>(idx)));
+            return !out.text.empty();
+        }
+        case 0x15: {  // METHOD_TYPE — a proto index (dexllm#57 named the code)
+            uint64_t idx = ReadIntLE(p, end, nbytes);
+            out.kind = Kind::Proto;
+            out.text = std::string(src.GetProto(dex_id, static_cast<uint32_t>(idx)));
+            return !out.text.empty();
+        }
+        case 0x16: {  // METHOD_HANDLE — an index into the method_handle section
+            uint64_t idx = ReadIntLE(p, end, nbytes);
+            return ResolveMethodHandle(src, item, dex_id,
+                                       static_cast<uint32_t>(idx), out);
+        }
+        case 0x1E:   // NULL — not a legal bootstrap argument (the dex spec
+                     // lists the primitive, String, Class, MethodType and
+                     // MethodHandle forms and nothing else), and it carries no
+                     // payload, so there is nothing to skip.
+            return false;
+        case 0x1F:   // BOOLEAN — the value is the arg nibble, no payload
+            out.kind = Kind::Bool;
+            out.ival = (header >> 5) & 0x01;
+            return true;
+        default:
+            // ENUM / FIELD / METHOD / ARRAY / ANNOTATION: not a legal call-site
+            // argument, and none has a faithful Java literal. Advance anyway so
+            // this decoder cannot desync (the ARRAY/ANNOTATION payload is not
+            // `arg+1` bytes, but the caller abandons the whole call site here,
+            // so nothing reads on).
+            (void)ReadIntLE(p, end, nbytes);
+            return false;
+    }
+}
+
 }  // namespace
 
 DexItemCodeSource::DexItemCodeSource(dexkit::DexKit& core) : core_(core) {}
@@ -591,6 +836,74 @@ DexItemCodeSource::GetProtoCached(uint16_t dex_id, uint32_t proto_idx) {
     std::lock_guard lock(proto_cache_mutex_);
     auto [it, _] = proto_cache_.emplace(key, std::move(proto));
     return it->second;
+}
+
+// dexllm#67 — resolve `call_site_ids[idx]`. See the helper block above for why
+// nothing here trusts the verifier beyond the section's extent.
+dad::IDexCodeSource::CallSiteInfo
+DexItemCodeSource::GetCallSite(uint16_t dex_id, uint32_t call_site_idx) {
+    // Every failure path returns a PRISTINE result, never the half-filled one:
+    // the bootstrap is resolved before the name is checked, so returning `out`
+    // would hand a consumer a real bootstrap beside an empty name and an empty
+    // call type — which renders as a plausible, and entirely fabricated,
+    // `bsm(lookup(), "", methodType(Void.TYPE))`. `ok == false` must mean
+    // nothing was learned.
+    CallSiteInfo out;
+    DexItem* item = SafeGetDexItem(core_, dex_id);
+    if (item == nullptr) return {};
+    ImageSpan span = SpanOf(*item);
+    if (!span) return {};
+
+    auto section = FindMapSection(*item, kMapCallSiteIdItem);
+    if (!section) return {};
+    const uint32_t cs_off = section->first;
+    const uint32_t cs_size = section->second;
+    if (call_site_idx >= cs_size) return {};
+    if (cs_off >= span.avail ||
+        (span.avail - cs_off) / sizeof(uint32_t) < cs_size) {
+        return {};
+    }
+    uint32_t data_off;
+    std::memcpy(&data_off,
+                span.base + cs_off + call_site_idx * sizeof(uint32_t),
+                sizeof(data_off));
+    if (data_off == 0 || data_off >= span.avail) return {};
+
+    // encoded_array_item: uleb128 size, then `size` encoded_values.
+    const U1* p = span.base + data_off;
+    const U1* end = span.base + span.avail;
+    const uint32_t count = ReadULeb128(p, end);
+    // ART's CheckInterCallSiteIdItem requires the three fixed elements; fewer
+    // is a malformed call site, and there is nothing to model without them.
+    if (count < 3) return {};
+
+    CallSiteArg e0;
+    if (!ParseCallSiteArg(p, end, *this, *item, dex_id, e0)) return {};
+    if (e0.kind != CallSiteArg::Kind::Handle) return {};
+    out.bootstrap = {e0.text, e0.member, e0.sig};
+
+    CallSiteArg e1;
+    if (!ParseCallSiteArg(p, end, *this, *item, dex_id, e1)) return {};
+    if (e1.kind != CallSiteArg::Kind::String) return {};
+    out.name = e1.text;
+
+    CallSiteArg e2;
+    if (!ParseCallSiteArg(p, end, *this, *item, dex_id, e2)) return {};
+    if (e2.kind != CallSiteArg::Kind::Proto) return {};
+    out.proto = e2.text;
+
+    // Bound the reserve by what could physically remain: `count` is a uleb128
+    // read straight out of the image, so a crafted one can claim 2^32-1
+    // elements that the parse below would fail on only after the allocation.
+    const size_t remaining = static_cast<size_t>(end - p);
+    out.args.reserve(std::min<size_t>(count - 3, remaining));
+    for (uint32_t i = 3; i < count; ++i) {
+        CallSiteArg a;
+        if (!ParseCallSiteArg(p, end, *this, *item, dex_id, a)) return {};
+        out.args.push_back(std::move(a));
+    }
+    out.ok = true;
+    return out;
 }
 
 std::string_view DexItemCodeSource::GetString(uint16_t dex_id, uint32_t idx) {

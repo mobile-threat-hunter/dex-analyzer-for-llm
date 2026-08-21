@@ -965,12 +965,22 @@ bool DexVerifier::VerifyInsns(const u2* insns, u4 insns_size, u2 registers_size)
             // it is bounded just above rather than left to the readers; the
             // asymmetry this comment used to describe did not survive it.
             //
-            // kIndexCallSiteRef (invoke-custom) and kIndexMethodHandleRef stay in
-            // the default arm on the ORIGINAL terms: nothing DEREFERENCES them
-            // (ResolveConstRef returns monostate, every invoke gate excludes
-            // 0xFC/0xFD precisely because their operand is not a method reference,
-            // and dexllm#66's smali arms render only a `call_site@N` /
-            // `method_handle@N` LABEL, which reads no table).
+            // kIndexMethodHandleRef stays in the default arm on the ORIGINAL
+            // terms: nothing dereferences it (dexllm#66's smali arm renders only
+            // a `method_handle@N` LABEL, which reads no table).
+            //
+            // kIndexCallSiteRef DOES have a reader since dexllm#67 —
+            // `ResolveConstRef` resolves it and `DexItemCodeSource::GetCallSite`
+            // walks the entry — so "nothing dereferences them" is no longer true
+            // for it. The rule is unchanged and is satisfied AT THE READER, which
+            // the rule permits: `GetCallSite` bounds `call_site_idx` against the
+            // section size before forming any pointer, and every offset and index
+            // inside the entry against the image and the id tables. It is left
+            // here rather than bounded above because the section is optional (a
+            // dex with no invoke-custom has no `call_site_ids` at all), so the
+            // bound belongs where the section is looked up. The invoke GATES
+            // still exclude 0xFC/0xFD, for the separate dexllm#61 reason that a
+            // call-site index is not a method reference.
             //
             // kIndexProtoRef (const-method-type, 0xFF) DOES have a reader now —
             // dexllm#66 renders it through FormatProto — so this comment no longer

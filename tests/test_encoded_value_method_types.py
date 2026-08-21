@@ -330,8 +330,9 @@ def test_every_decoder_implements_every_value_the_verifier_accepts(decoder, code
     [
         (_DEXKIT_EXT, "void ScanEncodedValueStrings"),
         (_CORE_EXT, "std::string DecodeEncodedValueText"),
+        (_CORE_EXT, "bool ParseCallSiteArg"),
     ],
-    ids=["ScanEncodedValueStrings", "DecodeEncodedValueText"],
+    ids=["ScanEncodedValueStrings", "DecodeEncodedValueText", "ParseCallSiteArg"],
 )
 def test_a_decoder_cannot_desync_by_construction(path, function):
     """A `default:` that ADVANCES makes the invariant a property of the code.
@@ -344,6 +345,14 @@ def test_a_decoder_cannot_desync_by_construction(path, function):
     on `list_class_strings` / `find_classes_declaring_strings` with a green suite
     - a correctness reviewer's finding, since this change is what makes the
     property load-bearing enough to state.
+
+    `ParseCallSiteArg` (dexllm#67, the FOURTH decoder — it reads the bootstrap
+    arguments of a call site) belongs to the same family for the same structural
+    reason: it implements the kinds a call site may LEGALLY carry rather than all
+    18, so the `>= 18` floor of the sibling test would reject it, and its
+    `default:` advances. It abandons the whole call site on an unhandled code, so
+    a desync is not observable there today - which is exactly why the property
+    has to be pinned rather than relied on.
 
     `DecodeEncodedValueText` was given the same arm by dexllm#63, and it needs
     this guard MORE, not less: its `default:` is unreachable on any loadable dex

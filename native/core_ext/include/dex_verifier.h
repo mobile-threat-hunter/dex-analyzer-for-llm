@@ -90,9 +90,19 @@
 //
 // ── OUT OF SCOPE (stated so the boundary is discoverable, not a silent gap) ──
 //   * Instruction type/dataflow semantics — runtime method_verifier, not ported.
-//   * call_site — not dereferenced by the core. Its section EXTENT and its
-//     4-byte ALIGNMENT are checked in CheckMap (see below) but nothing reads its
-//     contents.
+//   * call_site CONTENTS. This line used to read "not dereferenced by the core",
+//     which dexllm#67 made FALSE: modelling invoke-custom means the decompiler
+//     resolves `call_site_ids[N]` and walks the encoded_array it points at
+//     (`DexItemCodeSource::GetCallSite`), which transitively reads
+//     method_handles / string_ids / proto_ids / type_ids. Its section EXTENT and
+//     its 4-byte ALIGNMENT are still all this verifier checks — ART's
+//     `CheckInterCallSiteIdItem` (the element-kind and index checks) is NOT
+//     ported. The standing rule ("a consumer that starts reading one bounds it in
+//     the same change, here or at the reader") is satisfied AT THE READER: every
+//     offset, element kind and index inside is bounded there, and a failure
+//     reports "unresolved" rather than a guess. Porting the check would move
+//     those from a silent skip to a load-time rejection; that is a new rejection
+//     direction and needs its own a/b.
 //   * method_handle CONTENTS. This line used to read "call_site/method_handle —
 //     not dereferenced by the core", which dexllm#57 made FALSE: implementing the
 //     0x16 METHOD_HANDLE encoded_value means the core now resolves a handle

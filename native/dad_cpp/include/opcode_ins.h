@@ -711,6 +711,11 @@ enum class OpcodeKind : uint16_t {
     InvokeStaticRange, InvokeInterfaceRange,
     // dexllm#60 (beyond-DAD — androguard's table is 227 entries and has no 0xFA)
     InvokePolymorphic, InvokePolymorphicRange,
+    // dexllm#67 (beyond-DAD — androguard's table stops before 0xFA, so 0xFC/0xFD
+    // have no `// DAD:` analogue either). Unlike a polymorphic call these reuse
+    // no virtual handler: the operand names a call SITE, so the IR is built in
+    // instruction_dispatch.cpp from the bootstrap the site describes.
+    InvokeCustom, InvokeCustomRange,
     NegInt, NotInt, NegLong, NotLong, NegFloat, NegDouble,
     IntToLong, IntToFloat, IntToDouble,
     LongToInt, LongToFloat, LongToDouble,

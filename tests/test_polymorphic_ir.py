@@ -17,6 +17,10 @@ call-site proto and the port gained `GetProto`.
 **beyond-DAD.** androguard's own instruction table is 227 entries and stops before
 0xFA, so there is no `// DAD:` analogue to be faithful to.
 
+`invoke-custom` (0xFC/0xFD) was left unmodelled here and pinned by a test
+saying a future change should delete it. dexllm#67 is that change, and its
+guards are in `test_invoke_custom_ir.py`.
+
 Everything here runs on committed fixtures: no corpus, narrowing-proof.
 """
 
@@ -27,7 +31,6 @@ from conftest import REPO_ROOT
 
 _POLY = REPO_ROOT / "tests" / "data" / "invoke-polymorphic.dex"
 _HANDLES = REPO_ROOT / "tests" / "data" / "method_handles.dex"
-_CUSTOM = REPO_ROOT / "tests" / "data" / "invoke-custom.dex"
 
 
 def _dk(path):
@@ -196,27 +199,6 @@ def test_the_canonical_method_decompiles_to_its_call() -> None:
         or "AUTOFUZZ_FUNCTION_1.invoke(p2, p3)" in s
         for s in hit
     ), hit[0][:400]
-
-
-def test_invoke_custom_is_still_unmodelled_and_that_is_the_boundary() -> None:
-    """Non-discriminating BY DESIGN — it states what dexllm#60 did NOT do.
-
-    `invoke-custom` (0xFC/0xFD) hits the same null-guard for the same reason, but
-    its operand is a `call_site_ids` index rather than a method, so modelling it
-    needs a call-site reader this port does not have. Five methods here still fail,
-    and a future change that fixes them should DELETE this test rather than let it
-    quietly become a description of a bug that is gone.
-    """
-    dexllm, dk = _dk(_CUSTOM)
-    bad = [
-        m for m, src in _decompile_all(dexllm, dk).items() if "DECOMPILE ERROR" in src
-    ]
-    assert bad, "invoke-custom decompiles now — delete this test and update the docs"
-    for m in bad:
-        assert "invoke-custom" in dk.render_method_smali(m), (
-            f"{m} fails for some OTHER reason than invoke-custom — that is a "
-            "regression this test was not written to allow"
-        )
 
 
 def _polymorphic_offset(raw: bytearray) -> int:

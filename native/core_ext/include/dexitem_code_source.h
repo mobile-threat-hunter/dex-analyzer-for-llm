@@ -33,6 +33,7 @@ public:
     std::string_view   GetMethodName(uint16_t, uint32_t) override;
     std::string        GetMethodProto(uint16_t, uint32_t) override;
     std::string_view   GetProto(uint16_t, uint32_t) override;
+    CallSiteInfo       GetCallSite(uint16_t, uint32_t) override;
     const dex::Code*   GetMethodCode(uint16_t, uint32_t) override;
     std::pair<const uint8_t*, const uint8_t*>
                        GetDexImageRange(uint16_t) override;

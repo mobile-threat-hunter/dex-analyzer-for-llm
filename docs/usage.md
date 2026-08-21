@@ -589,6 +589,12 @@ proto, and `const-method-handle` / `invoke-custom` / the ODEX quick forms render
 `@N` that does not say what the number indexes (dexllm#66). See the operand
 contract in [api.md](api.md#dkrender_class_smaliclass_descriptor-str---str).
 
+`decompile_*` goes further for an `invoke-custom`: it RECONSTRUCTS the bootstrap
+chain the runtime executes for that call site — `bsm(MethodHandles.lookup(),
+"name", MethodType.methodType(…), …).dynamicInvoker().invoke(args)` — with a
+trailing `/* invoke-custom */` saying it is a reconstruction and not instructions
+the dex contains (dexllm#67). The smali listing is unchanged; only the Java is.
+
 ---
 
 ## L6 — Java decompilation (DAD port — complete)
