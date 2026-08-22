@@ -269,6 +269,11 @@ by extracting the raw `.dex` and loading it individually.
 - **EncodedValue**: AOSP reads per spec and stores; dexllm **decodes IEEE754 float/
   double and null/true/false into spec-correct Java literals** for decompiler output
   (a vs-androguard fix, but the intent — Java-source correctness — is dexllm-specific).
+  A float/double payload is **zero-extended to the RIGHT** — the stored bytes are the
+  MOST significant ones, ART's `ReadUnsignedInt(..., fill_on_right = true)` — so a
+  short encoding such as `80 3F` is `1.0f` and not the `0x00003F80` denormal a
+  left-justified read gives (dexllm#70; the decoder read it the wrong way until then,
+  and the FULL-WIDTH encodings every assertion used are where the two readings agree).
 
 ## Bottom line for a threat hunter
 

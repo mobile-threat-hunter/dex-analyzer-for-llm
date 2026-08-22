@@ -208,6 +208,8 @@ androguard gets wrong:
 - **Literals** — boolean `return false/true` (not `return 0/1`), `return null` for a null reference,
   IEEE-754 `float`/`double` literals (`1.0f`, `Double.NaN`) where androguard prints the raw integer
   bits, and `null`/`true`/`false` field initializers (not Python `None`/`True`/`False`).
+  A static initializer's float payload is zero-extended to the **right**, as ART reads it, so a
+  short encoding decodes to the constant the class declares rather than to a denormal (dexllm#70).
 
 **Parallel decompile** — dexllm releases the GIL in `decompile_*`, so threads give real
 parallelism on one shared instance; androguard cannot use threads at all (GIL + non-thread-safe

@@ -173,6 +173,34 @@ std::string PythonUnicodeEscape(std::string_view s) {
     return out;
 }
 
+// A float/double payload is "zero-extended to the RIGHT" (dex spec): the stored
+// bytes are the MOST significant ones and the omitted low-order bytes are the
+// zeros. ART reads them the same way (`EncodedArrayValueIterator` ->
+// `ReadUnsignedInt(..., fill_on_right = true)`), so a 2-byte `80 3F` is
+// 0x3F800000 = 1.0f and NOT the 0x00003F80 denormal a left-justified read gives.
+//
+// dexllm#70 — `DecodeEncodedValueText` (the static-field initializer renderer,
+// below) used to left-justify, so a SHORT-encoded initializer rendered as a
+// denormal on 332 corpus lines. It shares these now, so the rule is stated in
+// exactly one place for both readers. A FULL-WIDTH encoding is where the two
+// readings agree, which is why every pre-existing float assertion in the suite
+// was blind to it.
+double DecodeEncodedFloat(uint64_t raw, size_t nbytes) {
+    uint32_t bits = nbytes >= 4
+                        ? static_cast<uint32_t>(raw)
+                        : static_cast<uint32_t>(raw << (8 * (4 - nbytes)));
+    float f;
+    std::memcpy(&f, &bits, sizeof(f));
+    return static_cast<double>(f);
+}
+
+double DecodeEncodedDouble(uint64_t raw, size_t nbytes) {
+    uint64_t bits = nbytes >= 8 ? raw : (raw << (8 * (8 - nbytes)));
+    double d;
+    std::memcpy(&d, &bits, sizeof(d));
+    return d;
+}
+
 // Decode a single EncodedValue and produce DAD-equivalent text. Returns
 // empty string for value types we don't render (TYPE/FIELD/METHOD/ENUM/
 // ARRAY/ANNOTATION/FLOAT/DOUBLE) — DAD emits `str(<wrapped object>)` for
@@ -205,25 +233,19 @@ std::string DecodeEncodedValueText(const U1*& p,
             return std::to_string(v);
         }
         case 0x10: {  // FLOAT — 32-bit IEEE754, "zero-extended to the right"
-            // Per dex spec (and androguard `_unpack_value`): payload bytes go
-            // to the LSB end of the 4-byte buffer; the high (MSB) end is
-            // zero-padded. So `padded[0..size-1] = stored, padded[size..3] = 0`,
-            // then reinterpret little-endian as float.
+            // dexllm#70 — the payload's stored bytes are the MOST significant
+            // ones (see `DecodeEncodedFloat` above); this used to fill from the
+            // LSB end, which turned every SHORT encoding into a denormal.
             //
             // We diverge from DAD here (DAD reads it as LE unsigned and emits
             // the resulting huge integer, which isn't valid Java). DAD's
             // `_getintvalue` has `# TODO: parse floats/doubles correctly`.
-            uint8_t buf[4] = {0};
-            size_t n = std::min<size_t>(nbytes, 4);
-            for (size_t i = 0; i < n && p < end; ++i) buf[i] = *p++;
-            // Consume any excess bytes the encoder claimed (shouldn't happen
-            // for well-formed dex), clamped so the cursor never passes `end`.
-            if (nbytes > 4)
-                p += std::min<size_t>(nbytes - 4, p < end ? (end - p) : 0);
-            uint32_t bits = 0;
-            for (int i = 0; i < 4; ++i) bits |= static_cast<uint32_t>(buf[i]) << (i * 8);
-            float f;
-            std::memcpy(&f, &bits, 4);
+            //
+            // `nbytes` is 1..4 here — the gate (`VerifyEncodedValue`, 0x10 arm)
+            // rejects `value_arg > 3` — so `ReadIntLE` consumes exactly the
+            // declared payload and no excess-byte clamp is needed.
+            float f = static_cast<float>(
+                DecodeEncodedFloat(ReadIntLE(p, end, nbytes), nbytes));
             if (std::isnan(f)) return std::string("Float.NaN");
             if (std::isinf(f)) return f > 0 ? std::string("Float.POSITIVE_INFINITY")
                                             : std::string("Float.NEGATIVE_INFINITY");
@@ -233,15 +255,8 @@ std::string DecodeEncodedValueText(const U1*& p,
             return std::string(buffer);
         }
         case 0x11: {  // DOUBLE — 64-bit IEEE754, "zero-extended to the right"
-            uint8_t buf[8] = {0};
-            size_t n = std::min<size_t>(nbytes, 8);
-            for (size_t i = 0; i < n && p < end; ++i) buf[i] = *p++;
-            if (nbytes > 8)
-                p += std::min<size_t>(nbytes - 8, p < end ? (end - p) : 0);
-            uint64_t bits = 0;
-            for (int i = 0; i < 8; ++i) bits |= static_cast<uint64_t>(buf[i]) << (i * 8);
-            double d;
-            std::memcpy(&d, &bits, 8);
+            // `nbytes` is 1..8 (the gate's 0x11 arm allows every value_arg).
+            double d = DecodeEncodedDouble(ReadIntLE(p, end, nbytes), nbytes);
             if (std::isnan(d)) return std::string("Double.NaN");
             if (std::isinf(d)) return d > 0 ? std::string("Double.POSITIVE_INFINITY")
                                             : std::string("Double.NEGATIVE_INFINITY");
@@ -546,34 +561,6 @@ int64_t SignExtend(uint64_t v, size_t nbytes) {
     if (nbytes == 0 || nbytes >= 8) return static_cast<int64_t>(v);
     const unsigned shift = static_cast<unsigned>(64 - 8 * nbytes);
     return static_cast<int64_t>(v << shift) >> shift;  // arithmetic, C++20
-}
-
-// A float/double payload is "zero-extended to the RIGHT" (dex spec): the stored
-// bytes are the MOST significant ones and the omitted low-order bytes are the
-// zeros. ART reads them the same way (`EncodedArrayValueIterator` ->
-// `ReadUnsignedInt(..., fill_on_right = true)`), so a 2-byte `80 3F` is
-// 0x3F800000 = 1.0f and NOT the 0x00003F80 denormal a left-justified read gives.
-//
-// KNOWN DIVERGENCE, deliberate: `DecodeEncodedValueText` in this same file
-// left-justifies, so a short-encoded static float initializer renders as a
-// denormal (corpus-manifest — `FloatingActionButtonImpl.SHOW_SCALE = 1f` reads
-// `2.27795078e-41f`). That is a pre-existing defect of its own with its own
-// blast radius (382 initializers across the corpus) and is NOT fixed here; this
-// decoder is written correctly rather than bug-compatibly.
-double DecodeEncodedFloat(uint64_t raw, size_t nbytes) {
-    uint32_t bits = nbytes >= 4
-                        ? static_cast<uint32_t>(raw)
-                        : static_cast<uint32_t>(raw << (8 * (4 - nbytes)));
-    float f;
-    std::memcpy(&f, &bits, sizeof(f));
-    return static_cast<double>(f);
-}
-
-double DecodeEncodedDouble(uint64_t raw, size_t nbytes) {
-    uint64_t bits = nbytes >= 8 ? raw : (raw << (8 * (8 - nbytes)));
-    double d;
-    std::memcpy(&d, &bits, sizeof(d));
-    return d;
 }
 
 // One `method_handle_item`, resolved to (owner, member, signature) + its kind.
