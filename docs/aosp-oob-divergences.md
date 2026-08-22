@@ -223,7 +223,7 @@ keep-vs-remove decision.
   CLAUDE.md both call the channel one "no future verifier improvement can take
   away, because closing it at the gate would be a false-reject", and ART `:1212`
   **refutes that**: `NumMethodHandles()` is 0 for such a dex, so ART rejects it.
-  Until it is ported the index is bounded AT EACH READER — a throw through the
+  Filed as dexllm#72. Until it is ported the index is bounded AT EACH READER — a throw through the
   slicer's `ArrayView`, an empty render through `DecodeEncodedValueText` (C3's
   family).
 

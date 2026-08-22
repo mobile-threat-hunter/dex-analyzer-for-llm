@@ -1325,7 +1325,8 @@ bool DexVerifier::VerifyEncodedValue(const u1** pp, int depth) {
         //     away, because closing it at the gate would be a false-reject",
         //     and ART :1212 REFUTES that: ART's NumMethodHandles() is 0 for
         //     such a dex, so ART rejects it. Deferred as a decision, not an
-        //     oversight, on the dexllm#57 -> dexllm#59 precedent.
+        //     oversight, on the dexllm#57 -> dexllm#59 precedent. Filed as
+        //     dexllm#72.
         //
         // "for a value nothing consumes" is what this used to say, and it has
         // not been true since dexllm#57. Until the above is ported, every

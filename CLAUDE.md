@@ -2628,8 +2628,9 @@ rule bound the commit for the sixth time
 [[a-rule-you-wrote-binds-your-next-commit]]. The arm's comment is rewritten to
 state the REAL remaining reason (blast radius, not scope), the deferral is
 catalogued as **B2c** in
-[docs/aosp-oob-divergences.md](docs/aosp-oob-divergences.md), and the scope call
-was escalated to the user, who chose the issue as filed. Porting :1212 would
+[docs/aosp-oob-divergences.md](docs/aosp-oob-divergences.md), filed as
+**dexllm#72**, and the scope call was escalated to the user, who chose the issue
+as filed. Porting :1212 would
 **retire a test vehicle**: `tests/test_cache_init_failure.py` crafts that value
 on a section-less dex, where the index is out of range by construction — and
 that file and CLAUDE.md both call the channel one "no future verifier
