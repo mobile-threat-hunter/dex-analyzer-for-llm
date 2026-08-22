@@ -406,11 +406,17 @@ std::vector<LogicalSlice> ClassifyImageSlices(const uint8_t* base, size_t n,
                                               bool check_insns) {
     auto slices = LogicalDexSlices(base, n);
     size_t rejected = 0;
+    // ONE state for the whole image (dexllm#59). A v41 container is verified once
+    // per slice with the container as its span, so a method_handle section shared
+    // between siblings would otherwise be walked once per sibling — quadratic in
+    // the container, measured at 20.59 s for 16 MB. The state carries the memo
+    // that collapses the repeat and the budget that bounds the rest.
+    VerifyImageState image_state;
     for (auto& s : slices) {
         // The WHOLE image plus this dex's header offset — a v41 container dex
         // addresses a data section shared with its siblings, so the verifier
         // needs the container, not the slice (see VerifyDex).
-        auto vr = VerifyDex(base, n, check_insns, s.offset);
+        auto vr = VerifyDex(base, n, check_insns, s.offset, &image_state);
         s.ok = vr.ok;
         s.reason = vr.reason;
         if (!s.ok) ++rejected;

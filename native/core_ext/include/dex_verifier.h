@@ -32,7 +32,16 @@
 // runtime dependency (the opposite of vendoring ART verbatim — this is OUR
 // readable code with `// ART :NNNN` anchors a maintainer can cross-check).
 //   CheckHeader       :617   — magic/version/sizes/endian, section offset+size
-//   CheckMap          :738   — map ordering/bounds/alignment, required sections
+//   CheckMap          :738   — map ordering/bounds/alignment, required sections,
+//                              the two fixed-size sections the HEADER does not
+//                              describe (method_handle / call_site_id extents),
+//                              and method_handle CONTENTS
+//                              (VerifyMethodHandleSection = ART
+//                              CheckIntraMethodHandleItem :1492 — dexllm#59 —
+//                              PLUS a per-image memo and entry budget ART has no
+//                              analogue for, docs/aosp-oob-divergences.md B2d.
+//                              Deliberately not `==`, which this block uses for
+//                              an exact port)
 //   CheckIntraSection :2450  — per-item structure: ids, string_data(MUTF-8),
 //                              type_list, class_def, class_data, code_item
 //                              (VerifyCodeItem == ART CheckIntraCodeItem :1726),
@@ -103,27 +112,36 @@
 //     reports "unresolved" rather than a guess. Porting the check would move
 //     those from a silent skip to a load-time rejection; that is a new rejection
 //     direction and needs its own a/b.
-//   * method_handle CONTENTS. This line used to read "call_site/method_handle —
-//     not dereferenced by the core", which dexllm#57 made FALSE: implementing the
-//     0x16 METHOD_HANDLE encoded_value means the core now resolves a handle
-//     through Reader::GetMethodHandle. That is why CheckMap gained the section's
-//     EXTENT bound: without it, ArrayView's index check was against the map's own
-//     attacker-supplied count and read past the file. ART bounds these in TWO
-//     places and this port reached neither — its CheckMap (via an
-//     IsDataSectionType that returned true for both where ours returned false)
-//     and its map-driven intra pass. dexllm#62 closed the CheckMap half: the
-//     predicate now matches ART :82, so a MISALIGNED section offset is rejected
-//     as ART rejects it. ART's data_items_left budget stays unported on purpose
-//     (docs/aosp-oob-divergences.md B2b). Still NOT ported from ART's
-//     CheckIntraMethodHandleItem: method_handle_type <= kLast (:1501) and
-//     field_or_method_idx against field_ids/method_ids (:1512/:1521). The
-//     residual is never an OOB, but WHICH failure it is depends on the reader:
-//     through the slicer (Reader::GetMethodHandle, the annotation walk) it is a
-//     THROW, because that index reaches GetFieldDecl/GetMethodDecl where
+//   * method_handle — IN SCOPE since dexllm#59, and the only thing still out of
+//     it is one INDEX INTO the section, not the section. Kept here because the
+//     boundary moved twice and the trail is the point. The bullet first read
+//     "call_site/method_handle — not dereferenced by the core", which dexllm#57
+//     made FALSE: implementing the 0x16 METHOD_HANDLE encoded_value means the
+//     core resolves a handle through Reader::GetMethodHandle. Three commits
+//     closed it in pieces, each ART-anchored:
+//       EXTENT  (:1493) — dexllm#57, in CheckMap. Without it ArrayView's index
+//               check was against the map's own attacker-supplied count and read
+//               past the file: a SIGSEGV on a verify()-valid dex.
+//       ALIGN   (:798)  — dexllm#62, by restoring ART's own IsDataSectionType
+//               (:82), which this port had returning false for both types.
+//       CONTENTS(:1501/:1512/:1521) — dexllm#59, VerifyMethodHandleSection, also
+//               in CheckMap (ART reaches it by iterating the map; this port has
+//               no such pass, so the walk goes where the map item is in hand).
+//     ART's data_items_left budget stays unported on purpose
+//     (docs/aosp-oob-divergences.md B2b).
+//     STILL NOT PORTED, and now the sharper gap: the 0x16 encoded_value's own
+//     index into that section — ART caps its width at :1204 and bounds it
+//     against NumMethodHandles() at :1212. The reason is stated at the arm
+//     itself (VerifyEncodedValue `case 0x16`) and is a blast-radius argument,
+//     not a scope one: the count is not a header field, and porting :1212
+//     retires the vehicle tests/test_cache_init_failure.py drives. Until then
+//     that index is bounded AT THE READER, and WHICH failure it is depends on
+//     which reader: through the slicer (Reader::GetMethodHandle, the annotation
+//     walk) a THROW, because the index reaches GetFieldDecl/GetMethodDecl where
 //     ArrayView bounds it against a header-validated table; through
-//     DecodeEncodedValueText's 0x16 arm (dexllm#64) it is an EMPTY RESULT,
-//     because ResolveMethodHandle bounds it and Get*RefTriple returns {} rather
-//     than throwing, so the field simply renders no initializer.
+//     DecodeEncodedValueText's 0x16 arm (dexllm#64) an EMPTY RESULT, because
+//     ResolveMethodHandle bounds it and Get*RefTriple returns {} rather than
+//     throwing, so the field simply renders no initializer.
 //   * debug_info — dexllm never parses it; not verified by design.
 //   * adler32 checksum — intentionally not verified (project policy; ART itself
 //     only warns when verify_checksum=false — aosp-wiki dexfileverifier.md).
@@ -197,7 +215,9 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <map>
 #include <string>
+#include <utility>
 
 namespace dexkit::ext {
 
@@ -226,7 +246,40 @@ struct DexVerifyResult {
 // methods are decrypted. ART loads such a dex (it defers instruction validity to
 // the runtime method_verifier, which packers skip); this lets the analyzer do the
 // same WITHOUT relaxing any header/structure/bounds check.
+// Per-IMAGE scratch, threaded across the slices of ONE image by
+// ClassifyImageSlices (its only caller). It exists for one reason, and dexllm#59
+// learned it the hard way: a v41 CONTAINER is verified once PER SLICE, with
+// `size_` set to the whole container every time, so any per-slice walk of a
+// SHARED section is paid once per sibling. Passing nullptr is safe — a lone
+// VerifyDex call then gets a state of its own, which is exactly the one-slice
+// case.
+struct VerifyImageState {
+    // The two numbers a walked method_handle section needs from its dex: the
+    // SMALLEST field_ids_size and method_ids_size that accept every index in it
+    // (i.e. one past the largest of each kind).
+    struct HandleSectionNeeds {
+        uint32_t field_ids;
+        uint32_t method_ids;
+    };
+    // (offset, count) -> what that section needs. Keyed on the BYTES, not on the
+    // dex that named them, which is what makes the memo work across the slices
+    // of a v41 container: siblings have their own id tables, so a key carrying
+    // those would miss on exactly the case this exists for (measured — it did,
+    // and a legitimate 400-handle shared section was then rejected by the budget
+    // below). The re-check for a later slice is O(1) and EXACTLY equivalent to
+    // re-walking, because "every index < limit" is "max index < limit". This is
+    // the dexllm#56 annotation memo one level up: the repetition is across
+    // slices rather than across class_defs.
+    std::map<std::pair<uint32_t, uint32_t>, HandleSectionNeeds> walked_method_handles;
+    // Entries this image may still make the verifier walk. Seeded from the image
+    // size, so the total is O(image/8) however the slices are arranged: real
+    // sections occupy disjoint bytes, and a shared one is walked once thanks to
+    // the memo above. Exhaustion is a rejection, and it is one a legitimate image
+    // provably cannot reach.
+    size_t method_handle_entries_left = 0;
+};
+
 DexVerifyResult VerifyDex(const uint8_t* data, size_t size, bool check_insns = true,
-                          size_t header_off = 0);
+                          size_t header_off = 0, VerifyImageState* image = nullptr);
 
 }  // namespace dexkit::ext

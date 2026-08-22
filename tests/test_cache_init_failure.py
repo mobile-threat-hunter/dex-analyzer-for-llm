@@ -15,7 +15,9 @@ well-formed offset holding the wrong structure — which worked only because
 the whole annotations subtree), so this fixture could no longer be built: the
 guards below went from green to nine hard errors, correctly naming the reason.
 
-The replacement is a channel #56 deliberately does NOT close, and cannot. An
+The replacement is a channel #56 deliberately does NOT close. ("and cannot" is
+what this said until dexllm#59 measured ART: it CAN be closed at the gate, by
+porting ART :1212 — see the qualification below.) An
 annotation element retyped to `0x16 METHOD_HANDLE` is a ONE-BYTE craft that
 yields a dex verifying valid in both modes and throwing inside cache init.
 
@@ -24,10 +26,22 @@ the reason it worked ORIGINALLY. When this vehicle was adopted, the slicer
 implemented 16 of the 18 encoded_value types and `0x16` hit its
 `SLICER_CHECK(!"unexpected value type")`. #57 implemented both missing types, so
 the value now PARSES — and still throws here, from one layer further in: a
-`METHOD_HANDLE` index is NOT bounded by the verifier (`method_handle` is out of
-its documented scope), so `GetMethodHandle` resolves it through `ArrayView`,
-whose own `SLICER_CHECK_LT` throws. No bundled dex has a method_handle section at
-all, so EVERY index is out of range on this corpus.
+`METHOD_HANDLE` index is NOT bounded by the verifier, so `GetMethodHandle`
+resolves it through `ArrayView`, whose own `SLICER_CHECK_LT` throws. No bundled
+dex has a method_handle section at all, so EVERY index is out of range on this
+corpus.
+
+AND WHY IT STILL WORKS AFTER dexllm#59, which is the sharper qualification: that
+change put the method_handle SECTION into the verifier's scope (a handle's type,
+and its `field_or_method_idx` against the table that type names), so the reason
+above is no longer "the section is out of scope". The 0x16 encoded_value's own
+index INTO that section is a different operand and is still unbounded — ART caps
+it at :1204 and bounds it at :1212 and neither is ported, catalogued as B2c in
+docs/aosp-oob-divergences.md. So this vehicle now rests on ONE unported check
+rather than on a whole section, and the note below about a future improvement
+taking it away is not hypothetical: porting :1212 retires it, because ART's
+`NumMethodHandles()` is 0 for a section-less dex and ART therefore rejects
+exactly this craft.
 
 What that means for these guards: the craft is unchanged, the verdict is
 unchanged, and only the reason string moved. What they depend on is that the

@@ -287,9 +287,21 @@ bool IsValidDescriptor(const char* s) {
 class DexVerifier {
 public:
     DexVerifier(const u1* image, size_t image_size, size_t header_off,
-                bool check_insns = true)
+                bool check_insns = true, VerifyImageState* img_state = nullptr)
         : image_(image), image_size_(image_size), header_off_(header_off),
-          check_insns_(check_insns) {}
+          check_insns_(check_insns),
+          img_state_(img_state != nullptr ? img_state : &owned_state_) {
+        // A caller that threads no state gets one of its own, which is exactly
+        // the single-slice case. The budget is seeded from the IMAGE, not the
+        // slice, and only the FIRST verifier over a given state seeds it —
+        // ClassifyImageSlices reuses one state across an image's slices, so the
+        // total stays O(image / 8) rather than resetting per slice.
+        if (img_state_->method_handle_entries_left == 0 &&
+            img_state_->walked_method_handles.empty()) {
+            img_state_->method_handle_entries_left =
+                image_size / sizeof(dex::MethodHandle) + 1;
+        }
+    }
 
     bool Verify() {
         if (image_ == nullptr || header_off_ > image_size_) {
@@ -435,8 +447,14 @@ private:
     // ── phases ────────────────────────────────────────────────────────────────
     bool CheckHeader();        // ART :617  (implemented)
     bool CheckMap();           // ART :738  (implemented)
+
     bool CheckIntraSection();  // ART :2450
     bool CheckInterSection();  // ART :3477
+    // ART CheckIntraMethodHandleItem :1492 — fused into CheckMap for the same
+    // reason the annotations subtree fused into CheckIntraSection (dexllm#56):
+    // ART reaches it by ITERATING the map's sections, and this port has no such
+    // pass. The map item is in hand there, so that is where the walk goes.
+    bool VerifyMethodHandleSection(u4 off, u4 count);  // dexllm#59
 
     // ── intra-section item validators (phase ③) ──────────────────────────────
     bool VerifyMutf8(const u1* p, u4 utf16_len);
@@ -520,6 +538,8 @@ private:
     const u1* begin_ = nullptr;  // ART DataBegin() — the base every offset is off
     size_t size_ = 0;            // ART DataSize()  — and the bound for them
     bool check_insns_ = true;  // false = ART-structural-equivalent (skip VerifyInsns)
+    VerifyImageState owned_state_;  // used when the caller threads none
+    VerifyImageState* img_state_;   // per-IMAGE scratch (dexllm#59)
     const dex::Header* header_ = nullptr;
     std::string reason_;
     // Annotation offsets already walked, per structure kind. The slicer memoises
@@ -649,18 +669,22 @@ bool DexVerifier::CheckMap() {
         // dexllm#57 parser fix woke up by calling GetMethodHandle at all.
         // Variable-length sections cannot be bounded this way (their `size` is an
         // item count over items of differing length); each is validated where it
-        // is parsed instead. CONTENTS stay out of scope: this bounds only where
-        // the section ENDS. ART's CheckIntraMethodHandleItem also rejects a
-        // method_handle_type > kLast (:1501) and bounds field_or_method_idx
-        // against field_ids/method_ids (:1512/:1521) — NOT ported, and the
-        // residual is a THROW not an OOB (ParseMethodHandle hands that index to
-        // GetFieldDecl/GetMethodDecl, where ArrayView bounds it against a
-        // header-validated table; measured: `SLICER_CHECK_LT [65535 < 243]`).
+        // is parsed instead.
         const size_t entry = item->type == kMethodHandleItem ? sizeof(dex::MethodHandle)
                            : item->type == kCallSiteIdItem   ? sizeof(u4)
                                                              : 0;
         if (entry != 0 &&
             !CheckListSize(OffsetToPtr(item->offset), item->size, entry, "map section span")) {
+            return false;
+        }
+        // method_handle CONTENTS (dexllm#59). ORDER MATTERS: the walk below
+        // dereferences every entry of the section, and the ONLY thing that has
+        // bounded that span is the CheckListSize immediately above — so the two
+        // must stay adjacent and in this order. call_site_id has no analogue:
+        // its contents stay out of scope and are bounded at the reader
+        // (dexllm#67 GetCallSite), which the header records as a decision.
+        if (item->type == kMethodHandleItem &&
+            !VerifyMethodHandleSection(item->offset, item->size)) {
             return false;
         }
         last_offset = item->offset;
@@ -681,6 +705,133 @@ bool DexVerifier::CheckMap() {
            require(kFieldIdItem, header_->field_ids_off, header_->field_ids_size, "field_ids") &&
            require(kMethodIdItem, header_->method_ids_off, header_->method_ids_size, "method_ids") &&
            require(kClassDefItem, header_->class_defs_off, header_->class_defs_size, "class_defs");
+}
+
+// ── VerifyMethodHandleSection (ART CheckIntraMethodHandleItem :1492) ─────────
+// The CONTENTS of the method_handle section: each entry's TYPE must name a real
+// handle kind, and its `field_or_method_id` must index the table that kind
+// implies. dexllm#57 ported only this function's opening CheckListSize (as the
+// section EXTENT bound in CheckMap); dexllm#59 ports the rest.
+//
+// The residual was never an OOB — every path bounds the index eventually — but
+// it was NOT simply "a throw", which is what dexllm#59 was filed saying. Measured
+// on crafted entries of `tests/data/invoke-custom.dex`, in a subprocess judged by
+// exit status: 0 signals and 0 exceptions on every craft. What actually happened
+// splits by WHICH half is wrong and WHICH reader runs:
+//   * a TYPE past kLast never throws anywhere. `IsField()` (dex_ir.cc :110) is
+//     four equality tests against 0x00-0x03 with no else-branch check, so 0xFFFF
+//     simply falls through to the method table, and the
+//     Writer renders by the same partition — so a handle asserting an UNDEFINED
+//     kind decompiled BYTE-IDENTICALLY to a legal invoke-static one. A fabricated
+//     fact with nothing anywhere to mark it, and the half the issue never named.
+//   * an out-of-range INDEX throws only through the slicer (GetFieldDecl /
+//     GetMethodDecl, where ArrayView's SLICER_CHECK_LT bounds it). Through
+//     dexllm#67's ResolveMethodHandle — the invoke-custom and static-initializer
+//     path, written after this issue was filed — it is bounded and returns false,
+//     so the site renders NOTHING: 2 bootstrap lines silently vanished from the
+//     decompiled class. Refusing beats inventing, but only at the gate is it
+//     visible at all.
+//
+// COST, and the bound is NOT free — an adversarial review measured that. The
+// first version of this comment said "the CheckListSize above makes count * 8 <=
+// file size, so no work budget is needed (contrast the dexllm#56 annotation memo,
+// where one subtree is reachable from every class_def)". For ONE dex per image
+// that is true. For a **v41 CONTAINER** it is exactly backwards, and the contrast
+// it invokes is an identity: ComputeDataRange sets `size_` to ContainerSize() for
+// EVERY slice, while LogicalDexSlices strides by `file_size` — so `count` is
+// bounded by the CONTAINER while the number of slices is the container divided by
+// a 120-byte v41 header, and one section is reachable from every sibling. Measured on
+// a crafted container whose extra slices are bare headers reusing the shared map:
+// 2/4/8/16 MB -> 0.34 / 1.29 / 5.19 / 20.59 s, quadrupling per doubling, where
+// HEAD pays 0.00 / 0.01 / 0.02 / 0.04 s. Every slice is REJECTED either way and
+// for the same reason, so the delta is nothing but this walk — and the work is
+// paid BEFORE the rejection, which turns `dexllm.verify(path)`'s "always returns
+// a verdict" into "may take an hour" on a 256 MB upload.
+//
+// The fix is per-IMAGE, not per-slice, because the repetition is what is
+// quadratic: the SAME section, re-walked once per sibling. A memo keyed on the
+// BYTES — (offset, count) — collapses that to a single walk, and a per-image
+// ENTRY BUDGET seeded from the image size bounds the variant the memo cannot
+// see, N slices each naming a DIFFERENT overlapping section. Together the total
+// is O(image / 8) however the slices are arranged.
+//
+// Keying on the bytes rather than on (bytes + this dex's table sizes) is the
+// part that had to be MEASURED: siblings have their OWN id tables, so a key
+// carrying them misses on exactly the case the memo exists for, and a
+// legitimate 400-handle shared section was then rejected by the budget. What
+// the memo stores instead is the two MAXIMA the walk found, so a later slice
+// re-checks its own tables in O(1) — exactly equivalent, because "every index
+// < limit" is "max index < limit". Dropping that re-check would accept a
+// section legal for one sibling and out of range for another; the fixture's two
+// slices declare 6 and 3 method_ids, which is what pins it.
+//
+// ART has no analogue of either half. Its `data_items_left` budget (:751,
+// unported as B2b) is seeded at :731 from `dex_file_->Begin()` to `EndOfFile()`
+// for a v41 dex — a GEOMETRIC span, not `header_->data_size_`, so no craft is
+// involved and an early slice's budget is ~the whole container. ART is quadratic
+// here too. (An earlier draft of this comment said the seed was a per-dex
+// `data_size` a slice could inflate; both delta reviewers read AOSP and
+// disproved it. The conclusion held, the reason did not.)
+//
+// A FIRST fix bounded `count` by the slice's own `file_size / 8` instead, and a
+// delta review REFUTED it by construction: starting from AOSP's own
+// multidex-container.dex, appending a shared method_handle section and nothing
+// else, the crossover is exactly `file_size / 8` — 70 entries accepted, 71
+// rejected, and the v41 sibling rule then takes the WHOLE container down. Its
+// justification ("N distinct handles imply id tables of at least 8N bytes inside
+// file_size") assumed handles are DISTINCT, which nothing enforces, and assumed
+// the tables are INSIDE file_size, which is exactly what a v41 container does not
+// guarantee — in that same AOSP sample slice 0 has file_size 564 and
+// string_ids_off 684. Sharing is the point of the format. The memo needs no such
+// argument because it rejects nothing.
+bool DexVerifier::VerifyMethodHandleSection(u4 off, u4 count) {
+    const auto key = std::make_pair(off, count);
+    const auto seen = img_state_->walked_method_handles.find(key);
+    if (seen != img_state_->walked_method_handles.end()) {
+        // Already walked for this image, so only the two table bounds can differ
+        // — and they are decided by the maxima, which the first walk recorded.
+        if (seen->second.field_ids > header_->field_ids_size) {
+            return Fail("Bad index: method_handle_item field_idx");
+        }
+        if (seen->second.method_ids > header_->method_ids_size) {
+            return Fail("Bad index: method_handle_item method_idx");
+        }
+        return true;
+    }
+    if (count > img_state_->method_handle_entries_left) {
+        return Fail("method_handle sections exceed the image's entry budget");
+    }
+    img_state_->method_handle_entries_left -= count;
+    VerifyImageState::HandleSectionNeeds needs{0, 0};
+    // Precondition (asserted by construction at the single call site): the span
+    // [off, off + count * sizeof(dex::MethodHandle)) lies inside the image, and
+    // `off` is 4-aligned (dexllm#62 put kMethodHandleItem back in ART's own
+    // IsDataSectionType, so CheckMap's alignment branch reaches it).
+    const u1* p = OffsetToPtr(off);
+    for (u4 i = 0; i < count; ++i, p += sizeof(dex::MethodHandle)) {
+        const auto* mh = reinterpret_cast<const dex::MethodHandle*>(p);
+        // ART :1501 — `> MethodHandleType::kLast`, which is kInvokeInterface
+        // (dex_file.h :227). The slicer names the same nine constants, and using
+        // ITS spelling ties the check to the table the core actually consults.
+        if (mh->method_handle_type > dex::METHOD_HANDLE_TYPE_INVOKE_INTERFACE) {
+            return Fail("Bad method handle type");
+        }
+        // ART :1508-1524 — 0x00-0x03 are the field accessors and 0x04-0x08 the
+        // invokers; ir::MethodHandle::IsField() (dex_ir.cc :110) partitions the
+        // same way, which is what makes this the bound the reader will use.
+        const bool is_field =
+            mh->method_handle_type <= dex::METHOD_HANDLE_TYPE_INSTANCE_GET;
+        if (!CheckIndex(mh->field_or_method_id,
+                        is_field ? header_->field_ids_size : header_->method_ids_size,
+                        is_field ? "method_handle_item field_idx"
+                                 : "method_handle_item method_idx")) {
+            return false;
+        }
+        u4& hi = is_field ? needs.field_ids : needs.method_ids;
+        hi = std::max<u4>(hi, static_cast<u4>(mh->field_or_method_id) + 1u);
+    }
+    img_state_->walked_method_handles.emplace(key, needs);
+    return true;
 }
 
 // Modified UTF-8 validation (dex string_data) — ART CheckIntraStringDataItem
@@ -1151,16 +1302,36 @@ bool DexVerifier::VerifyEncodedValue(const u1** pp, int depth) {
         case 0x04: case 0x10: return arg <= 3 ? skip(arg + 1) : Fail("encoded int/float size");
         case 0x06: case 0x11: return skip(arg + 1);                                // LONG/DOUBLE (≤8)
         case 0x15: return idx(header_->proto_ids_size, "encoded method_type idx");
-        // METHOD_HANDLE: consume the index but do NOT bound it - the
-        // method_handle section is out of this verifier's documented scope.
-        // Bounding it here would mean bringing method_handle into scope: a new
-        // section to validate, with its own false-reject risk.
+        // METHOD_HANDLE: consume the index but do NOT bound it, and do not cap
+        // its WIDTH either. Both are unported ART checks, and this arm is where
+        // they would go:
+        //   * ART :1204 rejects `value_arg > 3` ("Bad encoded_value method
+        //     handle size"). Every OTHER index-bearing arm here gets that cap
+        //     for free from the `idx` lambda, so 0x16 is the one arm where an
+        //     EIGHT-byte "index" is gate-legal - the asymmetry dexllm#71's
+        //     lockstep guard had to be parametrised around.
+        //   * ART :1212 bounds the index against NumMethodHandles(). Since
+        //     dexllm#59 this port DOES validate the method_handle section, so
+        //     the reason this comment used to give - "bounding it here would
+        //     mean bringing method_handle into scope: a new section to
+        //     validate" - is GONE. What is left is not a section-scope argument
+        //     but a blast-radius one: the count lives only in the map (it is
+        //     not a header field), so the gate would have to carry it forward
+        //     from CheckMap; it is a new REJECTION direction needing its own
+        //     a/b; and it RETIRES a vehicle - tests/test_cache_init_failure.py
+        //     crafts exactly this value on a section-less dex, where the index
+        //     is out of range by construction. That file and CLAUDE.md both
+        //     call the channel one "no future verifier improvement can take
+        //     away, because closing it at the gate would be a false-reject",
+        //     and ART :1212 REFUTES that: ART's NumMethodHandles() is 0 for
+        //     such a dex, so ART rejects it. Deferred as a decision, not an
+        //     oversight, on the dexllm#57 -> dexllm#59 precedent.
         //
         // "for a value nothing consumes" is what this used to say, and it has
-        // not been true since dexllm#57. Every consumer bounds the index at
-        // its own READER, which is the tier the safety contract permits for an
-        // out-of-scope section. Of a value THIS function has walked there are
-        // two:
+        // not been true since dexllm#57. Until the above is ported, every
+        // consumer bounds the index at its own READER, which is the tier the
+        // safety contract permits. Of a value THIS function has walked there
+        // are two:
         //   * the slicer (GetMethodHandle, via the annotation walk) - bounded by
         //     ArrayView's own SLICER_CHECK, which THROWS;
         //   * DecodeEncodedValueText's 0x16 arm (dexllm#64, static-field
@@ -1640,9 +1811,9 @@ bool DexVerifier::CheckClassDataDefiners(u4 off, u4 cls) {
 }  // namespace
 
 DexVerifyResult VerifyDex(const u1* data, size_t size, bool check_insns,
-                          size_t header_off) {
+                          size_t header_off, VerifyImageState* image) {
     try {
-        DexVerifier v(data, size, header_off, check_insns);
+        DexVerifier v(data, size, header_off, check_insns, image);
         if (v.Verify()) return {true, {}};
         return {false, v.reason()};
     } catch (const std::exception& e) {

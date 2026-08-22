@@ -18,10 +18,12 @@ commits, so the guards hold in the corpus-less CI leg and under any
 no-false-reject floor at the bottom walks whatever corpus is present and SKIPS
 when it finds no carrier: an environment fact, never a failure (issue #46).
 
-The craft is length-preserving to the byte: it rewrites ONE u4, the section's
-offset field inside the map item, leaving the count alone. Keeping the count is
-what isolates the check - the extent still fits inside the file, so dexllm#57's
-span bound cannot be what rejects.
+The craft is length-preserving to the byte: it rewrites the section's offset
+field inside the map item and nothing outside that item, so dexllm#57's span
+bound cannot be what rejects. For every section but one that is a single u4 with
+the count left alone. `method_handle` is the exception since dexllm#59 walks its
+CONTENTS: there the count is ZEROED as well, which is what isolates the check for
+that type - see `_shift`.
 """
 
 from __future__ import annotations
@@ -108,6 +110,17 @@ def _shift(section_type: int, delta: int, dst: pathlib.Path) -> None:
     Only the START is bounded that way, not the extent - the `+4` control does
     overlap `method_handle` by 4 bytes, which is harmless because these crafts are
     judged by `verify()` and the verifier has no section-overlap rule.
+
+    THIRD attribution risk, added by dexllm#59: that change walks the CONTENTS of
+    the method_handle section, and a shifted offset points at bytes that are not
+    method handles - so for that one section a moved-but-aligned craft would be
+    rejected for its contents and the `+4` control would assert the opposite of
+    what it means. Its `count` is therefore zeroed, which makes the contents
+    vacuous while leaving ALIGNMENT the only variable: `CheckMap` checks
+    `item->offset` before it reads a single entry, so the misalignment crafts are
+    unaffected and the acceptance control goes back to measuring the move. The
+    guard this file exists for is unchanged; what a moved section's contents do is
+    tests/test_verifier_method_handle_contents.py's subject, not this one's.
     """
     raw = bytearray(_FIXTURE.read_bytes())
     items = _map_items(raw)
@@ -121,6 +134,13 @@ def _shift(section_type: int, delta: int, dst: pathlib.Path) -> None:
         "the shift would push the EXTENT past the file, so the dexllm#57 span "
         "bound - not alignment - would be what rejects it"
     )
+    if section_type == _METHOD_HANDLE:
+        # NOTE the EXTENT assert above is computed on the PRE-zeroing size, which
+        # is the stricter premise (a zero-count extent is trivially inside the
+        # file) - so the craft is still bounded by the geometry of the real
+        # section even though the written count is 0.
+        assert size > 0, "the fixture's method_handle section is already empty"
+        struct.pack_into("<I", raw, item + 4, 0)
     struct.pack_into("<I", raw, item + 8, off + delta)
     dst.write_bytes(bytes(raw))
 

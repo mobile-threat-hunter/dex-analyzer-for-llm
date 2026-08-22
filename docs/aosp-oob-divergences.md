@@ -198,6 +198,83 @@ keep-vs-remove decision.
   direction with no reachable defect behind it, and a new rejection direction is
   the one way an added check can fail (dexllm#58).
 
+### B2c. The `0x16` encoded_value's method_handle index is neither capped nor bounded
+
+> Same category note as B2/B2b: an OMISSION filed under an "ADDED" heading.
+
+- **AOSP:** `dex_file_verifier.cc` `CheckEncodedValue`, the
+  `kDexAnnotationMethodHandle` arm — `:1204` rejects `value_arg > 3` ("Bad
+  encoded_value method handle size") and `:1212` bounds the decoded index against
+  `NumMethodHandles()`. ART's `CheckInterCallSiteIdItem` applies the same bound to
+  a call site's first element (`:3119`).
+- **Our divergence:** `VerifyEncodedValue`'s `case 0x16` is `skip(arg + 1)` — it
+  consumes the payload and checks neither half. Every other index-bearing arm gets
+  the width cap for free from the shared `idx` lambda, so `0x16` is the one arm
+  where an EIGHT-byte "index" is gate-legal; dexllm#71's lockstep guard is
+  parametrised around exactly that asymmetry.
+- **Assessment:** deliberately **KEPT for now**, and the reason CHANGED with
+  dexllm#59. It used to be a scope argument — bounding the index would mean
+  validating the method_handle section, which the gate did not do. That section is
+  validated now, so what is left is blast radius: the count lives only in the map
+  (it is not a header field), so the gate would have to carry it forward from
+  `CheckMap`; it is a new rejection direction needing its own a/b; and it RETIRES a
+  test vehicle — `tests/test_cache_init_failure.py` crafts this very value on a
+  section-less dex, where the index is out of range by construction. That file and
+  CLAUDE.md both call the channel one "no future verifier improvement can take
+  away, because closing it at the gate would be a false-reject", and ART `:1212`
+  **refutes that**: `NumMethodHandles()` is 0 for such a dex, so ART rejects it.
+  Until it is ported the index is bounded AT EACH READER — a throw through the
+  slicer's `ArrayView`, an empty render through `DecodeEncodedValueText` (C3's
+  family).
+
+### B2d. A per-image memo and entry budget for the method_handle walk (dexllm#59)
+
+> Same category note as B2/B2b/B2c — except this one really is an ADDITION.
+
+- **AOSP:** no analogue. ART's nearest thing, the `data_items_left` budget
+  (`:751`, unported as B2b), is seeded at `:731` from `dex_file_->Begin()` to
+  `EndOfFile()` for a **v41** dex — a GEOMETRIC span, not `header_->data_size_` —
+  so an early slice's budget is ~the whole container and ART is quadratic here
+  too. (An earlier draft of this entry said the seed was a per-dex `data_size` a
+  crafted slice could inflate. Both delta reviewers read the AOSP source and
+  disproved it; the conclusion survives, the mechanism was wrong.)
+- **Our divergence:** `VerifyImageState`, threaded by `ClassifyImageSlices` across
+  the slices of ONE image. A memo keyed on a section's BYTES — `(offset, count)`
+  — storing the two maxima the walk found, plus a running entry budget seeded from
+  `image_size / 8 + 1`.
+- **Why it exists.** dexllm#59 walks the section's CONTENTS, and for a **v41
+  CONTAINER** that walk is quadratic: `ComputeDataRange` gives EVERY slice the
+  whole container as its span while `LogicalDexSlices` strides by `file_size`, so
+  one shared section is walked once per sibling and `count` is bounded by the
+  container rather than by the slice. Measured on a crafted container of
+  bare-header slices sharing one map: 2/4/8/16 MB → 0.34 / 1.29 / 5.19 / 20.59 s
+  where HEAD pays 0.00 / 0.01 / 0.02 / 0.04 s — quadrupling per doubling, with
+  every slice rejected either way, so the delta is nothing but the walk. The work
+  is paid BEFORE the rejection and it is reachable from the load-free public
+  `dexllm.verify(path)`. Post-fix the same crafts measure HEAD's numbers.
+- **Why it rejects (almost) nothing.** The memo changes no verdict at all — its
+  O(1) re-check of a later slice's own tables is exactly equivalent to
+  re-walking, since "every index < limit" is "max index < limit". Only the budget
+  can reject, and a legitimate image cannot reach it: real sections occupy
+  DISJOINT bytes, so their entries sum to at most `image / 8`, and a SHARED one
+  is counted once. What exhausts it is overlapping sections at distinct offsets,
+  i.e. the same bytes charged many times — a craft.
+- **What this REPLACED, and why.** The first cut bounded `count` by the slice's
+  own `file_size / 8`. A delta reviewer refuted it by construction: starting from
+  AOSP's own `multidex-container.dex`, appending a shared section and nothing
+  else, the crossover is exactly that bound — **70 entries accepted, 71
+  rejected** — and the v41 sibling rule then takes the whole container down. Its
+  justification ("N distinct handles imply id tables of at least 8N bytes inside
+  `file_size`") assumed handles are DISTINCT, which nothing enforces, and assumed
+  the tables sit INSIDE `file_size`, which is exactly what a container does not
+  guarantee: in that same sample slice 0 has `file_size` 564 and `string_ids_off`
+  684. Sharing is the point of the format.
+- **Assessment:** deliberately KEPT — removing either half reopens a DoS on a
+  public, load-free entry point. Plain concatenation (dexllm#25) needs neither
+  and is self-limiting: there `stride == file_size == size_`, so the sum is
+  already bounded by the image (measured: a 16 MB concatenated craft with every
+  count maxed verifies in 0.001 s).
+
 ---
 
 ## Type C — internal null/index guards (not AOSP-function divergences)
@@ -264,6 +341,8 @@ CPython bounds), but they exist for memory safety and are part of the same
 | A2 `SafeWidth`     | yes (slicer width)         | yes (VerifyInsns)  | none | low (3rd-party primitive) |
 | B1 `VerifyInsns`   | no (addition)              | n/a (IS the verifier) | n/a | no |
 | B2 `IsDataSectionType` | ~~yes~~ **none** | n/a (IS the verifier) | ~~accepts a misaligned call_site/method_handle offset~~ | **CLOSED — dexllm#62** |
+| B2d method_handle walk memo + budget | **yes** (an ADDITION; ART has no analogue) | n/a (IS the verifier) | none — the memo changes no verdict, and a legitimate image cannot exhaust the budget | no (removing either half reopens a v41 DoS) |
+| B2c `0x16` handle index | **yes** (ART :1204 width cap, :1212 index bound) | n/a (IS the verifier) | none today — bounded at each reader instead | no (deliberate; retires a test vehicle, needs its own a/b) |
 | B2b `data_items_left` | **yes** (ART :777 budget) | n/a (IS the verifier) | none — the count is never consumed for a variable-length section, and the fixed-size ones have a tighter span bound | no (deliberate) |
 | C1 edge index      | no (DAD relies on Python)  | partial            | none | no (cheap, internal) |
 | C2 move-result null| no (matches DAD effective) | n/a                | none | no |

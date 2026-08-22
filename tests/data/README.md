@@ -15,6 +15,7 @@ narrowed to the sample here.
 | `method_handles.dex` | 28,228 B | 16 `invoke-polymorphic` sites, all in ONE of its 24 classes |
 | `invoke-polymorphic.dex` | 1,160 B | 1 `invoke-polymorphic/range` (7 registers) + 2 `invoke-polymorphic` |
 | `const-method-handle.dex` | 2,524 B | the only `const-method-type` anywhere in reach |
+| `multidex-container.dex` | 1,468 B | the only **v41 CONTAINER** in reach — 2 slices sharing one data section |
 
 `multidex.apk` is deliberately the WORST case, not a convenient one: it is the
 sample that produced 17 of the failures in dexllm#46 (no `switch` header, no
@@ -25,6 +26,19 @@ A suite that stays green on it is a suite whose floors skip instead of failing.
 The narrowed leg reaches **254** tests in CI where the corpus-less run reaches
 111 (260 / 114 locally, where the optional `mcp` / `fastapi` / dev extras are
 installed), so it also adds real coverage where CI had none.
+
+`multidex-container.dex` is here because the v41 CONTAINER format is where the
+verifier's span rule stops being per-dex: `ComputeDataRange` gives every slice the
+whole container, since siblings SHARE a data section (this file's slice 0 has
+`file_size` 564 and `string_ids_off` 684 — outside its own file_size, and legally
+so). dexllm#59 walks the method_handle section's contents, and a first cut bounded
+that walk by the slice's own `file_size / 8`; a reviewer took THIS file, appended a
+shared section and nothing else, and found the crossover was exactly that bound —
+70 entries accepted, 71 rejected, and the sibling rule then took the whole
+container down. The fix that replaced it rejects nothing, and the guard that pins
+it needs a genuine v41 container: a faked one (a v038 dex with `header_size`
+patched to 120) overwrites the bytes after the header, so it can pin the REJECT
+direction but never the ACCEPT one.
 
 `invoke-custom.dex` is here for a different reason: it carries a **method_handle
 section**, and *nothing* in the gitignored corpus does (0 of its 36 dexes). Two
@@ -95,13 +109,19 @@ from. androguard is licensed **Apache-2.0**, the same licence as this project.
 
 `invoke-custom.dex` is byte-identical (md5 `3cbe61c0d2eb9ae9df5e05013b3ba119`) to
 AOSP's `art/test/dexdump/invoke-custom.dex` — dexdump's own regression input,
-also **Apache-2.0**. This repo already uses that directory as a spec reference
-(`multidex-container.dex` for the v41 container work); this is the first file
-copied from it.
+also **Apache-2.0**. This repo already used that directory as a
+spec reference (`multidex-container.dex` for the v41 container work) before
+copying anything out of it; this was the first.
 
 `method_handles.dex` is byte-identical (md5 `b7b3414ac12878c016e0e2fa9c921c47`) to
 AOSP's `tools/dexter/testdata/method_handles.dex` — dexter's own test input, also
 **Apache-2.0**.
+
+`multidex-container.dex` is byte-identical (md5 `c6621661ee9ef06c9af6aab68d5d9230`) to AOSP's
+`art/test/dexdump/multidex-container.dex`, from the same directory and also
+**Apache-2.0** — the file this repo had already been using as its v41 spec
+reference from outside the tree, now committed so the guard that needs it runs in
+CI.
 
 `invoke-polymorphic.dex` is byte-identical (md5 `fd1f7a6de8a8b3ddd498264c411fedac`)
 to AOSP's `art/test/dexdump/invoke-polymorphic.dex`. `const-method-handle.dex` is

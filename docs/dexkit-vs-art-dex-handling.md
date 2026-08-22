@@ -109,10 +109,15 @@ that ART keeps in the *runtime* method_verifier (deliberately not vendored), her
 re-derived from the Dalvik bytecode spec. **Intentional differences from ART:**
 adler32/SHA-1 still **not** checked (policy — checksums are not a crash vector and
 malware routinely lies about them); instruction *dataflow* semantics,
-call_site/method_handle CONTENTS and debug_info are out of scope (documented in
-`dex_verifier.h`) — for those two sections the EXTENT is bounded and, since
-dexllm#62, the 4-byte ALIGNMENT is checked, which is what ART's `CheckMap` does;
-what is not read is what the entries say. Annotations were on that list until dexllm#56 — see the
+call_site CONTENTS and debug_info are out of scope (documented in
+`dex_verifier.h`) — for both fixed-size sections the EXTENT is bounded and, since
+dexllm#62, the 4-byte ALIGNMENT is checked, which is what ART's `CheckMap` does.
+**method_handle CONTENTS left that list in dexllm#59** (ART
+`CheckIntraMethodHandleItem` :1492): a handle's type and the index it implies are
+now checked at the gate rather than throwing later at `GetFieldDecl` /
+`GetMethodDecl`. What is still not read is a call_site's contents, and one index
+INTO the method_handle section — the `0x16` encoded_value's, which ART caps and
+bounds at :1204/:1212. Annotations were on that list until dexllm#56 — see the
 `annotation_item` row below for why "the core lazy-parses it" was the wrong test. The slicer's own `Reader::ValidateHeader()` still runs after as
 a second cheap sanity layer; per-item decode problems beyond the verifier's scope
 still surface lazily as `SLICER_CHECK` → `std::runtime_error`, skipping that method.
@@ -171,7 +176,9 @@ Legend: ✅ ported (behavioural parity) · ⊕ beyond ART's *structural* verifie
 | class_data — EVERY member's defining class (`CheckInterClassDataItem` :3208, field loop :3226 / method loop :3244) | ✅ `CheckClassDataDefiners` (added for dexllm#48 — the port previously compared only the FIRST member, ART's `FindFirstClassDataDefiner` :2579, so a class_data whose first entry was its own could declare another class's members and still verify) |
 | class_data — member access flags (`CheckFieldAccessFlags` / `CheckMethodAccessFlags` :934/:961) · `CheckStaticFieldTypes` :1289 (a static field's declared type vs its `encoded_array` initializer) · orphan class_data (ART drives from the MAP and requires a `class_def`; this port drives from `class_defs`) | ◐ not checked — wrong-answer gaps, not crash surface. The `CheckStaticFieldTypes` one is *relied upon* today: `tests/test_mutf8_identifiers.py::test_astral_type_in_a_field_initializer_decompiles` retypes a static value `0x17`→`0x18` and expects the dex to load. Orphan class_data is inert (the core walks `class_defs`, never the map) |
 | proto shorty ↔ descriptor match | ◐ correctness-only (descriptors themselves are verified) |
-| annotations definer-match · call_site / method_handle CONTENTS (`CheckIntraMethodHandleItem` :1493 — handle type ≤ kLast :1501, `field_or_method_idx` bounds :1512/:1521) | ◐ not checked. The two sections' EXTENT and ALIGNMENT are (`CheckMap`, dexllm#57 and dexllm#62); a garbage handle's index is a THROW at `GetFieldDecl`/`GetMethodDecl`, not an OOB — filed as dexllm#59 |
+| the method_handle walk is memoised per IMAGE, under an entry budget | ✅ an ADDITION, no ART analogue (`docs/aosp-oob-divergences.md` B2d). For a **v41 container** `size_` is the whole container for EVERY slice while `LogicalDexSlices` strides by `file_size`, so a SHARED section was walked once per sibling — quadratic, measured 0.04 s → 20.59 s at 16 MB. The memo changes no verdict (a later slice re-checks its own tables against the maxima the walk recorded, which is equivalent to re-walking); only the budget can reject, and a legitimate image cannot exhaust it because real sections occupy disjoint bytes |
+| method_handle CONTENTS — handle type ≤ kLast (:1501), `field_or_method_idx` against field_ids/method_ids (:1512/:1521) | ✅ `VerifyMethodHandleSection` (= ART `CheckIntraMethodHandleItem` :1492, added for dexllm#59). Fused into `CheckMap`, where the map item is in hand — ART reaches it by ITERATING the map's sections and this port has no such pass. Never an OOB, but "a throw" (how dexllm#59 was filed) covers only half of it: measured on crafted entries, 0 signals and 0 exceptions, and instead — a TYPE past `kLast` decompiled BYTE-IDENTICALLY to a legal `invoke-static` handle, because `IsField()` sends everything outside 0x00-0x03 to the method table and the Writer renders by the same partition; an out-of-range INDEX throws only through the slicer, while dexllm#67's `ResolveMethodHandle` bounds it and renders nothing, so two bootstrap lines silently vanished |
+| annotations definer-match · call_site CONTENTS · the `0x16` encoded_value's index into method_handle (ART caps its width :1204 and bounds it :1212) | ◐ not checked. Both fixed-size sections' EXTENT and ALIGNMENT are (`CheckMap`, dexllm#57 and dexllm#62), and each unbounded index is bounded AT ITS READER — a throw through the slicer, an empty render through `DecodeEncodedValueText`. Porting :1212 is a new rejection direction with its own a/b, and it retires the vehicle `tests/test_cache_init_failure.py` drives |
 | `CheckOffsetToTypeMap` (offset matches its declared map-item type) | ⚠ not checked — contents are validated directly (`VerifyTypeList`/`VerifyClassData`/`VerifyEncodedArrayAt`/`VerifyAnnotationsDirectory`) so it stays crash-safe, but type-confusion of an offset is caught by ART, not here. **That sentence was false for annotations until dexllm#56** and the gap was exactly this one plus the missing walk: with no type map, "the contents are validated directly" has to hold for *every* referenced structure, and one exception is a crash. ART is map-driven (walk each section, record `offset -> type`, check references against it); this port is reference-driven (walk from the header's tables, validate what each offset points at) — so a section the port never walks is a section nothing checks at all |
 
 **Bottom line:** the structural crash surface is at ART parity (plus `VerifyInsns`
