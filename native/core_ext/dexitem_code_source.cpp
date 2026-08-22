@@ -201,16 +201,44 @@ double DecodeEncodedDouble(uint64_t raw, size_t nbytes) {
     return d;
 }
 
-// Decode a single EncodedValue and produce DAD-equivalent text. Returns
-// empty string for value types we don't render (TYPE/FIELD/METHOD/ENUM/
-// ARRAY/ANNOTATION/FLOAT/DOUBLE) — DAD emits `str(<wrapped object>)` for
-// these but the result is rarely valid Java and varies by androguard
-// version, so we conservatively skip.
+// dexllm#67's bounded method_handle resolver, defined below and forward-declared
+// because the 0x16 arm needs it. REUSED rather than re-derived: it is the one
+// place that bounds both the handle index and the handle's own member index,
+// and this repo's standing lesson is that a rule read a second time drifts
+// (dexllm#70). Moving it up would make the diff a move rather than a change.
+bool ResolveMethodHandle(DexItemCodeSource& src, const dexkit::DexItem& item,
+                         uint16_t dex_id, uint32_t mh_idx,
+                         dad::IDexCodeSource::CallSiteArg& out);
+
+// Decode a single EncodedValue and produce Java-equivalent text.
 //
-// p advances past the consumed bytes regardless.
-std::string DecodeEncodedValueText(const U1*& p,
-                                   const U1* end,
-                                   const dexkit::DexItem& item) {
+// `expression` says which of two things the text is. TRUE (the common case) is
+// a Java expression, emitted as `= text`. FALSE is a value with no expression
+// form at all — a METHOD_HANDLE, a METHOD, an ANNOTATION, or an array holding
+// one — which the caller carries as a trailing comment (dexllm#64). Before
+// that issue those five returned EMPTY, so a field with an unrenderable value
+// and a field with no value produced byte-identical output, and the constant
+// was recoverable from nowhere else: `decompile_class` is the only surface
+// that reads static_values at all.
+//
+// Both reference decompilers do worse here, which is why this diverges from
+// both rather than following either. androguard renders the wrapper object,
+// so 0x1c/0x1d emit a MEMORY ADDRESS — non-deterministic across runs, which
+// this project gates against. jadx 1.5.0 THROWS on 0x15/0x16 (`Can't decode
+// value`) and loses the whole CLASS, and emits a bare `= ;` for 0x1a. Its
+// 0x1c `{…}` is the one rendering worth matching, and this matches it.
+//
+// p advances past the consumed bytes regardless — the dexllm#63 property.
+struct EncodedValueText {
+    std::string text;
+    bool expression = true;
+};
+
+EncodedValueText DecodeEncodedValueText(const U1*& p,
+                                        const U1* end,
+                                        const dexkit::DexItem& item,
+                                        DexItemCodeSource& src,
+                                        uint16_t dex_id) {
     if (p >= end) return {};
     U1 header = *p++;
     uint8_t value_arg = (header >> 5) & 0x07;
@@ -223,14 +251,14 @@ std::string DecodeEncodedValueText(const U1*& p,
             char buf[16];
             if (v < 0) std::snprintf(buf, sizeof(buf), "-0x%x", -static_cast<int>(v));
             else       std::snprintf(buf, sizeof(buf), "0x%x", static_cast<int>(v));
-            return buf;
+            return {std::string(buf)};
         }
         case 0x02:   // SHORT
         case 0x03:   // CHAR
         case 0x04:   // INT
         case 0x06: { // LONG — androguard reads all of these as LE unsigned
             uint64_t v = ReadIntLE(p, end, nbytes);
-            return std::to_string(v);
+            return {std::to_string(v)};
         }
         case 0x10: {  // FLOAT — 32-bit IEEE754, "zero-extended to the right"
             // dexllm#70 — the payload's stored bytes are the MOST significant
@@ -246,32 +274,32 @@ std::string DecodeEncodedValueText(const U1*& p,
             // declared payload and no excess-byte clamp is needed.
             float f = static_cast<float>(
                 DecodeEncodedFloat(ReadIntLE(p, end, nbytes), nbytes));
-            if (std::isnan(f)) return std::string("Float.NaN");
-            if (std::isinf(f)) return f > 0 ? std::string("Float.POSITIVE_INFINITY")
-                                            : std::string("Float.NEGATIVE_INFINITY");
+            if (std::isnan(f)) return {std::string("Float.NaN")};
+            if (std::isinf(f)) return {f > 0 ? std::string("Float.POSITIVE_INFINITY")
+                                             : std::string("Float.NEGATIVE_INFINITY")};
             char buffer[40];
             // %.9g is the round-trip precision for IEEE754 binary32.
             std::snprintf(buffer, sizeof(buffer), "%.9gf", static_cast<double>(f));
-            return std::string(buffer);
+            return {std::string(buffer)};
         }
         case 0x11: {  // DOUBLE — 64-bit IEEE754, "zero-extended to the right"
             // `nbytes` is 1..8 (the gate's 0x11 arm allows every value_arg).
             double d = DecodeEncodedDouble(ReadIntLE(p, end, nbytes), nbytes);
-            if (std::isnan(d)) return std::string("Double.NaN");
-            if (std::isinf(d)) return d > 0 ? std::string("Double.POSITIVE_INFINITY")
-                                            : std::string("Double.NEGATIVE_INFINITY");
+            if (std::isnan(d)) return {std::string("Double.NaN")};
+            if (std::isinf(d)) return {d > 0 ? std::string("Double.POSITIVE_INFINITY")
+                                             : std::string("Double.NEGATIVE_INFINITY")};
             char buffer[48];
             // %.17g is the round-trip precision for IEEE754 binary64.
             std::snprintf(buffer, sizeof(buffer), "%.17g", d);
-            return std::string(buffer);
+            return {std::string(buffer)};
         }
         case 0x17: {  // STRING
             uint64_t idx = ReadIntLE(p, end, nbytes);
             const auto& strings = item.GetStrings();
             // idx validated in-range by VerifyEncodedValue (static_values gate).
             std::string_view raw = strings[idx];
-            if (raw.empty()) return std::string("\"\"");
-            return std::string("\"") + PythonUnicodeEscape(raw) + "\"";
+            if (raw.empty()) return {std::string("\"\"")};
+            return {std::string("\"") + PythonUnicodeEscape(raw) + "\""};
         }
         case 0x18: {  // TYPE — class literal "pkg.Cls.class" or "int[].class"
             uint64_t idx = ReadIntLE(p, end, nbytes);
@@ -279,7 +307,7 @@ std::string DecodeEncodedValueText(const U1*& p,
             // idx validated in-range by VerifyEncodedValue (static_values gate).
             // dad::GetType handles primitives (V/Z/B/.../J → void/boolean/...),
             // reference types ("Lpkg/Cls;" → "pkg.Cls"), and arrays.
-            return dexkit::dad::GetType(type_names[idx]) + ".class";
+            return {dexkit::dad::GetType(type_names[idx]) + ".class"};
         }
         case 0x19:   // FIELD — constant field reference: "Cls.NAME"
         case 0x1b: { // ENUM  — same shape; semantically an enum constant.
@@ -295,67 +323,129 @@ std::string DecodeEncodedValueText(const U1*& p,
             out += dexkit::dad::GetType(type_names[f.class_idx]);
             out += '.';
             out.append(strings[f.name_idx]);
+            return {out};
+        }
+        case 0x15: {  // METHOD_TYPE — an index into proto_ids
+            // The one member of this family that IS a valid Java expression:
+            // `MethodType.methodType(Ret.class, …)` is exactly how a MethodType
+            // constant is written, and it is what the IR path already emits for
+            // an invoke-custom bootstrap (dexllm#67) — through the SAME helper,
+            // so the two layers cannot spell it differently.
+            //
+            // The index is verifier-bounded (`VerifyEncodedValue`, 0x15 arm,
+            // against `proto_ids_size`), so `ProtoIds()[idx]` is in range; the
+            // bail below is for a dex the gate never saw.
+            uint64_t idx = ReadIntLE(p, end, nbytes);
+            const auto proto_ids = item.GetReader().ProtoIds();
+            if (idx >= proto_ids.size()) return {};
+            return {dexkit::dad::MethodTypeText(BuildProto(item, proto_ids[idx]))};
+        }
+        case 0x16: {  // METHOD_HANDLE — an index into the method_handle section
+            // A method handle has NO Java expression form, so it renders as the
+            // reference it names and rides as a comment.
+            //
+            // THE INDEX IS NOT VERIFIER-BOUNDED. `VerifyEncodedValue`'s 0x16 arm
+            // skips the payload without checking it, and says so, on the stated
+            // grounds that nothing consumes the value. This arm IS that consumer,
+            // so the bound moves here — the tier the safety contract permits for
+            // an out-of-scope section, and the same place dexllm#67's
+            // `GetCallSite` bounds it. `ResolveMethodHandle` bounds BOTH
+            // levels: the handle index against the section, and the handle's own
+            // field_or_method_id through `Get*RefTriple` (dexllm#59 is the gap
+            // that leaves the latter to the reader).
+            //
+            // The width is NOT the usual 1..4: 0x15/0x1a go through the gate's
+            // `idx` lambda, which rejects arg > 3, but 0x16 uses `skip(arg + 1)`
+            // with no cap, so an EIGHT-byte index is gate-legal. `ReadIntLE`
+            // reads (arg+1) bytes into a uint64 either way, so consumption
+            // matches the gate and the comparison below cannot wrap.
+            uint64_t idx = ReadIntLE(p, end, nbytes);
+            dad::IDexCodeSource::CallSiteArg h;
+            if (idx > UINT32_MAX ||
+                !ResolveMethodHandle(src, item, dex_id,
+                                     static_cast<uint32_t>(idx), h)) {
+                return {};
+            }
+            return {dexkit::dad::MethodHandleText(h.text, h.member,
+                                                  static_cast<uint32_t>(h.ival)),
+                    false};
+        }
+        case 0x1a: {  // METHOD — an index into method_ids
+            // `Cls::name` — a method reference, which Java can only assign to a
+            // functional interface, so this is a comment too. jadx renders the
+            // same value as a bare `= ;`, i.e. a syntax error; androguard
+            // renders the Python list `['Lcom/Foo;', 'bar', '()V']`.
+            //
+            // Index verifier-bounded against `method_ids_size`; a verified
+            // method_id's class_idx/name_idx are in-range by CheckIntra.
+            uint64_t idx = ReadIntLE(p, end, nbytes);
+            const auto method_ids = item.GetReader().MethodIds();
+            if (idx >= method_ids.size()) return {};
+            const auto& m = method_ids[idx];
+            return {dexkit::dad::MethodRefText(item.GetTypeNames()[m.class_idx],
+                                               item.GetStrings()[m.name_idx]),
+                    false};
+        }
+        case 0x1c: {  // ARRAY — `{a, b, c}`, a real Java array initializer
+            // Recursion depth is capped at 16 by the gate (`VerifyEncodedValue`
+            // kMaxDepth), which bounds this walk too.
+            //
+            // The array is an EXPRESSION only if every element is one: an array
+            // holding a method handle has no expression form either, and the
+            // whole `{…}` moves to the comment. That composition is why the flag
+            // is carried per value rather than decided per type.
+            uint32_t sz = ReadULEB128(p, end);
+            EncodedValueText out;
+            out.text = "{";
+            for (uint32_t i = 0; i < sz && p < end; ++i) {
+                if (i) out.text += ", ";
+                EncodedValueText el = DecodeEncodedValueText(p, end, item, src, dex_id);
+                // An element CAN render to nothing, and the arm that makes it
+                // so is thirty lines up: a 0x16 whose index the gate does not
+                // bound and `ResolveMethodHandle` cannot resolve. Both reviewers
+                // reached `{?}` with a one-byte craft. A hole would silently
+                // shift the list, so it is spelled — and it demotes the array to
+                // a comment, because `= {?}` is not compilable Java.
+                out.text += el.text.empty() ? "?" : el.text;
+                if (!el.expression || el.text.empty()) out.expression = false;
+            }
+            out.text += "}";
             return out;
         }
-        case 0x15:   // METHOD_TYPE   — an index into proto_ids
-        case 0x16:   // METHOD_HANDLE — an index into the method_handle section
-        case 0x1a: { // METHOD        — an index into method_ids
-            // All three are (arg+1)-byte indices with NO Java literal form: a
-            // MethodType / MethodHandle / method reference cannot be written as
-            // an initializer expression, so rendering one would put invalid Java
-            // into a field declaration. Returning {} tells the caller "no
-            // initializer" — but the payload MUST still be consumed, or every
-            // following value in the same encoded_array decodes from the wrong
-            // offset.
+        case 0x1d: {  // ANNOTATION — `@Type(name = value, …)`
+            // Never an expression: Java has no way to initialize a field with an
+            // annotation. Rendered anyway, because the alternative is the shape
+            // dexllm#64 exists to remove.
             //
-            // The width the merged body must survive is NOT uniform: 0x15 and
-            // 0x1a go through VerifyEncodedValue's `idx` lambda, which rejects
-            // arg > 3, but 0x16 uses `skip(arg + 1)` with no arg cap, so an
-            // EIGHT-byte "index" passes the gate. ReadIntLE reads (arg+1) bytes
-            // into a uint64 in every case, so the consumption matches the gate's
-            // for all three and cannot overflow.
-            //
-            // KNOWN COST, deliberate and pre-existing for 0x1a/0x1c/0x1d: the
-            // caller cannot tell "this field has no initializer" from "this
-            // field's initializer is unrenderable", and decompile_class is the
-            // ONLY surface that reads static values at all (render_class_smali
-            // emits none), so the dropped constant is not recoverable elsewhere.
-            // Both reviewers raised it; dexllm#63 scopes rendering OUT by its own
-            // terms ("whether to RENDER anything is a separate question"), and it
-            // sits against this repo's own make-ignorance-representable precedent
-            // (dexllm#41, dexllm#49). A marker comment or a MethodType rendered
-            // through proto_ids would close it — a separate decision, not a
-            // silent one. 0x15/0x16 were missing entirely and fell to `default:`,
-            // which consumed only the header byte (dexllm#63); they are legal
-            // since API 26 and VerifyEncodedValue accepts both, so the invariant
-            // "whatever the gate accepts, every decoder behind it handles" was
-            // broken here exactly as dexllm#57 broke it in the slicer's decoder.
-            //
-            // ReadIntLE rather than `p += nbytes` (which is what 0x1a did on its
-            // own): it is the `end`-bounded advance every other payload read in
-            // this file uses. Forced by the merge rather than chosen — the three
-            // share one body — and strictly safer, since the unbounded form
-            // could form a pointer past `end` on input this decoder does not
-            // itself validate.
-            (void)ReadIntLE(p, end, nbytes);
-            return {};
-        }
-        case 0x1c: {  // ARRAY — skip body
+            // type_idx and every name_idx are verifier-bounded
+            // (`VerifyEncodedAnnotation`). The name is bounded as a STRING
+            // index only — never validated as a member name — so it can be ANY
+            // pool string: a raw newline is the smallest part of it, and a
+            // control character, a C1, a Unicode line separator or a literal
+            // `\uXXXX` (which javac translates BEFORE it recognises comments,
+            // JLS 3.3) all forge a line just as well. `CommentSafe` at the emit
+            // site neutralises the lot by leaving no backslash in the text.
+            uint32_t type_idx = ReadULEB128(p, end);
             uint32_t sz = ReadULEB128(p, end);
+            const auto& type_names = item.GetTypeNames();
+            const auto& strings = item.GetStrings();
+            EncodedValueText out;
+            out.expression = false;
+            out.text = "@";
+            out.text += type_idx < type_names.size()
+                            ? dexkit::dad::GetType(type_names[type_idx]) : "?";
+            if (sz) out.text += "(";
             for (uint32_t i = 0; i < sz && p < end; ++i) {
-                (void)DecodeEncodedValueText(p, end, item);
+                if (i) out.text += ", ";
+                uint32_t name_idx = ReadULEB128(p, end);
+                out.text += name_idx < strings.size()
+                                ? std::string(strings[name_idx]) : "?";
+                out.text += " = ";
+                EncodedValueText el = DecodeEncodedValueText(p, end, item, src, dex_id);
+                out.text += el.text.empty() ? "?" : el.text;
             }
-            return {};
-        }
-        case 0x1d: {  // ANNOTATION — skip (complex; DAD doesn't emit anyway)
-            // type_idx (uleb128), size (uleb128), then size * (name_idx + value)
-            (void)ReadULEB128(p, end);
-            uint32_t sz = ReadULEB128(p, end);
-            for (uint32_t i = 0; i < sz && p < end; ++i) {
-                (void)ReadULEB128(p, end);  // name_idx
-                (void)DecodeEncodedValueText(p, end, item);
-            }
-            return {};
+            if (sz) out.text += ")";
+            return out;
         }
         case 0x1e:   // NULL — DAD emits the Python literal "None" (value=None,
                      // but the EncodedValue wrapper is truthy so the
@@ -364,11 +454,11 @@ std::string DecodeEncodedValueText(const U1*& p,
                      // IEEE754 decode — this decoder lives in core_ext, not the
                      // parity-tested dad_cpp surface, so no *DADFaithful sibling):
                      // emit spec-correct "null".
-            return std::string("null");
+            return {std::string("null")};
         case 0x1f:   // BOOLEAN — DAD emits the Python literals "True"/"False",
                      // which are not valid Java. Production fix: emit the Java
                      // literals "true"/"false".
-            return value_arg ? std::string("true") : std::string("false");
+            return {value_arg ? std::string("true") : std::string("false")};
         default:
             // An unknown type code costs a missing RENDER; it must not cost a
             // DESYNC. `nbytes` is the (arg+1) width of every fixed-payload
@@ -428,14 +518,18 @@ OrderedFields ParseClassFieldOrder(const dexkit::DexItem& item,
 }
 
 // Decode the EncodedArray @ static_values_off and pair each value with the
-// matching static field_idx (positional). Returns field_idx → init text;
-// fields without an EncodedValue entry (or with unsupported value types)
-// are simply absent from the map.
-std::unordered_map<uint32_t, std::string>
+// matching static field_idx (positional). Returns field_idx → the rendered
+// value and whether it is a Java EXPRESSION; a field with no EncodedValue
+// entry is simply absent from the map. Since dexllm#64 the only values that
+// render to nothing are ones this decoder could not RESOLVE (a crafted index),
+// not ones it declines to spell.
+std::unordered_map<uint32_t, EncodedValueText>
 DecodeStaticInitMap(const dexkit::DexItem& item,
                     const dex::ClassDef& cdef,
-                    const std::vector<uint32_t>& static_field_idxs) {
-    std::unordered_map<uint32_t, std::string> init_map;
+                    const std::vector<uint32_t>& static_field_idxs,
+                    DexItemCodeSource& src,
+                    uint16_t dex_id) {
+    std::unordered_map<uint32_t, EncodedValueText> init_map;
     if (cdef.static_values_off == 0 || static_field_idxs.empty()) {
         return init_map;
     }
@@ -454,8 +548,10 @@ DecodeStaticInitMap(const dexkit::DexItem& item,
     }
     init_map.reserve(value_count);
     for (uint32_t i = 0; i < value_count; ++i) {
-        std::string text = DecodeEncodedValueText(sv, sv_end, item);
-        if (!text.empty()) init_map.emplace(static_field_idxs[i], std::move(text));
+        EncodedValueText value = DecodeEncodedValueText(sv, sv_end, item, src, dex_id);
+        if (!value.text.empty()) {
+            init_map.emplace(static_field_idxs[i], std::move(value));
+        }
     }
     return init_map;
 }
@@ -1004,13 +1100,19 @@ DexItemCodeSource::GetClassInfo(std::string_view class_descriptor) {
                           fields.instance_ids.begin(), fields.instance_ids.end());
 
     // Decode static-field initializers (EncodedArray @ static_values_off);
-    // result is parallel to field_ids and stays empty for fields with no
-    // compile-time init or unsupported value types (FLOAT/DOUBLE/TYPE/...).
-    auto init_map = DecodeStaticInitMap(*item, cdef, fields.static_ids);
+    // both vectors are parallel to field_ids and stay empty for fields with no
+    // compile-time init. A value with no Java expression form goes to
+    // `field_init_comments` instead of `field_init_texts` (dexllm#64), so the
+    // two are disjoint and the renderer picks by which one is non-empty.
+    auto init_map = DecodeStaticInitMap(*item, cdef, fields.static_ids, *this,
+                                        info.dex_id);
     info.field_init_texts.assign(info.field_ids.size(), std::string{});
+    info.field_init_comments.assign(info.field_ids.size(), std::string{});
     for (size_t i = 0; i < info.field_ids.size(); ++i) {
         auto it = init_map.find(info.field_ids[i]);
-        if (it != init_map.end()) info.field_init_texts[i] = it->second;
+        if (it == init_map.end()) continue;
+        if (it->second.expression) info.field_init_texts[i] = it->second.text;
+        else                       info.field_init_comments[i] = it->second.text;
     }
     return info;
 }

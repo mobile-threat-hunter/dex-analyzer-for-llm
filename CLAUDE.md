@@ -918,6 +918,353 @@ ART's `CheckInterClassDataItem` (`dex_file_verifier.cc:3208`, field loop `:3226`
 
 **Deliberately still out of scope, all pre-existing, all wrong-answer rather than crash surface:** member ACCESS FLAG validation (`CheckFieldAccessFlags` / `CheckMethodAccessFlags`); **`CheckStaticFieldTypes` `:1289`** (a static field's declared type vs its `encoded_array` initializer) — which this repo currently *relies on the absence of*, since `tests/test_mutf8_identifiers.py::test_astral_type_in_a_field_initializer_decompiles` retypes a static value `0x17`→`0x18` and expects the dex to load; and the orphan-`class_data` check ART gets by driving from the MAP where this port drives from `class_defs` (inert — the core walks `class_defs` too, so it never parses one).
 
+### An unrenderable static initializer is no longer indistinguishable from none (dexllm#64, 2026-08-22)
+
+`DecodeEncodedValueText` returned an EMPTY string for five `encoded_value`
+types, and that empty string is filtered out **twice** — once by the producer
+([dexitem_code_source.cpp](native/core_ext/dexitem_code_source.cpp)
+`DecodeStaticInitMap`), once by the renderer
+([decompiler.cpp](native/dad_cpp/decompiler.cpp)). So a field whose
+`static_values` entry existed but could not be spelled and a field with no entry
+at all produced **byte-identical** Java. The constant was recoverable from
+nowhere else: `decompile_class` is the only surface that reads `static_values`
+(`render_class_smali` emits none since dexllm#45; neither the SDK nor MCP has an
+initializer accessor). Pre-existing for `0x1a`/`0x1c`/`0x1d`; dexllm#63 widened
+the set to five while fixing their payload-consumption bug, and recorded it as an
+accepted residual rather than filing it.
+
+**Both reference decompilers do worse here, which is why this follows neither —
+and that was measured, not assumed.** Five crafted dexes (one per type, on the
+committed fixture) run through **jadx 1.5.0**:
+
+| type | androguard / DAD | jadx 1.5.0 | dexllm before | dexllm now |
+|---|---|---|---|---|
+| `0x15 METHOD_TYPE` | the raw payload as an int | **whole CLASS fails** (`Can't decode value`) | dropped | `invoke.MethodType.methodType(Double.TYPE, TestInvocationKinds.class)` |
+| `0x16 METHOD_HANDLE` | the raw payload as an int | **whole CLASS fails** | dropped | `// = TestBadBootstrapArguments::bsm` |
+| `0x1a METHOD` | `['LMain;', '<init>', ['()', 'V']]` (the proto NESTS) | `= ;` (a syntax error) | dropped | `// = Main::new` |
+| `0x1c ARRAY` | a **memory address** | `= {7}` | dropped | `= {7}` |
+| `0x1d ANNOTATION` | a **memory address** | `= @B` | dropped | `// = @annotations.BootstrapMethod(Hello = 7)` |
+
+androguard's `0x1c`/`0x1d` are non-deterministic across runs (the address of an
+`EncodedArray` object with no `__str__`), which this project gates against, so
+dropping them was right at the time. jadx crashing the class for two of them is
+what settles the direction: this is not "catch up to the oracle", it is a place
+both oracles are wrong.
+
+**The androguard column is per-type and NOT uniform, which an earlier draft of
+[docs/api.md](docs/api.md) got wrong in a way this table did not.**
+`EncodedValue.__init__` opens with `if VALUE_SHORT <= value_type < VALUE_STRING`,
+i.e. `0x02 <= vt < 0x17` — which swallows `0x15` **and** `0x16` into
+`_getintvalue`, so both come out as a raw integer. Only `0x1a` reaches
+`cm.get_method(id)` and renders the Python list. A correctness reviewer RAN
+androguard on checksum-corrected crafts of the fixture to establish that, and
+found the two mirrors disagreeing.
+
+**TWO shapes, and the flag travels with the VALUE, not the type code.** A
+`MethodType` and an array HAVE Java expression forms, so they render after `=`.
+A method handle, a method reference and an annotation do NOT — Java cannot
+assign any of them to a field — so they ride as a trailing `// = …` comment and
+the declaration stays valid. `{Foo::bar}` has no expression form either, so an
+array is an expression exactly when every element is: `ClassInfo` grew a
+`field_init_comments` vector DISJOINT from `field_init_texts`, and the renderer
+picks by which one is non-empty. (The alternative — a marker string the renderer
+sniffs — is a protocol; two parallel vectors each mean one thing.)
+
+**The rendering vocabulary was HOISTED, not re-spelled.** dexllm#67 already
+taught the IR builder to reconstruct an `invoke-custom` bootstrap chain, which
+spells a proto as `MethodType.methodType(…)` and a handle as `Cls::name` /
+`Cls::new` / `Cls.name`. Those rules moved to `dad_cpp/util` as
+`ClassLiteralText` / `MethodTypeText` / `MethodHandleText` / `MethodRefText` — a
+rule read a second time drifts, and its prose drifts with it, which is the whole
+content of dexllm#70. **TWO of the four are genuinely shared**:
+`instruction_dispatch.cpp` calls `ClassLiteralText` and `MethodHandleText`, and
+only the node WRAPPING stayed there, because the AST needs structure a flat
+string cannot carry. `MethodTypeText` and `MethodRefText` have a single caller
+each and live beside the shared pair rather than beside it — the IR path
+assembles `methodType` from IR NODES instead. An earlier draft said the IR
+builder calls all four; it does not, and that overstatement is exactly what left
+ARGUMENT ORDER unguarded. **Sharing also bought coverage the crafts here cannot reach.** Every
+`method_handle` in all three committed fixtures is kind 4 or 5
+([[fixture-dead-branches-hide-guards]], the same census dexllm#67 recorded), so
+no static-value craft in this change can exercise `MethodHandleText`'s FIELD
+(`Cls.name`, kinds 0x00-0x03) or CONSTRUCTOR (`Cls::new`, kind 0x06) branches —
+but dexllm#67's `test_a_handle_argument_renders_by_its_KIND` patches
+`method_handle_type` IN PLACE for exactly those two, and now drives the shared
+helper. A duplicated body would have left both branches guarded on one caller
+and dead on the other. That covers the SPELLING and nothing more: a correctness
+review pointed out that `ResolveMethodHandle`'s own field-vs-method dispatch
+(`method_handle_type >= 4` → `GetMethodRefTriple`, else `GetFieldRefTriple`) is
+reached from the IR path only, so this change pins it from the static-value route
+with its own in-place kind patch. A guard pins that both layers call the helpers, and a
+behavioural one pins that they agree: the proto is
+`(ILjava/lang/String;Ljava/lang/Double;)I`, which the fixture's own bootstrap
+uses AND whose parameters are not all one type, so `decompile_class` (crafted
+static value) and `decompile_method` (untouched IR path) must produce the
+identical text through genuinely different code — including the ORDER, which a
+homogeneous signature cannot see.
+
+**The standing rule bound this commit for the fifth time**
+[[a-rule-you-wrote-binds-your-next-commit]]. `VerifyEncodedValue`'s `0x16` arm
+declines to bound the index and justified it as *"for a value nothing
+consumes"* — this arm is that consumer. The bound moves to the READER, which is
+the tier the safety contract permits for an out-of-scope section, and it is
+dexllm#67's existing `ResolveMethodHandle` (the one place that bounds BOTH the
+handle index and the handle's own `field_or_method_id`) rather than a second
+resolution. The two consumers now behave DIFFERENTLY on a crafted index and the
+comment says so: the slicer's annotation path THROWS out of `ArrayView`, while
+this one returns false, so an unresolvable handle renders nothing instead of
+taking the whole class decompile down.
+
+**An UNRESOLVABLE value still renders nothing, and that is dexllm#67's rule
+rather than a relapse.** A crafted `0x16` index that the gate does not bound and
+the reader cannot resolve produces no output at all — refusing beats inventing,
+the same call dexllm#67 made for an unresolved call site. It is reachable only
+from a craft: every value the gate can vouch for resolves, and those are exactly
+the ones that now always render.
+
+**A `//` comment, and `/* … */` would have been a hole.** A string element
+inside a rendered array is `PythonUnicodeEscape`d, which escapes quotes,
+backslashes and every control character — but NOT `*` or `/`, so a literal
+containing `*/` closes a block comment early and the rest of the line becomes
+code. A line comment has no such terminator. The remaining channel is a
+NEWLINE, and it is real rather than theoretical: an annotation element **name**
+is bounded by `VerifyEncodedAnnotation` as a string INDEX and never validated as
+a member name, so it can point at any pool string — and `invoke-custom.dex`
+itself ships two that end in a raw `0x0A`. `SanitizeUtf8` does not help (its
+ASCII fast path passes `0x0A` through verbatim, deliberately, so the Writer's
+own newlines survive), so **`CommentSafe`** folds it — along with every other C0,
+DEL, and the three Unicode separators — at the one append that is
+line-terminated. Same family as dexllm#22, and the first cut of that function
+folded only `\n` and `\r`, which is the review finding below.
+
+**Measured (a/b OFF=`d581b96` `c723499f…` vs ON, SAME script, both
+`.so` md5-verified and the ON build bit-reproducing its md5 after the halves were
+swapped back; re-captured on the FINAL build after the review fixes and identical
+on every axis, so the record covers the shipped binary and not a predecessor
+[[verify-build-identity-before-measuring]]):** 70 sources — the whole bundled corpus, every committed fixture,
+every `art/test/dexdump/*.dex`, every `tools/dexter/testdata/*.dex`, and **7
+crafted dexes** — × {both verify verdicts, load, class list, a hash over the
+static-field declaration lines, the whole decompile} = **259 axis records, 14
+changed, and every one of them is a crafted source on one of the two decompile
+axes**. The declaration axis is a WEAK one for this change and a correctness
+review had to say so: its filter keeps a line that ends in `;`, and a
+comment-bearing declaration ends in `// = …`, so those lines DROP OUT of it
+rather than differing within it — it registers the change but does not carry it.
+The whole-decompile axis is what carries the signal. Verify verdicts and class lists are identical on every source; **0 real
+sources changed on any axis**. The corpus carries **0** values of all five types
+(the issue's independent raw-dex census: 55 sources / 33,787 class_defs / 6,934
+`static_values` arrays / 113,349 top-level values / 0 hits — only 10 of the 18
+type codes occur at all), so a corpus-only a/b is byte-identical BY CONSTRUCTION
+and proves nothing about the mechanism; the crafted sources are in the same
+measurement for exactly that reason [[ab-must-prove-the-mechanism-fires]].
+
+parity **29/29**, pytest **909 passed / 10 skipped**, TRUE corpus-less
+(`test_apk` MOVED aside) **501 passed / 418 skipped / 0 failed** — every one of
+the 56 new guards runs in the CI leg — narrowed to `tests/data/multidex.apk`
+**810 passed**, the guard file green narrowed to each bundled sample, sweep
+**25,309-class / 213,374 method-block 0-crash 0-timeout, GATE: PASS**,
+determinism 3 processes x 3 `PYTHONHASHSEED`s -> one digest (unchanged from
+before the fix), lint trio clean, doc fences 77,
+`scripts/check_dad_boundary.sh` clean.
+
+**Stated rather than discovered, from the review:**
+* a rendered ARRAY is a new LINEAR output amplifier — pre-change `0x1c`
+  accumulated no text, and a 400,000-element array of one 51-byte string turns an
+  832 KB dex into a 22 MB `decompile_class` result (0.10 s, 106 MB RSS). Linear,
+  not quadratic (the gate caps nesting at 16 — verified, 16 accepted / 17
+  rejected), the same order as the pre-existing N-fields-one-big-string route,
+  and `0x1c` has 0 incidence in any real dex. No budget added; worth one if a
+  budget is ever added elsewhere in this decoder.
+* `{7}` on an `int` field is invalid Java, and this change turns a previously
+  VALID `static final int X;` into it. That is the un-ported
+  `CheckStaticFieldTypes` (ART :1289) gap CLAUDE.md already scopes out and which
+  `tests/test_mutf8_identifiers.py` actively relies on; the same mismatch is
+  already producible pre-change with a STRING value. Crafted-only.
+* an earlier draft justified NOT widening `CommentSafe` by claiming a member
+  NAME may already carry U+2028, so the class was pre-existing. **A delta
+  reviewer refuted that from the ported predicate**: `case 0x2028: return
+  leading == 0x202f;` REJECTS U+2028/U+2029, and `case 0x00: return leading >=
+  0x00a0;` rejects NEL and every C1 — and a field TYPE goes through
+  `IsValidDescriptor` to the same predicate while a String initializer is
+  `PythonUnicodeEscape`d. So EVERY component of a declaration line excluded
+  these before dexllm#64, the annotation element name is the only channel, and
+  the honest conclusion is the opposite of the draft's: widen. `CommentSafe`
+  escapes C0, DEL, the whole C1 range, the three separators and the backslash.
+  What genuinely IS pre-existing is the BIDI/invisible class — the same
+  predicate ALLOWS U+2066-U+2069 (`0x2066 & 0xfff8` is 0x2060, matching no case,
+  so `return true`) and U+FEFF in a member name — so those reach a declaration
+  line through `SanitizeUtf8(finfo.name)` today and stay out of scope.
+* the two vectors are disjoint only because `GetFieldInfo(...).init_text` is
+  hard-coded empty. If that hook is ever populated, `decompiler.cpp`'s fallback
+  would emit `Type name = <fallback>;  // = <comment>` — a declaration asserting
+  two values. The header comment says "check both"; nothing enforces it.
+
+**Guards** (56 cases in
+[tests/test_static_initializer_rendering.py](tests/test_static_initializer_rendering.py),
+ALL corpus-independent — every craft re-lays the eight bytes of
+`LTestLinkerMethodMinimalArguments`'s `static_values` in the committed
+`tests/data/invoke-custom.dex`, so they run in the CI leg and under any
+`$DEXLLM_TEST_APK` narrowing). The craft is length-preserving: a payload of N
+bytes takes 1 + N, the array's count drops to `1 + (7 - N) // 2`, the surviving
+one-byte INTs follow, and the leftover bytes are never read — no offset, no
+section size and no neighbouring structure moves. Those survivors double as a
+**desync oracle**. Each index is chosen to reach a DIFFERENT branch (`<init>`
+vs a plain method name, an empty array vs a populated one, an annotation with
+and without elements) and is resolved by an independent walk of the dex, not by
+asking the decoder under test.
+
+**Three inherited guards were INVERTED rather than deleted**, on the dexllm#22 /
+dexllm#29 / dexllm#45 precedent: dexllm#63's desync tests asserted the
+declaration `endswith("RETURNS_NULL;")`, which was the PREMISE of the day and
+not the subject — the subject is that the three values AFTER it keep their own
+constants, and that is untouched. Two source-level anchors also had to move
+(`"std::string DecodeEncodedValueText"` no longer matches a struct return type);
+both now anchor on the PARAMETER list and **raise loudly** if the definition ever
+disappears — which is how the coupling was found in the first place, since the
+dexllm#63 invariant test failed with a `ValueError` instead of silently
+auditing an empty string.
+
+## What the reviewers found — 23 findings over two rounds, and the code DID move
+
+**Round 1 found 12 and round 2 found 11 more. Calling them "none in what the
+code does" was wrong twice over** — the headline of each round is a defect in
+what this change EMITS, and both were introduced BY it. Round 2's is the sharper
+one, because it was introduced by round 1's own fix.
+
+**Round 1: a REGRESSION this change introduced, and only an OFF/ON measurement
+could have said so.** The first cut folded `\n` and `\r` into
+the comment and called that "cannot forge a line of Java". `SanitizeUtf8`'s ASCII
+fast path passes EVERY byte below 0x80 through verbatim, so VT, FF, FS, GS, RS,
+ESC and DEL reached the output raw, and the multibyte path renders U+0085 /
+U+2028 / U+2029 READABLY (dexllm#28, right for an identifier, wrong here).
+Python's `str.splitlines()` breaks on eight of them (not ESC or DEL,
+which are escaped because they reach a TERMINAL, not because they split a line). An adversarial reviewer re-laid
+pool string 3 in place, pointed an annotation element name at it, and got
+
+```java
+    static final int FAILURE_TYPE_LINKER_METHOD_RETURNS_NULL;  // = @…BootstrapMethod( C
+  static final String PWNED = "owned";  //     = 7)
+```
+
+on a dex `verify()` calls **valid** — then ran the same seven crafts against the
+PREVIOUS build and got `forged_line=False` on every one, because 0x1d rendered
+nothing there so the name never reached the output. It also breaks an invariant
+this repo states out loud: `test_smali_never_contains_raw_control_chars` forbids
+raw C0 in the smali listing, its docstring enumerates U+2028 / U+2029 / U+0085 /
+DEL as the only contract exceptions, and the Java path was C0-clean until this
+change. `SingleLine` became **`CommentSafe`**, folding every C0, DEL and the
+three Unicode separators; all twelve are pinned, and folding only the two
+newlines now fails TEN of them (a delta reviewer built that mutant and counted;
+an earlier draft of this line said seven).
+
+**Round 2: the escape alphabet re-forged the line it had just folded.** A Java
+compiler translates a `\uXXXX` escape BEFORE it recognises comments (JLS 3.3),
+so folding a newline TO `\u000a` hands the next Java-aware consumer the newline
+back — and `\` was not escaped either, so the six ASCII bytes could simply be
+written. A delta reviewer took this file's OWN `[lf]` guard case, ran the emitted
+line through **javac**, and got the fabricated `static final String PWNED` field;
+reproduced here, with a positive control (the pre-fix rendering compiles and
+yields the field, the fixed one does not). The invariant is now **no backslash
+survives in a comment** — escapes are written `<U+XXXX>` — which also defangs the
+`\uXXXX` escapes `SanitizeUtf8` ITSELF emits for a decoded control, and is
+checkable in one line. The contrast that shows it is specific to this change:
+the pre-existing `EscapeJavaString` emits the same escape inside a STRING
+literal, where javac fails loudly; a comment is the one place it succeeds
+silently, and before dexllm#64 no attacker-controlled text reached one.
+
+**Round 2: `SanitizeUtf8` was droppable with a green suite.**
+`CommentSafe(SanitizeUtf8(x))` is a two-part composition and every one of the 46
+crafts used a pure-ASCII body, on which the two forms are byte-identical — so
+deleting the inner call passed all 899 tests while a lone surrogate in an
+annotation element name made `decompile_class` raise `UnicodeDecodeError`, i.e.
+the dexllm#22 failure class re-opened. Three non-ASCII name crafts close it.
+
+**`MethodTypeText` has ONE caller, and three places said otherwise.** The IR
+builder assembles `methodType` from IR NODES (the AST needs structure a flat
+string cannot carry), so it shares only `ClassLiteralText`. That made ARGUMENT
+ORDER a property nothing held the two layers to — and both protos pinned here
+were blind to it, one having a single parameter and `(II)I` being homogeneous:
+**the exact hole dexllm#67 paid for once as its own M9.** A reviewer walked
+`ParseParamsType` backwards and passed all 875 tests. The claim is corrected in
+`util.h`, the guard docstring and this file; the fixture's mixed
+`(ILjava/lang/String;Ljava/lang/Double;)I` is pinned as a literal, and the
+cross-layer test moved onto it — the IR path renders that exact string in
+`TestDynamicBootstrapArguments.testCallSites()V`, so the comparison is now
+order-sensitive on both sides.
+
+**Two more unguarded lines, each demonstrated by a mutant that passed 875:**
+the `|| el.text.empty()` half of the array demotion (without it an unresolvable
+element yields `= {?};` — uncompilable Java on the right of an `=`, which is
+precisely what the two-shape design exists to prevent), and the
+`idx > UINT32_MAX` clause (0x16 is the one arm the gate lets through EIGHT bytes
+wide, so `2**32` truncates to 0 and FABRICATES handle 0 for a value naming none;
+every other 0x16 craft in the file is one byte).
+
+**A guard of mine tested the wrong function.** The new kind-dispatch case
+asserted the `.` / `::` separator — which `MethodHandleText` derives from the
+KIND alone, so it says nothing about which TABLE `ResolveMethodHandle` consulted.
+A mutant that always takes the method table passed all 128 cases. It pins the
+resolved NAME now (`field_ids[0]` is `TestDynamicBootstrapArguments.bsmCalls`,
+`method_ids[0]` is `Main;-><init>`), which is the half that differs.
+
+**Four factual claims were wrong and each was disproved by RUNNING something.**
+androguard swallows `0x15` **and** `0x16` into `_getintvalue` (its
+`VALUE_SHORT <= vt < VALUE_STRING` range), so only `0x1a` yields the Python list
+— [docs/api.md](docs/api.md) said otherwise while the table here said it right,
+i.e. one commit shipping two contradictory mirrors. jadx does NOT lose the class
+on a method reference; it emits `= ;`, and the two it loses are `0x15`/`0x16`
+(README overstated it). `<clinit>` IS a `method_id` a constant can name — four of
+them in this very fixture — so `MethodRefText`'s stated reason for not handling
+it was false. And the 0x1c arm called an empty element "unreachable" thirty lines
+below the arm that makes it reachable. Plus a comment naming a function that does
+not exist (`ResolveHandleText`), a verifier comment scoped to "TWO consumers"
+when `ParseCallSiteArg` is a third reader, and — the pattern this file keeps
+recording — the dexllm#63 section still describing, in the present tense, the
+residual this change removes, while its C++ twin had already been deleted
+[[a-rule-you-wrote-binds-your-next-commit]].
+
+**Everything else they attacked, they REFUTED with their own instruments:** the
+five new arms' memory safety (**451 crafted inputs judged by SUBPROCESS EXIT
+STATUS** — an 8-byte index, handle indices 29 / `0xFFFFFFFF` / `2**64-1`, an OOB
+`field_or_method_id`, kind `0xFFFF`, table boundaries — **0 signals, 0 hangs**),
+consumption desync (**12,000 fuzzed cases over three seeds, 7,590 gate-accepted,
+0 desync** — the trailing sentinel INTs never move), the recursion cap (depth 17
+accepted, 18 rejected, inherited from the gate), the choice of `//` over
+`/* */`, injection into the EXPRESSION path (structurally impossible — 0x17 and
+array-of-string are both escaped), and amplification (0x17 already offers the
+same).
+
+**26 mutants, each BUILT and RUN with a distinct `.so` md5, each killed.** Round
+two adds five for the lines round two touched: the escape form reverted to
+`\uXXXX` (**19 failures** — the shape a delta reviewer took through javac), the
+backslash left unescaped, C1 narrowed back to NEL-only, `SanitizeUtf8` dropped
+from the composition, and the annotation arm's `?` removed. Round one's fifteen: each
+of the five arms dropped alone (6 / 4 / 3 / 5 / 3 failures), a handle rendered as
+an EXPRESSION (`= Foo::bar`, uncompilable), the array's composition rule removed
+so an array of handles claims to be one, the comment sanitiser removed, the
+shared handle bound removed, the IR builder re-spelling the kind rule as a correct DUPLICATE
+(killed at SOURCE level only — nothing behavioural can see it), `methodType`'s
+return type moved LAST, a primitive rendered `int.class` instead of the boxed
+`TYPE`, `<init>` no longer `::new`, and a full pre-fix revert (**20 failures**).
+
+**The pre-fix mutant is the one worth recording, because the harness REFUSED it
+and a correctness review caught the gap in the evidence rather than in the
+product.** Its anchor, `case 0x15: {  // METHOD_TYPE`, matches TWICE in that file
+— `DecodeEncodedValueText` and `ParseCallSiteArg` — so `assert count == 1` fired
+and the run reported 13 md5s, not 14. The first hand-written replacement then did
+not COMPILE (a fallthrough group duplicates the 0x16/0x1a labels), and a build
+failure is not a kill [[mutation-harness-restore-pitfalls]] — the harness's own
+`md5 UNCHANGED` branch is what said so. It was rebuilt as five per-arm edits and
+run (md5 `84d2d061…`), and the reviewer independently constructed the same revert
+and reached the same 20 failures.
+
+**Docs:** [docs/api.md](docs/api.md)'s claim that the header+fields region
+matches androguard `DvClass.get_source()` *"byte for byte except that a `"` is
+escaped"* was **already false** before this change — CLAUDE.md's own record has
+614 `= None` lines on a single APK turning into `null`, plus the IEEE754 and
+TYPE/FIELD/ENUM divergences — so it is replaced with the actual divergence table
+rather than merely extended.
+
 ### Decompiler API surface (pybind11)
 
 Exposed via `dexllm.DexKit(apk_path)`. The constructor identifies the file **by content, not extension** — a `dex\n` magic loads as a bare `.dex` via the core's `AddImage`; otherwise it must prove out as a real zip/apk container (PK signature + parseable central directory via `ZipArchive::Open`) and carry at least one sequential `classes*.dex`. A disguised `.apk` (renamed, wrong, or absent extension) therefore still loads; a non-dex/non-zip file or a zip with no `classes*.dex` now raises a clear `std::runtime_error` (the error reports whether `AndroidManifest.xml` was present) instead of the old silent 0-dex load. Detection lives in `DexKitExt::DexKitExt` ([dexkit_ext.cpp](native/core_ext/dexkit_ext.cpp)). Arg name stays `apk_path` for backward compatibility.
@@ -930,7 +1277,7 @@ Exposed via `dexllm.DexKit(apk_path)`. The constructor identifies the file **by 
 |---|---|
 | `decompile_method(method_descriptor)` | Java text decompile. **GIL released** during execution (parallel-safe). |
 | `decompile_method_with_pc_map(method_descriptor)` → dict | **D-3 (dexllm#1)** — Java text + a source-line ↔ dex bytecode-offset map for smali sync: `{"source": str, "pc_map": [(line_1based, byte_off), …]}` (one entry per line, first-anchor-wins; lines with no source op — braces, `while(true)` — omitted; condition/loop/switch HEADER lines are mapped via the four emit hooks). **`line` = 1-based index into `source.split("\n")` — only `\n` (0x0A) delimits a line; do NOT use `splitlines()` / a Unicode-line-aware split** (a string literal may carry a raw U+2028/U+2029/U+0085 that those split on but the `\n`-only counter does not — a JS consumer's `text.split("\n")` matches the contract). Uncached (recompute is cheap), GIL released. Parity-neutral: the map is observed during emit, never mutates the text, which stays byte-identical to `decompile_method`. |
-| `decompile_class(class_descriptor)` | Full Java class text — `package`, class header (access + extends + implements), static→instance field declarations with compile-time initializers (EncodedValue decoded), then method bodies. Header+fields region is byte-identical to androguard `DvClass.get_source()`. |
+| `decompile_class(class_descriptor)` | Full Java class text — `package`, class header (access + extends + implements), static→instance field declarations with compile-time initializers (EncodedValue decoded), then method bodies. The header+fields region follows androguard `DvClass.get_source()`'s structure but deliberately DIVERGES from it wherever androguard emits invalid or non-deterministic Java — see the table in [docs/api.md](docs/api.md). |
 | `decompile_method_ast(method_descriptor, include_source=True)` → dict | Signature components + Java `source` + full DAD `dast.py` nested-list `ast` (`{triple, flags, ret, params, comments, body}`) + **D-3 `pc_map`** (a sidechannel `[(statement_seq, byte_off), …]` kept OUT of the `ast` tree so it stays byte-identical to androguard; key = post-order DFS statement index — see `JSONWriter::pc_map`). `include_source=False` skips the separate text-emit pipeline (AST and text emitters each mutate the graph, so they can't share one run) — ~1.7× faster for AST-only consumers. |
 | `list_classes()` → list[str] | Every declared class descriptor across all loaded dexes. Replaces androguard's `AnalyzeAPK→get_classes` (100×+ faster). |
 | `list_class_methods(class_descriptor)` → list[str] | Every declared method's full Dalvik descriptor. |
@@ -2280,17 +2627,19 @@ today (the gate rejects every code outside the 18, verified by a reviewer's
 crafted retypes to 0x01/0x05/0x12/0x14, refused strict AND lenient), so it is
 defence for the NEXT code rather than a live fix.
 
-**KNOWN COST, accepted and stated rather than discovered.** Rendering nothing
-means the caller cannot tell "this field has no initializer" from "this field's
-initializer is unrenderable", and `decompile_class` is the ONLY surface that
-reads static values at all (`render_class_smali` emits none), so the dropped
-constant is not recoverable through another API. Both reviewers raised it; it
-sits against this repo's own make-ignorance-representable precedent (dexllm#41's
-`access_flags → None`, dexllm#49's `dropped_touches`), and the asymmetry is real
-— a `MethodType` COULD render as valid Java through `proto_ids`, a `MethodHandle`
-could not. dexllm#63 scopes rendering out in its own words ("whether to RENDER
-anything is a separate question"), so this change keeps the 0x1a precedent and
-records the residual instead of widening silently.
+**KNOWN COST at the time, and CLOSED by dexllm#64 — this paragraph is kept for
+the record, not as current behaviour.** Rendering nothing meant the caller could
+not tell "this field has no initializer" from "this field's initializer is
+unrenderable", and `decompile_class` is the ONLY surface that reads static values
+at all (`render_class_smali` emits none), so the dropped constant was not
+recoverable through another API. Both reviewers raised it; it sat against this
+repo's own make-ignorance-representable precedent (dexllm#41's `access_flags →
+None`, dexllm#49's `dropped_touches`), and the asymmetry was real — a `MethodType`
+COULD render as valid Java through `proto_ids`, a `MethodHandle` could not.
+dexllm#63 scoped rendering out in its own words ("whether to RENDER anything is a
+separate question") and recorded the residual rather than widening silently;
+dexllm#64 is the change that took it up, and the asymmetry above is exactly the
+expression/comment split it settled on.
 
 **Reachability:** a static initializer whose constant is a `MethodType` or a
 `MethodHandle`, which javac does not produce (a compile-time constant field is a

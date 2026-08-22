@@ -269,6 +269,9 @@ by extracting the raw `.dex` and loading it individually.
 - **EncodedValue**: AOSP reads per spec and stores; dexllm **decodes IEEE754 float/
   double and null/true/false into spec-correct Java literals** for decompiler output
   (a vs-androguard fix, but the intent — Java-source correctness — is dexllm-specific).
+  Since dexllm#64 the type/field/enum/method-type/method-handle/method/array/annotation
+  values render too — the ones with no Java expression form as a trailing `// = …`
+  comment, so an unrenderable initializer is distinguishable from none.
   A float/double payload is **zero-extended to the RIGHT** — the stored bytes are the
   MOST significant ones, ART's `ReadUnsignedInt(..., fill_on_right = true)` — so a
   short encoding such as `80 3F` is `1.0f` and not the `0x00003F80` denormal a

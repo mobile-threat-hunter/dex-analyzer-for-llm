@@ -78,6 +78,72 @@ std::string SanitizeUtf8(std::string_view in) {
     return out;
 }
 
+// Make text safe to place in a `//` comment.
+//
+// TWO properties, and the second is not obvious. A comment runs to end of line,
+// so anything a consumer treats as a line break forges a line — and `\n` is the
+// smallest part of that: Python's `str.splitlines()` also breaks on VT, FF, FS,
+// GS, RS, NEL, U+2028 and U+2029. And a JAVA compiler translates a `\uXXXX`
+// escape BEFORE it recognises comments at all (JLS 3.3), so an escape is a line
+// break too — including one this function emits itself.
+//
+// So the invariant is: THE RESULT CONTAINS NO BACKSLASH. Escapes are written
+// `<U+XXXX>`, and a backslash in the input becomes `<U+005C>`. With no `\` in
+// the text there is no eligible unicode escape, and a `//` comment cannot be
+// terminated by anything. An earlier version escaped as `\uXXXX` and so
+// re-forged the very line it had just folded: a delta reviewer took this
+// function's OWN `[lf]` guard case, ran the output through javac, and got the
+// fabricated `static final String PWNED` field back. Verified here too.
+//
+// The escaped set is every CONTROL character (C0, DEL, C1) plus the three
+// Unicode line separators plus the backslash. C1 belongs for the same reason C0
+// does and is reachable for the same reason: ART's
+// `IsValidPartOfMemberNameUtf8Slow` has `case 0x00: return leading >= 0x00a0`,
+// so a member NAME may not hold one, and before dexllm#64 nothing else could put
+// one on a declaration line. 0x9B is the 8-bit CSI, i.e. an escape introducer.
+//
+// Bidi and invisible FORMAT characters are deliberately NOT escaped: the SAME
+// validator ALLOWS U+2066-U+2069 (the bidi isolates — `0x2066 & 0xfff8` is
+// 0x2060, which matches no case, so `return true`) and U+FEFF in a member name,
+// so they already reach a declaration line through `SanitizeUtf8(finfo.name)`.
+// That class is pre-existing and closing it is a change of its own.
+//
+// None of this is covered by `SanitizeUtf8`: its ASCII fast path passes every
+// byte below 0x80 verbatim — which is what lets the Writer's own newlines and
+// indentation survive — and its multibyte path renders a BMP separator READABLY
+// (dexllm#28), right for an identifier and wrong here. It still runs FIRST,
+// because it is what turns raw MUTF-8 into valid UTF-8; dropping it re-opens the
+// dexllm#22 raise (a lone surrogate in an annotation element name).
+//
+// A `/* … */` comment could NOT be secured at all: a string literal inside a
+// rendered array carries `*` and `/` through unescaped, so `*/` is injectable.
+std::string CommentSafe(std::string_view in) {
+    std::string out;
+    out.reserve(in.size());
+    auto escape = [&out](uint32_t cp) {
+        char buf[12];
+        std::snprintf(buf, sizeof(buf), "<U+%04X>", cp);
+        out += buf;
+    };
+    const uint8_t* p = reinterpret_cast<const uint8_t*>(in.data());
+    for (size_t i = 0, n = in.size(); i < n; ++i) {
+        const uint8_t c = p[i];
+        if (c < 0x20 || c == 0x7F || c == '\\') {   // C0, DEL, backslash
+            escape(c);
+        } else if (c == 0xC2 && i + 1 < n && p[i + 1] <= 0x9F) {
+            escape(p[i + 1]);                       // C1 (U+0080-U+009F), NEL included
+            ++i;
+        } else if (c == 0xE2 && i + 2 < n && p[i + 1] == 0x80 &&
+                   (p[i + 2] == 0xA8 || p[i + 2] == 0xA9)) {
+            escape(p[i + 2] == 0xA8 ? 0x2028 : 0x2029);  // LINE / PARAGRAPH SEP
+            i += 2;
+        } else {
+            out += static_cast<char>(c);
+        }
+    }
+    return out;
+}
+
 }  // namespace
 
 Decompiler::Decompiler(IDexCodeSource& source) : source_(source) {}
@@ -325,7 +391,16 @@ std::string Decompiler::DecompileClass(std::string_view class_descriptor) {
             // site too. Identity for the ASCII/pre-escaped cases.
             out += SanitizeUtf8(init);
         }
-        out += ";\n";
+        out += ";";
+        // dexllm#64 — a value with no Java expression form rides as a trailing
+        // comment instead of being DROPPED, which made `Type name;` mean both
+        // "no initializer" and "an initializer we could not spell".
+        if (i < info.field_init_comments.size() &&
+            !info.field_init_comments[i].empty()) {
+            out += "  // = ";
+            out += CommentSafe(SanitizeUtf8(info.field_init_comments[i]));
+        }
+        out += "\n";
     }
 
     // Methods — reuse the existing per-method decompile path.

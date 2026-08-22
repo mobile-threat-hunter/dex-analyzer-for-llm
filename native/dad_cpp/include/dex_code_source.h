@@ -174,10 +174,20 @@ public:
         std::vector<uint32_t>         field_ids;            // per-class field_idxs
         // Parallel to field_ids — pre-rendered initializer RHS for static
         // fields that have an EncodedValue in static_values_off (e.g. "2",
-        // "\"foo\"", "0x2a"). Empty string means no compile-time initializer
-        // (the field will be emitted as `Type name;`). Always same size as
-        // field_ids; non-static fields and unsupported value types stay empty.
+        // "\"foo\"", "0x2a"). Always same size as field_ids; non-static fields
+        // stay empty. Empty means "no Java EXPRESSION here", which since
+        // dexllm#64 is NOT the same as "no initializer" — see
+        // field_init_comments below, and check both before concluding a field
+        // has no value.
         std::vector<std::string>      field_init_texts;
+        // Parallel to field_ids, and DISJOINT from field_init_texts: the value
+        // of an initializer that has no Java EXPRESSION form (dexllm#64 — a
+        // METHOD_HANDLE, a METHOD, an ANNOTATION, or an array containing one).
+        // Rendered as a trailing `// = …` comment, so `Type name;` never means
+        // both "no initializer" and "an initializer we could not spell". Empty
+        // for every field whose value IS expressible, and for fields with no
+        // value at all.
+        std::vector<std::string>      field_init_comments;
     };
     // Default returns nullopt — override in production source.
     virtual std::optional<ClassInfo>

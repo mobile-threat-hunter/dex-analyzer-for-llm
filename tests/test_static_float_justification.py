@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import math
 import pathlib
+import re
 import struct
 
 import pytest
@@ -482,7 +483,11 @@ def _decoder_case_body(case: str) -> str:
     guard satisfied by a COMMENTED-OUT line (dexllm#32, dexllm#57).
     """
     text = _strip_comments(_DECODER.read_text())
-    start = text.index("std::string DecodeEncodedValueText(")
+    # Anchored on the parameter list rather than the return type, which
+    # dexllm#64 changed to a struct. Raises loudly if the definition moves.
+    start = re.search(r"\w+ DecodeEncodedValueText\(const U1\*& p", text)
+    assert start, "DecodeEncodedValueText's definition moved or was renamed"
+    start = start.start()
     end = text.index("\n}\n", start)
     fn = text[start:end]
     arm = fn.index(f"case {case}: {{")

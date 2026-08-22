@@ -249,4 +249,79 @@ std::vector<std::string> ParseParamsType(std::string_view proto) {
     return out;
 }
 
+// ── invoke-dynamic rendering vocabulary (dexllm#67, shared since dexllm#64) ──
+// See util.h for why these live here and not beside either caller.
+
+namespace {
+// The boxed `TYPE` constant is the only way Java spells a primitive's class
+// literal — `int.class` parses, but `Integer.TYPE` is what both jadx and this
+// repo's IR path emit, and they name the same object.
+const char* PrimitiveClassLiteral(char desc) {
+    switch (desc) {
+        case 'Z': return "Boolean.TYPE";
+        case 'B': return "Byte.TYPE";
+        case 'S': return "Short.TYPE";
+        case 'C': return "Character.TYPE";
+        case 'I': return "Integer.TYPE";
+        case 'J': return "Long.TYPE";
+        case 'F': return "Float.TYPE";
+        case 'D': return "Double.TYPE";
+        case 'V': return "Void.TYPE";
+        default:  return nullptr;
+    }
+}
+}  // namespace
+
+std::string ClassLiteralText(std::string_view descriptor) {
+    if (descriptor.size() == 1) {
+        if (const char* prim = PrimitiveClassLiteral(descriptor.front())) {
+            return prim;
+        }
+    }
+    return GetType(std::string(descriptor)) + ".class";
+}
+
+std::string MethodTypeText(std::string_view proto) {
+    std::string out = GetType("Ljava/lang/invoke/MethodType;");
+    out += ".methodType(";
+    auto paren = proto.rfind(')');
+    out += ClassLiteralText(paren == std::string_view::npos
+                                ? std::string_view("V")
+                                : proto.substr(paren + 1));
+    for (const auto& pd : ParseParamsType(std::string(proto))) {
+        out += ", ";
+        out += ClassLiteralText(pd);
+    }
+    out += ')';
+    return out;
+}
+
+std::string MethodHandleText(std::string_view class_descriptor,
+                             std::string_view member, uint32_t handle_type) {
+    constexpr uint32_t kLastFieldKind = 0x03;
+    constexpr uint32_t kInvokeConstructor = 0x06;
+    std::string out = GetType(std::string(class_descriptor));
+    out += (handle_type <= kLastFieldKind) ? "." : "::";
+    if (handle_type == kInvokeConstructor) out += "new";
+    else                                   out.append(member);
+    return out;
+}
+
+std::string MethodRefText(std::string_view class_descriptor,
+                          std::string_view member) {
+    std::string out = GetType(std::string(class_descriptor));
+    out += "::";
+    // `<clinit>` has NO reference form either and keeps its own name, so a
+    // constant naming one renders `Cls::<clinit>`. An earlier version of this
+    // comment justified that by claiming a class initializer is never a
+    // `method_id` — false, and checkable from a fixture this repo ships:
+    // `tests/data/invoke-custom.dex` has four. A correctness review found it.
+    // The output is crafted-only (javac emits no method constant) and lands
+    // inside a `//` comment, so naming it honestly beats inventing a spelling
+    // Java does not have.
+    if (member == "<init>") out += "new";
+    else                    out.append(member);
+    return out;
+}
+
 }  // namespace dexkit::dad

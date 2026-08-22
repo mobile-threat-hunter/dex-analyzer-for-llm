@@ -117,8 +117,13 @@
 //     (docs/aosp-oob-divergences.md B2b). Still NOT ported from ART's
 //     CheckIntraMethodHandleItem: method_handle_type <= kLast (:1501) and
 //     field_or_method_idx against field_ids/method_ids (:1512/:1521). The
-//     residual is a THROW, not an OOB — that index reaches GetFieldDecl/
-//     GetMethodDecl, where ArrayView bounds it against a header-validated table.
+//     residual is never an OOB, but WHICH failure it is depends on the reader:
+//     through the slicer (Reader::GetMethodHandle, the annotation walk) it is a
+//     THROW, because that index reaches GetFieldDecl/GetMethodDecl where
+//     ArrayView bounds it against a header-validated table; through
+//     DecodeEncodedValueText's 0x16 arm (dexllm#64) it is an EMPTY RESULT,
+//     because ResolveMethodHandle bounds it and Get*RefTriple returns {} rather
+//     than throwing, so the field simply renders no initializer.
 //   * debug_info — dexllm never parses it; not verified by design.
 //   * adler32 checksum — intentionally not verified (project policy; ART itself
 //     only warns when verify_checksum=false — aosp-wiki dexfileverifier.md).

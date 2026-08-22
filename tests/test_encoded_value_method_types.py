@@ -264,7 +264,12 @@ def _core_ext_case_codes() -> set[int]:
     offset. Comment-stripped for the same reason as the others.
     """
     body = _strip_comments(_CORE_EXT.read_text())
-    body = body[body.index("std::string DecodeEncodedValueText") :]
+    # Anchored on the PARAMETER list, not the return type: dexllm#64 changed the
+    # latter to a struct, and an anchor that names it would have to move with
+    # every such change. This one raises loudly if the definition ever goes away.
+    start = re.search(r"\w+ DecodeEncodedValueText\(const U1\*& p", body)
+    assert start, "DecodeEncodedValueText's definition moved or was renamed"
+    body = body[start.start() :]
     body = body[: body.index("        default:")]
     return {int(c, 16) for c in re.findall(r"case (0x[0-9a-fA-F]{2}):", body)}
 
@@ -329,7 +334,7 @@ def test_every_decoder_implements_every_value_the_verifier_accepts(decoder, code
     "path, function",
     [
         (_DEXKIT_EXT, "void ScanEncodedValueStrings"),
-        (_CORE_EXT, "std::string DecodeEncodedValueText"),
+        (_CORE_EXT, "EncodedValueText DecodeEncodedValueText"),
         (_CORE_EXT, "bool ParseCallSiteArg"),
     ],
     ids=["ScanEncodedValueStrings", "DecodeEncodedValueText", "ParseCallSiteArg"],
@@ -642,12 +647,15 @@ def test_a_no_literal_static_value_does_not_shift_the_values_after_it(
     assert row["valid"], row  # the premise: a length-preserving retype still verifies
 
     lines = _static_finals(dst)
-    # The crafted value renders NOTHING - a MethodType / MethodHandle / method
-    # reference has no Java literal form, so the field correctly loses its
-    # initializer...
-    assert lines[0].endswith("RETURNS_NULL;"), lines
+    # The crafted value RENDERS - since dexllm#64 all three of these have a
+    # spelling, `= MethodType.methodType(...)` for 0x15 and a trailing `// = ...`
+    # comment for the two with no Java expression form. This assertion used to
+    # read `endswith("RETURNS_NULL;")`, i.e. "renders nothing", which was the
+    # PREMISE of the day rather than the subject of this test; it is inverted
+    # rather than deleted, on the dexllm#22 / dexllm#29 / dexllm#45 precedent.
+    assert not lines[0].endswith("RETURNS_NULL;"), lines
     # ...and the three that FOLLOW it keep their own values. This is the assertion
-    # the fix is about; the one above passes pre-fix too.
+    # the fix is about; it is the one that fails pre-dexllm#63.
     assert lines[1].endswith("= 2;"), lines
     assert lines[2].endswith("= 0;"), lines
     assert lines[3].endswith("= 3;"), lines
@@ -710,7 +718,10 @@ def test_a_multi_byte_index_payload_is_consumed_in_full(tmp_path):
     assert row["valid"], row
 
     lines = _static_finals(dst)
-    assert lines[0].endswith("RETURNS_NULL;"), lines
+    # Renders since dexllm#64 - see the inversion note on the guard above; what
+    # this test is ABOUT is the three lines below, which only line up when the
+    # full (arg + 1)-byte payload was consumed.
+    assert not lines[0].endswith("RETURNS_NULL;"), lines
     assert lines[1].endswith(f'= "{expected}";'), lines
     assert lines[2].endswith("= 3;"), lines
     assert lines[3].endswith("= null;"), lines

@@ -1152,12 +1152,25 @@ bool DexVerifier::VerifyEncodedValue(const u1** pp, int depth) {
         case 0x06: case 0x11: return skip(arg + 1);                                // LONG/DOUBLE (≤8)
         case 0x15: return idx(header_->proto_ids_size, "encoded method_type idx");
         // METHOD_HANDLE: consume the index but do NOT bound it - the
-        // method_handle section is out of this verifier's documented scope. The
-        // slicer DOES dereference it since dexllm#57 (GetMethodHandle), so the
-        // bound that stops a crafted index is ArrayView's own SLICER_CHECK,
-        // which throws instead of reading out of range. Bounding it here would
-        // mean bringing method_handle into scope - a new section to validate,
-        // with its own false-reject risk - for a value nothing consumes.
+        // method_handle section is out of this verifier's documented scope.
+        // Bounding it here would mean bringing method_handle into scope: a new
+        // section to validate, with its own false-reject risk.
+        //
+        // "for a value nothing consumes" is what this used to say, and it has
+        // not been true since dexllm#57. Every consumer bounds the index at
+        // its own READER, which is the tier the safety contract permits for an
+        // out-of-scope section. Of a value THIS function has walked there are
+        // two:
+        //   * the slicer (GetMethodHandle, via the annotation walk) - bounded by
+        //     ArrayView's own SLICER_CHECK, which THROWS;
+        //   * DecodeEncodedValueText's 0x16 arm (dexllm#64, static-field
+        //     initializers) - bounded by ResolveMethodHandle, which returns
+        //     false, so an unresolvable handle renders NOTHING rather than
+        //     taking the whole class decompile down with it.
+        // ParseCallSiteArg (dexllm#67) reads one too and shares the second
+        // bound; it is absent above only because a call_site array is not walked
+        // by this function at all. A further consumer - of either kind - must
+        // add its own bound in the same change.
         case 0x16: return skip(arg + 1);
         case 0x17: return idx(header_->string_ids_size, "encoded string idx");
         case 0x18: return idx(header_->type_ids_size, "encoded type idx");

@@ -383,12 +383,31 @@ dk.decompile_method_with_pc_map(M)
 ### `dk.decompile_class(class_descriptor: str) -> str`
 Full Java class text — `package`, class header (access + extends + implements),
 static→instance field declarations with decoded EncodedValue initializers, then
-method bodies. The header+fields region matches androguard `DvClass.get_source()`
-byte for byte **except** that a `"` inside a `String` initializer is escaped as
-`\"` (dexllm#22). androguard escapes the value with Python's `unicode-escape`,
-whose repr is single-quoted, then wraps it in DOUBLE quotes to form a Java
-literal — so an embedded `"` ends the literal early. 9 lines of the bundled
-corpus are affected; all of them were invalid Java before.
+method bodies.
+
+The header+fields region was ported from androguard `DvClass.get_source()` and
+follows its structure, but it is **not** byte-for-byte equal to it. Every
+divergence is deliberate: in most rows androguard emits something that is not
+valid Java at all, and in the float/double row it emits Java that compiles with
+the WRONG VALUE (`= 16256` for a field AOSP declares as `1f` — an int literal
+widening to float).
+
+| EncodedValue | androguard | dexllm |
+|---|---|---|
+| `VALUE_NULL` / `VALUE_BOOLEAN` | `None` / `True` / `False` | `null` / `true` / `false` |
+| `VALUE_FLOAT` / `VALUE_DOUBLE` | the raw payload as an integer | the IEEE754 value, round-trip formatted (dexllm#70) |
+| `VALUE_TYPE` / `VALUE_FIELD` / `VALUE_ENUM` | a raw descriptor / a Python list | `pkg.Cls.class` / `pkg.Cls.NAME` |
+| `VALUE_METHOD_TYPE` / `VALUE_METHOD_HANDLE` | the raw payload as an integer | `invoke.MethodType.methodType(…)` / a trailing `// = Cls::name` comment (dexllm#64) |
+| `VALUE_METHOD` | a Python list — `['LMain;', '<init>', ['()', 'V']]` | a trailing `// = Main::new` comment (dexllm#64) |
+| `VALUE_ARRAY` / `VALUE_ANNOTATION` | a **memory address** — different every run | `{a, b}` / a trailing `// = @Foo(…)` comment (dexllm#64) |
+| a `"` inside a `String` | ends the literal early | escaped as `\"` (dexllm#22) |
+
+A value with **no Java expression form at all** — a method handle, a method
+reference, an annotation, or an array containing one — is rendered as a trailing
+`// = …` comment rather than after an `=`, so the declaration stays valid Java
+and `Type name;` never means both "no initializer" and "an initializer that
+could not be spelled" (dexllm#64). `decompile_class` is the only surface that
+reads `static_values`, so that comment is the only place the value appears.
 
 ### `dk.decompile_method_ast(method_descriptor: str, include_source: bool = True) -> dict`
 Signature components + Java `source` + the full DAD nested-list AST + D-3 pc_map.

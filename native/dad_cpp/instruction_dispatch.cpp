@@ -110,31 +110,16 @@ MethodRef BuildMethodRef(const MethodConst& mc) {
 // as `invoke.X`, as it already does everywhere else), and `MethodHandle.invoke`
 // is typed from the call site rather than as `Object` + a cast at each use —
 // the same call-site-over-declaration choice dexllm#60 made for 0xFA.
-const char* PrimitiveClassLiteral(char desc) {
-    switch (desc) {
-        case 'Z': return "Boolean.TYPE";
-        case 'B': return "Byte.TYPE";
-        case 'S': return "Short.TYPE";
-        case 'C': return "Character.TYPE";
-        case 'I': return "Integer.TYPE";
-        case 'J': return "Long.TYPE";
-        case 'F': return "Float.TYPE";
-        case 'D': return "Double.TYPE";
-        case 'V': return "Void.TYPE";
-        default:  return nullptr;
-    }
-}
-
 // `Foo.class` / `Integer.TYPE`. Typed `Ljava/lang/Class;` so `Constant::Accept`
 // routes it to `visit_base_class`, which emits the text unquoted.
+//
+// The TEXT comes from `ClassLiteralText` (util) rather than being spelled here:
+// dexllm#64 gave this rendering a second caller in `core_ext`, and a rule read
+// twice drifts (dexllm#70). Only the node WRAPPING is local, because the AST
+// needs the structure a flat string cannot carry.
 IRFormPtr ClassLiteral(std::string_view desc) {
-    std::string text;
-    if (desc.size() == 1) {
-        if (const char* prim = PrimitiveClassLiteral(desc.front())) text = prim;
-    }
-    if (text.empty()) text = GetType(std::string(desc)) + ".class";
-    return std::make_shared<Constant>(ConstantValue{text}, "Ljava/lang/Class;",
-                                      std::nullopt, desc);
+    return std::make_shared<Constant>(ConstantValue{ClassLiteralText(desc)},
+                                      "Ljava/lang/Class;", std::nullopt, desc);
 }
 
 InvokeInstruction::Triple SynthTriple(std::string_view cls,
@@ -204,20 +189,17 @@ IRFormPtr CallSiteArgToIr(const IDexCodeSource::CallSiteArg& a,
             break;
         case Kind::Handle: {
             // A method handle has NO Java literal, so it is spelled as the
-            // method reference it is. `ival` is the method_handle_type: 0x00-
-            // 0x03 name a FIELD (which method-reference syntax cannot express,
-            // so those read as the field access `Cls.name`), 0x06 is a
-            // constructor, everything else a method.
+            // method reference it is. The kind-to-spelling rule lives in
+            // `MethodHandleText` (util) because dexllm#64's static-initializer
+            // decoder must spell it identically.
             //
             // A `BaseClass` rather than a `Constant`, because that is the node
             // both emitters render as a BARE NAME: the Writer's
             // `visit_base_class` writes it unquoted, and dast maps a
             // descriptor-less one to `Local(name)`. A String-typed Constant
             // would render `"Cls::name"`, which reads as a literal it is not.
-            std::string text = GetType(a.text);
-            text += (a.ival <= 0x03) ? "." : "::";
-            text += (a.ival == 0x06) ? "new" : a.member;
-            node = std::make_shared<BaseClass>(text);
+            node = std::make_shared<BaseClass>(MethodHandleText(
+                a.text, a.member, static_cast<uint32_t>(a.ival)));
             break;
         }
     }

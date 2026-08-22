@@ -210,6 +210,12 @@ androguard gets wrong:
   bits, and `null`/`true`/`false` field initializers (not Python `None`/`True`/`False`).
   A static initializer's float payload is zero-extended to the **right**, as ART reads it, so a
   short encoding decodes to the constant the class declares rather than to a denormal (dexllm#70).
+  A static value with **no Java expression form at all** — a `MethodHandle`, a method reference, an
+  annotation — rides as a trailing `// = Cls::name` comment rather than being dropped, so
+  `Type name;` never means both "no initializer" and "one we could not spell" (dexllm#64). Both
+  reference decompilers do worse on that family: jadx 1.5.0 loses the **whole class** on a
+  `MethodType` or a `MethodHandle` (`Can't decode value`) and emits a bare `= ;` for a method
+  reference, and androguard prints a **memory address** for an array or an annotation.
 
 **Parallel decompile** — dexllm releases the GIL in `decompile_*`, so threads give real
 parallelism on one shared instance; androguard cannot use threads at all (GIL + non-thread-safe

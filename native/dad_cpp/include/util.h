@@ -83,4 +83,46 @@ std::vector<std::string> GetParamsType(std::string_view descriptor);
 // would emit them as one concatenated parameter).
 std::vector<std::string> ParseParamsType(std::string_view proto);
 
+// ── invoke-dynamic rendering vocabulary (dexllm#67, shared since dexllm#64) ──
+//
+// Beyond-DAD: androguard has no analogue — its instruction table stops at 227
+// entries, before `invoke-custom`, and its `EncodedValue` renderer emits a
+// Python list or a memory address for the same values.
+//
+// These live here, rather than beside either caller, because the repo has TWO
+// places that must spell one of these the same way and they sit in different
+// layers: the IR builder (`instruction_dispatch.cpp`, reconstructing an
+// `invoke-custom` bootstrap chain) and the static-initializer decoder
+// (`core_ext/dexitem_code_source.cpp`). dexllm#70 is the precedent — a rule
+// read a second time drifts from the first, and its prose drifts with it.
+
+// A class literal: "Foo.class", "int[].class", or the boxed `TYPE` constant a
+// primitive takes (`Integer.TYPE`), which is the only Java spelling of one.
+std::string ClassLiteralText(std::string_view descriptor);
+
+// `MethodType.methodType(Ret.class, P0.class, …)` — a proto spelled as the
+// factory call that builds it. The one member of this family that IS a valid
+// Java expression, so it renders as an initializer rather than a comment.
+//
+// ONE caller (the static-value decoder). It lives here beside `ClassLiteralText`
+// — which it and the IR builder DO share — because the IR path assembles the
+// same call out of IR nodes instead, so the AST keeps structure a flat string
+// cannot carry. That makes ARGUMENT ORDER a property only a test can hold the
+// two layers to; `test_the_two_layers_spell_a_method_type_identically` is it,
+// and it needs a proto whose parameters are not all the same type.
+std::string MethodTypeText(std::string_view proto);
+
+// A `method_handle_item` as the reference it names. `handle_type` is the dex
+// `method_handle_type`: 0x00-0x03 name a FIELD (which method-reference syntax
+// cannot express, so those read as the field access `Cls.name`), 0x06 is a
+// constructor (`Cls::new`), everything else a method (`Cls::name`).
+std::string MethodHandleText(std::string_view class_descriptor,
+                             std::string_view member, uint32_t handle_type);
+
+// A plain `method_id` as a method reference. No handle kind to consult, so the
+// constructor case is recognised by NAME — `<init>` is the only method a Java
+// reference can spell without one, and it spells it `Cls::new`.
+std::string MethodRefText(std::string_view class_descriptor,
+                          std::string_view member);
+
 }  // namespace dexkit::dad
