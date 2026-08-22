@@ -547,20 +547,19 @@ ir::EncodedValue* Reader::ParseEncodedValue(const dex::u1** pptr) {
       break;
 
     // dexllm(#57): the two invoke-dynamic-era types upstream never implemented.
-    // Both are plain (arg+1)-byte indices. METHOD_TYPE's index is bounded by
-    // VerifyDex (against proto_ids_size) before the core parses anything;
-    // METHOD_HANDLE's index is NOT bounded against its table - method_handle is
-    // out of the verifier's documented scope - so what stops a crafted one is a
-    // leaf check, and WHICH one depends on the width: arg > 3 throws first in
-    // ParseIntValue's SLICER_CHECK_LE(size, sizeof(u4)) (the verifier's 0x16 arm
-    // uses skip(), not the arg<=3 idx() the other index types use), and arg <= 3
-    // reaches ArrayView's SLICER_CHECK_LT inside MethodHandles()[]. Both throw
-    // rather than read out of range. The ArrayView bound is only sound because
-    // CheckMap now bounds the SECTION EXTENT (dexllm#57 review, CRITICAL): its
-    // size came straight from the map, so before that the index was bounded
-    // against attacker data and read past the file. A dex with no method_handle
-    // section therefore rejects EVERY 0x16 index, which is what
-    // tests/test_cache_init_failure.py drives.
+    // Both are plain (arg+1)-byte indices, and BOTH are now bounded by VerifyDex
+    // before the core parses anything - METHOD_TYPE against proto_ids_size since
+    // dexllm#57, METHOD_HANDLE against the map's method_handle count since
+    // dexllm#72 (ART :1212), with its width capped at 4 bytes (ART :1204). This
+    // comment used to say the handle index was bounded by nothing here and that
+    // what stopped a crafted one was a leaf check - ParseIntValue's
+    // SLICER_CHECK_LE(size, sizeof(u4)) for arg > 3, ArrayView's SLICER_CHECK_LT
+    // inside MethodHandles()[] otherwise. Those leaf checks are still the last
+    // line and still throw rather than read out of range, but they are no longer
+    // reachable from a loadable dex. The ArrayView bound was only ever sound
+    // because CheckMap bounds the SECTION EXTENT (dexllm#57 review, CRITICAL):
+    // its size came straight from the map, so before that the index was bounded
+    // against attacker data and read past the file.
     case dex::kEncodedMethodType: {
       dex::u4 index = ParseIntValue<dex::u4>(pptr, arg + 1);
       ir_encoded_value->u.proto_value = GetProto(index);

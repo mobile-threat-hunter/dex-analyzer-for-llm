@@ -542,6 +542,12 @@ private:
     VerifyImageState* img_state_;   // per-IMAGE scratch (dexllm#59)
     const dex::Header* header_ = nullptr;
     std::string reason_;
+    // ART's NumMethodHandles() (dex_file.cc :290, zero-inited at :159) — the
+    // map's method_handle count, carried forward by CheckMap so
+    // VerifyEncodedValue's 0x16 arm can bound its index (ART :1212). 0 means the
+    // dex declares no such section, which is ART's own value for that case and
+    // rejects every 0x16 index.
+    u4 method_handle_count_ = 0;
     // Annotation offsets already walked, per structure kind. The slicer memoises
     // the same way (reader.cc annotations_directories_ / annotation_sets_ /
     // annotations_), so this matches what it actually parses — and it is what
@@ -683,9 +689,12 @@ bool DexVerifier::CheckMap() {
         // must stay adjacent and in this order. call_site_id has no analogue:
         // its contents stay out of scope and are bounded at the reader
         // (dexllm#67 GetCallSite), which the header records as a decision.
-        if (item->type == kMethodHandleItem &&
-            !VerifyMethodHandleSection(item->offset, item->size)) {
-            return false;
+        if (item->type == kMethodHandleItem) {
+            if (!VerifyMethodHandleSection(item->offset, item->size)) return false;
+            // ART's NumMethodHandles(), carried forward for VerifyEncodedValue's
+            // 0x16 arm (ART :1212). Duplicate map sections are rejected above, so
+            // one item is the whole statement of this section's length.
+            method_handle_count_ = item->size;
         }
         last_offset = item->offset;
     }
@@ -1302,48 +1311,27 @@ bool DexVerifier::VerifyEncodedValue(const u1** pp, int depth) {
         case 0x04: case 0x10: return arg <= 3 ? skip(arg + 1) : Fail("encoded int/float size");
         case 0x06: case 0x11: return skip(arg + 1);                                // LONG/DOUBLE (≤8)
         case 0x15: return idx(header_->proto_ids_size, "encoded method_type idx");
-        // METHOD_HANDLE: consume the index but do NOT bound it, and do not cap
-        // its WIDTH either. Both are unported ART checks, and this arm is where
-        // they would go:
-        //   * ART :1204 rejects `value_arg > 3` ("Bad encoded_value method
-        //     handle size"). Every OTHER index-bearing arm here gets that cap
-        //     for free from the `idx` lambda, so 0x16 is the one arm where an
-        //     EIGHT-byte "index" is gate-legal - the asymmetry dexllm#71's
-        //     lockstep guard had to be parametrised around.
-        //   * ART :1212 bounds the index against NumMethodHandles(). Since
-        //     dexllm#59 this port DOES validate the method_handle section, so
-        //     the reason this comment used to give - "bounding it here would
-        //     mean bringing method_handle into scope: a new section to
-        //     validate" - is GONE. What is left is not a section-scope argument
-        //     but a blast-radius one: the count lives only in the map (it is
-        //     not a header field), so the gate would have to carry it forward
-        //     from CheckMap; it is a new REJECTION direction needing its own
-        //     a/b; and it RETIRES a vehicle - tests/test_cache_init_failure.py
-        //     crafts exactly this value on a section-less dex, where the index
-        //     is out of range by construction. That file and CLAUDE.md both
-        //     call the channel one "no future verifier improvement can take
-        //     away, because closing it at the gate would be a false-reject",
-        //     and ART :1212 REFUTES that: ART's NumMethodHandles() is 0 for
-        //     such a dex, so ART rejects it. Deferred as a decision, not an
-        //     oversight, on the dexllm#57 -> dexllm#59 precedent. Filed as
-        //     dexllm#72.
+        // METHOD_HANDLE — ART :1204 (the `value_arg > 3` width cap) and :1212
+        // (the index against NumMethodHandles()) arrive TOGETHER here, because
+        // the shared `idx` lambda is both. Until dexllm#72 this arm was
+        // `skip(arg + 1)`: it consumed the payload and checked neither half, so
+        // it was the ONE arm where an EIGHT-byte "index" was gate-legal (an
+        // asymmetry dexllm#71's lockstep guard had to be parametrised around)
+        // and the index reached the readers unbounded.
         //
-        // "for a value nothing consumes" is what this used to say, and it has
-        // not been true since dexllm#57. Until the above is ported, every
-        // consumer bounds the index at its own READER, which is the tier the
-        // safety contract permits. Of a value THIS function has walked there
-        // are two:
-        //   * the slicer (GetMethodHandle, via the annotation walk) - bounded by
-        //     ArrayView's own SLICER_CHECK, which THROWS;
-        //   * DecodeEncodedValueText's 0x16 arm (dexllm#64, static-field
-        //     initializers) - bounded by ResolveMethodHandle, which returns
-        //     false, so an unresolvable handle renders NOTHING rather than
-        //     taking the whole class decompile down with it.
-        // ParseCallSiteArg (dexllm#67) reads one too and shares the second
-        // bound; it is absent above only because a call_site array is not walked
-        // by this function at all. A further consumer - of either kind - must
-        // add its own bound in the same change.
-        case 0x16: return skip(arg + 1);
+        // `method_handle_count_` is ART's NumMethodHandles(): the count lives
+        // ONLY in the map (it is not a header field), so CheckMap carries it
+        // forward — which is why porting this had to wait for the section
+        // itself to be in scope, and why the ORDER of the two passes is load-
+        // bearing (CheckMap runs before CheckIntraSection, where encoded values
+        // are walked). 0 when the dex declares no method_handle section, which
+        // is exactly ART (dex_file.cc :159 zero-inits num_method_handles_ and
+        // :290 assigns it only from a kDexTypeMethodHandleItem map entry) and
+        // means every 0x16 index on such a dex is rejected. That is not a
+        // false-reject: it is what ART does with the same bytes — and it is
+        // what retired tests/test_cache_init_failure.py's vehicle, which was
+        // built on the belief that closing this at the gate WOULD be one.
+        case 0x16: return idx(method_handle_count_, "encoded method_handle idx");
         case 0x17: return idx(header_->string_ids_size, "encoded string idx");
         case 0x18: return idx(header_->type_ids_size, "encoded type idx");
         case 0x19: case 0x1b: return idx(header_->field_ids_size, "encoded field/enum idx");

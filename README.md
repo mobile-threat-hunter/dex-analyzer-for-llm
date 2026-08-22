@@ -130,20 +130,19 @@ spec-reference not runtime dep), turned to **crash-safety**, not execution trust
 
 **Deliberately not checked** — execution-trust mechanics irrelevant to a read-only
 analyzer, or out of the structural scope: adler32/SHA-1 checksums, instruction
-*dataflow* semantics, debug_info, the *contents* of call_site entries and one
-index INTO the method_handle section,[^handle] proto shorty-match, access-flag
-bitmasks, and the offset→map-type cross-check.[^ann]
+*dataflow* semantics, debug_info, the *contents* of call_site entries,[^handle]
+proto shorty-match, access-flag bitmasks, and the offset→map-type
+cross-check.[^ann]
 
 [^handle]: Both sections' **extent** is bounded and their **alignment** is
     checked (dexllm#57 and dexllm#62 — the latter because ART's
     `IsDataSectionType` covers both and this port's did not, so a misaligned
-    offset was accepted). Since dexllm#59 a **method_handle** entry's contents
-    are checked too (ART `CheckIntraMethodHandleItem` :1492 — the handle type,
-    and its index against the table that type names), so what is left unread
-    there is one thing: the `0x16` encoded_value's own index INTO the section,
-    which ART caps and bounds at :1204/:1212 and this port bounds at each
-    reader instead. A **call_site**'s contents are still unread here and
-    likewise bounded at the reader (dexllm#67). ART's `data_items_left` item
+    offset was accepted). A **method_handle** is now read end to end: an entry's
+    contents since dexllm#59 (ART `CheckIntraMethodHandleItem` :1492 — the handle
+    type, and its index against the table that type names), and since dexllm#72
+    the `0x16` encoded_value's own index INTO the section, which ART caps and
+    bounds at :1204/:1212. A **call_site**'s contents are still unread here and
+    bounded at the reader instead (dexllm#67). ART's `data_items_left` item
     budget stays unported on purpose, since this port consumes a section's item
     count only where it already has a tighter byte-span bound —
     [docs/aosp-oob-divergences.md](docs/aosp-oob-divergences.md) B2b. One mechanism

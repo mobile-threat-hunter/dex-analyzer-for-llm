@@ -112,12 +112,12 @@ malware routinely lies about them); instruction *dataflow* semantics,
 call_site CONTENTS and debug_info are out of scope (documented in
 `dex_verifier.h`) — for both fixed-size sections the EXTENT is bounded and, since
 dexllm#62, the 4-byte ALIGNMENT is checked, which is what ART's `CheckMap` does.
-**method_handle CONTENTS left that list in dexllm#59** (ART
-`CheckIntraMethodHandleItem` :1492): a handle's type and the index it implies are
-now checked at the gate rather than throwing later at `GetFieldDecl` /
-`GetMethodDecl`. What is still not read is a call_site's contents, and one index
-INTO the method_handle section — the `0x16` encoded_value's, which ART caps and
-bounds at :1204/:1212. Annotations were on that list until dexllm#56 — see the
+**method_handle left that list in two steps**: its CONTENTS in dexllm#59 (ART
+`CheckIntraMethodHandleItem` :1492 — a handle's type and the index it implies are
+checked at the gate rather than throwing later at `GetFieldDecl` /
+`GetMethodDecl`), and in dexllm#72 the `0x16` encoded_value's own index INTO the
+section (ART :1204's width cap and :1212's `NumMethodHandles()` bound). What is
+still not read is a call_site's contents. Annotations were on that list until dexllm#56 — see the
 `annotation_item` row below for why "the core lazy-parses it" was the wrong test. The slicer's own `Reader::ValidateHeader()` still runs after as
 a second cheap sanity layer; per-item decode problems beyond the verifier's scope
 still surface lazily as `SLICER_CHECK` → `std::runtime_error`, skipping that method.
@@ -178,7 +178,8 @@ Legend: ✅ ported (behavioural parity) · ⊕ beyond ART's *structural* verifie
 | proto shorty ↔ descriptor match | ◐ correctness-only (descriptors themselves are verified) |
 | the method_handle walk is memoised per IMAGE, under an entry budget | ✅ an ADDITION, no ART analogue (`docs/aosp-oob-divergences.md` B2d). For a **v41 container** `size_` is the whole container for EVERY slice while `LogicalDexSlices` strides by `file_size`, so a SHARED section was walked once per sibling — quadratic, measured 0.04 s → 20.59 s at 16 MB. The memo changes no verdict (a later slice re-checks its own tables against the maxima the walk recorded, which is equivalent to re-walking); only the budget can reject, and a legitimate image cannot exhaust it because real sections occupy disjoint bytes |
 | method_handle CONTENTS — handle type ≤ kLast (:1501), `field_or_method_idx` against field_ids/method_ids (:1512/:1521) | ✅ `VerifyMethodHandleSection` (= ART `CheckIntraMethodHandleItem` :1492, added for dexllm#59). Fused into `CheckMap`, where the map item is in hand — ART reaches it by ITERATING the map's sections and this port has no such pass. Never an OOB, but "a throw" (how dexllm#59 was filed) covers only half of it: measured on crafted entries, 0 signals and 0 exceptions, and instead — a TYPE past `kLast` decompiled BYTE-IDENTICALLY to a legal `invoke-static` handle, because `IsField()` sends everything outside 0x00-0x03 to the method table and the Writer renders by the same partition; an out-of-range INDEX throws only through the slicer, while dexllm#67's `ResolveMethodHandle` bounds it and renders nothing, so two bootstrap lines silently vanished |
-| annotations definer-match · call_site CONTENTS · the `0x16` encoded_value's index into method_handle (ART caps its width :1204 and bounds it :1212) | ◐ not checked. Both fixed-size sections' EXTENT and ALIGNMENT are (`CheckMap`, dexllm#57 and dexllm#62), and each unbounded index is bounded AT ITS READER — a throw through the slicer, an empty render through `DecodeEncodedValueText`. Porting :1212 is a new rejection direction with its own a/b, and it retires the vehicle `tests/test_cache_init_failure.py` drives |
+| the `0x16` encoded_value's index into method_handle — ART caps its width (:1204) and bounds it against `NumMethodHandles()` (:1212) | ✅ dexllm#72. The arm joins the shared `idx` lambda, so both checks arrive together; `method_handle_count_` is `NumMethodHandles()`, carried forward from `CheckMap` because the count lives only in the map. 0 for a dex with no such section, which is ART's own value and rejects every `0x16` index there — a/b 112 sources / 805 axes, **8 changed, all crafted, 0 real**. It RETIRED `tests/test_cache_init_failure.py`'s vehicle: an exhaustive retype sweep shows `0x16` was the last crafted-dex channel that verified and then threw in cache init |
+| annotations definer-match · call_site CONTENTS | ◐ not checked. A call_site's section EXTENT and ALIGNMENT are (`CheckMap`, dexllm#57 and dexllm#62) and every index inside it is bounded AT ITS READER (dexllm#67 `GetCallSite`), which reports "unresolved" rather than guessing |
 | `CheckOffsetToTypeMap` (offset matches its declared map-item type) | ⚠ not checked — contents are validated directly (`VerifyTypeList`/`VerifyClassData`/`VerifyEncodedArrayAt`/`VerifyAnnotationsDirectory`) so it stays crash-safe, but type-confusion of an offset is caught by ART, not here. **That sentence was false for annotations until dexllm#56** and the gap was exactly this one plus the missing walk: with no type map, "the contents are validated directly" has to hold for *every* referenced structure, and one exception is a crash. ART is map-driven (walk each section, record `offset -> type`, check references against it); this port is reference-driven (walk from the header's tables, validate what each offset points at) — so a section the port never walks is a section nothing checks at all |
 
 **Bottom line:** the structural crash surface is at ART parity (plus `VerifyInsns`

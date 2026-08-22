@@ -112,13 +112,16 @@
 //     reports "unresolved" rather than a guess. Porting the check would move
 //     those from a silent skip to a load-time rejection; that is a new rejection
 //     direction and needs its own a/b.
-//   * method_handle — IN SCOPE since dexllm#59, and the only thing still out of
-//     it is one INDEX INTO the section, not the section. Kept here because the
-//     boundary moved twice and the trail is the point. The bullet first read
-//     "call_site/method_handle — not dereferenced by the core", which dexllm#57
-//     made FALSE: implementing the 0x16 METHOD_HANDLE encoded_value means the
-//     core resolves a handle through Reader::GetMethodHandle. Three commits
-//     closed it in pieces, each ART-anchored:
+//   * method_handle — IN SCOPE as of dexllm#72: its extent, its alignment, its
+//     entries' contents, and the encoded_value index INTO it are all checked.
+//     What is still not applied to it is what is not applied to any data section
+//     here — ART's CheckIntraSectionIterate rules (offset-0 rejection :2356 and
+//     offset_to_type_map_), which belong to the map-driven intra pass this port
+//     does not have; see the two bullets below. Kept here because the boundary
+//     moved four times and the trail is the point. The bullet first read "call_site/method_handle —
+//     not dereferenced by the core", which dexllm#57 made FALSE: implementing the
+//     0x16 METHOD_HANDLE encoded_value means the core resolves a handle through
+//     Reader::GetMethodHandle. Four commits closed it in pieces, each ART-anchored:
 //       EXTENT  (:1493) — dexllm#57, in CheckMap. Without it ArrayView's index
 //               check was against the map's own attacker-supplied count and read
 //               past the file: a SIGSEGV on a verify()-valid dex.
@@ -127,21 +130,16 @@
 //       CONTENTS(:1501/:1512/:1521) — dexllm#59, VerifyMethodHandleSection, also
 //               in CheckMap (ART reaches it by iterating the map; this port has
 //               no such pass, so the walk goes where the map item is in hand).
+//       THE INDEX INTO IT (:1204 width cap + :1212 NumMethodHandles bound) —
+//               dexllm#72, in VerifyEncodedValue's 0x16 arm, which now joins the
+//               shared `idx` lambda. The count is not a header field, so CheckMap
+//               carries it forward as method_handle_count_; it is 0 when the dex
+//               declares no such section, which is ART's own value and therefore
+//               rejects every 0x16 index there. That is what retired the vehicle
+//               tests/test_cache_init_failure.py drove, on the belief — refuted by
+//               ART — that closing it at the gate would be a false-reject.
 //     ART's data_items_left budget stays unported on purpose
 //     (docs/aosp-oob-divergences.md B2b).
-//     STILL NOT PORTED, and now the sharper gap: the 0x16 encoded_value's own
-//     index into that section — ART caps its width at :1204 and bounds it
-//     against NumMethodHandles() at :1212. The reason is stated at the arm
-//     itself (VerifyEncodedValue `case 0x16`) and is a blast-radius argument,
-//     not a scope one: the count is not a header field, and porting :1212
-//     retires the vehicle tests/test_cache_init_failure.py drives. Until then
-//     that index is bounded AT THE READER, and WHICH failure it is depends on
-//     which reader: through the slicer (Reader::GetMethodHandle, the annotation
-//     walk) a THROW, because the index reaches GetFieldDecl/GetMethodDecl where
-//     ArrayView bounds it against a header-validated table; through
-//     DecodeEncodedValueText's 0x16 arm (dexllm#64) an EMPTY RESULT, because
-//     ResolveMethodHandle bounds it and Get*RefTriple returns {} rather than
-//     throwing, so the field simply renders no initializer.
 //   * debug_info — dexllm never parses it; not verified by design.
 //   * adler32 checksum — intentionally not verified (project policy; ART itself
 //     only warns when verify_checksum=false — aosp-wiki dexfileverifier.md).

@@ -198,7 +198,7 @@ keep-vs-remove decision.
   direction with no reachable defect behind it, and a new rejection direction is
   the one way an added check can fail (dexllm#58).
 
-### B2c. The `0x16` encoded_value's method_handle index is neither capped nor bounded
+### B2c. The `0x16` encoded_value's method_handle index — CLOSED (dexllm#72)
 
 > Same category note as B2/B2b: an OMISSION filed under an "ADDED" heading.
 
@@ -206,26 +206,38 @@ keep-vs-remove decision.
   `kDexAnnotationMethodHandle` arm — `:1204` rejects `value_arg > 3` ("Bad
   encoded_value method handle size") and `:1212` bounds the decoded index against
   `NumMethodHandles()`. ART's `CheckInterCallSiteIdItem` applies the same bound to
-  a call site's first element (`:3119`).
-- **Our divergence:** `VerifyEncodedValue`'s `case 0x16` is `skip(arg + 1)` — it
-  consumes the payload and checks neither half. Every other index-bearing arm gets
-  the width cap for free from the shared `idx` lambda, so `0x16` is the one arm
-  where an EIGHT-byte "index" is gate-legal; dexllm#71's lockstep guard is
-  parametrised around exactly that asymmetry.
-- **Assessment:** deliberately **KEPT for now**, and the reason CHANGED with
-  dexllm#59. It used to be a scope argument — bounding the index would mean
-  validating the method_handle section, which the gate did not do. That section is
-  validated now, so what is left is blast radius: the count lives only in the map
-  (it is not a header field), so the gate would have to carry it forward from
-  `CheckMap`; it is a new rejection direction needing its own a/b; and it RETIRES a
-  test vehicle — `tests/test_cache_init_failure.py` crafts this very value on a
+  a call site's first element (`:3119`); that one belongs to call_site CONTENTS
+  (C3's family) and stays out of scope.
+- **What it was:** `VerifyEncodedValue`'s `case 0x16` was `skip(arg + 1)` — it
+  consumed the payload and checked neither half. Every other index-bearing arm
+  gets the width cap for free from the shared `idx` lambda, so `0x16` was the one
+  arm where an EIGHT-byte "index" was gate-legal; dexllm#71's lockstep guard is
+  parametrised around exactly that asymmetry, which is now gone.
+- **Resolved:** the arm is
+  `case 0x16: return idx(method_handle_count_, "encoded method_handle idx");`, so
+  both ART checks arrive together. `method_handle_count_` is ART's
+  `NumMethodHandles()` — the count lives ONLY in the map (it is not a header
+  field), so `CheckMap` carries it forward, which is why this had to wait for
+  dexllm#59 to put the section itself in scope. 0 when the dex declares no
+  method_handle section, which is exactly ART (`dex_file.cc` :159 zero-inits it,
+  :290 assigns it only from a `kDexTypeMethodHandleItem` map entry).
+- **Measured (a/b OFF vs ON, same script, both `.so` md5-verified):** 112 sources
+  / 805 axis records — the whole bundled corpus, every committed fixture, every
+  `art/test/dexdump/*.dex`, every `tools/dexter/testdata/*.dex`, every ART
+  fuzzer-corpus dex, and 20 crafts — **8 changed, ALL crafted, 0 REAL**. The
+  boundary is EXACT (index `count - 1` accepted, `count` rejected) and widths 0..3
+  are untouched while 4..7 flip to `encoded_value bad index size`.
+- **It RETIRED a test vehicle, and that is the cost of record.**
+  `tests/test_cache_init_failure.py` (dexllm#55) crafted this very value on a
   section-less dex, where the index is out of range by construction. That file and
-  CLAUDE.md both call the channel one "no future verifier improvement can take
-  away, because closing it at the gate would be a false-reject", and ART `:1212`
-  **refutes that**: `NumMethodHandles()` is 0 for such a dex, so ART rejects it.
-  Filed as dexllm#72. Until it is ported the index is bounded AT EACH READER — a throw through the
-  slicer's `ArrayView`, an empty render through `DecodeEncodedValueText` (C3's
-  family).
+  CLAUDE.md both called the channel one *"no future verifier improvement can take
+  away, because closing it at the gate would be a false-reject"* — ART `:1212`
+  refutes that, and dexllm#59 measured it. An exhaustive retype sweep (every bare
+  corpus dex × all 32 type codes, width-preserving) shows `0x16` was the LAST
+  crafted-dex channel that verified and then threw in cache init: **2 of 64 before,
+  0 after**, with 1,700 random mutations across every map section and a lenient
+  instruction fuzz finding none either. So there was no third vehicle to move to —
+  see that file's docstring for what was retired and why.
 
 ### B2d. A per-image memo and entry budget for the method_handle walk (dexllm#59)
 
@@ -342,7 +354,7 @@ CPython bounds), but they exist for memory safety and are part of the same
 | B1 `VerifyInsns`   | no (addition)              | n/a (IS the verifier) | n/a | no |
 | B2 `IsDataSectionType` | ~~yes~~ **none** | n/a (IS the verifier) | ~~accepts a misaligned call_site/method_handle offset~~ | **CLOSED — dexllm#62** |
 | B2d method_handle walk memo + budget | **yes** (an ADDITION; ART has no analogue) | n/a (IS the verifier) | none — the memo changes no verdict, and a legitimate image cannot exhaust the budget | no (removing either half reopens a v41 DoS) |
-| B2c `0x16` handle index | **yes** (ART :1204 width cap, :1212 index bound) | n/a (IS the verifier) | none today — bounded at each reader instead | no (deliberate; retires a test vehicle, needs its own a/b) |
+| B2c `0x16` handle index | **yes** (ART :1204 width cap, :1212 index bound) | n/a (IS the verifier) | **CLOSED** (dexllm#72) — `idx(method_handle_count_, …)` | n/a — ported |
 | B2b `data_items_left` | **yes** (ART :777 budget) | n/a (IS the verifier) | none — the count is never consumed for a variable-length section, and the fixed-size ones have a tighter span bound | no (deliberate) |
 | C1 edge index      | no (DAD relies on Python)  | partial            | none | no (cheap, internal) |
 | C2 move-result null| no (matches DAD effective) | n/a                | none | no |

@@ -4,369 +4,212 @@
 path, and `DexItem::WaitInitCache` was an unconditional `cv.wait` with no timeout
 and no failure state. A cache-init task that threw was swallowed by the
 `packaged_task` whose future `InitDexCache` discards, so the claim was never
-retired and every caller of the warm / caller-xref family blocked forever — on a
-dex the structural verifier calls **valid**, because annotations are documented
-as out of its scope.
+retired and every caller of the warm / caller-xref family blocked forever.
 
-THE VEHICLE CHANGED IN dexllm#56, and the reason is worth keeping. The original
-fixture repointed one class_def's `annotations_off` at the map_list — a
-well-formed offset holding the wrong structure — which worked only because
-`annotations_off` was checked by nothing. #56 closed that (the verifier now walks
-the whole annotations subtree), so this fixture could no longer be built: the
-guards below went from green to nine hard errors, correctly naming the reason.
+THE VEHICLE IS GONE, AND THERE IS NO FOURTH ONE. This file has been re-based
+twice and cannot be a third time, so the history is the point:
 
-The replacement is a channel #56 deliberately does NOT close. ("and cannot" is
-what this said until dexllm#59 measured ART: it CAN be closed at the gate, by
-porting ART :1212 — see the qualification below.) An
-annotation element retyped to `0x16 METHOD_HANDLE` is a ONE-BYTE craft that
-yields a dex verifying valid in both modes and throwing inside cache init.
+  #55  `class_def.annotations_off` repointed at the map_list — a well-formed
+       offset holding the wrong structure, which worked only because that offset
+       was checked by nothing.
+  #56  closed it (the verifier walks the whole annotations subtree), and the
+       guards went from green to nine hard errors, correctly naming the reason.
+       Replaced by a ONE-BYTE craft: an annotation element retyped to
+       `0x16 METHOD_HANDLE` on a **section-less** dex, where the index is out of
+       range by construction and `ArrayView`'s `SLICER_CHECK_LT` throws.
+  #72  closed THAT, by porting ART :1204/:1212. This file and CLAUDE.md both
+       called the channel one "no future verifier improvement can take away,
+       because closing it at the gate would be a false-reject" — dexllm#59
+       measured ART and refuted it (`NumMethodHandles()` is 0 for a section-less
+       dex, so ART rejects exactly this craft), and dexllm#72 acted on that.
 
-WHY IT STILL WORKS AFTER dexllm#57 is worth stating, because that issue closed
-the reason it worked ORIGINALLY. When this vehicle was adopted, the slicer
-implemented 16 of the 18 encoded_value types and `0x16` hit its
-`SLICER_CHECK(!"unexpected value type")`. #57 implemented both missing types, so
-the value now PARSES — and still throws here, from one layer further in: a
-`METHOD_HANDLE` index is NOT bounded by the verifier, so `GetMethodHandle`
-resolves it through `ArrayView`, whose own `SLICER_CHECK_LT` throws. No bundled
-dex has a method_handle section at all, so EVERY index is out of range on this
-corpus.
+WHY NO FOURTH, stated as a measurement rather than as a search that gave up.
+Cache init dereferences three things: the instruction stream (DexKit's own
+walk, bounded), the annotations subtree, and the id tables — and the verifier now
+covers all three per-structure. Measured against the pre-#72 build:
 
-AND WHY IT STILL WORKS AFTER dexllm#59, which is the sharper qualification: that
-change put the method_handle SECTION into the verifier's scope (a handle's type,
-and its `field_or_method_idx` against the table that type names), so the reason
-above is no longer "the section is out of scope". The 0x16 encoded_value's own
-index INTO that section is a different operand and is still unbounded — ART caps
-it at :1204 and bounds it at :1212 and neither is ported, catalogued as B2c in
-docs/aosp-oob-divergences.md. So this vehicle now rests on ONE unported check
-rather than on a whole section, and the note below about a future improvement
-taking it away is not hypothetical: porting :1212 retires it, because ART's
-`NumMethodHandles()` is 0 for a section-less dex and ART therefore rejects
-exactly this craft.
+  * every bare corpus dex x all 32 `encoded_value` type codes, retyped
+    width-preservingly on a class annotation: **`0x16` was the ONLY one that
+    verified and then threw** (2 of 64). After #72: **0 of 64**.
+  * 500 random mutations inside the annotation sections and 1,200 across every
+    map section: 317 verified, **0 threw**.
+  * 120 `lenient=True` instruction-stream mutations: 11 verified, **0 threw**.
+  * `RLIMIT_NPROC` reaches the pool CONSTRUCTOR, not a task — the throw comes
+    out of `InitDexCache` directly ("Resource temporarily unavailable"), so it
+    never reaches `AbortInitCache` / `WaitInitCache` at all. That is the one
+    behavioural guard left, and it is the LAST test in this file.
 
-What that means for these guards: the craft is unchanged, the verdict is
-unchanged, and only the reason string moved. What they depend on is that the
-verifier accepts the dex and something downstream throws — not on which layer
-throws. `tests/test_encoded_value_method_types.py` pins the distinction directly
-(the reason must NOT be "unexpected value type"), so if the vehicle ever changes
-character again it fails there rather than silently here.
+WHAT THAT COSTS, said plainly: the publish-on-failure machinery — `AbortInitCache`
+retiring the claim and recording a reason, `WaitInitCache` throwing on the failed
+FLAG, `BeginInitCache` excluding an already-failed one, and the two wiring
+`catch`es — has no behavioural guard any more. The three mutants the crafted dex
+used to kill (the pre-fix module, the `EnterQueryExecution` try/catch, and the
+task's own try/catch) are all SOURCE-visible, so they are pinned that way below:
+the same device this repo uses wherever a load-bearing line is unreachable from
+any input (dexllm#63's advancing `default:`, dexllm#71's four index bounds,
+dexllm#70's shared-helper call). A source pin is weaker than a behavioural one —
+it cannot see a line that is present and wrong — but it is what is left, and
+"nothing" was not an option.
 
-Every call that could hang runs in a SUBPROCESS with a deadline. A regression
-must FAIL the suite, not hang it — an in-process assertion cannot do that.
+The surviving behavioural guard runs in a SUBPROCESS: a regression must FAIL the
+suite, not hang it, and an in-process assertion cannot do that.
 """
 
 from __future__ import annotations
 
-import glob
 import pathlib
-import struct
 import subprocess
 import sys
 import textwrap
 
 import pytest
-from conftest import REPO_ROOT, require_corpus_shape
+from conftest import REPO_ROOT
 
 TIMEOUT_S = 90
 
-# class_def_item is 32 bytes: class_idx, access_flags, superclass_idx,
-# interfaces_off, source_file_idx, annotations_off, class_data_off,
-# static_values_off — annotations_off is the 6th field, at +20.
-_ANNOTATIONS_OFF = 20
-_CLASS_DEF_SIZE = 32
-
-# encoded_value types whose payload is exactly `arg + 1` bytes, i.e. the ones a
-# retype to 0x16 leaves byte-for-byte the same length. Retyping anything else
-# would shift every following element and the craft would stop verifying — which
-# is a real trap, not a hypothetical: the fixture would then silently fall
-# through to the next candidate instead of doing what it says.
-_SAME_WIDTH_AS_METHOD_HANDLE = frozenset(
-    {0x00, 0x02, 0x03, 0x04, 0x06, 0x10, 0x11, 0x17, 0x18, 0x19, 0x1A, 0x1B}
-)
-_ENCODED_METHOD_HANDLE = 0x16
+_DEX_ITEM = REPO_ROOT / "vendor" / "dexkit_core" / "Core" / "dexkit" / "dex_item.cpp"
+_DEXKIT = REPO_ROOT / "vendor" / "dexkit_core" / "Core" / "dexkit" / "dexkit.cpp"
 
 
-def _has_method_handle_section(raw: bytearray) -> bool:
-    """True when the map declares a `method_handle_item` section (type 0x0008)."""
-    map_off = struct.unpack_from("<I", raw, 0x34)[0]
-    count = struct.unpack_from("<I", raw, map_off)[0]
-    for i in range(count):
-        kind = struct.unpack_from("<H", raw, map_off + 4 + i * 12)[0]
-        if kind == 0x0008:
-            return True
-    return False
+def _strip_comments(text: str) -> str:
+    """Remove // and /* */ comments, scanning left to right.
 
-
-def _uleb(raw: bytearray, off: int) -> tuple[int, int]:
-    r = s = 0
-    while True:
-        x = raw[off]
-        off += 1
-        r |= (x & 0x7F) << s
-        s += 7
-        if not (x & 0x80):
-            return r, off
-
-
-def _craft(src: pathlib.Path, dst: pathlib.Path) -> bool:
-    """Retype one annotation element to `0x16 METHOD_HANDLE` (see the module doc).
-
-    The element is reached the way the slicer reaches it — class_def ->
-    annotations_directory -> class_annotations_off -> set -> item -> the first
-    element's encoded_value header. Only the TYPE bits change; the `arg` bits,
-    and therefore the element's width, are preserved.
-
-    Returns False when `src` offers no such element, i.e. the shape this guard
-    needs is absent from that file.
+    One pass, in source order: a `//` line can contain `/*`, and this repo has
+    paid for the two-regex version twice (dexllm#32, dexllm#57). Every pin below
+    reads the stripped text, so a fix that survives only as a COMMENT is not a
+    fix — which is exactly the mutant shape a reviewer used on dexllm#57.
     """
-    raw = bytearray(src.read_bytes())
-    if raw[:4] != b"dex\n":
-        return False
-    # STRUCTURAL, not incidental (dexllm#57 review, both reviewers): what makes
-    # the crafted `0x16` throw is that its index cannot resolve, and that is only
-    # guaranteed while the source has NO method_handle section - with one, index 0
-    # resolves and the vehicle silently stops exercising a failure. No corpus dex
-    # has a section today; refusing such a source keeps that a property of the
-    # craft rather than of the corpus.
-    if _has_method_handle_section(raw):
-        return False
-
-    def u32(o: int) -> int:
-        return struct.unpack_from("<I", raw, o)[0]
-
-    cds_size, cds_off = struct.unpack_from("<II", raw, 0x60)
-    for i in range(cds_size):
-        d = u32(cds_off + i * _CLASS_DEF_SIZE + _ANNOTATIONS_OFF)
-        if d == 0:
-            continue
-        class_annotations_off = u32(d)
-        if class_annotations_off == 0:
-            continue
-        for k in range(u32(class_annotations_off)):
-            item = u32(class_annotations_off + 4 + 4 * k)
-            p = item + 1  # past the visibility byte
-            _type_idx, p = _uleb(raw, p)
-            size, p = _uleb(raw, p)
-            if size == 0:
-                continue
-            _name_idx, p = _uleb(raw, p)
-            header = raw[p]
-            if (header & 0x1F) not in _SAME_WIDTH_AS_METHOD_HANDLE:
-                continue
-            raw[p] = (header & 0xE0) | _ENCODED_METHOD_HANDLE
-            dst.write_bytes(bytes(raw))
-            return True
-    return False
-
-
-@pytest.fixture(scope="module")
-def broken_cache_dex(tmp_path_factory):
-    """A dex that VERIFIES but whose cache init throws.
-
-    Three outcomes, and keeping them apart is the whole point — this fixture
-    both BUILDS the input and runs the first probe against the product, so a
-    naive "try the next candidate" loop reports a product regression as a
-    missing corpus shape, and hides it entirely under a narrowing:
-
-    * no bare `.dex` at all (the corpus-less CI leg)      -> SKIP, an environment fact
-    * bare dexes exist but none is craftable              -> require_corpus_shape
-    * a craftable dex HANGS the product                   -> FAIL, always
-    """
-    import dexllm
-
-    candidates = sorted(glob.glob(str(REPO_ROOT / "test_apk" / "APK" / "*.dex")))
-    if not candidates:
-        pytest.skip("no bare .dex in the corpus to craft from")
-
-    out = tmp_path_factory.mktemp("cacheinit") / "broken.dex"
-    craftable = 0
-    for src in candidates:
-        if not _craft(pathlib.Path(src), out):
-            continue
-        report = dexllm.verify(str(out))
-        if not report or not all(r["valid"] for r in report):
-            continue
-        craftable += 1
-        # The craft must actually break cache init — otherwise the guards would
-        # pass vacuously against any implementation. A HANG here is the defect
-        # dexllm#55 removes, so it fails outright: it is a fact about the
-        # product, and a narrowed corpus must not soften it.
-        result = _run("dk.warm_analysis_caches()", out)
-        if result.verdict == "HUNG":
-            pytest.fail(
-                f"dexllm#55 regression: warm_analysis_caches never returned on a "
-                f"crafted {pathlib.Path(src).name} ({result.detail})"
-            )
-        if result.verdict != "RAISED":
-            continue
-        return out
-
-    require_corpus_shape(
-        craftable > 0,
-        "bare .dex declaring a class annotation whose first element can be "
-        "retyped to METHOD_HANDLE and break cache init",
-        "the #55 fixture can no longer be built, so the hang is unguarded",
-    )
-    pytest.fail(
-        f"{craftable} crafted dex(es) verified but none broke cache init — the "
-        "fixture no longer reaches the code path it guards"
-    )
-
-
-class _Result:
-    def __init__(self, verdict: str, detail: str) -> None:
-        self.verdict = verdict  # "RAISED" | "OK" | "HUNG" | "CRASHED"
-        self.detail = detail
-
-    def __repr__(self) -> str:  # pragma: no cover - debugging aid
-        return f"_Result({self.verdict!r}, {self.detail[:120]!r})"
-
-
-def _run(body: str, dex: pathlib.Path) -> _Result:
-    """Run `body` against a DexKit over `dex`, in a subprocess with a deadline.
-
-    A hang is the DEFECT under test, so it must be observed as a timeout rather
-    than blocking the test session.
-    """
-    prog = textwrap.dedent("""
-        import sys
-        import dexllm
-        dk = dexllm.DexKit([sys.argv[1]])
-        try:
-            {body}
-        except Exception as e:
-            print("RAISED", type(e).__name__, str(e).replace(chr(10), " "))
+    out = []
+    i, n = 0, len(text)
+    while i < n:
+        if text.startswith("//", i):
+            j = text.find("\n", i)
+            i = n if j < 0 else j
+        elif text.startswith("/*", i):
+            j = text.find("*/", i + 2)
+            i = n if j < 0 else j + 2
         else:
-            print("OK")
-        """).format(body=body)
-    try:
-        proc = subprocess.run(
-            [sys.executable, "-c", prog, str(dex)],
-            capture_output=True,
-            text=True,
-            timeout=TIMEOUT_S,
-        )
-    except subprocess.TimeoutExpired:
-        return _Result("HUNG", f"no result within {TIMEOUT_S}s")
-    out = proc.stdout.strip()
-    if proc.returncode != 0:
-        return _Result("CRASHED", f"rc={proc.returncode} {proc.stderr[-300:]}")
-    if out.startswith("RAISED"):
-        return _Result("RAISED", out)
-    if out.startswith("OK"):
-        return _Result("OK", out)
-    return _Result("CRASHED", f"unexpected output {out!r}")  # pragma: no cover
+            out.append(text[i])
+            i += 1
+    return "".join(out)
 
 
-# ── the premise ──────────────────────────────────────────────────────────────
+def test_the_comment_stripper_is_not_the_thing_that_is_broken():
+    """Non-discriminating BY DESIGN — every pin below rests on this."""
+    assert _strip_comments("a // /* b\nc") == "a \nc"
+    assert _strip_comments("a /* // b */ c") == "a  c"
+    assert _strip_comments("a /* unterminated") == "a "
 
 
-def test_the_crafted_dex_still_verifies(broken_cache_dex):
-    """Non-discriminating BY DESIGN — it pins the premise.
+def _body(path: pathlib.Path, signature: str) -> str:
+    """The stripped body of the function whose definition starts with `signature`."""
+    text = _strip_comments(path.read_text())
+    start = text.index(signature)
+    depth, i = 0, text.index("{", start)
+    for j in range(i, len(text)):
+        if text[j] == "{":
+            depth += 1
+        elif text[j] == "}":
+            depth -= 1
+            if depth == 0:
+                return text[i : j + 1]
+    raise AssertionError(f"{signature} has no balanced body")  # pragma: no cover
 
-    The whole point is that the verifier ACCEPTS this dex (annotations are
-    documented out of its scope), so the failure has to be handled downstream
-    rather than rejected at load. If this ever starts failing, the fixture is
-    testing a different thing and the guards below prove nothing.
+
+# ── the publish/retire/throw state machine (dexllm#55's core) ────────────────
+#
+# Pinned at source because dexllm#72 removed the last input that can reach it.
+# Each assertion names the ONE line the corresponding mutant deleted.
+
+
+def test_a_failed_cache_init_is_published_not_merely_abandoned():
+    """`AbortInitCache` must RECORD the failure and RETIRE the claim.
+
+    Recording without retiring leaves the next `BeginInitCache` waiting on an
+    in-flight claim that will never be published; retiring without recording
+    leaves `WaitInitCache` with nothing to throw on, so it returns normally and
+    the caller proceeds on a half-built cache.
     """
-    import dexllm
-
-    report = dexllm.verify(str(broken_cache_dex))
-    assert report and all(r["valid"] for r in report), report
-    lenient = dexllm.verify(str(broken_cache_dex), lenient=True)
-    assert lenient and all(r["valid"] for r in lenient), lenient
-
-
-# ── the fix ──────────────────────────────────────────────────────────────────
+    body = _body(_DEX_ITEM, "void DexItem::AbortInitCache(")
+    assert "init_cache_failed_flags |= failed_flags;" in body, body
+    assert "init_cache_inflight_flags &= ~init_flags;" in body, body
+    assert "init_cache_state_cv.notify_all();" in body, body
+    # A reason is never empty, which is what lets WaitInitCache read it directly.
+    assert "unknown error" in body, body
 
 
-@pytest.mark.parametrize(
-    "call",
-    [
-        "dk.warm_analysis_caches()",
-        "dk.find_call_sites_to('Ljava/lang/String;->length()I')",
-        "dk.resolve_call_args('Ljava/lang/String;->length()I')",
-        "dexllm.summarize_capabilities(dk)",
-    ],
-)
-def test_a_failed_cache_init_reports_instead_of_blocking(broken_cache_dex, call):
-    """Every API that warms the caller/cross-ref caches must raise, not hang."""
-    result = _run(call, broken_cache_dex)
-    assert result.verdict == "RAISED", f"{call}: {result.verdict} — {result.detail}"
-    assert "cache init failed" in result.detail, result.detail
+def test_the_waiter_wakes_on_failure_and_throws_on_the_FLAG():
+    """`WaitInitCache` waits on `(ready | failed)` and throws keyed on the flag.
 
-
-def test_the_reason_reaches_the_caller(broken_cache_dex):
-    """The message must name the UNDERLYING failure, not a placeholder.
-
-    Two things could publish the failure: the task's own `catch (...)`, which
-    knows what was thrown, and the post-join net in `InitDexCache`, which only
-    knows that nothing was published. Both retire the claim, so a caller still
-    gets an exception either way — which is exactly why dropping the task's
-    catch survived every other assertion in this file. What it costs is the
-    diagnosis, so that is what this pins: neither the "unknown error" fallback
-    nor the net's generic reason may be what the caller is told.
+    Waiting on `ready` alone IS the original hang. Keying the throw on the
+    message instead of the flag is a provably EQUIVALENT mutant today (a failed
+    flag always carries a reason) and is rejected anyway: the flag is the state
+    that means "failed", and a message-keyed throw would silently stop raising
+    if that ever changed.
     """
-    result = _run("dk.warm_analysis_caches()", broken_cache_dex)
-    assert result.verdict == "RAISED", result.detail
-    assert "unknown error" not in result.detail, result.detail
-    assert "task did not run" not in result.detail, result.detail
-    assert len(result.detail) > len(
-        "RAISED RuntimeError cache init failed: "
-    ), result.detail
+    body = _body(_DEX_ITEM, "void DexItem::WaitInitCache(")
+    assert "(ready_flags | init_cache_failed_flags) & init_flags) == init_flags" in body
+    assert "failed = (init_cache_failed_flags & init_flags) != 0;" in body, body
+    assert 'throw std::runtime_error("dex cache init failed: " + error);' in body, body
 
 
-def test_a_second_call_reports_too_and_does_not_block(broken_cache_dex):
-    """The claim must be RETIRED, not merely abandoned.
+def test_a_failed_flag_is_not_claimed_again():
+    """`BeginInitCache` excludes an already-failed flag.
 
-    `BeginInitCache` sets `init_cache_inflight_flags` before the work starts and
-    only the publish clears it — so a failure that left it set would make the
-    NEXT caller block inside `BeginInitCache`'s own wait instead. Retrying is
-    also how a consumer reacts to an error, which makes this the realistic path.
+    Without it the retry re-runs work known to throw on this dex; with it the
+    caller reaches `WaitInitCache` and is told why. The two are coupled — this
+    is what makes the failure STICKY rather than merely reported once.
     """
-    result = _run(
-        "\n            try:\n"
-        "                dk.warm_analysis_caches()\n"
-        "            except Exception:\n"
-        "                pass\n"
-        "            dk.warm_analysis_caches()",
-        broken_cache_dex,
+    body = _body(_DEX_ITEM, "uint32_t DexItem::BeginInitCache(")
+    assert "& ~init_cache_failed_flags" in body, body
+
+
+def test_the_task_publishes_its_own_diagnosis():
+    """The enqueued lambda wraps `InitCache` in a catch that calls Abort*.
+
+    Dropping it leaves the post-join net (`RetireInitClaims`) as the only
+    publisher — the caller still gets an exception, which is why this mutant
+    survived every other assertion in the file, but the message degrades from
+    the real cause to "cache init task did not run".
+    """
+    body = _body(_DEXKIT, "void DexKit::InitDexCache(")
+    assert "dex_item->InitCache(claimed_flags);" in body, body
+    assert (
+        "dex_item->AbortInitCache(claimed_flags, DescribeCurrentException());" in body
     )
-    assert result.verdict == "RAISED", f"{result.verdict} — {result.detail}"
+    assert "dex_item->FinishInitCache(claimed_flags);" in body, body
+    # The net, for a task that never ran at all, and the enqueue-throws path,
+    # which must release rather than latch (a blip is not a verdict).
+    assert "RetireInitClaims(init_jobs);" in body, body
+    assert "ReleaseInitClaims(init_jobs);" in body, body
+    # …and the WAIT. The state machine above publishes a verdict; this is the
+    # line that makes anyone READ it, and it is the one the retired behavioural
+    # guards covered that nothing else does: a correctness reviewer deleted it,
+    # rebuilt, and the whole suite passed at the published 1040 — while the same
+    # mutant against the pre-fix build and the pre-dexllm#72 test file gave 9
+    # errors, all "warm_analysis_caches never returned". Without it a failed
+    # cache init is published and then ignored, so the caller proceeds on caches
+    # that were never built.
+    assert "dex_item->WaitInitCache(init_flags);" in body, body
 
 
-def test_a_later_query_still_reports_rather_than_waiting_on_the_warmup(
-    broken_cache_dex,
-):
-    """`EnterQueryExecution` sets `warmup_inflight` around `InitDexCache`.
+def test_the_warmup_flag_is_retired_on_the_throwing_path_too():
+    """`EnterQueryExecution` clears `warmup_inflight` on BOTH paths.
 
-    Making InitDexCache throw would leave that flag set forever, so every LATER
-    query would block in `EnterQueryExecution`'s own wait — the old hang moved
-    one frame up. This pins that a different API, entered after the failure,
-    still reports.
+    Making `InitDexCache` throw without this moves the hang one frame up: every
+    later query blocks in `EnterQueryExecution`'s own wait instead. The queue
+    ticket goes with it — the ticket is owned by a LOCAL, so leaving it in the
+    wait queue strands it there permanently.
     """
-    result = _run(
-        "\n            try:\n"
-        "                dk.warm_analysis_caches()\n"
-        "            except Exception:\n"
-        "                pass\n"
-        "            dk.find_call_sites_to('Ljava/lang/String;->length()I')",
-        broken_cache_dex,
-    )
-    assert result.verdict == "RAISED", f"{result.verdict} — {result.detail}"
+    body = _body(_DEXKIT, "DexKit::QueryExecutionGuard DexKit::EnterQueryExecution(")
+    after = body.split("InitDexCache(warmup_flags);", 1)[1]
+    caught = after.split("catch (...)", 1)[1].split("throw;", 1)[0]
+    assert "warmup_inflight = false;" in caught, caught
+    assert "dequeue_shared_pool_admission_ticket();" in caught, caught
+    assert "query_execution_cv.notify_all();" in caught, caught
 
 
-def test_the_apis_that_never_needed_the_cache_still_answer(broken_cache_dex):
-    """No-regression: a broken cache must not take down the paths that do not
-    use it. These worked before the fix (the hang was scoped to the caller /
-    cross-ref flags) and must keep working."""
-    result = _run(
-        "\n            assert dk.list_classes()\n"
-        "            assert dk.render_class_smali(dk.list_classes()[0])\n"
-        "            dk.list_value_strings()\n"
-        "            dk.decompile_class(dk.list_classes()[0])",
-        broken_cache_dex,
-    )
-    assert result.verdict == "OK", f"{result.verdict} — {result.detail}"
+# ── the one behavioural path left ────────────────────────────────────────────
 
 
 def test_a_clean_dex_still_warms(dk):
@@ -375,9 +218,6 @@ def test_a_clean_dex_still_warms(dk):
     dk.warm_analysis_caches()
     dk.warm_analysis_caches()
     assert dk.list_classes()
-
-
-# ── the paths the failure now travels, which the hang used to hide ───────────
 
 
 def test_a_transient_resource_failure_is_not_latched_and_does_not_abort():

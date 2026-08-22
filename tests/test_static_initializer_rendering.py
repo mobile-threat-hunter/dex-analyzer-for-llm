@@ -321,43 +321,59 @@ def test_an_array_holding_an_unspellable_value_is_not_an_expression(tmp_path):
     ), decl
 
 
-@pytest.mark.parametrize(
-    "payload,want",
-    [
-        (bytes([1, 0x16, 0xFF]), "{?}"),
-        (bytes([2, 0x16, 0xFF, 0x04, 9]), "{?, 9}"),
-    ],
-    ids=["only", "with-a-sibling"],
-)
-def test_an_array_holding_an_UNRESOLVABLE_element_is_demoted_too(
-    tmp_path, payload, want
-):
-    """The `?` placeholder is REACHABLE, and demoting on it is load-bearing.
+def test_an_unrenderable_element_demotes_the_array_and_shows_a_placeholder():
+    """RE-BASED to a SOURCE pin by dexllm#72, which closed the only channel.
 
-    The 0x1c arm's comment used to claim an element rendering to nothing was
-    unreachable "because all 18 types now render".  The 0x16 arm thirty lines up
-    refutes that: its index is the one the gate does not bound, and an
-    unresolvable handle renders nothing.  Both reviewers reached `{?}` with a
-    one-byte craft.
+    This used to be two crafted dexes: a `0x16` whose index the gate did not
+    bound rendered nothing, so an array holding it came back `{?}` / `{?, 9}`.
+    dexllm#72 ported ART :1204/:1212, so the gate now bounds that index and every
+    `0x16` a loadable dex can carry RESOLVES — which is what closes the channel.
+    An empty member name would be the other route and `IsValidMemberName` rejects
+    it, so nothing in `DecodeEncodedValueText` can return empty text from a dex
+    that verifies.
 
-    Without the `|| el.text.empty()` half of the demotion the array claims to be
-    an expression and emits `= {?};` - uncompilable Java on the right of an `=`,
-    which is exactly what the two-shape design exists to prevent.  An
-    adversarial review built that mutant and it passed the whole 875-test suite.
+    Both halves of the line stay load-bearing and BOTH are pinned, because they
+    are separately deletable: `? : "?"` is what stops a hole reading as an empty
+    value, and `|| el.text.empty()` is what stops the array claiming to be an
+    EXPRESSION and emitting `= {?};` — uncompilable Java on the right of an `=`,
+    which an adversarial review built as a mutant that passed the whole suite.
+
+    A source pin is WEAKER than the crafted dexes it replaces: it cannot see a
+    line that is present and wrong. Saying so is the point of the docstring.
     """
-    decl = _decl(tmp_path, 0x1C, payload, "arr_unresolvable")
-    assert decl == f"static final int {_FIELD0};  // = {want}", decl
+    body = _decoder_body()
+    assert 'out.text += el.text.empty() ? "?" : el.text;' in body, body[-2000:]
+    assert "if (!el.expression || el.text.empty()) out.expression = false;" in body
 
 
-def test_an_eight_byte_handle_index_is_refused_not_wrapped(tmp_path):
-    """The gate lets an EIGHT-byte 0x16 index through, so the reader must not wrap.
+def test_an_annotation_element_that_cannot_resolve_shows_a_placeholder():
+    """The symmetric twin, pinned the same way and for the same reason.
 
-    0x15 and 0x1a go through `VerifyEncodedValue`'s `idx` lambda, which rejects
-    `arg > 3`; 0x16 uses `skip(arg + 1)` with no cap.  So `2**32` is a legal
-    encoding, and truncating it to `uint32_t` yields 0 - a REAL handle, which
-    would be fabricated for a value naming none.  Every other 0x16 craft in this
-    file is one byte wide, so nothing else can see the `idx > UINT32_MAX` clause;
-    an adversarial review removed it and 113 tests still passed.
+    A delta reviewer dropped the annotation arm's `?` and all 46 cases passed,
+    leaving `@Foo(Hello = )` — a hole that reads as an empty value rather than an
+    unresolved one. It was reached the same way as the array's, so dexllm#72 took
+    that route away too.
+    """
+    body = _decoder_body()
+    assert body.count('out.text += el.text.empty() ? "?" : el.text;') == 2, body[-2000:]
+    # The annotation TYPE and each element NAME have their own placeholders, on
+    # index bounds dexllm#71 added; those are unreachable while the walk stays in
+    # lockstep with the gate, which is that issue's whole subject.
+    assert '? dexkit::dad::GetType(type_names[type_idx]) : "?";' in body
+    assert '? std::string(strings[name_idx]) : "?";' in body
+
+
+def test_an_eight_byte_handle_index_is_rejected_at_the_gate(tmp_path):
+    """INVERTED by dexllm#72 — the gate used to LET an 8-byte 0x16 index through.
+
+    That was the point of this guard: 0x15 and 0x1a went through
+    `VerifyEncodedValue`'s `idx` lambda, which rejects `arg > 3`, while 0x16 used
+    `skip(arg + 1)` with no cap — so `2**32` was a legal encoding and truncating
+    it to `uint32_t` would yield 0, a REAL handle fabricated for a value naming
+    none. dexllm#72 ported ART :1204, so the encoding is refused at load and the
+    reader's `idx > UINT32_MAX` clause is defence in depth rather than the only
+    line. It is pinned at source below, because nothing can reach it any more
+    THROUGH A STATIC VALUE.
     """
     dexllm = pytest.importorskip("dexllm")
     payload = (1 << 32).to_bytes(8, "little")
@@ -370,10 +386,35 @@ def test_an_eight_byte_handle_index_is_refused_not_wrapped(tmp_path):
     raw[_EL0_PAYLOAD_OFF : _EL0_PAYLOAD_OFF + 8] = payload
     out = tmp_path / "mh8.dex"
     out.write_bytes(bytes(raw))
-    assert all(r["valid"] for r in dexllm.verify(str(out))), "the gate lets it in"
-    src = dexllm.DexKit(str(out)).decompile_class(_FIXTURE_CLASS)
-    hits = [ln.strip() for ln in src.splitlines() if _FIELD0 in ln]
-    assert hits == [f"static final int {_FIELD0};"], hits
+    rows = dexllm.verify(str(out))
+    assert rows and not any(r["valid"] for r in rows), rows
+    assert "bad index size" in rows[0]["reason"], rows
+
+
+def test_the_static_value_handle_index_is_still_bounded_at_the_reader():
+    """Defence in depth, pinned at source because dexllm#72 made it unreachable.
+
+    Two clauses, separately deletable, and neither can now be reached through a
+    static value on a loadable dex:
+
+      * `idx > UINT32_MAX` — the width guard above. An adversarial review removed
+        it and 113 tests still passed even when the encoding WAS gate-legal,
+        because every other 0x16 craft in this file is one byte wide.
+      * `mh_idx >= handles.size()` inside `ResolveMethodHandle` — the index bound
+        the gate now duplicates.
+
+    The second one is NOT dead: `ParseCallSiteArg` shares it, and a call_site's
+    CONTENTS are deliberately out of the verifier's scope, so a crafted call site
+    still reaches it. `tests/test_invoke_custom_ir.py` is where that route lives.
+    """
+    body = _decoder_body()
+    assert "if (idx > UINT32_MAX ||" in body, body[-2000:]
+    resolver = _strip_comments(_CORE_EXT.read_text())
+    # rindex, not index: the forward DECLARATION comes first and has no body.
+    start = resolver.rindex("bool ResolveMethodHandle(DexItemCodeSource& src")
+    assert (
+        "if (mh_idx >= handles.size()) return false;" in resolver[start : start + 900]
+    )
 
 
 # `field_ids[0]` and `method_ids[0]` name DIFFERENT members, which is the whole
@@ -467,25 +508,6 @@ def test_a_nested_value_renders_through(tmp_path, payload, want):
     """
     vt = 0x1D if payload[0] == _TYPE_ANNOTATION else 0x1C
     assert _decl(tmp_path, vt, payload, "nested") == want
-
-
-def test_an_annotation_element_that_cannot_resolve_renders_a_placeholder(tmp_path):
-    """The array's `?` was pinned in round 1; its symmetric twin was not.
-
-    A delta reviewer dropped the annotation arm's `?` and all 46 cases passed,
-    leaving `@Foo(Hello = )` - a hole that reads as an empty value rather than an
-    unresolved one. Reached the same way as the array's: a 0x16 whose index the
-    gate does not bound.
-    """
-    decl = _decl(
-        tmp_path,
-        0x1D,
-        bytes([_TYPE_ANNOTATION, 1, _STRING_NAME, 0x16, 0xFF]),
-        "annot_unresolvable",
-    )
-    assert decl == (
-        f"static final int {_FIELD0};  // = @annotations.BootstrapMethod(Hello = ?)"
-    ), decl
 
 
 def test_no_field_carries_both_an_expression_and_a_comment(tmp_path):
@@ -729,32 +751,32 @@ def test_the_two_layers_spell_a_method_type_identically(tmp_path):
 # -- the bound the gate does not provide --------------------------------------
 
 
-def test_an_unresolvable_method_handle_renders_nothing_and_survives(tmp_path):
-    """`VerifyEncodedValue`'s 0x16 arm does NOT bound the index, and says so.
+def test_an_out_of_range_static_value_handle_index_is_rejected_at_the_gate(tmp_path):
+    """INVERTED by dexllm#72, and the sentence it inverts is the finding.
 
-    Its justification used to be "for a value nothing consumes"; this arm is a
-    consumer, so the bound moved to the READER - the tier the safety contract
-    permits for an out-of-scope section.  Unlike the slicer's annotation path,
-    which THROWS out of `ArrayView`, this one degrades: an unresolvable handle
-    renders nothing rather than taking the whole class decompile down.
+    This used to assert that the dex VERIFIED and the field rendered nothing,
+    with a docstring saying `VerifyEncodedValue`'s 0x16 arm "does NOT bound the
+    index, and says so" — the bound lived at the READER, the tier the safety
+    contract permits for an out-of-scope section. dexllm#59 put the section IN
+    scope and dexllm#72 the index, so the arm bounds it now (ART :1212) and the
+    dex does not load.
 
-    Rendering NOTHING here is deliberate and is dexllm#67's rule, not a relapse
-    into the shape this issue removes: refusing beats inventing, so a value we
-    could not READ produces no output rather than a fabricated one.  It is
-    reachable only from a crafted index - every value the gate can vouch for
-    resolves, and those are the ones that now always render.
+    What is NOT inverted is the reader's own behaviour on an unresolvable handle:
+    render NOTHING rather than a guess (dexllm#67's rule). That is still live via
+    a crafted call_site, whose contents stay out of scope — see the source pin
+    above and `tests/test_invoke_custom_ir.py`.
 
-    0xFF is past the fixture's 29 handles, and the dex still verifies - which is
-    the point.
+    0xFF is past the fixture's 29 handles, which is what makes this exact.
     """
     dexllm = pytest.importorskip("dexllm")
     out = _craft(tmp_path, 0x16, bytes([0xFF]), "mh_oob")
-    assert all(r["valid"] for r in dexllm.verify(str(out))), "the gate lets it through"
-    src = dexllm.DexKit(str(out)).decompile_class(_FIXTURE_CLASS)
-    hits = [ln.strip() for ln in src.splitlines() if _FIELD0 in ln]
-    assert hits == [f"static final int {_FIELD0};"], hits
-    # The rest of the class is unharmed - a degraded value, not a lost class.
-    assert "static final int FAILURE_TYPE_NONE = 0;" in src
+    rows = dexllm.verify(str(out))
+    assert rows and not any(r["valid"] for r in rows), rows
+    assert "encoded method_handle idx" in rows[0]["reason"], rows
+    # A handle index the gate CAN vouch for still renders, so the rejection is
+    # not "0x16 stopped working".
+    ok = _craft(tmp_path, 0x16, bytes([_HANDLE_0]), "mh_ok")
+    assert all(r["valid"] for r in dexllm.verify(str(ok))), "the in-range craft"
 
 
 # -- the shared vocabulary (source level) -------------------------------------
@@ -793,6 +815,25 @@ def test_the_comment_stripper_sees_through_the_trap_that_bit_this_repo():
     assert "keep" in _strip_comments("// a /* b\nkeep")
     assert "gone" not in _strip_comments("/* gone */")
     assert "gone" not in _strip_comments("// gone")
+
+
+def _decoder_body() -> str:
+    """`DecodeEncodedValueText`'s stripped body — the static-value renderer.
+
+    Comments are stripped first: a fix that survives only as a COMMENT is not a
+    fix, which is the mutant shape a reviewer used on dexllm#57.
+    """
+    text = _strip_comments(_CORE_EXT.read_text())
+    start = text.index("EncodedValueText DecodeEncodedValueText(")
+    depth, i = 0, text.index("{", text.index(")", start))
+    for k in range(i, len(text)):
+        if text[k] == "{":
+            depth += 1
+        elif text[k] == "}":
+            depth -= 1
+            if depth == 0:
+                return text[i : k + 1]
+    raise AssertionError("DecodeEncodedValueText has no balanced body")
 
 
 @pytest.mark.parametrize(

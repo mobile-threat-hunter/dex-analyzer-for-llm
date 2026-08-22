@@ -15,20 +15,21 @@ Upstream AOSP's slicer has the SAME gap, so this is not a port: `dex_format.h`
 has no constant for either code, and neither does the current
 `tools/dexter/slicer` in AOSP.
 
-**The two halves resolve differently, and the asymmetry is the design.** A
-`METHOD_TYPE` index is bounded by `VerifyDex` (against `proto_ids_size`), so
-resolving it through `GetProto` runs on verified input. A `METHOD_HANDLE` index
-is NOT - `method_handle` is out of the verifier's documented scope - so what
-stops a crafted one is `ArrayView`'s own `SLICER_CHECK_LT`, which throws rather
-than reading out of range. Bringing method_handle into the verifier's scope would
-be a new section to validate, with its own false-reject risk, for a value nothing
-consumes.
+**The two halves used to resolve differently, and dexllm#72 removed the
+asymmetry.** A `METHOD_TYPE` index was bounded by `VerifyDex` (against
+`proto_ids_size`) from the start, so resolving it through `GetProto` ran on
+verified input; a `METHOD_HANDLE` index was not, and what stopped a crafted one
+was `ArrayView`'s own `SLICER_CHECK_LT`, which throws rather than reading out of
+range. dexllm#72 ported the two ART checks that close it (`:1204`'s width cap and
+`:1212`'s bound against `NumMethodHandles()`), so both indices are now gate-
+bounded and the leaf checks are unreachable from a loadable dex.
 
-Consequence, and it is deliberate: on a dex with NO method_handle section every
-`0x16` index is out of range, so such a value still throws - it just throws from
-the index bound now instead of from the missing case. That is the channel
-`tests/test_cache_init_failure.py` drives, and it is why fixing this issue did
-not take those nine guards away.
+Consequence, and it is what RETIRED a test vehicle: ART's `NumMethodHandles()` is
+0 for a dex with no method_handle section, so on such a dex every `0x16` index is
+out of range and the DEX no longer loads at all. `tests/test_cache_init_failure.py`
+drove exactly that channel; the guards below moved with it - the section-less
+craft is now pinned as a REJECTION, and the SUCCESS path is pinned on
+`tests/data/invoke-custom.dex`, which has a real section.
 
 **dexllm#63 closed the SAME gap in the OTHER decoder.** This repo has three
 encoded_value decoders. `core_ext/dexitem_code_source.cpp`'s
@@ -105,7 +106,11 @@ def _uleb(raw: bytearray, off: int) -> tuple[int, int]:
 
 
 def _craft(
-    src: pathlib.Path, dst: pathlib.Path, new_type: int, zero_index: bool
+    src: pathlib.Path,
+    dst: pathlib.Path,
+    new_type: int,
+    zero_index: bool,
+    index: int | None = None,
 ) -> bool:
     """Retype the first class-annotation element, preserving its width.
 
@@ -141,7 +146,10 @@ def _craft(
                 continue
             arg = header >> 5
             raw[p] = (header & 0xE0) | new_type
-            if zero_index:
+            if index is not None:
+                for j in range(arg + 1):
+                    raw[p + 1 + j] = (index >> (8 * j)) & 0xFF
+            elif zero_index:
                 for j in range(arg + 1):
                     raw[p + 1 + j] = 0
             dst.write_bytes(bytes(raw))
@@ -149,26 +157,50 @@ def _craft(
     return False
 
 
-def _crafted(tmp_path_factory, new_type: int, zero_index: bool, label: str):
+def _crafted(
+    tmp_path_factory, new_type: int, zero_index: bool, label: str, expect_valid=True
+):
+    """Craft on the first bare corpus dex that yields the shape AND the verdict.
+
+    THREE outcomes, kept apart on purpose — the discipline
+    `tests/test_cache_init_failure.py` had to learn the hard way, and which an
+    adversarial reviewer showed this fixture still lacked:
+
+    * no bare `.dex` at all (the corpus-less CI leg)  -> SKIP, an environment fact
+    * bare dexes exist but none carries the shape     -> `require_corpus_shape`
+    * the shape exists and the VERDICT is wrong       -> FAIL, always
+
+    Without the third, a product regression is reported as "the #57 fixture can
+    no longer be built" — the reviewer's `method_handle_count_ = 0xFFFFFFFFu`
+    mutant produced exactly that message. `expect_valid` is the verdict the craft
+    must PRODUCE, not a convenience: a `0x16` on a section-less dex verified
+    until dexllm#72 and is rejected after it.
+    """
     import dexllm
 
     candidates = sorted(glob.glob(str(REPO_ROOT / "test_apk" / "APK" / "*.dex")))
     if not candidates:
         pytest.skip("no bare .dex in the corpus to craft from")
     out = tmp_path_factory.mktemp("encval") / f"{label}.dex"
+    craftable = 0
     for src in candidates:
         if not _craft(pathlib.Path(src), out, new_type, zero_index):
             continue
+        craftable += 1
         report = dexllm.verify(str(out))
-        if report and all(r["valid"] for r in report):
+        if report and all(r["valid"] for r in report) == expect_valid:
             return out
     require_corpus_shape(
-        False,
+        craftable > 0,
         "bare .dex declaring a class annotation whose first element can be "
         f"retyped to {label}",
         "the #57 fixture can no longer be built, so the parser gap is unguarded",
     )
-    return None  # pragma: no cover - require_corpus_shape raises or skips
+    pytest.fail(
+        f"{craftable} crafted dex(es) carry the {label} shape but none verified "
+        f"{expect_valid} — the VERDICT moved, which is a fact about the product, "
+        "not about the corpus"
+    )
 
 
 @pytest.fixture(scope="module")
@@ -182,10 +214,18 @@ def method_handle_dex(tmp_path_factory):
     """A dex carrying a `METHOD_HANDLE` value whose index cannot resolve.
 
     No bundled dex has a method_handle section, so the index is out of range
-    whatever it is - which is the point: it separates "the type is not
-    implemented" from "this particular index does not resolve".
+    whatever it is. Until dexllm#72 that dex VERIFIED and threw later; the fixture
+    therefore takes `expect_valid=False` now, and the guard below is INVERTED
+    (same treatment dexllm#22's overlong and dexllm#29's lone-surrogate guards
+    got when their premise turned out to be false).
     """
-    return _crafted(tmp_path_factory, _ENCODED_METHOD_HANDLE, False, "method_handle")
+    return _crafted(
+        tmp_path_factory,
+        _ENCODED_METHOD_HANDLE,
+        False,
+        "method_handle",
+        expect_valid=False,
+    )
 
 
 # -- the fix ------------------------------------------------------------------
@@ -207,23 +247,30 @@ def test_a_legal_method_type_value_loads_and_warms(method_type_dex):
     dk.find_classes_by_annotation("Ljava/lang/annotation/Retention;")
 
 
-def test_a_method_handle_value_no_longer_fails_as_an_unknown_type(method_handle_dex):
-    """The half that is bounded rather than resolvable, and how to tell.
+def test_an_unresolvable_method_handle_index_is_rejected_at_the_gate(
+    method_handle_dex,
+):
+    """INVERTED by dexllm#72 - this used to assert the dex LOADED and then threw.
 
-    The value PARSES now; what it cannot do on this dex is resolve, because
-    there is no method_handle section for the index to point into. The
-    distinction is observable in the reason, and it is the whole assertion: a
-    build that still lacked the case would say "unexpected value type".
+    ART's `NumMethodHandles()` is 0 for a dex with no method_handle section
+    (`dex_file.cc` :159 zero-inits it, :290 assigns it only from a map entry), so
+    ART rejects every `0x16` index there and `:1212` says so. Rejecting is
+    therefore ART parity, not a false-reject - which is the claim this file used
+    to make in the opposite direction.
+
+    The reason is asserted because "rejected" alone would pass on any unrelated
+    rejection: the craft is one byte on an otherwise untouched dex, so the ONLY
+    thing that can be wrong with it is the value it retyped. Both modes, because
+    `check_insns_` gates `VerifyInsns` and nothing else.
     """
     import dexllm
 
-    dk = dexllm.DexKit([str(method_handle_dex)])
-    assert dk.list_classes()
-    with pytest.raises(RuntimeError) as excinfo:
-        dk.warm_analysis_caches()
-    reason = str(excinfo.value)
-    assert "unexpected value type" not in reason, reason
-    assert "SLICER_CHECK_LT" in reason, reason
+    for lenient in (False, True):
+        report = dexllm.verify(str(method_handle_dex), lenient=lenient)
+        assert report and not any(r["valid"] for r in report), (lenient, report)
+        assert "encoded method_handle idx" in report[0]["reason"], (lenient, report)
+    with pytest.raises(RuntimeError):
+        dexllm.DexKit([str(method_handle_dex)])
 
 
 # -- the invariant the gap violated -------------------------------------------
@@ -418,9 +465,20 @@ def _method_handle_section(raw: bytearray) -> tuple[int, int, int] | None:
     return None
 
 
-def _craft_on(src: pathlib.Path, dst: pathlib.Path, new_type: int, zero_index: bool):
-    """`_craft` against an explicit source, returning the raw bytes it wrote."""
-    if not _craft(src, dst, new_type, zero_index):
+def _craft_on(
+    src: pathlib.Path,
+    dst: pathlib.Path,
+    new_type: int,
+    zero_index: bool,
+    index: int | None = None,
+):
+    """`_craft` against an explicit source, returning the raw bytes it wrote.
+
+    `index` writes the payload explicitly, little-endian over the element's own
+    (preserved) width - so a one-byte element can carry 0..255, which is what
+    makes the fixture's 29-entry section testable at its boundary.
+    """
+    if not _craft(src, dst, new_type, zero_index, index):
         return None
     return bytearray(dst.read_bytes())
 
@@ -762,3 +820,296 @@ def test_the_uncrafted_fixture_renders_every_initializer():
         "0;",
         "3;",
     ], lines
+
+
+# -- dexllm#72: the index INTO the section is capped and bounded at the gate ---
+#
+# ART `CheckEncodedValue`'s `kDexAnnotationMethodHandle` arm rejects
+# `value_arg > 3` (:1204) and bounds the decoded index against
+# `NumMethodHandles()` (:1212). Both arrive together here, because the arm now
+# goes through the shared `idx` lambda like every other index-bearing one.
+#
+# Every craft below is on the COMMITTED fixture, so these run in the corpus-less
+# CI leg and under any `$DEXLLM_TEST_APK` narrowing. The fixture is the only
+# source in the repo with a real method_handle section, which is what makes the
+# ACCEPT direction testable at all - without it every index is out of range and
+# a bound that rejected everything would pass.
+
+_CRAFT_CLASS = "LTestLinkerMethodMinimalArguments;"
+
+
+def _uleb_bytes(value: int) -> bytes:
+    out = bytearray()
+    while True:
+        b = value & 0x7F
+        value >>= 7
+        out.append(b | (0x80 if value else 0))
+        if not value:
+            return bytes(out)
+
+
+def _class_def_offset(raw: bytes) -> int:
+    """Offset of `_CRAFT_CLASS`'s class_def, found by walking the table."""
+    type_ids_off = struct.unpack_from("<I", raw, 0x44)[0]
+    string_ids_off = struct.unpack_from("<I", raw, 0x3C)[0]
+    defs_size, defs_off = struct.unpack_from("<II", raw, 0x60)
+    for i in range(defs_size):
+        base = defs_off + i * 32
+        type_idx = struct.unpack_from("<I", raw, base)[0]
+        str_idx = struct.unpack_from("<I", raw, type_ids_off + type_idx * 4)[0]
+        data = struct.unpack_from("<I", raw, string_ids_off + str_idx * 4)[0]
+        n, q = _uleb(bytearray(raw), data)
+        if raw[q : q + n].decode("utf-8", "replace") == _CRAFT_CLASS:
+            return base
+    raise AssertionError(f"{_CRAFT_CLASS} is not in the fixture")
+
+
+def _append_static_value(dst: pathlib.Path, value: bytes) -> None:
+    """Append a one-element `encoded_array` at EOF and repoint `static_values_off`.
+
+    The in-place craft used everywhere else in this file preserves the element's
+    WIDTH, so it can only ever produce `value_arg` values the fixture already
+    has - and `value_arg >= 4` is exactly what ART :1204 is about. This one trades
+    length-preservation for reach and pays for it by asserting the verdict.
+    """
+    raw = bytearray(_INVOKE_CUSTOM.read_bytes())
+    base = _class_def_offset(bytes(raw))
+    while len(raw) % 4:
+        raw.append(0)
+    new_off = len(raw)
+    raw += _uleb_bytes(1) + value
+    while len(raw) % 4:  # the slicer's ValidateHeader wants a 4-aligned data_size
+        raw.append(0)
+    struct.pack_into("<I", raw, base + 28, new_off)
+    grown = len(raw) - struct.unpack_from("<I", raw, 0x20)[0]
+    struct.pack_into("<I", raw, 0x20, len(raw))  # file_size
+    struct.pack_into("<I", raw, 0x68, struct.unpack_from("<I", raw, 0x68)[0] + grown)
+    dst.write_bytes(bytes(raw))
+
+
+def _handle_count() -> int:
+    section = _method_handle_section(bytearray(_INVOKE_CUSTOM.read_bytes()))
+    assert section is not None, "the fixture must HAVE a method_handle section"
+    _base, count, _off = section
+    assert count > 1, count  # `count - 1` has to be a DIFFERENT index from 0
+    return count
+
+
+@pytest.mark.parametrize("value_arg", list(range(8)))
+def test_a_method_handle_value_wider_than_four_bytes_is_rejected(tmp_path, value_arg):
+    """ART :1204. Widths 1..4 are legal; 5..8 are not, and the cut is EXACT.
+
+    Asserting both sides is the point: a bound that rejected every width would
+    satisfy the reject half on its own, and `value_arg == 3` is the one that
+    says it does not. The payload is zero bytes, i.e. index 0, which resolves on
+    this fixture - so the ONLY thing under test is the width.
+    """
+    import dexllm
+
+    dst = tmp_path / f"mh-width{value_arg}.dex"
+    _append_static_value(dst, bytes([(value_arg << 5) | 0x16]) + bytes(value_arg + 1))
+    rows = dexllm.verify(str(dst))
+    valid = bool(rows and all(r["valid"] for r in rows))
+    assert valid == (value_arg <= 3), (value_arg, rows)
+    if not valid:
+        assert "bad index size" in rows[0]["reason"], rows
+
+
+@pytest.mark.parametrize("lenient", [False, True])
+def test_the_method_handle_index_bound_is_exactly_the_declared_count(tmp_path, lenient):
+    """ART :1212, pinned at the boundary in BOTH directions.
+
+    `count - 1` must be ACCEPTED and `count` REJECTED - an off-by-one that admits
+    `count` passes any reject-only assertion, and one that rejects `count - 1`
+    passes any accept-only one. Both verify modes, because `check_insns_` gates
+    `VerifyInsns` and nothing else, and a packer dump is the population most
+    likely to carry a malformed value.
+    """
+    import dexllm
+
+    n = _handle_count()
+    for index, want_valid in ((0, True), (n - 1, True), (n, False), (n + 7, False)):
+        dst = tmp_path / f"mh-idx{index}-{lenient}.dex"
+        # The element's width is PRESERVED, so this craft carries an index < 256
+        # - which is why the fixture's 29-entry section is what makes a boundary
+        # test possible at all.
+        assert (
+            _craft_on(_INVOKE_CUSTOM, dst, _ENCODED_METHOD_HANDLE, False, index)
+            is not None
+        ), index
+        rows = dexllm.verify(str(dst), lenient=lenient)
+        valid = bool(rows and all(r["valid"] for r in rows))
+        assert valid == want_valid, (index, want_valid, lenient, rows)
+        if not valid:
+            assert "encoded method_handle idx" in rows[0]["reason"], rows
+
+
+def test_the_carriers_still_verify_and_warm():
+    """0 false-reject, on the three committed dexes that HAVE a real section.
+
+    Non-discriminating BY DESIGN in the accept direction - it must hold on both
+    sides of dexllm#72 - but it is the only thing standing between a new
+    rejection direction and a real API-26+ dex, which is the one way an added
+    check can fail (dexllm#58).
+    """
+    import dexllm
+
+    carriers = [
+        REPO_ROOT / "tests" / "data" / "invoke-custom.dex",
+        REPO_ROOT / "tests" / "data" / "method_handles.dex",
+        REPO_ROOT / "tests" / "data" / "const-method-handle.dex",
+    ]
+    for path in carriers:
+        assert path.is_file(), path
+        section = _method_handle_section(bytearray(path.read_bytes()))
+        assert section is not None, f"{path.name} must carry a section"
+        rows = dexllm.verify(str(path))
+        assert rows and all(r["valid"] for r in rows), (path.name, rows)
+        dk = dexllm.DexKit([str(path)])
+        dk.warm_analysis_caches()
+        assert dk.list_classes()
+
+
+_METHOD_HANDLE_MAP_TYPE_COUNT_OFF = (
+    4  # map_item: {u2 type, u2 unused, u4 size, u4 offset}
+)
+
+
+@pytest.mark.parametrize("lenient", [False, True])
+def test_a_dex_declaring_no_handles_rejects_every_index(tmp_path, lenient):
+    """`count == 0` — the headline property, on a COMMITTED fixture.
+
+    ART's `NumMethodHandles()` is 0 when the map declares no method_handle
+    section, so ART rejects every `0x16` index on such a dex; that is the whole
+    argument for why closing this at the gate is parity rather than a
+    false-reject, and it is what retired the dexllm#55 vehicle.
+
+    Its sibling `test_an_unresolvable_method_handle_index_is_rejected_at_the_gate`
+    drives a genuinely section-less bare dex, which the CI leg does not have —
+    so this one ZEROES the fixture's own map count instead, which is
+    length-preserving (one `u4`), reaches the same `count == 0` state, and runs
+    everywhere. Index 0 is the sharpest case: it is in range for ANY nonzero
+    count, so a bound that read `> count` instead of `>= count`, or that skipped
+    the check when the section is absent, would accept it.
+    """
+    import dexllm
+
+    raw = bytearray(_INVOKE_CUSTOM.read_bytes())
+    section = _method_handle_section(raw)
+    assert section is not None, "the fixture must HAVE a method_handle section"
+    base, count, _off = section
+    assert count > 0, count
+    struct.pack_into("<I", raw, base + _METHOD_HANDLE_MAP_TYPE_COUNT_OFF, 0)
+    # A 0x16 whose index is 0 — legal on the unmodified fixture, out of range the
+    # moment the section declares nothing.
+    dst = tmp_path / f"mh-nocount-{lenient}.dex"
+    assert _craft_on(_INVOKE_CUSTOM, dst, _ENCODED_METHOD_HANDLE, True) is not None
+    patched = bytearray(dst.read_bytes())
+    struct.pack_into("<I", patched, base + _METHOD_HANDLE_MAP_TYPE_COUNT_OFF, 0)
+    dst.write_bytes(bytes(patched))
+
+    rows = dexllm.verify(str(dst), lenient=lenient)
+    assert rows and not any(r["valid"] for r in rows), (lenient, rows)
+    assert "encoded method_handle idx" in rows[0]["reason"], rows
+    # The premise: zeroing the count alone does NOT make the dex invalid, so the
+    # rejection above is attributable to the 0x16 and not to the craft.
+    only_count = tmp_path / f"mh-nocount-clean-{lenient}.dex"
+    only_count.write_bytes(bytes(raw))
+    clean = dexllm.verify(str(only_count), lenient=lenient)
+    assert clean and all(r["valid"] for r in clean), (lenient, clean)
+
+
+_MULTIDEX = REPO_ROOT / "tests" / "data" / "multidex.apk"
+
+
+def _append_static_value_on(src: bytes, value: bytes, cls: str) -> bytes:
+    """`_append_static_value`, against an arbitrary dex and class descriptor."""
+    raw = bytearray(src)
+    type_ids_off = struct.unpack_from("<I", raw, 0x44)[0]
+    string_ids_off = struct.unpack_from("<I", raw, 0x3C)[0]
+    defs_size, defs_off = struct.unpack_from("<II", raw, 0x60)
+    base = None
+    for i in range(defs_size):
+        b = defs_off + i * 32
+        ti = struct.unpack_from("<I", raw, b)[0]
+        si = struct.unpack_from("<I", raw, type_ids_off + ti * 4)[0]
+        data = struct.unpack_from("<I", raw, string_ids_off + si * 4)[0]
+        n, q = _uleb(raw, data)
+        if raw[q : q + n].decode("utf-8", "replace") == cls:
+            base = b
+            break
+    assert base is not None, cls
+    while len(raw) % 4:
+        raw.append(0)
+    new_off = len(raw)
+    raw += _uleb_bytes(1) + value
+    while len(raw) % 4:
+        raw.append(0)
+    struct.pack_into("<I", raw, base + 28, new_off)
+    grown = len(raw) - struct.unpack_from("<I", raw, 0x20)[0]
+    struct.pack_into("<I", raw, 0x20, len(raw))
+    struct.pack_into("<I", raw, 0x68, struct.unpack_from("<I", raw, 0x68)[0] + grown)
+    return bytes(raw)
+
+
+@pytest.mark.parametrize("lenient", [False, True])
+def test_a_dex_with_no_method_handle_section_at_all_rejects_index_zero(
+    tmp_path, lenient
+):
+    """The INITIALIZER path — `u4 method_handle_count_ = 0;` — and nothing else.
+
+    Its sibling above reaches `count == 0` by ZEROING the fixture's map item,
+    which goes through `CheckMap`'s ASSIGNMENT and therefore overwrites whatever
+    the member was initialised to. An adversarial reviewer built the one-token
+    mutant that separates them — `= 0xFFFFFFFFu` — and it passed the whole
+    corpus-less suite twice, restoring the pre-dexllm#72 behaviour exactly, while
+    being the very default that makes "0 for a dex with no such section" ART
+    parity rather than a false-reject. Only a dex with NO method_handle map item
+    at all exercises it.
+
+    `tests/data/multidex.apk` is that dex and it is COMMITTED, so this runs in
+    the corpus-less CI leg and under any `$DEXLLM_TEST_APK` narrowing. Index 0 is
+    the payload because it is in range for every nonzero count — the sharpest
+    value a wrong default can let through.
+    """
+    import zipfile
+
+    import dexllm
+
+    with zipfile.ZipFile(_MULTIDEX) as z:
+        src = z.read("classes.dex")
+    assert _method_handle_section(bytearray(src)) is None, "the premise"
+    cls = _first_class_with_static_values_slot(src)
+    value = bytes([_ENCODED_METHOD_HANDLE]) + bytes([0])  # arg=0, index 0
+    dst = tmp_path / f"nosection-{lenient}.dex"
+    dst.write_bytes(_append_static_value_on(src, value, cls))
+
+    rows = dexllm.verify(str(dst), lenient=lenient)
+    assert rows and not any(r["valid"] for r in rows), (lenient, rows)
+    assert "encoded method_handle idx" in rows[0]["reason"], rows
+
+    # The craft itself is sound: the same append with a plain INT verifies, so
+    # the rejection is attributable to the 0x16 and not to the surgery.
+    ok = tmp_path / f"nosection-ok-{lenient}.dex"
+    ok.write_bytes(_append_static_value_on(src, bytes([0x04, 7]), cls))
+    clean = dexllm.verify(str(ok), lenient=lenient)
+    assert clean and all(r["valid"] for r in clean), (lenient, clean)
+
+
+def _first_class_with_static_values_slot(src: bytes) -> str:
+    """A class descriptor whose class_def this craft may repoint.
+
+    Any class_def will do — `static_values_off` is repointed wholesale, so an
+    existing array is replaced rather than appended to. The first one keeps the
+    choice deterministic.
+    """
+    raw = bytearray(src)
+    type_ids_off = struct.unpack_from("<I", raw, 0x44)[0]
+    string_ids_off = struct.unpack_from("<I", raw, 0x3C)[0]
+    defs_size, defs_off = struct.unpack_from("<II", raw, 0x60)
+    assert defs_size, "the fixture must declare a class"
+    ti = struct.unpack_from("<I", raw, defs_off)[0]
+    si = struct.unpack_from("<I", raw, type_ids_off + ti * 4)[0]
+    data = struct.unpack_from("<I", raw, string_ids_off + si * 4)[0]
+    n, q = _uleb(raw, data)
+    return raw[q : q + n].decode("utf-8", "replace")

@@ -392,21 +392,36 @@ EncodedValueText DecodeEncodedValueText(const U1*& p,
             // A method handle has NO Java expression form, so it renders as the
             // reference it names and rides as a comment.
             //
-            // THE INDEX IS NOT VERIFIER-BOUNDED. `VerifyEncodedValue`'s 0x16 arm
-            // skips the payload without checking it, and says so, on the stated
-            // grounds that nothing consumes the value. This arm IS that consumer,
-            // so the bound moves here — the tier the safety contract permits for
-            // an out-of-scope section, and the same place dexllm#67's
-            // `GetCallSite` bounds it. `ResolveMethodHandle` bounds BOTH
-            // levels: the handle index against the section, and the handle's own
-            // field_or_method_id through `Get*RefTriple` (dexllm#59 is the gap
-            // that leaves the latter to the reader).
+            // THE INDEX IS VERIFIER-BOUNDED as of dexllm#72 (ART :1212 against
+            // the map's method_handle count, :1204 capping its width). This
+            // paragraph said the OPPOSITE in the present tense until an
+            // adversarial review read it — it was written when the arm was the
+            // consumer that had to bound the value itself, which is why the
+            // bound is ALSO here: the tier the safety contract permits for an
+            // out-of-scope section, and the same place dexllm#67's `GetCallSite`
+            // bounds it. `ResolveMethodHandle` bounds BOTH levels — the handle
+            // index against the section, and the handle's own field_or_method_id
+            // through `Get*RefTriple` (dexllm#59 closed the latter at the gate
+            // too). Neither is redundant: `ParseCallSiteArg` calls the same
+            // resolver for a call_site array the gate does NOT walk.
             //
-            // The width is NOT the usual 1..4: 0x15/0x1a go through the gate's
-            // `idx` lambda, which rejects arg > 3, but 0x16 uses `skip(arg + 1)`
-            // with no cap, so an EIGHT-byte index is gate-legal. `ReadIntLE`
-            // reads (arg+1) bytes into a uint64 either way, so consumption
-            // matches the gate and the comparison below cannot wrap.
+            // The width used to be the odd one out: 0x15/0x1a go through the
+            // gate's `idx` lambda, which rejects arg > 3, while 0x16 used
+            // `skip(arg + 1)` with no cap, so an EIGHT-byte index was gate-legal
+            // and truncating it to uint32_t would FABRICATE handle 0 for a value
+            // naming none. dexllm#72 ported ART :1204/:1212, so both halves are
+            // refused at load and the clause below is now DEAD on this route:
+            // `arg <= 3` caps `idx` at 0xFFFFFFFF, so the comparison cannot fire.
+            // It stays as defence in depth and is pinned at source, because
+            // nothing behavioural can reach it any more. What is NOT dead is the
+            // bound one level down — `ResolveMethodHandle`'s own
+            // `mh_idx >= handles.size()`, which `ParseCallSiteArg` shares and a
+            // crafted call_site still reaches, since a call_site's CONTENTS are
+            // deliberately not gate-read. That arm has no width clause of its
+            // own and narrows an 8-byte index instead: dexllm#74, recorded rather
+            // than fixed here. `ReadIntLE` reads (arg+1) bytes into a
+            // uint64 regardless, so consumption still matches the gate and the
+            // comparison cannot wrap.
             uint64_t idx = ReadIntLE(p, end, nbytes);
             dad::IDexCodeSource::CallSiteArg h;
             if (idx > UINT32_MAX ||

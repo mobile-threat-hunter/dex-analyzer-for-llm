@@ -460,6 +460,45 @@ def test_an_unresolvable_call_site_emits_nothing_rather_than_guessing(
     assert not others, others
 
 
+def test_a_call_site_handle_index_past_the_section_resolves_nothing(tmp_path) -> None:
+    """`ResolveMethodHandle`'s own index bound, on the one route that still reaches it.
+
+    dexllm#72 bounded the `0x16` encoded_value's index at the GATE (ART :1212), so
+    the static-initializer route that used to drive this — a `0x16` on a dex whose
+    method_handle section is smaller than the index — is rejected at load now, and
+    `tests/test_static_initializer_rendering.py` pins it as a rejection instead.
+    A call_site's CONTENTS are deliberately out of the verifier's scope
+    (`dex_verifier.h`), so this route is not, and it keeps the READER's bound
+    behavioural: `if (mh_idx >= handles.size()) return false;`.
+
+    Element 0 of a call site IS the bootstrap handle, so overwriting its one-byte
+    payload with an index past the fixture's 29 handles makes the site
+    unresolvable — and an unresolved site renders NOTHING rather than a guess.
+
+    The site is a VOID one on purpose. Without the bound `handles[mh_idx]` reaches
+    `ArrayView`'s own `SLICER_CHECK_LT`, which THROWS and costs the whole class;
+    with it the class renders complete, minus one `/* invoke-custom */`. On a site
+    whose result is CONSUMED both readings end in a `// DECOMPILE ERROR` (the
+    documented `move-result` null-guard fires either way) and differ only in the
+    message, so that shape could not carry this guard.
+    """
+    dexllm = pytest.importorskip("dexllm")
+    raw = _CUSTOM.read_bytes()
+    els = _site_by_name(raw, "missingParameterTypes")
+    assert els[0].kind == 0x16 and els[0].width == 1, (els[0].kind, els[0].width)
+    out = _crafted(tmp_path, {els[0].payload_off: bytes([0xFF])}, "handle_oob")
+    # The gate does not read a call site's contents, which is what makes this
+    # route survive dexllm#72 — asserted, not assumed.
+    assert all(r["valid"] for r in dexllm.verify(str(out))), dexllm.verify(str(out))
+    _, clean = _dk(_CUSTOM, dexllm=dexllm)
+    before = clean.decompile_class("LTestBadBootstrapArguments;")
+    after = dexllm.DexKit(str(out)).decompile_class("LTestBadBootstrapArguments;")
+    assert before.count("/* invoke-custom */") >= 5, before
+    assert after.count("/* invoke-custom */") == before.count("/* invoke-custom */") - 1
+    assert "SLICER_CHECK" not in after, after
+    assert 'lookup(), "",' not in after, after
+
+
 def test_an_unresolvable_void_call_site_fabricates_nothing(tmp_path) -> None:
     """The half that a consumed result hides.
 

@@ -320,11 +320,14 @@ def test_every_decoder_consumes_exactly_what_the_gate_consumes(decoder):
                 f"gate consumes {gate_width(arg)}, decoder consumes {mine(arg)}",
             )
             compared += 1
-    # Pinned, not a floor: 64 is the exact number of (code, accepted arg) pairs
-    # with a numeric width. An adversarial reviewer showed a floor of 60 had ZERO
-    # margin - one gate narrowing lands on it exactly - so a 19th type code, or a
+    # Pinned, not a floor: 60 is the exact number of (code, accepted arg) pairs
+    # with a numeric width. An adversarial reviewer showed a floor is worthless
+    # here - a gate narrowing can land on it exactly - so a 19th type code, or a
     # deliberate change to an arm's accepted args, has to bump this by hand.
-    assert compared == 64, compared
+    # It WAS 64, and dexllm#72 is the "deliberate change" the sentence predicted:
+    # porting ART :1204 narrowed 0x16 METHOD_HANDLE from 8 accepted args to 4,
+    # which is exactly the 4 pairs that left.
+    assert compared == 60, compared
 
 
 def test_the_gate_model_matches_the_real_gate_on_every_type_and_arg(gate_probe):
@@ -411,14 +414,23 @@ def test_the_payload_width_is_derived_from_the_header_the_same_way_everywhere(de
 # uncovered args are exactly where the `nbytes` mutant bites: APPEND a fresh
 # `encoded_array` at EOF (4-aligned), repoint the class's `static_values_off`
 # at it, and grow `file_size` / `data_size`. The result verifies, loads and
-# decompiles - so LONG, DOUBLE and METHOD_HANDLE (the three types the gate lets
-# through at ANY arg) are covered at every width they can carry.
+# decompiles - so LONG and DOUBLE (the two types the gate lets through at ANY
+# arg) are covered at every width they can carry.
+#
+# METHOD_HANDLE was a third until dexllm#72, which ported ART :1204's width cap
+# and so removed the asymmetry this parametrisation was built around: the arm
+# now goes through the shared `idx` lambda like every other index-bearing one.
+# It stays here as a CAPPED control precisely because it moved - a revert would
+# make args 4..7 verify again, and the model/gate cross-check below is what says
+# so.
 #
 # This does not replace the in-place craft: that one is length-preserving, so
 # nothing but the intended bytes can be what changed. This one trades that for
 # reach, and pays for it by asserting the dex still verifies.
-_UNCAPPED = (0x06, 0x11, 0x16)  # LONG / DOUBLE / METHOD_HANDLE
-_CAPPED_CONTROL = 0x04  # INT - the gate rejects arg > 3, which the craft must show
+_UNCAPPED = (0x06, 0x11)  # LONG / DOUBLE
+# INT - the gate rejects arg > 3, which the craft must show - and METHOD_HANDLE,
+# capped the same way since dexllm#72.
+_CAPPED_CONTROLS = (0x04, 0x16)
 
 
 def _uleb_bytes(value: int) -> bytes:
@@ -476,7 +488,7 @@ def _append_array(dst: pathlib.Path, values: bytes, count: int) -> None:
 
 
 @pytest.mark.parametrize("value_arg", list(range(8)))
-@pytest.mark.parametrize("value_type", [*_UNCAPPED, _CAPPED_CONTROL])
+@pytest.mark.parametrize("value_type", [*_UNCAPPED, *_CAPPED_CONTROLS])
 def test_a_wide_value_is_consumed_in_full_and_the_gate_agrees(
     tmp_path, value_type, value_arg
 ):
@@ -488,9 +500,9 @@ def test_a_wide_value_is_consumed_in_full_and_the_gate_agrees(
     and where it accepts, the sentinels must land on the fields FOLLOWING the
     crafted value.
 
-    `_CAPPED_CONTROL` is what keeps the first half from being vacuous - INT is
-    rejected at arg >= 4, so the craft has to be able to produce a REJECTED dex
-    as well as an accepted one.
+    `_CAPPED_CONTROLS` is what keeps the first half from being vacuous - INT and
+    (since dexllm#72) METHOD_HANDLE are rejected at arg >= 4, so the craft has to
+    be able to produce a REJECTED dex as well as an accepted one.
     """
     import dexllm
 

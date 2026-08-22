@@ -424,6 +424,17 @@ through a new `Visitor::visit_constant_float` that DEFAULTS to the double path s
 implementer changed. The corpus a/b is byte-identical across that edit, which is the
 unreachability restated as a measurement.
 
+**Five of these guards lost their channel to dexllm#72** and are recorded in its
+section: the `{?}` array demotion and its annotation twin, the `idx > UINT32_MAX`
+width clause, and the two unresolvable-handle crafts all rested on the gate NOT
+bounding the `0x16` index. Two were INVERTED into rejections, two became SOURCE
+pins, and one was re-based onto the call_site route, where the contents are still
+deliberately out of scope. The `idx > UINT32_MAX` clause this section added is
+DEAD on its own route now (the gate caps `arg <= 3`), and the comment justifying
+it said the opposite until a correctness reviewer read it — what is genuinely
+shared with `ParseCallSiteArg` is the bound one level down, inside
+`ResolveMethodHandle`.
+
 **One PLAUSIBLE was worth fixing rather than documenting:** a crafted call-site proto can
 declare more parameters than the instruction has registers, and `BuildInvokeRegs` always
 yields a 5-slot window with empty names, so `GetArgs` materialised `unknownType v`
@@ -519,6 +530,267 @@ family. `EnumerateInvokeSites` and the caller index still exclude 0xFC/0xFD on p
 (dexllm#61's truth set is derived from the operand's INDEX KIND, and a call-site index
 is not a method reference) — cross-referencing a call site to its bootstrap is a
 different capability, not a gap in this one.
+
+### The `0x16` method_handle index is capped and bounded at the gate (dexllm#72, 2026-08-23)
+
+The last piece of the method_handle boundary. `VerifyEncodedValue`'s `case 0x16`
+was `skip(arg + 1)` — it consumed the payload and checked neither half of what
+ART checks: `:1204` rejects `value_arg > 3` ("Bad encoded_value method handle
+size") and `:1212` bounds the decoded index against `NumMethodHandles()`. Every
+OTHER index-bearing arm got the width cap for free from the shared `idx` lambda,
+so **0x16 was the one arm where an EIGHT-byte "index" was gate-legal** — the
+asymmetry dexllm#71's lockstep guard had to be parametrised around.
+
+**Fix:** the arm becomes
+`case 0x16: return idx(method_handle_count_, "encoded method_handle idx");`, so
+both ART checks arrive together. `method_handle_count_` is ART's
+`NumMethodHandles()` — the count lives ONLY in the map (it is not a header
+field), so `CheckMap` carries it forward, which is why this had to wait for
+dexllm#59 to put the section itself in scope; the ORDER of the two passes is
+load-bearing (`CheckMap` runs before `CheckIntraSection`, where encoded values
+are walked). It is 0 when the dex declares no method_handle section, which is
+exactly ART (`dex_file.cc` :159 zero-inits `num_method_handles_`, :290 assigns it
+only from a `kDexTypeMethodHandleItem` map entry) — both anchors read against the
+local AOSP checkout, not inferred.
+
+**The residual was never an OOB**, and each reader already bounded the index
+itself — a THROW through the slicer's `ArrayView`, an EMPTY RESULT through
+`DecodeEncodedValueText` (dexllm#64), and dexllm#67's own bound in
+`ParseCallSiteArg`. What porting buys is a load-time rejection with a byte-level
+reason, and "`VerifyDex` is the single gate" restored for the last part of this
+section. **method_handle now leaves the out-of-scope list entirely**, after four
+commits: EXTENT (dexllm#57), ALIGN (dexllm#62), CONTENTS (dexllm#59), and the
+index into it (this one).
+
+## It RETIRED a test vehicle, and there is no third one — that is the cost of record
+
+`tests/test_cache_init_failure.py` (dexllm#55, 10 cases) crafted exactly this
+value: one byte, an annotation element retyped to `0x16` on a **section-less**
+dex, where the index is out of range by construction. That file and this one both
+called the channel one *"no future verifier improvement can take away, because
+closing it at the gate would be a false-reject"* — **false, and dexllm#59
+measured why**: `NumMethodHandles()` is 0 there, so ART rejects the same bytes.
+Closing it is ART parity.
+
+The issue's plan assumed a third vehicle existed. **None was found, and the
+search is a measurement rather than a shrug — but state it as what it is: a
+negative universal supported by a sample, not a proof.** Cache init dereferences three
+things — the instruction stream (DexKit's own walk, bounded), the annotations
+subtree, and the id tables — and the verifier now covers all three per-structure:
+
+| probe (against the pre-#72 build) | verified | threw in cache init |
+|---|---:|---:|
+| every bare corpus dex x all 32 `encoded_value` type codes, width-preserving | 32 | **2 — both `0x16`** |
+| …the same sweep after the fix | 30 | **0** |
+| 500 random mutations in the annotation sections | 100 | 0 |
+| 1,200 random mutations across every map section | 217 | 0 |
+| 120 `lenient=True` instruction-stream mutations | 11 | 0 |
+| `RLIMIT_NPROC` | n/a | raises, but from the pool **CONSTRUCTOR** |
+
+The retype sweep is the strongest row and also the thinnest — 2 craftable bare
+dexes x 32 codes, retyping the FIRST element of the FIRST annotated class — so
+it is a census of the encoded_value SWITCH, not of every reachable shape. A
+correctness reviewer ran an independent 900-mutation fuzz across the annotation
+structures and `lenient=True` and got 89 verified / 0 thrown / 0 signals, which
+agrees without widening the claim.
+
+The RLIMIT row is the one that decides the shape of the replacement: the throw
+comes out of `InitDexCache` directly ("Resource temporarily unavailable"), so it
+never reaches `AbortInitCache` / `WaitInitCache` — it exercises the ctor/enqueue
+recovery path, not the publish-on-failure machinery the 6 core guards pinned.
+**The scope call was escalated to the user (CLAUDE.md rule 5) with this evidence,
+who chose "port + retire the guards with a record".**
+
+What replaced them is what this repo already does wherever a load-bearing line is
+unreachable from any input (dexllm#63's advancing `default:`, dexllm#71's four
+index bounds, dexllm#70's shared-helper call): **SOURCE-level pins**, on
+`AbortInitCache` (record AND retire AND notify, never an empty reason),
+`WaitInitCache` (wait on `ready | failed`, throw keyed on the FLAG),
+`BeginInitCache` (exclude an already-failed flag), the task's own `catch` +
+`RetireInitClaims` + `ReleaseInitClaims`, and `EnterQueryExecution`'s catch
+(clear `warmup_inflight`, dequeue the admission ticket, notify), and the two
+CALL SITES — `FinishInitCache` and `WaitInitCache`. A source pin is WEAKER than a
+behavioural one — it cannot see a line that is present and wrong — and saying so
+is part of the record. **13 source mutants, each applied and run without a
+rebuild, each killed**, including "the fix survives only as a COMMENT" (the
+stripper is scanned left-to-right and self-checked, the trap dexllm#32 and
+dexllm#57 each paid for).
+
+**Two reviewers turned that admission into measurements, one on each side.** A
+correctness review deleted `dex_item->WaitInitCache(init_flags);` — the line that
+makes anyone READ the verdict the state machine publishes — and the whole suite
+passed at the published 1040, because the pins covered `WaitInitCache`'s BODY and
+not its CALL SITE (the retired behavioural guards killed it with 9 errors, all
+"warm_analysis_caches never returned"); that hole is the 13th mutant and is
+closed. An adversarial review then built the one no source pin can EVER catch:
+keep every pinned string verbatim in `AbortInitCache` and undo the effect one
+line later (`init_cache_failed_flags &= ~failed_flags;`) — 9 passed. The first is
+a defect; the second is the technique's ceiling, and the honest thing to do with
+it is publish it rather than let the pins read as equivalent to what they
+replaced.
+
+**Measured (a/b OFF=`256a70cb01465af7156dc4346f3f1099` vs ON, SAME script, both
+`.so` md5-verified — and the OFF build BIT-REPRODUCES the recorded HEAD md5,
+which is the diff's functional content stated as a measurement):** 112 sources —
+the whole bundled corpus, every committed fixture, every `art/test/dexdump/*.dex`,
+every `tools/dexter/testdata/*.dex`, **every ART fuzzer-corpus dex**, and 20
+crafts — x {strict verify, lenient verify, load, `dex_count`, class list, a smali
+digest, a decompile digest, `warm_analysis_caches`} = **805 axis records, 8
+changed, ALL crafted, 0 REAL**. The 805 is re-derivable rather than a harness
+number: 90 sources load and carry all 8 axes, 21 are rejected on both halves and
+carry 4, and 1 SIGNALS and carries only that — 8x90 + 4x21 + 1
+[[published-counts-need-the-repos-own-predicate]]. The boundary is EXACT: index `count - 1`
+accepted, `count` rejected; widths 0..3 untouched, 4..7 flip to `encoded_value
+bad index size`; and the `0x15 METHOD_TYPE` / `0x04 INT` controls at the same
+widths are unchanged on both halves, so the change is not "the lambda rejects
+more". The bundled corpus carries **0** `0x16` values, so a corpus-only a/b is
+byte-identical BY CONSTRUCTION and the crafts are the only thing that can show
+the mechanism firing [[ab-must-prove-the-mechanism-fires]].
+
+**Independent census, and it is what bounds the false-reject risk:** a raw
+map-list parser that never asks the code under test — every `.dex`/`.apk`/`.jar`/
+`.zip`/`.oat`/`.odex` under the repo and the local AOSP tree — finds **12**
+carrying a method_handle section, and all 12 are in the a/b. (The 12 is stable —
+two reviewers' independent scanners reproduced the same twelve files; the file
+and logical-dex TOTALS they were drawn from are not, at 8,718 / 1,421 against
+8,712 / 1,424 and 8,706 / 1,417, which is what a count with no shared predicate
+is worth, so only the carrier list is published.) **One of the twelve does carry
+a `0x16` value** — `art/tools/fuzzer/class-verifier-corpus/b365807384.dex`, an
+annotation element whose index is 0 against a 2-entry section, so it is ACCEPTED
+on both halves. An earlier draft said none did, which an adversarial reviewer
+refuted with a raw parser; the direction is favourable (a real file exercises the
+accept path) and the sentence was still wrong. None carries a `0x16` encoded_value at all, which is why the
+accept direction had to be crafted on the committed fixture rather than found.
+
+**Guards** (12 new cases in
+[tests/test_encoded_value_method_types.py](tests/test_encoded_value_method_types.py),
+the file that already owns the `0x16` subject; every craft is on the COMMITTED
+`tests/data/invoke-custom.dex`, so they run in the corpus-less CI leg and under
+any `$DEXLLM_TEST_APK` narrowing). The width cap is parametrised over `value_arg`
+0..7 and asserts BOTH sides of the cut — a bound that rejected every width
+satisfies the reject half on its own, and `value_arg == 3` is what says it does
+not. The index bound is pinned at the boundary in both directions and in BOTH
+verify modes (`check_insns_` gates `VerifyInsns` and nothing else, and a packer
+dump is the population most likely to carry one). A third guard is the
+no-false-reject floor over the three committed carriers. The `value_arg >= 4`
+half needs a craft the in-place retype structurally cannot produce (it preserves
+the element's WIDTH), so it appends a fresh `encoded_array` at EOF and repoints
+`static_values_off` — trading length-preservation for reach and paying for it by
+asserting the verdict [[one-byte-crafts-cannot-prove-width]].
+
+**The HIGH an adversarial review confirmed was in the GUARDS, and it was the
+change's own headline property.** `u4 method_handle_count_ = 0;` — the default
+that makes "0 for a dex with no such section" ART parity — had no test at all: a
+one-token mutant, `= 0xFFFFFFFFu`, restores the pre-#72 behaviour EXACTLY and
+passed the whole corpus-less suite twice. The `count == 0` guard described above
+does not see it, because it reaches count 0 by ZEROING the fixture's map item,
+i.e. through `CheckMap`'s ASSIGNMENT, which overwrites whatever the member was
+initialised to. Only a dex with **no method_handle map item at all** exercises
+the initializer. `tests/data/multidex.apk` is one and it is COMMITTED, so
+`test_a_dex_with_no_method_handle_section_at_all_rejects_index_zero` appends a
+`0x16 idx=0` static value to it and runs everywhere; index 0 because it is in
+range for every nonzero count. Post-fix the mutant fails 2 cases corpus-less.
+**Two guards for what looked like one property, and the difference between them
+is which line of C++ they reach.**
+
+**A SECOND finding in the same fixture, from the same review:** with the corpus
+present that mutant failed as *"the #57 fixture can no longer be built"* — a
+product regression reported as a missing corpus shape, which is the trap
+`tests/test_cache_init_failure.py` already carries a three-outcome fixture to
+avoid. `_crafted` now separates them: no bare `.dex` SKIPS, no craftable shape
+goes through `require_corpus_shape`, and a craftable shape whose VERDICT moved
+FAILS with a message that says so.
+
+**Two inherited guards were INVERTED rather than deleted**, the dexllm#22 /
+dexllm#29 / dexllm#45 precedent: `test_a_method_handle_value_no_longer_fails_as_
+an_unknown_type` asserted the section-less craft LOADED and threw, and is now
+`test_an_unresolvable_method_handle_index_is_rejected_at_the_gate`; its fixture
+takes an explicit `expect_valid=False`, because a fixture that only looked for
+"verifies" would silently fall through every candidate and report a deliberate
+change as a missing corpus shape. And dexllm#71's lockstep guard lost `0x16` from
+its `_UNCAPPED` set — the pinned pair count `compared == 64` becomes **60**,
+which is exactly the "a deliberate change to an arm's accepted args has to bump
+this by hand" the assertion's own comment predicted.
+
+**9 mutants, each BUILT and RUN with a distinct `.so` md5, each killed:** the
+pre-fix arm (9 fail), the bound retargeted at `method_ids` (2), `CheckMap` never
+recording the count (14 — everything is rejected, which is the accept direction
+earning its place), the arm gated on `check_insns_` (2, killed only by the
+lenient leg), **width cap ONLY with the index unbounded (10)**, **index bound ONLY
+with the width uncapped (7)**, an off-by-one accepting `index == count` (4), and
+— added after a correctness review — the arm SKIPPED when the dex declares no
+section at all (2), which nothing saw until the `count == 0` guard below existed.
+The two half-fixes are the ones worth having: both ART checks arrive through one
+lambda, so nothing else would notice if only one of them did.
+
+**The `count == 0` case needed a guard of its own, and it is the change's own
+headline property.** The inverted guard that drives a genuinely section-less dex
+is corpus-GATED and skips in the CI leg, so until a reviewer said so the only
+behavioural coverage was `count == 29`. A committed-fixture craft that zeroes the
+method_handle map item's own count (one `u4`, length-preserving) reaches the same
+state everywhere, with index 0 as the payload — in range for ANY nonzero count,
+so it is the sharpest case a `>`-instead-of-`>=` or a skip-when-absent would let
+through. Both mutants above were invisible without it.
+
+**It cost a SECOND set of guards, which the issue did not anticipate either.**
+dexllm#64's five method_handle guards in
+[tests/test_static_initializer_rendering.py](tests/test_static_initializer_rendering.py)
+all rested on the same "the gate does not bound this index" premise:
+
+| guard | what happened |
+|---|---|
+| unresolvable handle renders nothing | **INVERTED** — the craft is rejected at the gate now, with an in-range control so the rejection is not "0x16 stopped working" |
+| an 8-byte handle index is refused, not wrapped | **INVERTED** — the encoding is refused at load (ART :1204) |
+| `{?}` array demotion + `\|\| el.text.empty()` | **SOURCE pin** — no dex that verifies can make `DecodeEncodedValueText` return empty text any more (`IsValidMemberName` rejects the empty-name route too), so the channel is closed rather than moved |
+| the annotation `?` twin | **SOURCE pin**, same reason |
+| the reader's own `mh_idx >= handles.size()` | **RE-BASED, still behavioural** — a call_site's CONTENTS stay out of the gate's scope, so a crafted bootstrap-handle index reaches it; the guard moved to [tests/test_invoke_custom_ir.py](tests/test_invoke_custom_ir.py) and drives a VOID site, because on a site whose result is CONSUMED both readings end in a `// DECOMPILE ERROR` and differ only in the message |
+
+That re-base is the one worth reading twice: the FIRST cut of it used the
+consumed-result site and did NOT kill the mutant (both readings lack the marker),
+which only a built-and-run mutant showed. The void site turns it into "the class
+renders complete, minus one `/* invoke-custom */`, with no `SLICER_CHECK` in it".
+
+**Adjacent, found while re-basing that guard and deliberately NOT fixed here:**
+`ParseCallSiteArg`'s own 0x16 arm truncates `idx` to `uint32_t` with **no
+`idx > UINT32_MAX` clause** — the exact defence dexllm#64's review added to the
+SIBLING arm in the same file. A call_site's contents are not gate-read, so an
+8-byte index there is still legal and `2**32` fabricates handle 0 for a value
+naming none. Its `0x15` / `0x17` / `0x18` siblings narrow the same way, so the
+fix is an arm FAMILY rather than one case. Pre-existing, unchanged by this
+commit, and now the ONLY route to that shape — **dexllm#74**.
+
+**A process lesson worth more than any single finding.** The two reviewers ran
+CONCURRENTLY on one worktree, and the adversarial one's first baseline measured
+the OTHER reviewer's pre-fix mutant: 8 spurious failures, with the `.so` md5
+silently flipped from the change's to HEAD's mid-run. It caught this by checking
+the md5 [[verify-build-identity-before-measuring]], retracted the reading, and
+re-ran everything in an isolated copy of the tree with its own venv and build
+dir. **Concurrent reviewers need isolated worktrees, not just discipline about
+restoring** [[reviewer-agents-swap-the-worktree]] — and the only reason the
+retraction was possible is that it was asserting build identity in the first
+place.
+
+**Adjacent, found by this a/b and deliberately NOT fixed here:**
+`art/tools/fuzzer/class-verifier-corpus/b391844326.dex` — an UNMODIFIED AOSP file
+— verifies valid in BOTH modes, loads, renders smali, warms its caches, and then
+**SIGSEGVs in `dexkit::dad::Construct`** on `decompile_method`. Identical on OFF
+and ON, so it is pre-existing and this change neither caused nor closed it; it is
+a crash on a `verify()`-valid input, i.e. the defect class the verifier project
+exists to prevent, and it is in the IR builder rather than the gate —
+**dexllm#73**.
+
+parity **29/29**, pytest **1044 passed / 24 skipped**, TRUE corpus-less
+(`test_apk` MOVED aside) **644 passed / 424 skipped / 0 failed** — every one of
+the new cases runs in the CI leg, since every craft is on a committed fixture
+(`tests/data/invoke-custom.dex` for the section, `tests/data/multidex.apk` for
+the absence of one) — narrowed to `tests/data/multidex.apk` **945 passed**, the
+five touched guard files green narrowed to **each of the 34 bundled samples one
+at a time**, sweep **25,309-class / 213,374 method-block 0-crash 0-timeout
+0-error, GATE: PASS**, determinism 3 `PYTHONHASHSEED`s -> one digest, lint trio
+clean, doc fences 78, `scripts/check_dad_boundary.sh` clean. The a/b was
+RE-CAPTURED on the shipped binary after every review fix and is identical on all
+112 sources to the capture taken before them, so the record covers what is
+committed and not a predecessor [[verify-build-identity-before-measuring]].
 
 ### A static float/double initializer is zero-extended to the RIGHT (dexllm#70, 2026-08-22)
 
@@ -1005,8 +1277,10 @@ homogeneous signature cannot see.
 
 **The standing rule bound this commit for the fifth time**
 [[a-rule-you-wrote-binds-your-next-commit]]. `VerifyEncodedValue`'s `0x16` arm
-declines to bound the index and justified it as *"for a value nothing
-consumes"* — this arm is that consumer. The bound moves to the READER, which is
+declined to bound the index and justified it as *"for a value nothing
+consumes"* — this arm is that consumer. (**dexllm#72 later bounded it at the
+gate**, ART :1204/:1212, so the reader bound below is defence in depth on this
+route now.) The bound moves to the READER, which is
 the tier the safety contract permits for an out-of-scope section, and it is
 dexllm#67's existing `ResolveMethodHandle` (the one place that bounds BOTH the
 handle index and the handle's own `field_or_method_id`) rather than a second
@@ -1016,8 +1290,8 @@ this one returns false, so an unresolvable handle renders nothing instead of
 taking the whole class decompile down.
 
 **An UNRESOLVABLE value still renders nothing, and that is dexllm#67's rule
-rather than a relapse.** A crafted `0x16` index that the gate does not bound and
-the reader cannot resolve produces no output at all — refusing beats inventing,
+rather than a relapse.** A crafted `0x16` index the reader cannot resolve
+produces no output at all — refusing beats inventing,
 the same call dexllm#67 made for an unresolved call site. It is reachable only
 from a craft: every value the gate can vouch for resolves, and those are exactly
 the ones that now always render.
@@ -1196,9 +1470,12 @@ order-sensitive on both sides.
 the `|| el.text.empty()` half of the array demotion (without it an unresolvable
 element yields `= {?};` — uncompilable Java on the right of an `=`, which is
 precisely what the two-shape design exists to prevent), and the
-`idx > UINT32_MAX` clause (0x16 is the one arm the gate lets through EIGHT bytes
+`idx > UINT32_MAX` clause (0x16 WAS the one arm the gate let through EIGHT bytes
 wide, so `2**32` truncates to 0 and FABRICATES handle 0 for a value naming none;
-every other 0x16 craft in the file is one byte).
+every other 0x16 craft in the file is one byte). **dexllm#72 closed that width at
+the gate**, so on THIS route the clause is now dead and its guard is a source
+pin; the same truncation in `ParseCallSiteArg`, which reads a call_site array the
+gate does not walk, was never given the clause at all — dexllm#74.
 
 **A guard of mine tested the wrong function.** The new kind-dispatch case
 asserted the `.` / `::` separator — which `MethodHandleText` derives from the
@@ -1538,23 +1815,33 @@ string hashing, so the capability axis reported 4 spurious differences that
 reproduced across three `PYTHONHASHSEED` values on ONE build. Canonicalised
 (sets sorted) before re-measuring both sides.
 
-**Guards** ([tests/test_cache_init_failure.py](tests/test_cache_init_failure.py),
-10 cases): every call that could hang runs in a **SUBPROCESS with a deadline**, so
-a regression FAILS the suite instead of hanging it — an in-process assertion
-cannot do that. The fixture crafts the dex IN PLACE and length-preserving, tries
-each bare `.dex` in turn, and requires the craft to ACTUALLY break cache init
-before using it (otherwise the guards would pass vacuously); 3 of the corpus's 9
-bare dexes carry the shape. The fixture separates THREE outcomes, which the
-first cut conflated into one and a review took apart: no bare `.dex` at all (the
-corpus-less CI leg) SKIPS — it is an environment fact; bare dexes that exist but
-are not craftable go through `require_corpus_shape`; and a craftable dex whose
-probe HANGS FAILS unconditionally, narrowing or not, because that is a fact
-about the product. The first cut instead `continue`d past a hang, so a real #55
-regression was reported as "no shape in the bundled corpus" — and SKIPPED
-outright under a narrowing (reproduced: pre-fix + `$DEXLLM_TEST_APK` gave 10
-green tests). It also globbed a RELATIVE path, so the corpus-less leg hit
+**Guards** ([tests/test_cache_init_failure.py](tests/test_cache_init_failure.py)).
+**The crafted-dex half was RETIRED by dexllm#72** — see that section; the record
+below is what those 10 cases were and why they are gone, because the file has now
+been re-based twice and cannot be a third time. Every call that could hang ran in
+a **SUBPROCESS with a deadline**, so a regression FAILED the suite instead of
+hanging it — an in-process assertion cannot do that. The fixture crafted the dex
+IN PLACE and length-preserving, tried each bare `.dex` in turn, and required the
+craft to ACTUALLY break cache init before using it (otherwise the guards would
+pass vacuously); 3 of the corpus's 9 bare dexes carried the shape. It separated
+THREE outcomes, which the first cut conflated into one and a review took apart:
+no bare `.dex` at all (the corpus-less CI leg) SKIPS — an environment fact; bare
+dexes that exist but are not craftable go through `require_corpus_shape`; and a
+craftable dex whose probe HANGS FAILS unconditionally, narrowing or not, because
+that is a fact about the product. The first cut instead `continue`d past a hang,
+so a real #55 regression was reported as "no shape in the bundled corpus" — and
+SKIPPED outright under a narrowing (reproduced: pre-fix + `$DEXLLM_TEST_APK` gave
+10 green tests). It also globbed a RELATIVE path, so the corpus-less leg hit
 `pytest.fail` rather than a skip — the issue #46 trap, in a file written after
-reading the rule.
+reading the rule. What replaced them is SOURCE-level pins on the publish/retire/
+throw state machine plus the one behavioural guard that survives (`RLIMIT_NPROC`,
+which reaches the pool CONSTRUCTOR rather than a task). **The first cut of those
+pins had a hole a correctness reviewer found by building it:** `WaitInitCache`'s
+BODY was pinned and its CALL SITE was not, so deleting
+`dex_item->WaitInitCache(init_flags);` — which makes a published failure go
+unread and the caller proceed on caches that were never built — passed the whole
+suite at the published 1040. The retired behavioural guards killed it loudly (9
+errors, all "warm_analysis_caches never returned"); nothing else did.
 
 **Mutation matrix — and the three survivors are the interesting part.** Killed:
 the pre-fix module (9 errors — the fixture itself can no longer be built, which
@@ -1849,10 +2136,14 @@ second time (the craft is unchanged; only the layer that throws moved).
 **It also cost dexllm#55 its fixture, and that re-base is part of this change.**
 #55's guards crafted the SAME `annotations_off` repoint to make cache init throw;
 closing the channel made the fixture unbuildable and turned 9 tests into hard
-errors, correctly naming the reason. `tests/test_cache_init_failure.py` now
-retypes ONE annotation element to `0x16` — a **one-byte** craft, and a channel no
-future verifier improvement can take away, because closing it at the gate would
-be a false-reject. Strictly better than the vehicle it replaces.
+errors, correctly naming the reason. `tests/test_cache_init_failure.py` then
+retyped ONE annotation element to `0x16` — a **one-byte** craft, and (this said)
+"a channel no future verifier improvement can take away, because closing it at
+the gate would be a false-reject". **That claim was FALSE**: ART's
+`NumMethodHandles()` is 0 for a section-less dex, so ART rejects exactly this
+craft — dexllm#59 measured it and dexllm#72 acted on it, retiring the vehicle for
+good. Kept here because the sentence is the mistake, not a typo: a channel was
+called permanent without checking what ART does with the same bytes.
 
 **Guards** (33 in [tests/test_verifier_annotations.py](tests/test_verifier_annotations.py)),
 crafted IN PLACE and length-preserving (a `u4` for a `u4`, a byte for a byte), each
@@ -2239,22 +2530,23 @@ shape that exercises the new code path.
   idx(header_->proto_ids_size, …)`), so `GetProto` runs on verified input — the
   same call every `ParseMethodDecl` already makes, over a table `CheckHeader`
   spans.
-* `METHOD_HANDLE`'s index is not bounded against its table, so what stops a
-  crafted one is a leaf check — and **which** one depends on the width: `arg > 3`
+* `METHOD_HANDLE`'s index was not bounded against its table at the time (**dexllm#72
+  ports ART :1212 and it is now**), so what stopped a crafted one was a leaf
+  check — and **which** one depends on the width: `arg > 3`
   throws first in `ParseIntValue`'s `SLICER_CHECK_LE(size, sizeof(u4))` (the
   verifier's `0x16` arm uses `skip()`, not the `arg<=3` `idx()` the other index
   types use), and `arg <= 3` reaches `ArrayView`. The first cut attributed the
   throw solely to `ArrayView`; the correctness review corrected that.
 
-**Consequence, deliberate:** on a dex with NO method_handle section every `0x16`
-index is out of range, so such a value still throws — from the index bound instead
-of the missing case. That is the channel `tests/test_cache_init_failure.py`
-drives, so **the issue's "this fix needs a third vehicle for those nine guards"
-worry did not materialise**: the one-byte craft is unchanged, the verdict is
-unchanged, only the reason string moved. Both reviewers noted the vehicle rested
-on a CORPUS property, so that file's `_craft` now **refuses a source that has a
-method_handle section** — the mechanism is structural, and a future corpus dex
-with one cannot silently turn the vehicle into a no-op.
+**Consequence, deliberate AT THE TIME:** on a dex with NO method_handle section
+every `0x16` index was out of range, so such a value still threw — from the index
+bound instead of the missing case. That was the channel
+`tests/test_cache_init_failure.py` drove, so **the issue's "this fix needs a third
+vehicle for those nine guards" worry did not materialise here** — it materialised
+at **dexllm#72**, which bounded that index at the gate and left no vehicle at all.
+Both reviewers noted the vehicle rested on a CORPUS property, so that file's
+`_craft` **refused a source that has a method_handle section**; the mechanism was
+structural, and what took it away was not a corpus dex but ART parity.
 
 **What this change left NOT ported, and the scope line it forced — CLOSED by
 dexllm#59:** ART's `CheckIntraMethodHandleItem` also rejects a
@@ -2636,8 +2928,9 @@ on a section-less dex, where the index is out of range by construction — and
 that file and CLAUDE.md both call the channel one "no future verifier
 improvement can take away, because closing it at the gate would be a
 false-reject", which ART :1212 **refutes** (`NumMethodHandles()` is 0 there, so
-ART rejects it). Both mirrors now say so. #59 alone leaves the vehicle intact,
-verified: those 12 guards still pass.
+ART rejects it). Both mirrors now say so. #59 alone left the vehicle intact,
+verified: those 12 guards still passed. **dexllm#72 then took it, and B2c is
+CLOSED** — see its section below for what the retirement cost.
 
 **Measured (a/b OFF=`6af3fc5723471894966917c63df5ec87` vs
 ON=`256a70cb01465af7156dc4346f3f1099`, SAME script, both `.so` md5-verified, and
@@ -2896,10 +3189,11 @@ also moved from an unbounded `p += nbytes` (0x1a's own) to the file's
 chosen, and an EQUIVALENT mutant on reachable input (a reviewer built it: on a
 verified dex `p + nbytes` cannot pass `end`), so the comment's "strictly safer"
 is a defence, not a fix. The width the merged body must survive is **not
-uniform**: 0x15/0x1a go through the gate's `idx` lambda (arg <= 3) but 0x16 uses
-`skip(arg+1)` with no cap, so an EIGHT-byte "index" is gate-legal — `ReadIntLE`
-reads `arg+1` into a `uint64` in every case, so consumption matches the gate for
-all three.
+uniform**: 0x15/0x1a go through the gate's `idx` lambda (arg <= 3) and 0x16 used
+`skip(arg+1)` with no cap, so an EIGHT-byte "index" was gate-legal until
+dexllm#72 joined that arm to the same lambda — `ReadIntLE` reads `arg+1` into a
+`uint64` in every case, so consumption matches the gate for all three either
+way.
 
 **And the bug CLASS was closed, not just this instance.** `default:` now advances
 by `nbytes` too — the same structural defence the THIRD encoded_value decoder in
@@ -3127,9 +3421,11 @@ rather than assumed. Ten attempts to weaken or evade the guards were all killed.
   `encoded_array` at EOF (4-aligned), repoint the class's `static_values_off` at
   it, grow `file_size`/`data_size`: the dex verifies, loads and decompiles, so
   every width 1..8 is reachable on the same committed fixture. That craft is now
-  a guard — LONG / DOUBLE / METHOD_HANDLE (**three** uncapped types, not the two
-  the first draft claimed; `case 0x16: return skip(arg + 1);` has no cap either)
-  x arg 0..7, plus INT as the negative control that must be REJECTED at arg >= 4.
+  a guard — LONG / DOUBLE / METHOD_HANDLE (**three** uncapped types at the time,
+  not the two the first draft claimed; `case 0x16: return skip(arg + 1);` had no
+  cap either, until dexllm#72 gave it ART :1204's and moved it to the capped
+  side of that parametrisation) x arg 0..7, plus INT as the negative control that
+  must be REJECTED at arg >= 4.
   It doubles as the model cross-check past arg 4. The in-place craft is KEPT
   rather than replaced: it is length-preserving, so nothing but the intended
   bytes can be what changed.
