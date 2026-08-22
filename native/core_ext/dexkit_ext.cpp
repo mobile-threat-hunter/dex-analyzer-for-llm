@@ -785,9 +785,15 @@ uint64_t ScanIntLE(const uint8_t*& p, const uint8_t* end, size_t nbytes) {
 // Collect VALUE_STRING (0x17) string indices from one encoded_value, recursing
 // into ARRAY (0x1c) and ANNOTATION (0x1d). All other types only advance the
 // cursor by their fixed payload (idx/number = value_arg+1 bytes; NULL/BOOLEAN 0).
+// `depth` mirrors `DecodeEncodedValueText`'s (dexllm#71): the gate's kMaxDepth
+// bounds this walk only in lockstep, and on a desync a run of 0x1c bytes is one
+// stack frame per byte.
+constexpr int kScanMaxDepth = 16;
+
 void ScanEncodedValueStrings(const uint8_t*& p, const uint8_t* end,
-                             std::vector<uint32_t>& out) {
+                             std::vector<uint32_t>& out, int depth = 0) {
     if (p >= end) return;
+    if (depth > kScanMaxDepth) return;
     uint8_t header = *p++;
     uint8_t value_arg = (header >> 5) & 0x07;
     uint8_t value_type = header & 0x1F;
@@ -798,7 +804,7 @@ void ScanEncodedValueStrings(const uint8_t*& p, const uint8_t* end,
             return;
         case 0x1c: {  // ARRAY
             uint64_t sz = ScanUleb(p, end);
-            for (uint64_t i = 0; i < sz && p < end; ++i) ScanEncodedValueStrings(p, end, out);
+            for (uint64_t i = 0; i < sz && p < end; ++i) ScanEncodedValueStrings(p, end, out, depth + 1);
             return;
         }
         case 0x1d: {  // ANNOTATION — type_idx, size, size*(name_idx, value)
@@ -806,7 +812,7 @@ void ScanEncodedValueStrings(const uint8_t*& p, const uint8_t* end,
             uint64_t sz = ScanUleb(p, end);
             for (uint64_t i = 0; i < sz && p < end; ++i) {
                 (void)ScanUleb(p, end);  // name_idx
-                ScanEncodedValueStrings(p, end, out);
+                ScanEncodedValueStrings(p, end, out, depth + 1);
             }
             return;
         }

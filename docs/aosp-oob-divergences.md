@@ -223,6 +223,37 @@ CPython bounds), but they exist for memory safety and are part of the same
   throw to match (a segfault would be the divergence). This *matches DAD's
   effective behavior* — included as a memory-safety guard, not an AOSP divergence.
 
+### C3. `encoded_value` index bounds in `DecodeEncodedValueText` (dexllm#71)
+
+- **Where:** [`native/core_ext/dexitem_code_source.cpp`](../native/core_ext/dexitem_code_source.cpp)
+  — the `0x17` / `0x18` / `0x19` / `0x1b` arms: `if (idx >= table.size()) return {};`
+  before the subscript. (The `0x15` / `0x16` / `0x1a` / `0x1d` arms already had one.)
+- **Why:** `VerifyEncodedValue` bounds every index it accepts, so this is
+  redundant — but only while the decoder walks the array in LOCKSTEP with the
+  gate. A wrong consumed width for one element makes every later index
+  attacker-controlled, and dexllm#70's over-consume mutants showed that is a
+  SIGSEGV rather than a wrong answer. Lockstep is itself pinned, per type code and
+  per accepted `value_arg`, by
+  [`tests/test_encoded_value_lockstep.py`](../tests/test_encoded_value_lockstep.py).
+- **Not an AOSP divergence:** ART has no analogous decoder here (this renders Java
+  text); the bound is the reader tier the safety contract permits for values whose
+  validity is established elsewhere, the same tier dexllm#66 / dexllm#67 chose.
+
+### C4. `encoded_value` recursion depth caps (dexllm#71)
+
+- **Where:** [`native/core_ext/dexitem_code_source.cpp`](../native/core_ext/dexitem_code_source.cpp)
+  (`kEncodedValueMaxDepth`) and
+  [`native/core_ext/dexkit_ext.cpp`](../native/core_ext/dexkit_ext.cpp)
+  (`kScanMaxDepth`) — both 16, the gate's own `kMaxDepth`, applied at the same
+  cutoff (a top-level value is depth 0, so a 17th nested level is refused by both).
+- **Why:** the 0x1c/0x1d arms recursed with no depth of their own, under a comment
+  saying the gate's cap "bounds this walk too". Same conditional promise as C3: in
+  lockstep it does; on a desync the nesting is bounded only by `end - p`, i.e. one
+  stack frame per 0x1c byte — an uncatchable SIGSEGV of the emit-walk /
+  ShortCircuitStruct family. A correctness reviewer pointed out it was the one
+  instance of that promise the change had left undone.
+- **Not an AOSP divergence:** same as C3.
+
 ---
 
 ## Decision framing (for later)
@@ -236,6 +267,8 @@ CPython bounds), but they exist for memory safety and are part of the same
 | B2b `data_items_left` | **yes** (ART :777 budget) | n/a (IS the verifier) | none — the count is never consumed for a variable-length section, and the fixed-size ones have a tighter span bound | no (deliberate) |
 | C1 edge index      | no (DAD relies on Python)  | partial            | none | no (cheap, internal) |
 | C2 move-result null| no (matches DAD effective) | n/a                | none | no |
+| C3 encoded_value idx | no (no AOSP analogue) | yes (VerifyEncodedValue) — but only while the decoder stays in lockstep with it | none (0-diff a/b) | no (defence in depth; the gate's promise is conditional) |
+| C4 encoded_value depth | no (no AOSP analogue) | yes (VerifyEncodedValue kMaxDepth) — same conditional promise as C3 | none (0-diff a/b; cutoff verified equal to the gate's) | no (same reason) |
 
 The live question is **A1** (and by extension the policy for A2): keep the leaf
 decoder self-defending (SafeWidth precedent, provenance-independent), or remove

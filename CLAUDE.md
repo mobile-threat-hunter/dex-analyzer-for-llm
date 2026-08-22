@@ -730,8 +730,8 @@ incomplete, it was WRONG**: the reviewer rebuilt a pre-#63-shaped decoder (0x15 
 0x16 consuming only the header byte) and it **SIGSEGVs on 16 of 23 `verify()`-VALID
 crafted dexes**, where both the OFF and ON builds give 0/23. Defence in depth
 there — bounding the four index arms, and pinning the consumed WIDTH rather than
-only the CASE SET in dexllm#63's own invariant test — is a change of its own with
-its own a/b.
+only the CASE SET in dexllm#63's own invariant test — was filed as **dexllm#71**
+and is **DONE**; see its section below.
 
 ### Writer constant/keyword nits — string `"true"` + `while(true)` (2026-06-17)
 
@@ -2381,13 +2381,19 @@ adversarial review): `core_ext/dexitem_code_source.cpp`'s `DecodeEncodedValueTex
 reads static-field initializers for `decompile_class` and has no case for
 0x15/0x16 either. Its `default:` returns having advanced only past the header
 byte, so the payload is not skipped and the following values in that
-`encoded_array` desync. **Wrong-answer only** — verified rather than assumed: the
-caller is a count-bounded `for` loop with `value_count` clamped to
-`static_field_idxs.size()`, so it terminates, and `ReadIntLE` is `end`-bounded, so
-it cannot read out of range. Pre-existing, reachable only from a
+`encoded_array` desync. Pre-existing, reachable only from a
 `MethodHandle`/`MethodType` STATIC INITIALIZER (which javac does not produce),
 filed as **dexllm#63** — and **CLOSED there**, along with the guard's scoping: the
 invariant is now stated once for both decoders. See its section below.
+
+**This paragraph called that desync "wrong-answer only" and was WRONG**, in the
+two sentences dexllm#71 deleted from it: *"the caller is a count-bounded `for`
+loop with `value_count` clamped … and `ReadIntLE` is `end`-bounded, so it cannot
+read out of range."* Both halves are true and NEITHER covers the four arms that
+INDEX a table with the value they just read — a desynced walk hands those an
+index the gate validated nothing about. A reviewer rebuilt a pre-#63-shaped
+decoder and it SIGSEGVs on 16 of 23 `verify()`-VALID crafted dexes. See the
+dexllm#71 section.
 
 **Recorded, not fixed:** the slicer's own pointer guards are inert —
 `Reader::ptr<T>` is `SLICER_CHECK_GE(offset, 0 && offset + sizeof(T) <= size_)`,
@@ -2718,6 +2724,259 @@ lint trio clean. No API, `.pyi`, SDK or MCP surface moves — the change is two
 switch arms in a decoder behind `decompile_class`, and a reviewer traced the
 blast radius closed: `DecodeEncodedValueText` is file-local with exactly one
 caller, which itself has exactly one.
+
+### A gate promise that holds only in LOCKSTEP is bounded at the reader (dexllm#71, 2026-08-22)
+
+`DecodeEncodedValueText`'s `0x17 STRING` / `0x18 TYPE` / `0x19 FIELD` /
+`0x1b ENUM` arms indexed `strings[idx]` / `type_names[idx]` / `field_ids[idx]`
+with an UNBOUNDED subscript, justified in the source by one line — *"idx
+validated in-range by VerifyEncodedValue (static_values gate)"*.
+
+That promise is real, and it is about the value at a given OFFSET. It holds only
+while the decoder walks the `encoded_array` in **lockstep** with the gate — same
+element boundaries, same consumed widths. A decoder that consumes the wrong
+number of bytes for any element reads DIFFERENT bytes for every element after
+it, and the index it then extracts was validated by nothing.
+
+**Not reachable on the shipped code**, and that is the whole shape of the issue:
+what was filed is that the property had no defence in depth, that it was
+maintained by two `switch` statements agreeing BY HAND in two files, that the one
+test looking at them pinned the wrong axis — and that a conclusion this file
+already recorded about the same function was WRONG.
+
+**Measured with the issue's own named vehicle, because no crafted dex can reach
+these bails.** The gate bounds every index it accepts, so a firing case needs a
+DESYNC, which needs a bug — the a/b alone cannot separate "the corpus is in
+lockstep" from "the bound is dead". dexllm#70's over-consume mutant is what
+separates them: built on HEAD it **SIGSEGVs** (signal 11) in `decompile_class` on
+**3 of 31 loadable corpus sources** — `com.android.example.text.styling.apk`,
+`multiple_locale_appname_test.apk`, `Annotation_classes.dex` — and the SAME
+mutant with these four bounds gives **0 signals**, judged by SUBPROCESS EXIT
+STATUS (a `try/except` cannot see a signal). So a desync here is a CRASH surface,
+not a wrong answer, and the bound is what closes it.
+
+**Two independent pieces, and the second is the durable one.** A third — the
+0x1c/0x1d recursion depth, which leaned on the identical conditional promise —
+was added after review; see below.
+
+**(1) The bound.** `if (idx >= table.size()) return {};` on the four arms (three
+source lines: 0x19 and 0x1b share an arm) — the API-boundary shape the safety
+contract already permits, the tier dexllm#66 and dexllm#67 chose for their own
+readers, and the TIER the 0x15 / 0x16 / 0x1a / 0x1d arms of this same function
+ALREADY used, so it is a consistency fix as much as an addition (the exact SHAPE
+is 0x15's and 0x1a's; 0x16 bounds through `ResolveMethodHandle`'s `false` and
+0x1d as an inline `?`). `{}` is "could not render" — at TOP level that is
+indistinguishable from "this field has no initializer", since the caller drops an
+empty text, which is acceptable only because the path is unreachable; nested in a
+0x1c/0x1d it renders `?`. Bounding the OUTER index is
+what covers the 0x19/0x1b arm's inner two: `f` is then a real field_id, whose
+`class_idx`/`name_idx` the verifier's intra pass bounded against
+type_ids/string_ids — a per-structure check that does not depend on this walk
+being in lockstep with anything.
+
+**(2) The WIDTH, not only the CASE SET.**
+`test_every_decoder_implements_every_value_the_verifier_accepts` (dexllm#57,
+widened by dexllm#63) asserts that every type the gate ACCEPTS is HANDLED. It
+says nothing about how many bytes each arm consumes, so a future type code added
+to `VerifyEncodedValue` and to a decoder with a MISMATCHED width satisfies it
+while re-opening exactly this.
+`test_every_decoder_consumes_exactly_what_the_gate_consumes` derives, from
+SOURCE, each arm's consumed width as a function of `value_arg` and each gate
+arm's accepted `value_arg` set, and compares them **per type code and per
+accepted arg** — 64 numeric comparisons per decoder, over all three decoders that
+walk an `encoded_array` the gate walks (`DecodeEncodedValueText`,
+`ScanEncodedValueStrings`, the slicer's `ParseEncodedValue`). Both sides fail
+CLOSED: an idiom the classifier does not recognise reports width 0 and mismatches
+loudly rather than being skipped. `ParseCallSiteArg` — the fourth decoder — is
+deliberately absent and says why: it walks a call_site array `VerifyEncodedValue`
+never walks, so there is no gate for it to be in lockstep WITH.
+
+**The source model is adjudicated by the shipped verifier, which is what makes it
+trustworthy** — it is read out of the same file it audits, so on its own it could
+degrade to "everything is accepted" and pass. `test_the_gate_model_matches_the_
+real_gate_on_every_type_and_arg` builds **32 type codes x `value_arg` 0..4 = 160
+crafted dexes** and requires `dexllm.verify()` to agree with the model on every
+one. It checks the WIDTH half too, not only the accepted-arg half: each craft is
+LAID OUT using the model's width, so a model that got a width wrong produces a
+malformed array the real gate rejects. Exactly **18** type codes are accepted at
+some arg, which is the floor that keeps the parametrised guard from passing by
+skipping everything.
+
+**And a wrong width MOVES a value the assertion names.** For every (type, arg)
+the SHIPPED gate accepts, the 8-byte value region of the committed fixture's
+`LTestLinkerMethodMinimalArguments` is re-laid as `[crafted value][INT
+sentinels]` — 42 / 51 / 17, none of them a value the fixture has — and the
+sentinels must come back on the fields FOLLOWING the crafted one. Not a
+hand-listed set: the accepted combinations come from `dexllm.verify()` on the
+crafts themselves, so a type code that becomes acceptable in future is exercised
+the day it does. Length-preserving to the byte: the count uleb stays one byte,
+the region stays 8, and a leftover byte is never read.
+
+**That in-place craft stops at `value_arg == 4`** — the region is 8 bytes, so a
+6-byte payload plus its header leaves no room for a sentinel. The first draft of
+this section called args 5..7 "unreachable behaviourally" and said the symbolic
+width invariant covered them; BOTH halves were refuted in review, and the
+append-and-repoint craft that closes it is described there.
+
+**Two independent reviewers, and every CONFIRMED finding was in the GUARDS or the
+PROSE — none in the bound.** Both re-derived every headline number from their own
+builds; the adversarial one additionally instrumented the four bails and found
+**0 firings** across the 60-source a/b, 34-source marker probes, **834 crafted
+gate-valid dexes** and 46 targeted probes (arg 4..7, maximal in-range indices,
+5-byte NON-MINIMAL ulebs for array count / annotation size / name / type_idx,
+nesting 14/15/16), with a **positive control** proving the instrumentation live
+(the same build + dexllm#70's over-consume mutant → 8 sources / 16 bails). So
+"the bound cannot fire on a gate-accepted dex" survived a serious attempt to
+break it, and the table-size equality it rests on (`GetStrings().size() ==
+header_->string_ids_size`, via `Reader::section`'s unclamped count) was traced
+rather than assumed. Ten attempts to weaken or evade the guards were all killed.
+
+**What they DID find, and all of it is fixed here:**
+
+* **Both, independently: the width invariant was blind to the one line the
+  argument rests on.** All three classifiers read ARM TEXT, and `nbytes` is
+  computed ONCE at the top of each decoder, outside every arm — the model merely
+  ASSUMED it in a docstring, while the new C++ comment names exactly that line as
+  the reason lockstep holds. `size_t nbytes = std::min<size_t>(value_arg + 1, 5);`
+  left **the whole guard file green AND the TRUE corpus-less run green**, while
+  ordinary corpus `long` initializers (`value_arg == 7`, what d8 emits for any
+  long ≥ 2^56 — six of them in `app-prod-debug.apk`) rendered wrong values and
+  desynced the rest of their array. Fixed by pinning the derivation as a
+  LITERAL, for the gate and all FOUR decoders (`ParseCallSiteArg` has its own
+  copy of the same line — the blind spot is a property of the LINE, not of which
+  gate a decoder answers to).
+* **"args 5..7 are unreachable behaviourally" was an artefact of the CRAFT, not a
+  fact — and the adversarial reviewer built the counter-example.** APPEND a fresh
+  `encoded_array` at EOF (4-aligned), repoint the class's `static_values_off` at
+  it, grow `file_size`/`data_size`: the dex verifies, loads and decompiles, so
+  every width 1..8 is reachable on the same committed fixture. That craft is now
+  a guard — LONG / DOUBLE / METHOD_HANDLE (**three** uncapped types, not the two
+  the first draft claimed; `case 0x16: return skip(arg + 1);` has no cap either)
+  x arg 0..7, plus INT as the negative control that must be REJECTED at arg >= 4.
+  It doubles as the model cross-check past arg 4. The in-place craft is KEPT
+  rather than replaced: it is length-preserving, so nothing but the intended
+  bytes can be what changed.
+* **The 0x1c/0x1d recursion was leaning on the SAME conditional promise, in the
+  same function, and was the one left undone** (correctness, PLAUSIBLE). It
+  recursed with no depth parameter under a comment reading *"capped at 16 by the
+  gate … which bounds this walk too"* — true in lockstep; on a desync the nesting
+  is bounded only by `end - p`, one stack frame per 0x1c byte, an uncatchable
+  SIGSEGV of the emit-walk family. Both `DecodeEncodedValueText` and
+  `ScanEncodedValueStrings` now carry their own cap at the gate's own cutoff
+  (verified EXACT: 16 nested arrays verify and render, 17 are refused by the
+  gate).
+* **`DecodeStaticInitMap`'s `value_count` clamp — named by this change as one of
+  the four reasons the bounds cannot fire — had NO guard**, and deleting it left
+  the entire 935-test suite green (adversarial, CONFIRMED). Now pinned. **The
+  behavioural half is honest about what it cannot do**: removing the clamp is
+  UNDEFINED BEHAVIOUR, not a guaranteed fault — `static_field_idxs[i]` at
+  i ~ 100,000 reads ~400 KB past a four-element vector, which lands in mapped
+  heap as often as not, and the rebuilt mutant PASSES that case. The killing
+  guard is the source pin; the crafted one pins the observable half (the walk
+  stops at the field list, the process survives) in a subprocess judged by exit
+  status.
+* **The production comment named the WRONG test file** (both reviewers) —
+  `test_encoded_value_method_types.py`, which this change does not touch and
+  which pins the CASE SET, the axis this change's own prose calls insufficient.
+  `docs/aosp-oob-divergences.md` had it right: one mirror updated, the other
+  missed [[a-rule-you-wrote-binds-your-next-commit]].
+* Prose: *"`{}` … is a distinguishable outcome"* is FALSE at top level (the
+  caller drops an empty text, so it reads as "no initializer" — the very shape
+  dexllm#64 removed for values it could not SPELL); *"the shape the 0x15 / 0x16 /
+  0x1a / 0x1d arms already use"* is the TIER for all four but the exact SHAPE for
+  only two; "four lines" is three (0x19 and 0x1b share an arm); the a/b lists six
+  axes where 450 = 55x8 + 5x2; and the declaration-line count is static-CONTEXT
+  lines (field declarations plus static method signatures), not field
+  declarations alone.
+* **Measurement hygiene, and it is the durable lesson:** neither crash-probe
+  script asserted the `.so` md5, so when a concurrent process restored the
+  worktree mid-run the probe **silently reported the fixed build's 0 for the
+  pre-fix build's question** — the reviewer saw 1/0/0/0 before catching it. Both
+  scripts now assert the binary before AND after
+  [[verify-build-identity-before-measuring]].
+
+**Measured (a/b OFF=`54f5b54` `a5faf1ca…` vs ON `6af3fc57…`, SAME script, both
+`.so` md5-verified, and the ON capture re-taken on the FINAL build after every
+review fix and byte-identical to the one taken before them):** 60 sources — the
+whole bundled corpus (34), every committed fixture (5), every
+`art/test/dexdump/*.dex` (10) and every `tools/dexter/testdata/*.dex` (11); 55
+load — x {strict verify verdicts + reasons, load, class count, class list, the
+whole decompiled Java, its line count, a hash over every static-context
+declaration line, their count} = **450 axis records (55x8 + 5x2), 0 changed**,
+over **33,732 classes / 3,019,567 decompiled lines**. A 0-diff is REQUIRED rather
+than reassuring — the bound is a no-op while lockstep holds, and the depth cap
+sits at exactly the gate's cutoff — which is why the over-consume demonstration
+is the half that proves the mechanism [[ab-must-prove-the-mechanism-fires]].
+**The strongest single statement of what the diff contains is that M0, the full
+pre-fix build of both files, bit-reproduces the OFF md5** `a5faf1ca…`.
+
+parity **29/29**, pytest **976 passed / 24 skipped**, TRUE corpus-less (`test_apk`
+MOVED aside) **568 passed / 432 skipped / 0 failed** — all 81 collected cases of
+the new file run in the CI leg, since every craft is on a committed fixture —
+narrowed to `tests/data/multidex.apk` **877 passed**, both guard files green
+narrowed to **each of the 34 bundled samples one at a time**, sweep
+**25,309-class / 213,374 method-block 0-crash 0-timeout 0-error, GATE: PASS**,
+determinism 3 processes x 3 `PYTHONHASHSEED`s -> one digest **unchanged from
+before the fix**, lint trio clean (CI scope; the two pre-existing unformatted
+`scripts/` files untouched), doc fences 78,
+`scripts/check_dad_boundary.sh` clean.
+
+**Guards** (81 cases in
+[tests/test_encoded_value_lockstep.py](tests/test_encoded_value_lockstep.py), 67
+run / 14 skipped — a skip is a type code the gate rejects at every arg, i.e.
+32 - 18). Four things are pinned at SOURCE level, because that is the only level
+left for each: the four bounds, the two depth caps, the `value_count` clamp, and
+the shared `nbytes` derivation. On a loadable dex the first three are dead code —
+exactly the position this decoder's `default:` arm is in, and the reason
+dexllm#63 pinned that one the same way — and the fourth is a line no arm-text
+audit can see. Each pin is derived on one axis and literal on the other: the SET
+of arms that must carry a bound is every arm that forms a subscript from a value
+it read with `ReadIntLE` (the VARIABLE NAME is derived too, so a rename cannot
+empty the set silently), while the TABLE each bound names is a literal, so a
+bound cannot be quietly retargeted at a table that is always big enough; the
+depth caps' VALUE is pinned against the gate's own `kMaxDepth`, so the two cannot
+drift. A bound must also be its OWN STATEMENT and PRECEDE its subscript. The
+comment scanner has a self-check, since every derivation rests on it —
+`dexitem_code_source.cpp` contains `// ---- const-wide/* ----`, and a `/* */`
+regex pass applied first swallows ~290 lines silently instead of failing, the
+trap dexllm#32 and dexllm#57 each paid for.
+
+**19 mutants plus M0, each BUILT and RUN with a distinct `.so` md5, each killed
+by its intended guard**, with a control md5 asserted before the matrix starts and
+after it ends: **M0** the full pre-fix build of both files (2 fail, and it
+reproduces the OFF md5); the four bounds removed together and each of the three
+sites alone (1 each); a bound retargeted at a bigger table (1); a bound moved
+AFTER its subscript (1); the 0x17 width hard-coded to one byte (2 — the source
+invariant AND the crafted guard); the 0x11 DOUBLE width fixed at four (9); 0x1f
+BOOLEAN consuming a payload it does not have (2);
+`ScanEncodedValueStrings`' advancing `default:` stopped (2); the GATE narrowed
+from `arg <= 3` to `arg <= 1` for INT/FLOAT (42 + 2 errors); the slicer's 0x17
+width hard-coded (5); **`nbytes` clamped to 5** (10); the `value_count` clamp
+removed (1); each depth cap removed (1 each); a depth cap lowered to 8 (2); and
+each decoder's recursion no longer deepening (1 each). **The width mutants dying
+in BOTH layers is the complementarity claim stated as a measurement** — neither
+layer alone kills them, while the bound-removal, clamp and cap shapes die only at
+source, where nothing behavioural can see them. Two mutants had to be rewritten
+rather than counted: a first "retarget" edit named a table not in scope in that
+arm and did not COMPILE — a build failure is not a kill
+[[mutation-harness-restore-pitfalls]] — and two anchors were not UNIQUE
+(`case 0x17: {  // STRING` matches in both `DecodeEncodedValueText` and
+`ParseCallSiteArg`; `depth + 1)` matches at both recursion sites).
+
+**Three stale claims corrected in the same commit**
+[[a-rule-you-wrote-binds-your-next-commit]]: the four `// idx validated in-range
+by VerifyEncodedValue` comments, whose promise this change qualifies; the 0x1c
+arm's *"which bounds this walk too"*, whose promise this change now enforces
+locally; and the dexllm#57 section's *"Wrong-answer only — verified rather than
+assumed"*, whose two supporting sentences are both TRUE and neither of which
+covers an index arm.
+
+**Deliberately NOT done:** the gate is unchanged, so no new rejection direction
+and no false-reject risk; and the SIBLING decoders keep their own arrangements —
+`ScanEncodedValueStrings` and `ParseCallSiteArg` already bound their indices at
+the reader, and the slicer resolves through `ArrayView`, which throws rather than
+reading out of range.
+
 
 ### "Is this an invoke" is spelled four times, and all four missed `invoke-polymorphic` (dexllm#61, 2026-08-20)
 

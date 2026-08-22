@@ -201,6 +201,15 @@ double DecodeEncodedDouble(uint64_t raw, size_t nbytes) {
     return d;
 }
 
+// The gate's own nesting cap (`VerifyEncodedValue` kMaxDepth). dexllm#71 - the
+// arms below used to lean on it directly, with a comment saying it "bounds this
+// walk too". It does, in lockstep. On a desync the nesting is bounded only by
+// `end - p`, i.e. one frame per 0x1c byte, which is a stack overflow no
+// try/catch can contain - the emit-walk / ShortCircuitStruct family. Same cap,
+// enforced here, at the same cutoff (a top-level value is depth 0, so a 17th
+// nested level is refused by both).
+constexpr int kEncodedValueMaxDepth = 16;
+
 // dexllm#67's bounded method_handle resolver, defined below and forward-declared
 // because the 0x16 arm needs it. REUSED rather than re-derived: it is the one
 // place that bounds both the handle index and the handle's own member index,
@@ -238,8 +247,10 @@ EncodedValueText DecodeEncodedValueText(const U1*& p,
                                         const U1* end,
                                         const dexkit::DexItem& item,
                                         DexItemCodeSource& src,
-                                        uint16_t dex_id) {
+                                        uint16_t dex_id,
+                                        int depth = 0) {
     if (p >= end) return {};
+    if (depth > kEncodedValueMaxDepth) return {};
     U1 header = *p++;
     uint8_t value_arg = (header >> 5) & 0x07;
     uint8_t value_type = header & 0x1F;
@@ -293,10 +304,44 @@ EncodedValueText DecodeEncodedValueText(const U1*& p,
             std::snprintf(buffer, sizeof(buffer), "%.17g", d);
             return {std::string(buffer)};
         }
+        // dexllm#71 — the four arms below index a table with the value they
+        // just read, and used to do it WITHOUT a bound, on the grounds that
+        // `VerifyEncodedValue` had already checked it. That promise is real,
+        // and it is about the value at a given OFFSET: it holds only while this
+        // decoder walks the `encoded_array` in LOCKSTEP with the gate — same
+        // element boundaries, same consumed widths. A decoder that consumes the
+        // wrong number of bytes for any one element reads DIFFERENT bytes for
+        // every element after it, and the index it then extracts was validated
+        // by nothing. dexllm#70's over-consume mutants proved that is a CRASH
+        // rather than a wrong answer: SIGSEGV in `decompile_class` on ordinary,
+        // well-formed corpus APKs, judged by subprocess exit status, and gone
+        // when exactly these four bounds are added.
+        //
+        // Lockstep holds today (`nbytes` is derived from the header here
+        // exactly as the gate derives it, which
+        // `tests/test_encoded_value_lockstep.py` pins per type code and per
+        // accepted `arg`, and whose `nbytes` DEFINITION it pins as a literal -
+        // a correctness reviewer showed an arm-text-only audit is blind to the
+        // one line the argument rests on), so no loadable dex can reach these
+        // bails and the a/b is a 0-diff. They
+        // are defence in depth for a property that was maintained by two
+        // `switch` statements agreeing BY HAND, in two files. Bounding at the
+        // READER is the tier the safety contract permits, and it is the tier
+        // the 0x15 / 0x16 / 0x1a / 0x1d arms of this same function already use
+        // — 0x15 and 0x1a in this exact form, 0x16 through
+        // `ResolveMethodHandle`'s `false`, 0x1d as an inline `?`.
+        //
+        // `{}` is "could not render". At TOP level that is indistinguishable
+        // from "this field has no initializer" - `DecodeStaticInitMap` drops an
+        // empty text, which is the very shape dexllm#64 removed for the values
+        // it could not SPELL. Acceptable only because this path is unreachable
+        // on a loadable dex: refusing beats inventing, and there is nothing to
+        // report about a value that is only reachable through a decoder bug.
+        // Nested in a 0x1c/0x1d it does render, as `?`.
         case 0x17: {  // STRING
             uint64_t idx = ReadIntLE(p, end, nbytes);
             const auto& strings = item.GetStrings();
-            // idx validated in-range by VerifyEncodedValue (static_values gate).
+            if (idx >= strings.size()) return {};
             std::string_view raw = strings[idx];
             if (raw.empty()) return {std::string("\"\"")};
             return {std::string("\"") + PythonUnicodeEscape(raw) + "\""};
@@ -304,7 +349,7 @@ EncodedValueText DecodeEncodedValueText(const U1*& p,
         case 0x18: {  // TYPE — class literal "pkg.Cls.class" or "int[].class"
             uint64_t idx = ReadIntLE(p, end, nbytes);
             const auto& type_names = item.GetTypeNames();
-            // idx validated in-range by VerifyEncodedValue (static_values gate).
+            if (idx >= type_names.size()) return {};  // dexllm#71 — see 0x17
             // dad::GetType handles primitives (V/Z/B/.../J → void/boolean/...),
             // reference types ("Lpkg/Cls;" → "pkg.Cls"), and arrays.
             return {dexkit::dad::GetType(type_names[idx]) + ".class"};
@@ -316,8 +361,11 @@ EncodedValueText DecodeEncodedValueText(const U1*& p,
             const auto& strings = item.GetStrings();
             const auto& type_names = item.GetTypeNames();
             const auto field_ids = reader.FieldIds();
-            // idx validated in-range by VerifyEncodedValue (static_values gate);
-            // a verified field_id's class_idx/name_idx are in-range by CheckIntra.
+            if (idx >= field_ids.size()) return {};  // dexllm#71 — see 0x17
+            // Bounding the OUTER index is what covers the inner two: `f` is now
+            // a real field_id, whose class_idx/name_idx the verifier's intra
+            // pass bounded against type_ids/string_ids — a per-structure check
+            // that does not depend on this walk being in lockstep with anything.
             const auto& f = field_ids[idx];
             std::string out;
             out += dexkit::dad::GetType(type_names[f.class_idx]);
@@ -388,7 +436,8 @@ EncodedValueText DecodeEncodedValueText(const U1*& p,
         }
         case 0x1c: {  // ARRAY — `{a, b, c}`, a real Java array initializer
             // Recursion depth is capped at 16 by the gate (`VerifyEncodedValue`
-            // kMaxDepth), which bounds this walk too.
+            // kMaxDepth) AND, since dexllm#71, by `depth` here - the gate's cap
+            // bounds this walk only while the two are in lockstep.
             //
             // The array is an EXPRESSION only if every element is one: an array
             // holding a method handle has no expression form either, and the
@@ -399,7 +448,7 @@ EncodedValueText DecodeEncodedValueText(const U1*& p,
             out.text = "{";
             for (uint32_t i = 0; i < sz && p < end; ++i) {
                 if (i) out.text += ", ";
-                EncodedValueText el = DecodeEncodedValueText(p, end, item, src, dex_id);
+                EncodedValueText el = DecodeEncodedValueText(p, end, item, src, dex_id, depth + 1);
                 // An element CAN render to nothing, and the arm that makes it
                 // so is thirty lines up: a 0x16 whose index the gate does not
                 // bound and `ResolveMethodHandle` cannot resolve. Both reviewers
@@ -441,7 +490,7 @@ EncodedValueText DecodeEncodedValueText(const U1*& p,
                 out.text += name_idx < strings.size()
                                 ? std::string(strings[name_idx]) : "?";
                 out.text += " = ";
-                EncodedValueText el = DecodeEncodedValueText(p, end, item, src, dex_id);
+                EncodedValueText el = DecodeEncodedValueText(p, end, item, src, dex_id, depth + 1);
                 out.text += el.text.empty() ? "?" : el.text;
             }
             if (sz) out.text += ")";
