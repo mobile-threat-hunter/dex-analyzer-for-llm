@@ -43,7 +43,12 @@ DexKit ↔ DAD boundary: `MethodSnapshotBuilder::Build(IDexCodeSource&, dex_id, 
 - `MethodMeta` (cls/name/proto/access/lparams/triple)
 - `RawIns[]` — pointer-stable, decoded `dex::Instruction` + pre-resolved `ConstRef` variant (String/Type/Method/Field) + pre-computed branch_target
 - `RawBlock[]` — CFG (start_byte/end_byte/ins-span/childs/exception_handlers/payloads)
-- `entry_block_id: optional<uint32_t>` (nullopt for native/abstract/external-ref)
+- `entry_block_id: optional<uint32_t>` — nullopt ⟺ `ins_storage` is empty: no CFG
+  to build (native/abstract/external-ref, or a code item with no decodable
+  instruction — `insns_size == 0`, or payloads only). NOT keyed on `blocks`, which
+  a try-range leader makes non-empty even with zero instructions. A value PROMISES
+  `blocks[value]` exists; `Construct` consumes it six times unguarded and THROWS if
+  a producer ever breaks it (dexllm#73)
 
 Builder runs in 7 stages: decode → leaders → exception table → block split → CFG edges → payload attach. Strings come from DexItem (process-lifetime); snapshot lives shorter than DexItem.
 
@@ -791,6 +796,203 @@ clean, doc fences 78, `scripts/check_dad_boundary.sh` clean. The a/b was
 RE-CAPTURED on the shipped binary after every review fix and is identical on all
 112 sources to the capture taken before them, so the record covers what is
 committed and not a predecessor [[verify-build-identity-before-measuring]].
+
+### A code item can carry no instruction, and `entry_block_id` promised otherwise (dexllm#73, 2026-08-23)
+
+`decompile_method` **SIGSEGV'd in `dad::Construct`** on an UNMODIFIED AOSP file —
+`art/tools/fuzzer/class-verifier-corpus/b391844326.dex`, 1,240 bytes — that
+`verify()` calls valid in BOTH modes, which loads, lists its classes, renders its
+smali and warms its caches. A signal unwinds nothing, so no `catch (...)` and no
+`safe.py` deadline can contain it, and it breaks the two properties README and
+CLAUDE.md both market: *"a load-time structural verifier is the single gate"* and
+0-crash on malformed dex.
+
+**The issue asked which of two branches it was, and it is the second.**
+`LMain;->throwsIfParamIsZero(I)V` has a real code item (`code_off=512`,
+`registers=4`) whose **`insns_size` is 0** — established by a raw `class_data`
+walk that never asks dexllm anything, and reproduced independently by both
+reviewers. ART's **structural** verifier accepts that: `CheckIntraCodeItem`
+(`dex_file_verifier.cc:1726`) bounds the insns span with `CheckListSize` (`:1754`,
+which returns true for count 0) and, with `tries_size == 0`, returns. What rejects
+a zero-opcode code item is the **runtime** `method_verifier`
+(`method_verifier.cc:1734`, *"code item has no opcode"*) — the 6032-line pass this
+project deliberately does not vendor. So the gate behaved exactly as documented
+and the defect was in the IR builder, where the issue's second branch predicted it.
+
+**`entry_block_id` is a PROMISE and the builder made it unconditionally.**
+`MethodSnapshotBuilder::Build` set `entry_block_id = 0` for every method with a
+code item at all, and **six** accesses consume that id with no bound of their own
+— `seen[]`, `snap.blocks[bid]` (the bfs seed), `exception_type_for[bid]`,
+`catch_seed[bid]`, `nodes[*entry]`, and `nodes[bid] = raw`, **which is a heap
+pointer WRITE**. On an empty vector that is a null deref; on a short one it is an
+out-of-range write, which a correctness reviewer demonstrated by building it. A
+half-guard on the adjacent `seen[...]` write made the function *look* tolerant; it
+was not, and it is gone.
+
+**The predicate is `ins_storage`, not `blocks` — and BOTH reviewers independently
+CONFIRMED that, each by constructing the input.** The first cut guarded on
+`blocks.empty()`, justified as "no instruction → no leader → no block". That is
+true only when `tries_size == 0`: stage 3 seeds a leader per try-range START and
+per handler address, so a payload-only body **with a try table** produces blocks —
+every one with an empty `ins` span — and rendered an empty `try { } catch { }` (or
+`while(true) { }`) for a method carrying no instruction at all, which is exactly
+the fabrication this path exists to refuse. It also made the rule written on the
+field false. `blocks.empty()` implies `ins_storage.empty()` but not the reverse,
+so the weaker predicate is the one that matches the documented contract, and it is
+what shipped. Pinned by a `[payload+try]` case in C++ and a crafted one in Python;
+the mutant that keys on `blocks` fails both.
+
+**Fix at the builder — one condition:** the id is set only `if (!snap->ins_storage.empty())`.
+`DvMethod::BuildProcessedGraph` then returns false (`decompile.cpp:89` already
+tests `!graph_->entry`) and the method falls to the signature-only path
+abstract/native methods take, in text and AST alike, with `ast.body == null`.
+Refusing beats inventing — an empty `{ }` would assert the method does nothing,
+which is a fabrication (falling off the end of a Dalvik method is not a return).
+
+**And it SAYS it refused.** Both reviewers pointed out that the bare signature is
+separated from an abstract or native method only by the ABSENCE of a modifier, on
+the primary LLM-facing surface, so a body-less declaration is marked:
+
+```java
+public void throwsIfParamIsZero(int p3);  // no instructions
+```
+
+beyond-DAD, the same *"say that you could not render it"* choice dexllm#64 made
+for an unrenderable static initializer, and driven by a snapshot flag
+(`code_without_instructions`) so it cannot spread to abstract/native — which has
+its own guard. The AST carries the same distinction structurally (`body: null`
+plus `flags` without `abstract`/`native`), and `decompile_method_ast()["source"]`
+runs the same Writer, so text and AST cannot disagree.
+
+**And the promise is bounded at the READER, where it now THROWS.** `Construct`'s
+`nullopt` case still returns an empty graph — that is a legitimate no-CFG shape —
+but an id naming no block is an internal invariant violation, not an input shape,
+so it raises and the per-method catch reports it rather than silently emitting a
+method that reads as abstract. Same choice as the `MoveExpression` null-operand
+guard (divergences C2): *a segfault would be the divergence*.
+
+**Deliberately NOT fixed at the gate.** Rejecting `insns_size == 0` would refuse
+the WHOLE dex over one method, where the IR fix keeps every other method
+analysable and makes the one without a body say so. (An earlier draft also argued
+"an added check can only fail in the direction ART cannot" — an adversarial
+reviewer correctly refuted the framing: `VerifyInsns` is exactly such a check and
+this project ships it deliberately. The whole-dex-versus-per-method argument is
+the one that decides it.)
+
+**Measured (a/b OFF=`e411eb0941e22563227b3c76a9cb0172` vs
+ON=`bbbbcd569aa15726628df2d9b3f16a48`, SAME script, both `.so` md5-verified — and
+the OFF build BIT-REPRODUCES the recorded HEAD md5, which is the diff's functional
+content stated as a measurement):** 92 sources — the whole bundled corpus, every
+committed fixture, every `art/test/dexdump/*.dex`, every
+`tools/dexter/testdata/*.dex` and **all four ART fuzzer corpora** — x {strict
+verify, lenient verify, load, `dex_count`, class list, a smali digest, a
+whole-decompile digest, decompiled line count, `// DECOMPILE ERROR` count, an AST
+digest, `warm_analysis_caches`, and the subprocess EXIT STATUS} = **861 axis
+records, 6 changed, all on `b391844326.dex`**, over 3,038,784 decompiled lines.
+Each source runs in a SUBPROCESS whose axes are FLUSHED one per line, so the
+crashing half still reports what it computed before dying — which is what makes
+the attribution exact: on that file `verify`, `verify_lenient`, `load`,
+`dex_count`, `classes` and `smali` are **byte-identical**, and the six that move
+are `java` / `ast` / `java_lines` / `decompile_errors` / `warm` (nothing → a
+value) plus `_EXIT` (**-11 → 0**). Judging by exit status is not a detail: a
+`try/except` cannot observe a SIGSEGV. **0 other source changed on any axis.** The
+a/b was RE-CAPTURED on the shipped binary after every review fix and is identical
+on all 92 sources to the capture taken before them, so the record covers what is
+committed and not a predecessor [[verify-build-identity-before-measuring]].
+
+**Independent census — the population is ONE, and only the CONCLUSION re-derives.**
+Three raw `class_data` parsers written independently (mine and both reviewers')
+agree exactly: **one** code item with no decodable instruction — the reported one
+— and **zero** payload-only bodies, with every source a parser could not walk
+being gate-rejected in both modes. Their totals do NOT agree (89 sources /
+263,941 methods; 92 enumerated, 81 walked / 263,833; 80 / 240,657) because each
+counts a different predicate, so the totals are published as what they are rather
+than as one number [[published-counts-need-the-repos-own-predicate]].
+
+parity **29/29** (the count is unchanged — the new cases went into the existing
+`construct_parity_test`, which grows from **16** checks to **30**), pytest
+**1058 passed / 24 skipped**, TRUE corpus-less (`test_apk` MOVED aside) **658
+passed / 424 skipped / 0 failed** — every one of the 14 new cases runs in the CI
+leg — narrowed to `tests/data/multidex.apk` **959 passed**, the guard file green
+narrowed to **each of the 34 bundled samples one at a time**, sweep
+**25,309-class / 213,374 method-block 0-crash 0-timeout 0-error, GATE: PASS**,
+determinism 3 processes x 3 `PYTHONHASHSEED`s -> one digest, lint trio clean, doc
+fences 78, `scripts/check_dad_boundary.sh` clean.
+
+**Guards, in TWO layers, and the matrix is what proves they are complementary.**
+[tests/test_empty_code_item.py](tests/test_empty_code_item.py) (14 cases) crafts
+both shapes IN PLACE on the committed `tests/data/multidex.apk` — one `u4` for
+shape A, the instruction words for shape B, length-preserving to the byte, with
+the craft's verify verdict ASSERTED rather than assumed (a rejected dex never
+reaches the IR builder, so a guard that skipped this could pass for the wrong
+reason) — plus the payload+try shape on `tests/data/invoke-custom.dex`, the only
+committed fixture with try blocks. **No decompile of a CRAFTED dex runs in
+the pytest process**: an adversarial reviewer showed the first cut ran 7 of its
+10 cases in-process on the crafted dex, so against a regression `pytest tests/` **aborted
+the session at this alphabetically-early file** instead of reporting — the
+published matrix cell "FF" was only the prefix before the crash. It also pins that
+the sibling method is byte-unchanged (without which a build that renders EVERY
+method as a signature would satisfy the rest), that the marker does not spread to
+abstract/native, and that the uncrafted target HAS a body (non-vacuity;
+non-discriminating BY DESIGN and says so). Five cases in
+[tests/parity/construct_parity_test.cpp](tests/parity/construct_parity_test.cpp)
+pin the C++ side: the three no-instruction shapes leave `entry_block_id`
+**nullopt**, and two hand-built snapshots with a broken promise are REFUSED.
+
+**9 mutants, each BUILT and RUN with a distinct `.so` md5, each killed — and the
+two layers do NOT overlap:**
+
+| mutant | pytest | ctest[construct] |
+|---|---|---|
+| M0 pre-fix — a TRUE revert of all four sources (md5 = the OFF build's, exactly) | 11 failed | FAIL |
+| M1 builder guard removed, reader side kept | 7 failed | FAIL |
+| M2 reader side removed, builder fix kept | **14 passed** | FAIL |
+| M3 builder guard keyed on `insns_size == 0` | 3 failed | FAIL |
+| M4 builder guard keyed on `blocks.empty()` (the reviewers' shape) | 1 failed | FAIL |
+| M5 broken promise returns an empty graph instead of throwing | **14 passed** | FAIL |
+| M6 bound weakened to `blocks.empty()` | **14 passed** | FAIL |
+| M7 the `// no instructions` marker removed | 5 failed | pass |
+| M8 the marker emitted unconditionally | 1 failed | pass |
+
+M2, M5 and M6 are invisible at the Python surface: with the reader side in place
+an unbuilt promise yields an empty graph and the pipeline renders the same
+signature, so **the two guards mask each other end-to-end**
+[[mutants-can-mask-each-other]] and the ABI contract is observable only from C++.
+That is the argument for the C++ layer stated as a measurement.
+
+**M6 is the one worth reading twice.** An adversarial reviewer built it —
+`*entry >= blocks.size()` weakened to `blocks.empty()`, a plausible
+simplification, since under the documented producer the two agree — and it
+survived the whole suite, because the only fixture set `blocks` EMPTY, the single
+state where the two predicates coincide. A one-block snapshot with `entry = 7`
+separates them; that fixture is also where `nodes[bid] = raw` is a genuine
+out-of-range WRITE rather than a null deref. **And the first version of that
+fixture still did not kill it**: asserting merely that *something* threw accepted
+a throw raised from the garbage read one frame later, so the case asserts the
+rejection MESSAGE.
+
+**M8 is the second one worth reading twice, and it is a hole I created answering
+review.** The marker guard I first wrote scoped itself to the crafted class — and
+`tests/data/multidex.apk` has **no abstract or native method at all**, so it was
+VACUOUS: a mutant emitting the marker unconditionally (which would append
+`// no instructions` to every interface method in every APK) passed the whole
+file. It is driven on `tests/data/method_handles.dex` now, with a floor requiring
+it to actually REACH abstract methods
+[[a-guard-can-pass-having-exercised-nothing]] — the pattern this repo keeps
+recording, where the defect is in the RESPONSE to a review rather than in the
+design [[review-responses-are-the-weak-spot]].
+
+**Adjacent, found by the adversarial review and deliberately NOT fixed here.** A
+crafted body whose FIRST code units are a payload, with real code after it and a
+try range starting at byte 0, makes block 0 the empty payload block — so
+`entry_block_id = 0` names it, it has no child edges, and the real body is
+**silently dropped** (`while(true) { }`); a nearby variant is contained by the
+existing emit-depth cap as `// DECOMPILE ERROR`. Both are **identical OFF and ON**
+(pre-existing, neither caused nor closed here), crafted-only (0 in the census),
+and not crashes — but the builder's `// first block is entry (lowest byte_off)`
+assumption is wrong whenever a try or handler leader precedes the first
+instruction, and that is a wrong-ANSWER defect with its own blast radius and its
+own a/b.
 
 ### A static float/double initializer is zero-extended to the RIGHT (dexllm#70, 2026-08-22)
 

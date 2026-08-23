@@ -154,7 +154,7 @@ Legend: ✅ ported (behavioural parity) · ⊕ beyond ART's *structural* verifie
 | string_data — MUTF-8 + length + NUL | ✅ `VerifyStringData`/`VerifyMutf8` |
 | type / proto / field / method / class id index validity | ✅ |
 | type_list (proto params, interfaces) — incl. `type_idx < count` | ✅ `VerifyTypeList` |
-| code_item — registers / ins / outs / insns / try / handler offsets | ✅ `VerifyCodeItem` (= ART `CheckIntraCodeItem` :1726) |
+| code_item — registers / ins / outs / insns / try / handler offsets | ✅ `VerifyCodeItem` (= ART `CheckIntraCodeItem` :1726). Like ART's, it ACCEPTS `insns_size == 0`: a zero-opcode code item is rejected by the *runtime* `method_verifier` (:1734), not the structural one, so such a method loads and the IR builder emits it as a signature with no body (dexllm#73) |
 | encoded_array / encoded_value — recursive index validity | ✅ `VerifyEncodedArrayAt` (= ART `CheckEncodedArray` :1225) |
 | class_data_item | ✅ `VerifyClassData` |
 | **per-instruction operand bounds** (reg / index / branch / switch / array target) | ⊕ `VerifyInsns` — **not in ART's structural verifier** (it lives in the 6032-line runtime `method_verifier`); re-derived from the Dalvik spec via the slicer's VerifyFlags/IndexType tables |

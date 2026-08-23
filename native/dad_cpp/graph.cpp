@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <limits>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <utility>
 
@@ -592,8 +593,25 @@ std::unique_ptr<Graph> Construct(const MethodSnapshot& snap,
                                  Vmap& vmap, GenInvokeRetName& gen_ret) {
     auto g = std::make_unique<Graph>();
     if (!snap.entry_block_id) {
-        // Native / abstract — no CFG.
+        // No CFG to build: native/abstract, or a code item with no decodable
+        // instruction (dexllm#73). A legitimate shape — emit an empty graph and
+        // let the caller fall to signature-only.
         return g;
+    }
+    if (*snap.entry_block_id >= snap.blocks.size()) {
+        // The id PROMISES `blocks[id]` exists, and six accesses below consume it
+        // with no bound of their own — `seen[]`, `snap.blocks[bid]`,
+        // `exception_type_for[bid]`, `catch_seed[bid]`, `nodes[*entry]`, and
+        // `nodes[bid] = raw`, which is a heap pointer WRITE. On an empty vector
+        // that is a null deref; with a short one it is an out-of-range write.
+        // The builder cannot break the promise (dexllm#73 fixed the one path
+        // that did), so reaching here is an internal invariant violation, not an
+        // input shape — THROW rather than return an empty graph, so the
+        // per-method catch reports it instead of silently emitting a method that
+        // reads as abstract. Same choice as the MoveExpression null-operand
+        // guard (docs/aosp-oob-divergences.md C2): a segfault would be the
+        // divergence.
+        throw std::runtime_error("Construct: entry_block_id names no block");
     }
 
     // STEP 1: Build BasicBlock for each RawBlock; index by block_id.
@@ -642,7 +660,7 @@ std::unique_ptr<Graph> Construct(const MethodSnapshot& snap,
         std::vector<uint32_t> queue;
         std::vector<char> seen(snap.blocks.size(), 0);
         queue.push_back(*snap.entry_block_id);
-        if (*snap.entry_block_id < seen.size()) seen[*snap.entry_block_id] = 1;
+        seen[*snap.entry_block_id] = 1;  // in range: bounded at the top
         for (size_t head = 0; head < queue.size(); ++head) {
             uint32_t bid = queue[head];
             const RawBlock& rb = snap.blocks[bid];

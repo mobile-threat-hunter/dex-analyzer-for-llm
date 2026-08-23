@@ -180,11 +180,24 @@ struct MethodSnapshot {
     uint16_t registers_size = 0;
     uint16_t ins_size = 0;          // parameter register count
 
+    // The method HAS a code item, but nothing decodable in it (dexllm#73).
+    // Distinguishes "there is no body here" from abstract/native, which is
+    // otherwise readable only as the ABSENCE of a modifier; the Writer marks
+    // the declaration so the refusal is stated rather than implied.
+    bool code_without_instructions = false;
+
     // ★ POINTER-STABLE after Build() returns. RawBlock.ins spans into this.
     std::vector<RawIns> ins_storage;
     std::vector<RawBlock> blocks;
 
-    // nullopt = native/abstract (no code). Else 0 (first block).
+    // nullopt ⟺ `ins_storage` is empty: native/abstract (no code item), or a
+    // code item with no decodable instruction (`insns_size == 0`, or payloads
+    // only — DecodeAllInsns skips those). Note `blocks` may be NON-empty in that
+    // second case, because a try-range start also seeds a leader; the predicate
+    // is `ins_storage`, not `blocks`.
+    // Else 0 — and a value here PROMISES `blocks[value]` exists. Construct
+    // consumes it six times without a bound of its own (one of them a write),
+    // so it throws rather than proceed if a producer ever breaks it (dexllm#73).
     std::optional<uint32_t> entry_block_id;
 
     // Method-level exception aggregation (DvMethod passes to construct()).
@@ -209,8 +222,9 @@ struct MethodSnapshot {
 
 class MethodSnapshotBuilder {
 public:
-    // Always returns non-null. For native/abstract methods, returns a snapshot
-    // with empty `blocks` and `entry_block_id == nullopt`. For malformed dex,
+    // Always returns non-null. For a method with no CFG — native/abstract, or a
+    // code item carrying no decodable instruction — returns a snapshot with
+    // empty `blocks` and `entry_block_id == nullopt`. For malformed dex,
     // throws std::runtime_error.
     static std::unique_ptr<MethodSnapshot> Build(IDexCodeSource& source,
                                                  uint16_t dex_id,

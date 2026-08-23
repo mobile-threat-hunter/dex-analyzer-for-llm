@@ -792,7 +792,28 @@ MethodSnapshotBuilder::Build(IDexCodeSource& source,
     // 7. Attach exception handlers per block + aggregate method-level.
     AttachExceptionHandlers(*snap, tries);
 
-    snap->entry_block_id = 0;  // first block is entry (lowest byte_off)
+    // A code item can legally carry NO decodable instruction: `insns_size == 0`,
+    // or a body that is nothing but switch/fill-array payloads (DecodeAllInsns
+    // skips those). Not a gate gap — ART's STRUCTURAL verifier, the
+    // DexFileVerifier this port mirrors, accepts a zero-opcode code item too
+    // (CheckIntraCodeItem :1726); what rejects one is the runtime
+    // method_verifier (:1734, "code item has no opcode"), the 6032-line pass
+    // deliberately not vendored. There is nothing to build from, so leave
+    // entry_block_id unset and let DvMethod::Process fall to the same
+    // signature-only path abstract/native methods take (dexllm#73).
+    //
+    // The predicate is `ins_storage`, NOT `blocks`. They differ: stage 3 seeds a
+    // leader per try-range START, so a payload-only body WITH a try table
+    // produces blocks — every one of them with an empty `ins` span — and those
+    // rendered an empty `try { } catch { }` for a method that has no
+    // instruction at all, which is the fabrication this path exists to refuse.
+    // `blocks.empty()` implies `ins_storage.empty()` but not the reverse, so the
+    // weaker predicate is the one that matches the rule stated on the field.
+    if (!snap->ins_storage.empty()) {
+        snap->entry_block_id = 0;  // first block is entry (lowest byte_off)
+    } else {
+        snap->code_without_instructions = true;
+    }
     return snap;
 }
 

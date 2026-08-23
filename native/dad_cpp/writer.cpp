@@ -878,7 +878,15 @@ void Writer::WriteMethod() {
     }
 
     if (!graph_ || !graph_->entry) {
-        Write(";\n");
+        Write(";");
+        // beyond-DAD (dexllm#73): a method whose code item carries no decodable
+        // instruction has no body to emit, and the signature-only form it shares
+        // with abstract/native says so only by the ABSENCE of a modifier. State
+        // the refusal instead — the same "say that you could not render it"
+        // choice dexllm#64 made for an unrenderable static initializer. A line
+        // comment, and the text is fixed (no attacker-controlled bytes reach it).
+        if (snap_ && snap_->code_without_instructions) Write("  // no instructions");
+        Write("\n");
         return;
     }
     Write("\n");

@@ -343,6 +343,38 @@ CPython bounds), but they exist for memory safety and are part of the same
   instance of that promise the change had left undone.
 - **Not an AOSP divergence:** same as C3.
 
+### C5. `entry_block_id` bound in `Construct` (dexllm#73)
+
+- **Where:** [`native/dad_cpp/graph.cpp`](../native/dad_cpp/graph.cpp) — `nullopt`
+  returns an empty graph; `*snap.entry_block_id >= snap.blocks.size()` THROWS.
+- **Why:** the id is a promise from `MethodSnapshotBuilder` that `blocks[id]`
+  exists, and `Construct` consumes it **six** times with no bound of its own —
+  including `nodes[bid] = raw`, a heap pointer WRITE. The builder broke that
+  promise for a code item with no decodable instruction (`insns_size == 0`, or
+  payloads only), which the STRUCTURAL verifier accepts because ART rejects a
+  zero-opcode code item in the runtime `method_verifier` (`:1734`), not in
+  `DexFileVerifier`. That was a SIGSEGV on a `verify()`-valid, unmodified AOSP
+  dex. Fixed at the builder (the id is set only when `ins_storage` is non-empty);
+  this is the reader side on top — same posture as C3/C4, a real promise bounded
+  where it is consumed. It **throws** rather than returning an empty graph
+  because reaching it means a producer lied, not that the input has a legitimate
+  no-CFG shape: the per-method catch then reports it instead of silently emitting
+  a method that reads as abstract.
+- **Not an AOSP divergence:** ART has no analogous structure (this is our
+  snapshot DTO). The check ART *does* have for the input shape lives in the
+  runtime verifier, which is out of scope by the same line B1 draws — and adding
+  it to the gate would be a new rejection direction that refuses a whole dex over
+  one method, so the IR builder is where it belongs.
+- **Guards:** [`tests/test_empty_code_item.py`](../tests/test_empty_code_item.py)
+  (all three shapes, end-to-end, every observation made in a child and judged by
+  subprocess exit status) and the two `[bad-entry]` cases in
+  [`tests/parity/construct_parity_test.cpp`](../tests/parity/construct_parity_test.cpp),
+  the only things that can reach this clause now that the builder cannot. The
+  second of them uses a NON-empty `blocks` with an out-of-range id and asserts the
+  rejection MESSAGE: with `blocks` empty the committed bound and a strictly weaker
+  `blocks.empty()` agree, and an adversarial reviewer's mutant of exactly that
+  shape survived the first cut.
+
 ---
 
 ## Decision framing (for later)
