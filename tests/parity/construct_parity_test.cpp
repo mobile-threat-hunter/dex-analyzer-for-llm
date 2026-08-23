@@ -207,6 +207,33 @@ int main() {
     }
 
     // ============================================================
+    // Test 6c (dexllm#73): the entry is SEEDED into `seen`, so a back edge
+    // targeting it does not build it twice
+    // ============================================================
+    // dexllm#73 simplified `if (*entry < seen.size()) seen[*entry] = 1;` to a
+    // bare `seen[*entry] = 1;` on the strength of the new top-of-function
+    // bound. The comment explains the line's BOUND; its PURPOSE is the seed —
+    // without it, a child edge back to the entry re-enqueues it and the block
+    // is built a second time. An adversarial reviewer deleted the line and it
+    // survived ctest, the corpus-less suite AND a narrowed run, while changing
+    // decompiled output on two unmodified AOSP dexes. `goto -1` back to unit 0
+    // is the smallest input that has the shape.
+    {
+        mck::MockCodeSource src;
+        std::vector<dex::u2> insns = {0x0012, 0xFF28};  // const/4 v0,#0 ; goto -1
+        auto code = mck::FakeCodeItem::Make(1, 0, 0, insns);
+        src.RegisterMethod(0, 9, 1, "Lcom/X;", "selfloop", "()V", std::move(code));
+        auto snap = MethodSnapshotBuilder::Build(src, 0, 9);
+        check("[self-loop] one block", static_cast<int>(snap->blocks.size()), 1);
+        Vmap vm; GenInvokeRetName ret;
+        auto g = Construct(*snap, vm, ret);
+        // Exactly one node: without the seed the entry is enqueued twice and
+        // BuildNodeFromBlock runs again, so the graph carries a duplicate.
+        check("[self-loop] entry built exactly once",
+              static_cast<int>(g->size()), 1);
+    }
+
+    // ============================================================
     // Test 7 (dexllm#73): Construct REFUSES a promise it cannot keep
     // ============================================================
     // The two tests above pin the builder; this one pins the reader side, which

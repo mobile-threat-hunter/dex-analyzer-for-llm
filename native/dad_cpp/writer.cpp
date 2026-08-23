@@ -878,7 +878,15 @@ void Writer::WriteMethod() {
     }
 
     if (!graph_ || !graph_->entry) {
-        Write(";");
+        // A `<clinit>` reaching here has emitted the bare `static` keyword, and
+        // `static;` is not Java. With no instruction nothing executes, so the
+        // empty initializer block is both valid AND true — the one shape where
+        // `{ }` is not the fabrication the marker exists to refuse (adversarial
+        // review of dexllm#73). Scoped to the no-instruction case so the
+        // pre-existing rendering of a code-less `<clinit>` is untouched.
+        Write(is_clinit_ && snap_ && snap_->code_without_instructions
+                  ? " { }"
+                  : ";");
         // beyond-DAD (dexllm#73): a method whose code item carries no decodable
         // instruction has no body to emit, and the signature-only form it shares
         // with abstract/native says so only by the ABSENCE of a modifier. State

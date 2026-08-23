@@ -436,7 +436,8 @@ bounding the `0x16` index. Two were INVERTED into rejections, two became SOURCE
 pins, and one was re-based onto the call_site route, where the contents are still
 deliberately out of scope. The `idx > UINT32_MAX` clause this section added is
 DEAD on its own route now (the gate caps `arg <= 3`), and the comment justifying
-it said the opposite until a correctness reviewer read it — what is genuinely
+it said the opposite until a correctness reviewer read it — dexllm#74 mirrored
+the clause into `ParseCallSiteArg`, where it is LIVE. What is also
 shared with `ParseCallSiteArg` is the bound one level down, inside
 `ResolveMethodHandle`.
 
@@ -755,14 +756,15 @@ consumed-result site and did NOT kill the mutant (both readings lack the marker)
 which only a built-and-run mutant showed. The void site turns it into "the class
 renders complete, minus one `/* invoke-custom */`, with no `SLICER_CHECK` in it".
 
-**Adjacent, found while re-basing that guard and deliberately NOT fixed here:**
-`ParseCallSiteArg`'s own 0x16 arm truncates `idx` to `uint32_t` with **no
+**Adjacent, found while re-basing that guard and NOT fixed here:**
+`ParseCallSiteArg`'s own 0x16 arm truncated `idx` to `uint32_t` with **no
 `idx > UINT32_MAX` clause** — the exact defence dexllm#64's review added to the
 SIBLING arm in the same file. A call_site's contents are not gate-read, so an
-8-byte index there is still legal and `2**32` fabricates handle 0 for a value
-naming none. Its `0x15` / `0x17` / `0x18` siblings narrow the same way, so the
-fix is an arm FAMILY rather than one case. Pre-existing, unchanged by this
-commit, and now the ONLY route to that shape — **dexllm#74**.
+8-byte index there is legal and `2**32` fabricates handle 0 for a value naming
+none. Its `0x15` / `0x17` / `0x18` siblings narrowed the same way, so the fix is
+an arm FAMILY rather than one case. Pre-existing, unchanged by this commit, and
+made the ONLY route to that shape by it — **dexllm#74**, fixed in the section
+below.
 
 **A process lesson worth more than any single finding.** The two reviewers ran
 CONCURRENTLY on one worktree, and the adversarial one's first baseline measured
@@ -859,8 +861,11 @@ public void throwsIfParamIsZero(int p3);  // no instructions
 
 beyond-DAD, the same *"say that you could not render it"* choice dexllm#64 made
 for an unrenderable static initializer, and driven by a snapshot flag
-(`code_without_instructions`) so it cannot spread to abstract/native — which has
-its own guard. The AST carries the same distinction structurally (`body: null`
+(`code_without_instructions`) so it cannot spread to a WELL-FORMED abstract or
+native method, which has no code item at all — that has its own guard, on a
+fixture that actually contains such methods. A CRAFTED method that is both
+abstract and code-bearing does carry the marker, and for it "no instructions" is
+simply true; that is pinned too, so it stays a decision. The AST carries the same distinction structurally (`body: null`
 plus `flags` without `abstract`/`native`), and `decompile_method_ast()["source"]`
 runs the same Writer, so text and AST cannot disagree.
 
@@ -888,7 +893,8 @@ committed fixture, every `art/test/dexdump/*.dex`, every
 verify, lenient verify, load, `dex_count`, class list, a smali digest, a
 whole-decompile digest, decompiled line count, `// DECOMPILE ERROR` count, an AST
 digest, `warm_analysis_caches`, and the subprocess EXIT STATUS} = **861 axis
-records, 6 changed, all on `b391844326.dex`**, over 3,038,784 decompiled lines.
+records PRESENT** (not a product — a source that fails to load carries only the
+axes it reached), **6 changed, all on `b391844326.dex`**, over 3,038,784 decompiled lines.
 Each source runs in a SUBPROCESS whose axes are FLUSHED one per line, so the
 crashing half still reports what it computed before dying — which is what makes
 the attribution exact: on that file `verify`, `verify_lenient`, `load`,
@@ -910,17 +916,17 @@ counts a different predicate, so the totals are published as what they are rathe
 than as one number [[published-counts-need-the-repos-own-predicate]].
 
 parity **29/29** (the count is unchanged — the new cases went into the existing
-`construct_parity_test`, which grows from **16** checks to **30**), pytest
-**1058 passed / 24 skipped**, TRUE corpus-less (`test_apk` MOVED aside) **658
-passed / 424 skipped / 0 failed** — every one of the 14 new cases runs in the CI
-leg — narrowed to `tests/data/multidex.apk` **959 passed**, the guard file green
+`construct_parity_test`, which grows from **16** checks to **32**), pytest
+**1061 passed / 24 skipped**, TRUE corpus-less (`test_apk` MOVED aside) **661
+passed / 424 skipped / 0 failed** — every one of the 17 new cases runs in the CI
+leg — narrowed to `tests/data/multidex.apk` **962 passed**, the guard file green
 narrowed to **each of the 34 bundled samples one at a time**, sweep
 **25,309-class / 213,374 method-block 0-crash 0-timeout 0-error, GATE: PASS**,
 determinism 3 processes x 3 `PYTHONHASHSEED`s -> one digest, lint trio clean, doc
 fences 78, `scripts/check_dad_boundary.sh` clean.
 
 **Guards, in TWO layers, and the matrix is what proves they are complementary.**
-[tests/test_empty_code_item.py](tests/test_empty_code_item.py) (14 cases) crafts
+[tests/test_empty_code_item.py](tests/test_empty_code_item.py) (17 cases) crafts
 both shapes IN PLACE on the committed `tests/data/multidex.apk` — one `u4` for
 shape A, the instruction words for shape B, length-preserving to the byte, with
 the craft's verify verdict ASSERTED rather than assumed (a rejected dex never
@@ -934,10 +940,11 @@ published matrix cell "FF" was only the prefix before the crash. It also pins th
 the sibling method is byte-unchanged (without which a build that renders EVERY
 method as a signature would satisfy the rest), that the marker does not spread to
 abstract/native, and that the uncrafted target HAS a body (non-vacuity;
-non-discriminating BY DESIGN and says so). Five cases in
+non-discriminating BY DESIGN and says so). Six cases in
 [tests/parity/construct_parity_test.cpp](tests/parity/construct_parity_test.cpp)
 pin the C++ side: the three no-instruction shapes leave `entry_block_id`
-**nullopt**, and two hand-built snapshots with a broken promise are REFUSED.
+**nullopt**, two hand-built snapshots with a broken promise are REFUSED, and a
+self-loop pins that the entry is SEEDED so a back edge cannot build it twice.
 
 **9 mutants, each BUILT and RUN with a distinct `.so` md5, each killed — and the
 two layers do NOT overlap:**
@@ -982,6 +989,73 @@ it to actually REACH abstract methods
 recording, where the defect is in the RESPONSE to a review rather than in the
 design [[review-responses-are-the-weak-spot]].
 
+
+**Follow-up — the DELTA review of the shipped commit found a regression IT
+introduced, and two lines nothing was holding (2026-08-24).** The two reviews
+above ran on a PRE-response cut, so the `ins_storage` predicate, the throw, the
+marker and the subprocess restructure shipped unreviewed — this project's own
+record says that is where defects concentrate
+[[review-responses-are-the-weak-spot]]. A third adversarial pass, aimed only at
+those:
+
+* **CONFIRMED, and the shipped change created the route: a package-private
+  body-less method VANISHED from `decompile_class`.** `DvMethod::Process` uses
+  `meta.access.empty()` as a proxy for *"external reference — emit nothing"*,
+  and a package-private member has access flags 0, i.e. an empty vector too.
+  That was unreachable while every method with a code item got a graph. The
+  method came back as the empty string: no declaration, no marker, no error —
+  the exact outcome `test_the_class_still_decompiles_whole`'s own docstring
+  forbids. Every fixture method AND the real AOSP exemplar are `public`, so no
+  corpus a/b could reach it. Fixed by `access.empty() &&
+  !code_without_instructions`: the flag is set only when a code item EXISTS,
+  which an external reference never has, so it separates the two exactly.
+* **CONFIRMED — a line this change REWROTE was unguarded.** The diff simplified
+  `if (*entry < seen.size()) seen[*entry] = 1;` to a bare `seen[*entry] = 1;`.
+  The comment explains the line's BOUND; its PURPOSE is the seed — without it a
+  child edge back to the entry re-enqueues it and the block is BUILT TWICE.
+  Deleting it survived ctest, the corpus-less suite and a narrowed run, while
+  changing decompiled output on two unmodified AOSP dexes (`checkers.dex`, and
+  `large.dex` at 601,885 → 601,884 lines, i.e. structural). Not an equivalent
+  mutant. Pinned by a `[self-loop]` case: `const/4 v0,#0 ; goto -1` is the
+  smallest input with the shape, and the graph must carry exactly one node.
+* **CONFIRMED (LOW) — `static;  // no instructions` is not Java.** A `<clinit>`
+  reaching the signature-only branch has already emitted the bare `static`
+  keyword. With no instruction nothing executes, so the empty initializer block
+  is both valid AND true — the one shape where `{ }` is not the fabrication the
+  marker exists to refuse. Scoped to the no-instruction case, so a code-less
+  `<clinit>`'s pre-existing rendering is untouched.
+* **CONFIRMED (LOW) — the marker CAN reach an abstract or native declaration**
+  on crafted input (the flag follows the code item, not the modifiers, and
+  member access-flag validation is out of the gate's scope). The claim above was
+  false as written and is narrowed; the crafted case is pinned rather than
+  suppressed, because for such a method "no instructions" is true.
+* Two prose defects: the adjacent finding's root cause is ANY leader before the
+  first instruction — a plain branch target does it with no try table — and
+  "92 sources x 12 axes = 861 axis records" reads as a product (92 x 12 = 1104;
+  861 is the count PRESENT). Both corrected above.
+
+**REFUTED with its own instruments**, and worth recording: the throw cannot
+escape (every reachable surface — text, class, AST at both `include_source`
+values, pc-map, both smali renderers, `safe_decompile_*`, the SDK adapter —
+returns `// DECOMPILE ERROR`, exit 0, no signal, no inconsistent cache);
+`ins_storage` is exhaustive (no third shape where it is non-empty and the
+promise breaks, and nothing real is lost when it is empty); **1,400 subprocess
+runs over 700 crafted dexes → 0 signals, 0 hangs**, with a positive control
+reporting -11 on the OFF build; and the census, the exemplar's facts, the ART
+anchors, the check counts and the corpus-less total all re-derive independently.
+One mutant the reviewer PREDICTED would survive (the marker swallowing the
+trailing newline) is killed by the existing whole-class guard.
+
+**Measured (a/b OFF=`bbbbcd569aa15726628df2d9b3f16a48` — the SHIPPED `692cfc8`,
+bit-reproduced — vs ON=`ccee6d9887b7cd0022c00e1352e25dc7`):** the same 92
+sources x 12 axes = **860 axis records present, 0 changed**, over 3,038,784
+decompiled lines. A follow-up that fixes three crafted-only shapes MUST be a
+no-op on every real input, and this is that stated as a measurement. **3 mutants,
+each BUILT and RUN, each killed by its intended guard**: the package-private
+proxy restored (1 pytest), the `<clinit>` back to a bare `;` (1 pytest), and the
+entry seed deleted (ctest only — invisible to all 17 Python cases, which is the
+two-layer complementarity again).
+
 **Adjacent, found by the adversarial review and deliberately NOT fixed here.** A
 crafted body whose FIRST code units are a payload, with real code after it and a
 try range starting at byte 0, makes block 0 the empty payload block — so
@@ -990,9 +1064,10 @@ try range starting at byte 0, makes block 0 the empty payload block — so
 existing emit-depth cap as `// DECOMPILE ERROR`. Both are **identical OFF and ON**
 (pre-existing, neither caused nor closed here), crafted-only (0 in the census),
 and not crashes — but the builder's `// first block is entry (lowest byte_off)`
-assumption is wrong whenever a try or handler leader precedes the first
-instruction, and that is a wrong-ANSWER defect with its own blast radius and its
-own a/b.
+assumption is wrong whenever ANY leader precedes the first instruction — a try
+or handler leader, and (a delta reviewer's addition) a plain BRANCH TARGET with
+no try table at all — and that is a wrong-ANSWER defect with its own blast radius
+and its own a/b. Filed as **dexllm#75**.
 
 ### A static float/double initializer is zero-extended to the RIGHT (dexllm#70, 2026-08-22)
 

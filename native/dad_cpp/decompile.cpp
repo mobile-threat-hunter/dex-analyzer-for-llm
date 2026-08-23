@@ -30,7 +30,17 @@ void DvMethod::Process() {
         //   (a) External reference (access empty = no ClassDef in this dex)
         //       → emit empty string; this method's code lives elsewhere.
         //   (b) Abstract/native or empty-construct → emit signature.
-        if (snap_ && snap_->meta.access.empty()) {
+        //
+        // `access.empty()` is a PROXY for (a), and a package-private member has
+        // access flags 0, i.e. an empty vector too. That was unreachable while
+        // every method with a code item got a graph — dexllm#73 created the
+        // route, and a package-private method with no decodable instruction then
+        // DISAPPEARED from decompile_class with no declaration, no marker and no
+        // error. `code_without_instructions` is set only when a code item
+        // EXISTS, which an external reference never has, so it separates the two
+        // exactly (adversarial review of dexllm#73).
+        if (snap_ && snap_->meta.access.empty() &&
+            !snap_->code_without_instructions) {
             source_ = "";  // external reference: nothing to emit
             return;
         }

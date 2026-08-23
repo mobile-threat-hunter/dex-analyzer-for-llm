@@ -66,8 +66,12 @@ def _uleb(b: bytes, o: int) -> tuple[int, int]:
     return r, o
 
 
-def _code_items(b: bytes) -> list[tuple[str, int, int, int]]:
-    """``[(descriptor, code_off, tries_size, insns_size)]`` for every code item."""
+def _code_items(b: bytes) -> list[tuple[str, int, int, int, int, int]]:
+    """``[(descriptor, code_off, tries_size, insns_size, acc_off, acc_len)]``.
+
+    ``acc_off``/``acc_len`` locate the member's ``access_flags`` uleb inside
+    ``class_data``, which the crafts below rewrite in place.
+    """
 
     def u4(o: int) -> int:
         return struct.unpack_from("<I", b, o)[0]
@@ -118,10 +122,14 @@ def _code_items(b: bytes) -> list[tuple[str, int, int, int]]:
             for _ in range(n):
                 d, p = _uleb(b, p)
                 idx += d
+                acc_off = p
                 _, p = _uleb(b, p)
+                acc_len = p - acc_off
                 co, p = _uleb(b, p)
                 if co:
-                    out.append((desc(idx), co, u2(co + 6), u4(co + 12)))
+                    out.append(
+                        (desc(idx), co, u2(co + 6), u4(co + 12), acc_off, acc_len)
+                    )
     return out
 
 
@@ -147,8 +155,8 @@ def target():
         if c[2] == 0 and c[3] >= _MIN_UNITS and c[3] % 2 == 0
     ]
     assert cands, "the committed fixture carries no try-free code item of >= 6 units"
-    d, co, _tries, isz = cands[0]
-    return zip_bytes, dex, d, co, isz
+    d, co, _tries, isz, acc_off, acc_len = cands[0]
+    return zip_bytes, dex, d, co, isz, acc_off, acc_len
 
 
 def _rezip(tmp_path: Path, zip_bytes: bytes, dex: bytes, name: str) -> str:
@@ -165,7 +173,7 @@ def _rezip(tmp_path: Path, zip_bytes: bytes, dex: bytes, name: str) -> str:
 
 
 def _craft(tmp_path: Path, target, shape: str) -> str:
-    zip_bytes, dex, _desc, co, isz = target
+    zip_bytes, dex, _desc, co, isz, _ao, _al = target
     b = bytearray(dex)
     if shape == "A":
         struct.pack_into("<I", b, co + 12, 0)
@@ -356,7 +364,7 @@ def test_a_body_less_code_item_with_try_blocks_is_rejected_at_the_gate(tmp_path)
     dex = blob.read_bytes()
     with_tries = [c for c in _code_items(dex) if c[2] != 0]
     assert with_tries, "the fixture no longer carries a method with try blocks"
-    _d, co, _t, _i = with_tries[0]
+    _d, co, _t, _i, _a, _l = with_tries[0]
     b = bytearray(dex)
     struct.pack_into("<I", b, co + 12, 0)
     out = tmp_path / "tries_zero.dex"
@@ -372,9 +380,9 @@ def test_a_class_whose_every_method_is_body_less_still_renders(tmp_path, target)
     Without this, a build that rendered the whole CLASS as empty (or died on the
     first body-less member) would satisfy every per-method case above.
     """
-    zip_bytes, dex, desc, _co, _isz = target
+    zip_bytes, dex, desc, _co, _isz, _ao, _al = target
     b = bytearray(dex)
-    for _d, co, tries, _i in _code_items(dex):
+    for _d, co, tries, _i, _a, _l in _code_items(dex):
         if tries == 0:
             struct.pack_into("<I", b, co + 12, 0)
     path = _rezip(tmp_path, zip_bytes, bytes(b), "all_body_less.apk")
@@ -406,7 +414,7 @@ def test_a_payload_only_body_with_try_blocks_is_also_body_less(tmp_path):
         if c[2] != 0 and c[3] >= _MIN_UNITS and c[3] % 2 == 0
     ]
     assert cands, "the fixture no longer carries a method with try blocks"
-    desc, co, _tries, isz = cands[0]
+    desc, co, _tries, isz, _a, _l = cands[0]
     b = bytearray(dex)
     # one packed-switch payload filling the whole body; the try ranges and
     # handler addresses still refer to offsets < insns_size, which is unchanged.
@@ -452,3 +460,120 @@ def test_an_abstract_method_does_not_get_the_marker():
                 seen += 1
                 assert "// no instructions" not in src, (desc, src)
     assert seen >= 2, f"fixture carries no abstract/native method ({seen})"
+
+
+# ── what the ADVERSARIAL delta review of the shipped change found ────────────
+
+
+def _uleb_bytes_fixed(value: int, width: int) -> bytes:
+    """`value` as a uleb128 padded to exactly `width` bytes (redundant
+    continuation bits are legal and keep the craft length-preserving)."""
+    out = bytearray()
+    for i in range(width):
+        byte = value & 0x7F
+        value >>= 7
+        out.append(byte | (0x80 if i + 1 < width else 0))
+    assert value == 0, "value does not fit in the original uleb width"
+    return bytes(out)
+
+
+def test_a_package_private_body_less_method_still_appears(tmp_path, target):
+    """It DISAPPEARED — a regression the shipped change introduced.
+
+    ``DvMethod::Process`` uses ``meta.access.empty()`` as a proxy for "external
+    reference, emit nothing", and a package-private member has access flags 0,
+    i.e. an empty vector too.  That was unreachable while every method with a
+    code item got a graph; making one graph-less created the route, and the
+    method then vanished from ``decompile_class`` with no declaration, no marker
+    and no error — the exact outcome
+    ``test_the_class_still_decompiles_whole`` forbids.  Every fixture method and
+    the real AOSP exemplar are ``public``, so no corpus a/b could reach it.
+    """
+    zip_bytes, dex, desc, co, _isz, acc_off, acc_len = target
+    b = bytearray(dex)
+    struct.pack_into("<I", b, co + 12, 0)  # no instructions
+    b[acc_off : acc_off + acc_len] = _uleb_bytes_fixed(0, acc_len)  # package-private
+    assert len(b) == len(dex)
+    path = _rezip(tmp_path, zip_bytes, bytes(b), "package_private.apk")
+    for lenient in (False, True):
+        assert all(r["valid"] for r in dexllm.verify(path, lenient=lenient))
+
+    obs = probe(path, desc)
+    name = desc.split(";->")[1].split("(")[0]
+    assert obs["text"].strip(), "the method emitted nothing at all"
+    assert obs["text"].rstrip().endswith("// no instructions"), obs["text"]
+    assert any(
+        name in ln and ln.rstrip().endswith("// no instructions")
+        for ln in obs["class_text"].splitlines()
+    ), obs["class_text"]
+
+
+def test_a_clinit_with_no_instructions_is_an_empty_static_block(tmp_path):
+    """`static;` is not Java, and `static { }` is both valid AND true here.
+
+    A `<clinit>` reaching the signature-only branch has already emitted the bare
+    `static` keyword (the beyond-DAD `<clinit>` rendering), so the shared `;`
+    produced uncompilable output on a shape this change created.  With no
+    instruction nothing executes, which is the one case where `{ }` is not the
+    fabrication the marker exists to refuse.
+    """
+    blob = REPO_ROOT / "tests" / "data" / "invoke-custom.dex"
+    dex = blob.read_bytes()
+    clinits = [
+        c for c in _code_items(dex) if c[0].split(";->")[1].startswith("<clinit>")
+    ]
+    assert clinits, "the fixture no longer carries a <clinit>"
+    desc, co, _t, _i, _a, _l = clinits[0]
+    b = bytearray(dex)
+    struct.pack_into("<I", b, co + 12, 0)
+    assert len(b) == len(dex)
+    out = tmp_path / "clinit_empty.dex"
+    out.write_bytes(bytes(b))
+    assert all(r["valid"] for r in dexllm.verify(str(out)))
+
+    text = probe(str(out), desc)["text"]
+    assert "static { }" in text, text
+    assert "static;" not in text, text
+    assert "// no instructions" in text, text
+
+
+def test_a_crafted_abstract_method_with_a_code_item_is_still_marked(tmp_path, target):
+    """The marker follows the CODE ITEM, not the modifiers — pinned, not implied.
+
+    A well-formed abstract or native method has no code item at all, so it never
+    sets the flag; that is what ``test_an_abstract_method_does_not_get_the_marker``
+    checks on a real fixture.  A method that is BOTH abstract and code-bearing is
+    malformed (ART's member access-flag validation is out of the gate's scope),
+    and for it "no instructions" is simply true — so the marker appears.  This
+    case exists so that stays a decision rather than an accident.
+    """
+    zip_bytes, dex, _d, _co, _isz, _ao, _al = target
+
+    def flags(off: int, width: int) -> int:
+        v = 0
+        for i in range(width):
+            v |= (dex[off + i] & 0x7F) << (7 * i)
+        return v
+
+    # ACC_ABSTRACT must fit the member's EXISTING uleb width, or the craft is
+    # not length-preserving. `<init>` carries public|constructor in 3 bytes,
+    # which has room; a bare `public` is one byte and does not.
+    cands = [
+        c
+        for c in _code_items(dex)
+        if c[2] == 0 and (flags(c[4], c[5]) | 0x0400) >> (7 * c[5]) == 0
+    ]
+    assert cands, "no member's access uleb has room for ACC_ABSTRACT"
+    desc, co, _t, _i, acc_off, acc_len = cands[0]
+    b = bytearray(dex)
+    struct.pack_into("<I", b, co + 12, 0)
+    b[acc_off : acc_off + acc_len] = _uleb_bytes_fixed(
+        flags(acc_off, acc_len) | 0x0400, acc_len
+    )
+    assert len(b) == len(dex)
+    path = _rezip(tmp_path, zip_bytes, bytes(b), "abstract_with_code.apk")
+    assert all(r["valid"] for r in dexllm.verify(path))
+
+    text = probe(path, desc)["text"]
+    assert "abstract" in text.split("(")[0].split(), text
+    assert text.rstrip().endswith("// no instructions"), text
