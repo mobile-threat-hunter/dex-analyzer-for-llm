@@ -417,11 +417,12 @@ EncodedValueText DecodeEncodedValueText(const U1*& p,
             // bound one level down — `ResolveMethodHandle`'s own
             // `mh_idx >= handles.size()`, which `ParseCallSiteArg` shares and a
             // crafted call_site still reaches, since a call_site's CONTENTS are
-            // deliberately not gate-read. That arm has no width clause of its
-            // own and narrows an 8-byte index instead: dexllm#74, recorded rather
-            // than fixed here. `ReadIntLE` reads (arg+1) bytes into a
-            // uint64 regardless, so consumption still matches the gate and the
-            // comparison cannot wrap.
+            // deliberately not gate-read. That arm carried no width clause of
+            // its own until dexllm#74, which mirrored this one across all four
+            // of its index arms; there the clause is LIVE, because nothing caps
+            // a call_site element's value_arg. `ReadIntLE` reads (arg+1) bytes
+            // into a uint64 regardless, so consumption still matches the gate
+            // and the comparison cannot wrap.
             uint64_t idx = ReadIntLE(p, end, nbytes);
             dad::IDexCodeSource::CallSiteArg h;
             if (idx > UINT32_MAX ||
@@ -794,26 +795,71 @@ bool ParseCallSiteArg(const U1*& p, const U1* end,
             out.dval = DecodeEncodedDouble(ReadIntLE(p, end, nbytes), nbytes);
             return true;
         }
+        // ---- the four INDEX arms (dexllm#74) --------------------------------
+        // Each reads `nbytes` = value_arg + 1, i.e. up to EIGHT bytes, into a
+        // uint64 and then indexes a table with a uint32. `VerifyEncodedValue`
+        // caps value_arg at 3 for every index type it walks — but it does NOT
+        // walk a call_site's `encoded_array`: a call_site's CONTENTS are a
+        // documented out-of-scope item (dex_verifier.h), bounded at the reader
+        // instead (dexllm#67). So an 8-byte index IS gate-legal here, and
+        // narrowing it names a DIFFERENT, real entry: 2**32 becomes 0.
+        //
+        // Every resolver below bounds the NARROWED index, so nothing reads out
+        // of range — what came out was a plausible, fully-formed value built
+        // from an operand the dex does not contain, handed to an analyst or an
+        // LLM with no marker. Refuse instead, which abandons the whole call site
+        // and renders nothing: dexllm#67's rule, and what the sibling arm in
+        // `DecodeEncodedValueText` has done since dexllm#64.
+        //
+        // 0x17 bounds the INDEX directly instead (see there) — strictly stronger,
+        // and it subsumes the width clause. 0x18 and 0x15 rely on their resolver
+        // returning EMPTY for an out-of-range index, a sound proxy only because
+        // no legal type name or proto is empty; that proxy is the ONLY range
+        // bound those two arms have, so a guard pins it.
         case 0x17: {  // STRING
             uint64_t idx = ReadIntLE(p, end, nbytes);
+            if (idx >= item.GetStrings().size()) return false;
             out.kind = Kind::String;
-            out.text = std::string(src.GetString(dex_id, static_cast<uint32_t>(idx)));
+            // Read through the BOUNDED accessor even though the line above
+            // already refused everything out of range: a raw `strings[idx]`
+            // makes that check memory-safety-critical, and a later edit to it
+            // would be a SEGV instead of a wrong answer. Verified — the mutant
+            // that removes the check CRASHES the suite with the raw subscript
+            // and merely fails a case with this one. `idx < size()` here, so
+            // the narrowing cast cannot lose anything.
+            out.text = std::string(
+                src.GetString(dex_id, static_cast<uint32_t>(idx)));
+            // The RANGE, not emptiness: `""` is a legal String constant, so
+            // `return !out.text.empty()` would drop a legitimate empty-named
+            // call site — while leaving an out-of-range index rendering `""`,
+            // which is the fabricated `bsm(lookup(), "", methodType(Void.TYPE))`
+            // GetCallSite's own comment exists to prevent. An adversarial
+            // reviewer reached that on a `verify()`-valid dex with a FOUR-byte
+            // craft — shorter than the 8-byte one the width clause closes — and
+            // showed the same out-of-range index abandoning the site on the
+            // three sibling arms and not on this one. This bound SUBSUMES the
+            // width clause (a `size()` cannot reach 2**32), so it replaces it
+            // rather than joining it. `item.GetStrings()` is the accessor the
+            // sibling decoder in this same file already uses.
             return true;
         }
         case 0x18: {  // TYPE — a class literal
             uint64_t idx = ReadIntLE(p, end, nbytes);
+            if (idx > UINT32_MAX) return false;
             out.kind = Kind::Class;
             out.text = std::string(src.GetTypeName(dex_id, static_cast<uint32_t>(idx)));
             return !out.text.empty();
         }
         case 0x15: {  // METHOD_TYPE — a proto index (dexllm#57 named the code)
             uint64_t idx = ReadIntLE(p, end, nbytes);
+            if (idx > UINT32_MAX) return false;
             out.kind = Kind::Proto;
             out.text = std::string(src.GetProto(dex_id, static_cast<uint32_t>(idx)));
             return !out.text.empty();
         }
         case 0x16: {  // METHOD_HANDLE — an index into the method_handle section
             uint64_t idx = ReadIntLE(p, end, nbytes);
+            if (idx > UINT32_MAX) return false;
             return ResolveMethodHandle(src, item, dex_id,
                                        static_cast<uint32_t>(idx), out);
         }

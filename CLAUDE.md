@@ -436,9 +436,9 @@ bounding the `0x16` index. Two were INVERTED into rejections, two became SOURCE
 pins, and one was re-based onto the call_site route, where the contents are still
 deliberately out of scope. The `idx > UINT32_MAX` clause this section added is
 DEAD on its own route now (the gate caps `arg <= 3`), and the comment justifying
-it said the opposite until a correctness reviewer read it — dexllm#74 mirrored
-the clause into `ParseCallSiteArg`, where it is LIVE. What is also
-shared with `ParseCallSiteArg` is the bound one level down, inside
+it said the opposite until a correctness reviewer read it. dexllm#74 carried the
+clause into `ParseCallSiteArg`, where it IS live, and what was genuinely shared
+all along is the bound one level down, inside
 `ResolveMethodHandle`.
 
 **One PLAUSIBLE was worth fixing rather than documenting:** a crafted call-site proto can
@@ -1068,6 +1068,151 @@ assumption is wrong whenever ANY leader precedes the first instruction — a try
 or handler leader, and (a delta reviewer's addition) a plain BRANCH TARGET with
 no try table at all — and that is a wrong-ANSWER defect with its own blast radius
 and its own a/b. Filed as **dexllm#75**.
+
+### A call_site index arm bounds what it indexes (dexllm#74, 2026-08-24)
+
+`ParseCallSiteArg` ([dexitem_code_source.cpp](native/core_ext/dexitem_code_source.cpp))
+reads `value_arg + 1` bytes — up to **eight** — into a `uint64_t` and then
+indexes a table with a `uint32_t`. Four arms did that: `0x15 METHOD_TYPE`,
+`0x16 METHOD_HANDLE`, `0x17 STRING`, `0x18 TYPE`. `2**32` narrows to **0**, a
+real entry, so the reader answered with a fully-formed value built from an
+operand the dex does not contain.
+
+**Reachable because a call_site's CONTENTS are deliberately out of the gate's
+scope.** `VerifyEncodedValue` caps `value_arg` at 3 for every index type it
+walks — dexllm#72 brought `0x16` into that lambda — but `VerifyEncodedArrayAt`
+has exactly ONE caller (`class_def.static_values_off`), so a call_site's
+`encoded_array` is never walked; those bytes are bounded at the READER
+(dexllm#67). dexllm#72 is what made this the ONLY remaining route: the SIBLING
+arm in the same file has refused since dexllm#64, and its clause is now dead on
+its own route while these are live. The standing rule bound the commit for at
+least the **seventh** time — that sibling's comment said this arm "narrows an
+8-byte index instead: dexllm#74, recorded rather than fixed here", which this
+change makes false [[a-rule-you-wrote-binds-your-next-commit]].
+
+**A wrong ANSWER, not an OOB, and both reviewers verified it rather than
+accepting it:** `GetString` / `GetTypeName` / `GetProtoCached` /
+`ResolveMethodHandle` each bound the NARROWED index against a real table (and
+one of them proved those bounds are themselves guarded — deleting `GetString`'s
+SIGSEGVs an existing test). What came out was a plausible bootstrap chain handed
+to an analyst or an LLM with no marker — the "confidently wrong" shape dexllm#67
+designed its unresolved-site bail to avoid, reached through the operands it did
+not check. On the pre-fix build a `wide_*` craft's whole-decompile digest is
+**byte-identical** to its in-range control, which is that claim at digest level.
+
+**Fix — refuse, do not clamp:** `if (idx > UINT32_MAX) return false;` in the
+`0x15` / `0x16` / `0x18` arms, which abandons the whole call site so it renders
+nothing. Clamping is not a weaker fix but *the same binary*: `idx &= 0xFFFFFFFF`
+before a `uint32_t` cast is a no-op the compiler folds, and the mutant that does
+it reproduces the pre-fix `.so` md5 exactly (both reviewers built it).
+
+**`0x17` bounds the INDEX instead, and the reason the first cut gave for not
+doing so was FALSE.** That cut kept the width clause and left the arm returning
+`true` for an out-of-range index, arguing the fix "needs either a size accessor
+or a different lookup path" because `""` is a legal String constant and
+emptiness cannot separate the two. **Both reviewers refuted it independently**:
+`ParseCallSiteArg` already takes `const DexItem& item`, `GetStrings()` is public,
+and the sibling decoder 470 lines up in the same file does exactly this. The
+correct discriminator was never emptiness — it is the RANGE, which the ambiguity
+does not obstruct. And the residual was not merely untidy: an adversarial
+reviewer reached, on a `verify()`-valid dex with a **four-byte** craft (shorter
+than the eight-byte one the width clause closes), exactly
+`bsm(lookup(), "", methodType(Void.TYPE))` — verbatim the string `GetCallSite`'s
+own comment names as what its pristine-result rule exists to prevent — while the
+same out-of-range index abandoned the site on all three sibling arms. The range
+bound also SUBSUMES the width clause (`size()` cannot reach 2**32), so it
+replaces rather than joins it, and it makes an existing claim in
+[dex_verifier.h](native/core_ext/include/dex_verifier.h) true: the safety
+contract already said *"every offset, element kind and index inside is bounded
+[at the reader]"*, and that sentence had been false for this one arm.
+
+**The read goes through the BOUNDED accessor even so.** A raw `strings[idx]`
+after the check makes the check memory-safety-critical, and the mutation matrix
+showed the difference concretely: with the raw subscript, removing the check
+CRASHED the suite; with `src.GetString`, it merely fails two cases. A later edit
+to that line should be a wrong answer, not a SEGV.
+
+**Measured (a/b OFF=`ccee6d9887b7cd0022c00e1352e25dc7` — HEAD, bit-reproduced by
+the true pre-fix mutant — vs ON=`238911494b43c603829140b2820f5f63`, SAME script,
+both `.so` md5-verified):** 108 sources — the whole bundled corpus, every
+committed fixture, every `art/test/dexdump/*.dex`, every
+`tools/dexter/testdata/*.dex`, all four ART fuzzer corpora, and **16 crafted** —
+x {strict verify, lenient verify, load, class list, a smali digest, a
+whole-decompile digest, the `/* invoke-custom */` marker count, the
+`DECOMPILE ERROR` count, an AST digest, `warm_analysis_caches`, exit status} =
+**947 axis records present, 15 changed, ALL of them crafts, 0 REAL source changed
+on any axis**. The five that move are the four `wide_*` (the width fix) and
+`oob_17` (the range fix), each **46 → 45** markers. The **four `wideok_*`** — an
+in-range index at eight bytes — are unchanged on both halves, and so are
+`oob_15` / `oob_16` / `oob_18`, which the pre-fix build already refused: that
+asymmetry IS the 0x17 residual, stated as a measurement rather than as prose.
+The bundled corpus carries **0** invoke-custom sites (an independent raw
+map-list census agrees), so a corpus-only a/b is byte-identical by construction
+and the crafts are the only thing that can show either mechanism firing
+[[ab-must-prove-the-mechanism-fires]].
+
+parity **29/29**, pytest **1079 passed / 24 skipped**, TRUE corpus-less
+(`test_apk` MOVED aside) **679 passed / 424 skipped / 0 failed** — every new case
+runs in the CI leg, since every craft is built from the committed
+`tests/data/invoke-custom.dex` — narrowed to `tests/data/multidex.apk` **980
+passed**, the guard file green narrowed to **each of the 34 bundled samples one
+at a time**, sweep **25,309-class / 213,374 method-block 0-crash 0-timeout
+0-error, GATE: PASS**, determinism 3 processes x 3 `PYTHONHASHSEED`s -> one
+digest, lint trio clean, doc fences 78,
+`scripts/check_dad_boundary.sh` clean.
+
+**Guards** (18 new cases in
+[tests/test_invoke_custom_ir.py](tests/test_invoke_custom_ir.py), the file that
+already owns call-site crafting; 32 -> 50). The craft has to LENGTHEN an element,
+so it cannot be length-preserving: it APPENDS a fresh `encoded_array` at EOF
+(4-aligned), repoints ONE `call_site_id` at it, and grows `file_size` /
+`data_size` — the shape [tests/test_encoded_value_lockstep.py](tests/test_encoded_value_lockstep.py)
+uses for the same reason [[one-byte-crafts-cannot-prove-width]]. It pays for the
+lost length-preservation by ASSERTING the dex still verifies, and it rebuilds
+site 0's own element values so the chain stays resolvable and the only variable
+is the one under test. Four families, each parametrised over all four arms:
+natural (the control), **wide-but-in-range**, over-2**32, and in-`uint32`-but-
+out-of-table. Plus a legitimately EMPTY string element, and a premise test.
+
+**9 mutants, each BUILT and RUN with a distinct `.so` md5, each killed — and
+FOUR of them were CONSTRUCTED BY THE REVIEWERS, each having passed the whole file
+as it then stood:**
+
+| mutant | outcome |
+|---|---|
+| M0 true pre-fix, the whole file at HEAD (md5 = the OFF build's, exactly) | 5 failed |
+| M0b the three width clauses removed | 3 failed (not 4 — the 0x17 range bound subsumes its width clause) |
+| M1 / M2 / M3 each arm's width clause alone (three distinct md5s) | 1 failed each |
+| M4 the 0x17 range bound removed | 2 failed |
+| **G1 `return true;` on the 0x18 + 0x15 arms** | 2 failed |
+| **G2 the 0x17 range bound swapped back for an emptiness proxy** | 2 failed |
+| **G3 `nbytes > 4` — refuse by WIDTH instead of by VALUE** | 3 failed |
+| **G4 `>=` instead of `>`** | **49 passed — EQUIVALENT, not an escape** |
+
+**G3 is the one worth reading twice, and BOTH reviewers built it independently.**
+The clause is on the VALUE; the plausible alternative is on the WIDTH — which is
+what this section's own first title said. A non-minimal `value_arg` is legal, the
+array is gate-unchecked, so an in-range index at eight bytes must still resolve —
+and the first cut tested only widths 4 and 8, with width 8 used ONLY for the
+out-of-range value, so the two axes were confounded in every case and the mutant
+passed all 40. The `wideok_*` family separates them.
+
+**G1 and G2 are the same shape one level down:** the ONLY range bound the `0x18`
+and `0x15` arms have is their resolver returning empty, and the ONLY thing
+distinguishing the 0x17 range bound from an emptiness proxy is a legitimately
+empty string — neither of which anything tested. The `oob_*` family and the
+empty-name craft close them. **G4 is a genuine EQUIVALENT mutant** rather than an
+escape: `0xFFFFFFFF` is out of range for every table in reach, so `>` and `>=`
+refuse the same inputs by different routes; recorded rather than papered over.
+
+**Adjacent, stated rather than discovered (adversarial review), NOT fixed here:**
+the sibling VALUE arms of the same switch narrow or mis-read a wide payload too —
+an 8-byte `0x04 INT` renders `1099511627775`, `0x03 CHAR` truncates to 16 bits,
+an 8-byte `0x10 FLOAT` takes the LOW four bytes (the opposite of the
+right-justification rule dexllm#70 established), and `0x1F BOOLEAN` with
+`value_arg = 2` renders `false` where ART's reader gives true. Same function,
+same gate-legality, but a different defect family (value arms, not index arms)
+with its own blast radius and its own a/b.
 
 ### A static float/double initializer is zero-extended to the RIGHT (dexllm#70, 2026-08-22)
 

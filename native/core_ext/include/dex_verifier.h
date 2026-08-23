@@ -109,7 +109,12 @@
 //     ported. The standing rule ("a consumer that starts reading one bounds it in
 //     the same change, here or at the reader") is satisfied AT THE READER: every
 //     offset, element kind and index inside is bounded there, and a failure
-//     reports "unresolved" rather than a guess. Porting the check would move
+//     reports "unresolved" rather than a guess. That was not true until
+//     dexllm#74 — the STRING arm alone guessed `""` for an out-of-table index,
+//     which `GetCallSite` accepts, so a crafted name rendered the fabricated
+//     `bsm(lookup(), "", methodType(Void.TYPE))` this file's own pristine-result
+//     rule exists to prevent. Both reviewers found the sentence before the code
+//     caught up with it. Porting the check would move
 //     those from a silent skip to a load-time rejection; that is a new rejection
 //     direction and needs its own a/b.
 //   * method_handle — IN SCOPE as of dexllm#72: its extent, its alignment, its

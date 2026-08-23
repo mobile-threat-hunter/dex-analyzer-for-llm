@@ -23,6 +23,7 @@ Everything here runs on committed fixtures: no corpus, narrowing-proof.
 from __future__ import annotations
 
 import pathlib
+import re
 import struct
 
 import pytest
@@ -778,3 +779,255 @@ def test_the_span_base_subtracts_the_container_offset() -> None:
     body = body[: body.index("\n}\n")]
     assert "hdr->ContainerOff()" in body, body
     assert "- hdr->ContainerOff()" in body.replace("  ", " "), body
+
+
+# -- dexllm#74: an index arm must REFUSE a width it cannot represent ----------
+#
+# `ParseCallSiteArg`'s 0x15 / 0x16 / 0x17 / 0x18 arms each read `value_arg + 1`
+# bytes — up to EIGHT — into a uint64 and then index a table with a uint32.
+# `VerifyEncodedValue` caps `value_arg` at 3 for every index type it walks, but
+# it does NOT walk a call_site's `encoded_array`: those contents are a
+# documented out-of-scope item, bounded at the reader instead. So an 8-byte
+# index is gate-legal HERE, and narrowing it names a different, real entry —
+# `2**32` becomes 0. Every resolver bounds the narrowed value, so this is a
+# wrong ANSWER, not an OOB: a plausible, fully-formed bootstrap chain built from
+# an operand the dex does not contain.
+#
+# The craft has to LENGTHEN an element, so it cannot be length-preserving: it
+# APPENDS a fresh `encoded_array` at EOF (4-aligned), repoints one
+# `call_site_id` at it, and grows `file_size` / `data_size` — the shape
+# tests/test_encoded_value_lockstep.py uses for the same reason. It pays for the
+# lost length-preservation by asserting the dex still VERIFIES.
+
+_INDEX_ARMS = (0x15, 0x16, 0x17, 0x18)
+
+
+def _uleb_bytes(value: int) -> bytes:
+    out = bytearray()
+    while True:
+        byte = value & 0x7F
+        value >>= 7
+        out.append(byte | (0x80 if value else 0))
+        if not value:
+            return bytes(out)
+
+
+def _element_bytes(kind: int, value: int, width: int) -> bytes:
+    assert 1 <= width <= 8
+    return bytes([((width - 1) << 5) | kind]) + value.to_bytes(width, "little")
+
+
+def _repointed_site(tmp_path, kind: int, width: int, mode: str, stem: str):
+    """Site 0 rebuilt with the `kind` element at `width` bytes, appended at EOF.
+
+    Every other element keeps site 0's own value, so the chain stays genuinely
+    resolvable and the ONLY variable is the one under test.  `mode` picks what
+    that variable is:
+
+    * ``natural`` — the element's own in-range index.  The control.
+    * ``over``    — the same index plus ``1 << 32``.  Must be refused.
+    * ``oob``     — an index inside ``uint32`` but past every table.  Must be
+      refused too, and by a DIFFERENT check: for 0x18/0x15 the only range bound
+      is their resolver returning empty, which a mutant can revert to
+      ``return true`` invisibly (adversarial review).
+    """
+    raw = bytearray(_CUSTOM.read_bytes())
+    _size, ids_off = _map_section(bytes(raw), _CALL_SITE_ID_ITEM)
+    els = _elements(bytes(raw), struct.unpack_from("<I", raw, ids_off)[0])
+    assert [e.kind for e in els[:3]] == [
+        0x16,
+        0x17,
+        0x15,
+    ], "call_site@0 is no longer (handle, name, proto) in the fixture"
+
+    def val(i: int) -> int:
+        return int.from_bytes(
+            raw[els[i].payload_off : els[i].payload_off + els[i].width], "little"
+        )
+
+    # (kind, natural value) for the four elements the craft writes. 0x18 is not
+    # in a real call site here, so it rides as a bootstrap ARGUMENT; type 0 is
+    # in range for the fixture's 77 type_ids.
+    natural = {0x16: val(0), 0x17: val(1), 0x15: val(2), 0x18: 0}
+    # 0xFFFFFF is past every id table in this fixture and fits in three bytes,
+    # so `oob` needs no extra width.
+    payload = {
+        "natural": lambda v: v,
+        "over": lambda v: v + (1 << 32),
+        "oob": lambda _v: 0xFFFFFF,
+    }[mode]
+    body = b"".join(
+        _element_bytes(
+            k,
+            payload(natural[k]) if k == kind else natural[k],
+            width if k == kind else max(1, (natural[k].bit_length() + 7) // 8),
+        )
+        for k in (0x16, 0x17, 0x15, 0x18)
+    )
+
+    while len(raw) % 4:
+        raw.append(0)
+    new_off = len(raw)
+    raw += _uleb_bytes(4) + body
+    while len(raw) % 4:  # the slicer's ValidateHeader wants a 4-aligned data_size
+        raw.append(0)
+    struct.pack_into("<I", raw, ids_off, new_off)
+    grown = len(raw) - struct.unpack_from("<I", raw, 0x20)[0]
+    struct.pack_into("<I", raw, 0x20, len(raw))  # file_size
+    struct.pack_into("<I", raw, 0x68, struct.unpack_from("<I", raw, 0x68)[0] + grown)
+    out = tmp_path / f"{stem}.dex"
+    out.write_bytes(bytes(raw))
+    return out
+
+
+def _markers(path) -> tuple[int, list]:
+    """`(marker count, verify rows)` — the craft's PREMISE, then its result.
+
+    `verify` runs BEFORE `DexKit`: a craft that stopped verifying would
+    otherwise raise out of the constructor and never reach the caller's
+    `assert all(r["valid"] ...)`, reporting a broken craft as a broken product.
+    """
+    dexllm = pytest.importorskip("dexllm")
+    rows = dexllm.verify(str(path))
+    _dexllm, dk = _dk(path, dexllm=dexllm)
+    return (
+        sum(text.count("/* invoke-custom */") for text in _decompile_all(dk).values()),
+        rows,
+    )
+
+
+_BASELINE_MARKERS = 46  # asserted, not assumed — see the premise test below
+
+
+def test_the_crafted_site_is_referenced_exactly_once() -> None:
+    """`_BASELINE_MARKERS - 1` rests on it, so it is a premise, not a comment.
+
+    The marker count is per invoke-custom INSTRUCTION, not per call site; the
+    fixture's 46 = 46 is a coincidence of this file.  If `call_site@0` were named
+    twice, refusing it would drop the count by two and every refusal case would
+    be wrong by one.  Non-discriminating BY DESIGN — a property of the fixture.
+    """
+    _dexllm, dk = _dk(_CUSTOM)
+    smali = "\n".join(dk.render_class_smali(c) for c in dk.list_classes())
+    assert len(re.findall(r"\bcall_site@0\b", smali)) == 1, smali.count("call_site@")
+    assert (
+        sum(t.count("/* invoke-custom */") for t in _decompile_all(dk).values())
+        == _BASELINE_MARKERS
+    )
+
+
+@pytest.mark.parametrize("kind", _INDEX_ARMS)
+def test_a_natural_width_index_still_resolves(tmp_path, kind) -> None:
+    """The NEGATIVE control, and it is what makes the pair mean anything.
+
+    Same append, same repoint, same four elements — only the value differs from
+    the cases below.  A fix that refused every appended site, or that broke the
+    repoint, would satisfy the refusal tests alone.  Non-discriminating BY
+    DESIGN: it holds on both sides of dexllm#74.
+    """
+    seen, rows = _markers(
+        _repointed_site(tmp_path, kind, 4, "natural", f"natural_{kind:02x}")
+    )
+    assert all(r["valid"] for r in rows), rows
+    assert seen == _BASELINE_MARKERS
+
+
+@pytest.mark.parametrize("kind", _INDEX_ARMS)
+def test_a_wide_but_IN_RANGE_index_still_resolves(tmp_path, kind) -> None:
+    """The clause is on the VALUE, not the WIDTH — which is the whole thesis.
+
+    Testing only widths 4 and 8 cannot tell `idx > UINT32_MAX` from
+    `nbytes > 4`, and an adversarial reviewer's `nbytes > 4` mutant passed the
+    whole file while refusing legitimate in-range indices at 5..8 bytes.  A
+    redundant-but-legal wide encoding of an in-range index must still resolve.
+    """
+    seen, rows = _markers(
+        _repointed_site(tmp_path, kind, 8, "natural", f"wide_ok_{kind:02x}")
+    )
+    assert all(r["valid"] for r in rows), rows
+    assert seen == _BASELINE_MARKERS
+
+
+@pytest.mark.parametrize("kind", _INDEX_ARMS)
+def test_an_eight_byte_index_is_refused_not_truncated(tmp_path, kind) -> None:
+    """`2**32 + n` must not resolve as `n`.
+
+    The value is the element's own natural index plus `1 << 32`, so a decoder
+    that narrows produces exactly the chain the control produces — identical
+    output, from an operand the dex does not contain.  Refusing abandons the
+    call site, which renders nothing, so the marker count drops by one.
+    """
+    seen, rows = _markers(
+        _repointed_site(tmp_path, kind, 8, "over", f"wide_{kind:02x}")
+    )
+    assert all(r["valid"] for r in rows), rows
+    assert seen == _BASELINE_MARKERS - 1
+
+
+@pytest.mark.parametrize("kind", _INDEX_ARMS)
+def test_an_in_uint32_but_out_of_range_index_is_refused(tmp_path, kind) -> None:
+    """The RANGE bound, which for 0x18 / 0x15 is their resolver's empty return.
+
+    That proxy is the only range check those two arms have, and reverting it to
+    `return true` passed the entire file until this case existed — an
+    out-of-range proto then rendered a fabricated `methodType(Void.TYPE)`.  For
+    0x17 this pins the explicit bound that replaced the width clause.
+    """
+    seen, rows = _markers(_repointed_site(tmp_path, kind, 4, "oob", f"oob_{kind:02x}"))
+    assert all(r["valid"] for r in rows), rows
+    assert seen == _BASELINE_MARKERS - 1
+
+
+def test_a_legitimately_EMPTY_string_element_still_resolves(tmp_path) -> None:
+    """`""` is a legal String constant, and `GetCallSite` accepts an empty name.
+
+    This is why the 0x17 arm bounds the INDEX rather than testing the rendered
+    text for emptiness: `return !out.text.empty()` passed the whole file (an
+    adversarial reviewer built it) while silently abandoning every call site
+    carrying an empty string — as a name OR as a bootstrap argument.
+
+    The craft appends an empty `string_data_item` at EOF and repoints
+    `string_ids[0]` at it.  `""` sorts before every other string, so index 0 is
+    the one slot where the id table stays ordered; the previous entry is simply
+    orphaned.  Then site 0 is rebuilt with its NAME element pointing at index 0.
+    """
+    raw = bytearray(_CUSTOM.read_bytes())
+    string_ids_off = struct.unpack_from("<I", raw, 0x3C)[0]
+    _size, ids_off = _map_section(bytes(raw), _CALL_SITE_ID_ITEM)
+    els = _elements(bytes(raw), struct.unpack_from("<I", raw, ids_off)[0])
+    natural = {
+        i: int.from_bytes(
+            raw[els[i].payload_off : els[i].payload_off + els[i].width], "little"
+        )
+        for i in range(3)
+    }
+    assert _strings(bytes(raw))[0] != "", "the fixture already has an empty string@0"
+
+    while len(raw) % 4:
+        raw.append(0)
+    empty_off = len(raw)
+    raw += _uleb_bytes(0) + b"\x00"  # utf16_size 0, then the terminator
+    while len(raw) % 4:
+        raw.append(0)
+    site_off = len(raw)
+    raw += _uleb_bytes(3) + b"".join(
+        (
+            _element_bytes(0x16, natural[0], 1),
+            _element_bytes(0x17, 0, 1),  # the NAME is string@0 == ""
+            _element_bytes(0x15, natural[2], 1),
+        )
+    )
+    while len(raw) % 4:
+        raw.append(0)
+    struct.pack_into("<I", raw, string_ids_off, empty_off)
+    struct.pack_into("<I", raw, ids_off, site_off)
+    grown = len(raw) - struct.unpack_from("<I", raw, 0x20)[0]
+    struct.pack_into("<I", raw, 0x20, len(raw))
+    struct.pack_into("<I", raw, 0x68, struct.unpack_from("<I", raw, 0x68)[0] + grown)
+    out = tmp_path / "empty_name.dex"
+    out.write_bytes(bytes(raw))
+
+    seen, rows = _markers(out)
+    assert all(r["valid"] for r in rows), rows
+    assert _strings(out.read_bytes())[0] == "", "the craft did not land"
+    assert seen == _BASELINE_MARKERS, "an empty String element abandoned the site"
