@@ -278,6 +278,124 @@ int main() {
                   "Construct: entry_block_id names no block");
     }
 
+    // ============================================================
+    // Test 7 (dexllm#75): a leader BELOW the first instruction
+    // ============================================================
+    // The builder named block 0 the entry, and block 0's span starts at the
+    // lowest LEADER — which is the first instruction only when nothing else is
+    // seeded below it. A code item that opens with a payload (DecodeAllInsns
+    // skips those) plus any leader inside that payload makes block 0 an EMPTY
+    // span, ComputeChildEdges gives it no successor, and the whole body was
+    // dropped. Two routes, because they are seeded by different stages and only
+    // one of them needs a try table; both must reach the same entry.
+    //
+    // These are the C++ half of a two-layer matrix: they pin the ABI contract
+    // (`entry_block_id`, `entry_not_at_offset_zero`) that no Python assertion
+    // can see, while tests/test_entry_block.py pins what the two emitters
+    // RENDER. Neither layer alone kills every mutant.
+    {
+        // 7a — a plain BRANCH TARGET at 0, no try table anywhere. VerifyInsns
+        // bounds a branch target's RANGE and does not require it to be an
+        // instruction boundary, so this is gate-legal.
+        mck::MockCodeSource src;
+        std::vector<dex::u2> insns = {
+            0x0100, 0x0000, 0x0000, 0x0000,  // units 0-3: packed-switch payload
+            0x0038, 0xFFFC,                  // unit 4: if-eqz v0, -4  → unit 0
+            0x000e,                          // unit 6: return-void
+        };
+        auto code = mck::FakeCodeItem::Make(1, 0, 0, insns);
+        src.RegisterMethod(0, 20, 1, "Lcom/X;", "br", "()V", std::move(code));
+        auto snap = MethodSnapshotBuilder::Build(src, 0, 20);
+        check("[entry br] first instruction at byte 8",
+              static_cast<int>(snap->ins_storage.front().byte_off), 8);
+        check("[entry br] block 0 carries no instruction",
+              static_cast<int>(snap->blocks[0].ins.size()), 0);
+        check("[entry br] entry is NOT block 0",
+              snap->entry_block_id.value_or(999) != 0u, true);
+        check("[entry br] entry block starts at the first instruction",
+              static_cast<int>(snap->blocks[*snap->entry_block_id].start_byte), 8);
+        check("[entry br] entry block HAS instructions",
+              static_cast<int>(snap->blocks[*snap->entry_block_id].ins.size()) > 0,
+              true);
+        check("[entry br] marked as not-at-offset-0",
+              snap->entry_not_at_offset_zero, true);
+        Vmap vm; GenInvokeRetName ret;
+        auto g = Construct(*snap, vm, ret);
+        check("[entry br] the body survives", static_cast<int>(g->size()) > 1, true);
+    }
+    {
+        // 7b — the same shape reached through a try-range START at 0 (stage 3).
+        mck::MockCodeSource src;
+        std::vector<dex::u2> insns = {
+            0x0100, 0x0000, 0x0000, 0x0000,  // units 0-3: packed-switch payload
+            0x1012,                          // unit 4: const/4 v0, #1
+            0x000e,                          // unit 5: return-void
+        };
+        std::vector<dex::TryBlock> tries(1);
+        tries[0].start_addr = 0;
+        tries[0].insn_count = 6;
+        tries[0].handler_off = 1;
+        std::vector<uint8_t> handlers = {0x01, 0x00, 0x05};
+        auto code = mck::FakeCodeItem::Make(2, 0, 0, insns, tries, handlers);
+        src.RegisterMethod(0, 21, 1, "Lcom/X;", "tr", "()V", std::move(code));
+        auto snap = MethodSnapshotBuilder::Build(src, 0, 21);
+        check("[entry try] block 0 carries no instruction",
+              static_cast<int>(snap->blocks[0].ins.size()), 0);
+        check("[entry try] entry is NOT block 0",
+              snap->entry_block_id.value_or(999) != 0u, true);
+        check("[entry try] entry block starts at the first instruction",
+              static_cast<int>(snap->blocks[*snap->entry_block_id].start_byte), 8);
+        check("[entry try] entry block HAS instructions",
+              static_cast<int>(snap->blocks[*snap->entry_block_id].ins.size()) > 0,
+              true);
+        check("[entry try] marked as not-at-offset-0",
+              snap->entry_not_at_offset_zero, true);
+        Vmap vm; GenInvokeRetName ret;
+        auto g = Construct(*snap, vm, ret);
+        // `> 1`, not `> 0`: Construct always builds the entry node, and here the
+        // empty block 0 additionally carries an exception edge, so the graph is
+        // size 2 even PRE-FIX — a correctness review built the entry-reverted
+        // mutant and watched this very check report `got=1 want=1` while the
+        // Python probe showed the body dropped. A check whose label is "the body
+        // survives" must not pass against the build in which it does not.
+        check("[entry try] the body survives", static_cast<int>(g->size()) > 1, true);
+    }
+    {
+        // 7c — a leading payload with NOTHING seeded inside it. Block 0 already
+        // held the first instruction, so the ENTRY does not move; only the
+        // marker fires. This is what separates the two predicates: keying the
+        // marker on `entry_block_id != 0` would leave this case silent.
+        mck::MockCodeSource src;
+        std::vector<dex::u2> insns = {
+            0x0100, 0x0000, 0x0000, 0x0000,
+            0x1012, 0x000e,
+        };
+        auto code = mck::FakeCodeItem::Make(1, 0, 0, insns);
+        src.RegisterMethod(0, 22, 1, "Lcom/X;", "po", "()V", std::move(code));
+        auto snap = MethodSnapshotBuilder::Build(src, 0, 22);
+        check("[entry payload-only] one block",
+              static_cast<int>(snap->blocks.size()), 1);
+        check("[entry payload-only] entry IS block 0",
+              static_cast<int>(snap->entry_block_id.value_or(999)), 0);
+        check("[entry payload-only] still marked",
+              snap->entry_not_at_offset_zero, true);
+    }
+    {
+        // 7d — the control: an ordinary body. Entry at block 0, unmarked. A
+        // marker emitted unconditionally would append the comment to every
+        // method in every APK and pass every assertion above.
+        mck::MockCodeSource src;
+        std::vector<dex::u2> insns = {0x1012, 0x000e};
+        auto code = mck::FakeCodeItem::Make(1, 0, 0, insns);
+        src.RegisterMethod(0, 23, 1, "Lcom/X;", "ok", "()V", std::move(code));
+        auto snap = MethodSnapshotBuilder::Build(src, 0, 23);
+        check("[entry normal] entry IS block 0",
+              static_cast<int>(snap->entry_block_id.value_or(999)), 0);
+        check("[entry normal] unmarked", snap->entry_not_at_offset_zero, false);
+        check("[entry normal] block 0 has instructions",
+              static_cast<int>(snap->blocks[0].ins.size()) > 0, true);
+    }
+
     std::printf("\n%s — %d failure(s)\n", g_fail ? "FAIL" : "PASS", g_fail);
     return g_fail ? 1 : 0;
 }

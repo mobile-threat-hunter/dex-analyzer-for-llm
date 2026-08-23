@@ -809,8 +809,31 @@ MethodSnapshotBuilder::Build(IDexCodeSource& source,
     // instruction at all, which is the fabrication this path exists to refuse.
     // `blocks.empty()` implies `ins_storage.empty()` but not the reverse, so the
     // weaker predicate is the one that matches the rule stated on the field.
+    //
+    // The entry is the block that CONTAINS the first decodable instruction, not
+    // block 0 (dexllm#75). Block 0 is the LOWEST LEADER, and stage 2 seeds a
+    // leader per branch target while stage 3 seeds one per try-range start and
+    // per handler address — any of which may sit BELOW the first instruction
+    // when the code item opens with a payload. Block 0 is then an empty span,
+    // it gets no successor from ComputeChildEdges (which skips a block with no
+    // last instruction), and naming it the entry dropped the entire body: the
+    // Java view rendered `{ }` for a method whose smali listing shows real
+    // instructions. The two rules AGREE wherever the old one was right, and the
+    // equivalence is exact rather than empirical: `ins_storage.front().byte_off`
+    // is itself a leader, so `leaders[0] <= it`, and block 0 holds the first
+    // instruction iff `leaders[0] == it` — i.e. block 0 is non-empty iff it IS
+    // the block this looks up.
     if (!snap->ins_storage.empty()) {
-        snap->entry_block_id = 0;  // first block is entry (lowest byte_off)
+        const uint32_t first_off = snap->ins_storage.front().byte_off;
+        const uint32_t entry = FindBlockIdForByteOff(snap->blocks, first_off);
+        // The first instruction's offset was inserted as a leader by
+        // ComputeLeaders and every leader starts a block, so this cannot miss.
+        if (entry == UINT32_MAX) {
+            throw std::runtime_error(
+                "MethodSnapshotBuilder: first instruction starts no block");
+        }
+        snap->entry_block_id = entry;
+        snap->entry_not_at_offset_zero = (first_off != 0);
     } else {
         snap->code_without_instructions = true;
     }

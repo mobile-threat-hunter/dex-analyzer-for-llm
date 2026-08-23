@@ -186,6 +186,21 @@ struct MethodSnapshot {
     // the declaration so the refusal is stated rather than implied.
     bool code_without_instructions = false;
 
+    // The first decodable instruction is NOT at byte offset 0 (dexllm#75) — the
+    // code item opens with a switch/fill-array payload, which DecodeAllInsns
+    // skips. A VM starts at insns[0], so such a method cannot execute at all
+    // (ART's runtime method_verifier rejects it; the STRUCTURAL verifier this
+    // port mirrors does not, so it loads). We decompile from the first real
+    // instruction, which is a REINTERPRETATION rather than what would run — the
+    // Writer and the AST both mark it so that is stated, not implied.
+    // Strictly weaker than the entry defect it was found through: a leader
+    // BELOW the first instruction (a try-range start, a handler, or a plain
+    // branch target) additionally made block 0 an empty span, and
+    // `entry_block_id = 0` then named it, dropping the whole body. That is why
+    // the entry is chosen by CONTENT (the block holding the first instruction)
+    // rather than by position; the two coincide on every well-formed input.
+    bool entry_not_at_offset_zero = false;
+
     // ★ POINTER-STABLE after Build() returns. RawBlock.ins spans into this.
     std::vector<RawIns> ins_storage;
     std::vector<RawBlock> blocks;
@@ -195,9 +210,12 @@ struct MethodSnapshot {
     // only — DecodeAllInsns skips those). Note `blocks` may be NON-empty in that
     // second case, because a try-range start also seeds a leader; the predicate
     // is `ins_storage`, not `blocks`.
-    // Else 0 — and a value here PROMISES `blocks[value]` exists. Construct
-    // consumes it six times without a bound of its own (one of them a write),
-    // so it throws rather than proceed if a producer ever breaks it (dexllm#73).
+    // Else the id of the block that CONTAINS the first decodable instruction —
+    // NOT necessarily block 0, whose span is the lowest LEADER and may hold no
+    // instruction at all (dexllm#75). A value here PROMISES `blocks[value]`
+    // exists. Construct consumes it six times without a bound of its own (one of
+    // them a write), so it throws rather than proceed if a producer ever breaks
+    // it (dexllm#73).
     std::optional<uint32_t> entry_block_id;
 
     // Method-level exception aggregation (DvMethod passes to construct()).

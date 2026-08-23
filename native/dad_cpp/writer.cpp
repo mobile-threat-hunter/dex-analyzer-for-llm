@@ -897,6 +897,21 @@ void Writer::WriteMethod() {
         Write("\n");
         return;
     }
+    // beyond-DAD (dexllm#75): the code item opens with a payload, so the body
+    // below starts at the first DECODABLE instruction rather than at byte offset
+    // 0, where a VM would start — a REINTERPRETATION of a method that cannot
+    // execute as written. State it instead of leaving it to be inferred, the
+    // same "say what you could not do straight" choice dexllm#73 made for
+    // `// no instructions` and dexllm#64 for `// = ...`. Fixed text (no
+    // attacker-controlled bytes reach it), and the AST carries the identical
+    // string in its `comments` array so the two emitters agree. Emitted HERE
+    // rather than beside the signature-only marker above so it can never land
+    // between the signature and that path's `;`. It is unreachable there in any
+    // case: the two flags are mutually exclusive (that one needs an EMPTY
+    // ins_storage, this one a non-empty front()).
+    if (snap_ && snap_->entry_not_at_offset_zero) {
+        Write("  // entry is not at offset 0");
+    }
     Write("\n");
     Write(Space());
     Write("{\n");

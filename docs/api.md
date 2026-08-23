@@ -368,6 +368,22 @@ public static int convertDpToPixel(android.content.Context p2, int p3)
 }
 ```
 
+**A declaration line can carry a marker**, so a rendering is never silently
+something other than a straight decompile. Both texts are fixed (no dex bytes
+reach them) and the two are mutually exclusive.
+
+| marker | when |
+|---|---|
+| `// no instructions` | the method HAS a code item with nothing decodable in it, so there is no body to emit — without the marker the signature-only form is indistinguishable from `abstract`/`native`, which differ only by a modifier (dexllm#73) |
+| `// entry is not at offset 0` | the code item opens with a switch/fill-array payload, so the body starts at the first decodable instruction instead of where a VM enters. Such a method cannot execute at all, so what is rendered is a reinterpretation (dexllm#75) |
+
+The second is a crafted-input shape: no method in the bundled corpus, the
+committed fixtures, `art/test/dexdump`, `tools/dexter/testdata` or the four ART
+fuzzer corpora begins its body with a payload. The first is NOT — the unmodified
+AOSP file `art/tools/fuzzer/class-verifier-corpus/b391844326.dex` carries a
+method with a code item and no decodable instruction, and it is where dexllm#73
+was found.
+
 ### `dk.decompile_method_with_pc_map(method_descriptor: str) -> dict`
 **D-3** — Java text + a source-line ↔ dex bytecode-offset map for smali sync.
 ```python
@@ -426,7 +442,7 @@ dk.decompile_method_ast(M).keys()
 | `params_type` | `list[str]` | `['Landroid/content/Context;', 'I']` |
 | `access` | `list[str]` | `['public', 'static']` |
 | `source` | `str` | Java text (omitted body if `include_source=False`) |
-| `ast` | `dict` | keys `{triple, flags, ret, params, comments, body}` — the DAD `get_ast()` nested-list tree (50+ node types) |
+| `ast` | `dict` | keys `{triple, flags, ret, params, comments, body}` — the DAD `get_ast()` nested-list tree (50+ node types). `comments` is `[]` in DAD and stays `[]` here except for the dexllm#75 marker, which it carries as `['entry is not at offset 0']` so an `include_source=False` consumer can see the reinterpretation too |
 | `pc_map` | `list[tuple[int,int]]` | `(statement_seq, byte_off)` — sidechannel kept OUT of `ast` |
 
 ---

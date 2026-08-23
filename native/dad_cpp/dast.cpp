@@ -419,7 +419,19 @@ AstValue JSONWriter::get_ast() {
     out.set("flags", AstValue::Arr(std::move(flagv)));
     out.set("ret", ParseDescriptor(m.ret_type));
     out.set("params", AstValue::Arr(std::move(paramdecls)));
-    out.set("comments", AstValue::Arr());
+    // beyond-DAD (dexllm#75): DAD always leaves `comments` empty (dast.py's
+    // get_ast reserves the field and never fills it), so a lone string here is a
+    // deliberate divergence — the AST counterpart of the Writer's
+    // `// entry is not at offset 0`. Without it an AST-only consumer
+    // (`include_source=False`) has no way to see that the body starts at the
+    // first decodable instruction rather than at byte offset 0; the text/AST
+    // divergence the dexllm#63 review found for `boolean v = 0` is the cost of
+    // marking one emitter and not the other. Same string in both.
+    std::vector<AstValue> commentv;
+    if (snap_ && snap_->entry_not_at_offset_zero) {
+        commentv.push_back(AstValue::Str("entry is not at offset 0"));
+    }
+    out.set("comments", AstValue::Arr(std::move(commentv)));
     out.set("body", std::move(body));
     return out;
 }
