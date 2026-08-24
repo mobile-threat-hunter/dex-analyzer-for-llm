@@ -338,11 +338,11 @@ def test_only_categories_matches_either_axis():
 
     by_flag = summarize_capabilities(dk, only_categories={"IDENTIFIER"})
     assert by_flag.matched_apis == 1
-    assert by_flag.api_hits[0].api_descriptor == _GET_DEVICE_ID
+    assert by_flag.api_usages[0].api_descriptor == _GET_DEVICE_ID
 
     by_category = summarize_capabilities(dk, only_categories={"REFLECTION"})
     assert by_category.matched_apis == 1
-    assert by_category.api_hits[0].api_descriptor == _FOR_NAME
+    assert by_category.api_usages[0].api_descriptor == _FOR_NAME
 
 
 def test_unknown_only_categories_tag_raises_instead_of_reporting_nothing():
@@ -384,10 +384,10 @@ def test_flags_are_counted_per_call_site_like_categories():
     assert r.categories == {"TELEPHONY": 3}
     # …while the caller SET collapses the repeat, which is what makes the two
     # readings distinguishable here.
-    assert r.api_hits[0].callers == {"La/B;->m()V", "La/C;->m()V"}
-    assert r.api_hits[0].call_site_count == 3
+    assert r.api_usages[0].callers == {"La/B;->m()V", "La/C;->m()V"}
+    assert r.api_usages[0].call_site_count == 3
     # the per-hit list stays per-API (one entry, not repeated per site)
-    assert r.api_hits[0].flags == ["IDENTIFIER"]
+    assert r.api_usages[0].flags == ["IDENTIFIER"]
 
 
 def test_a_repeated_tag_is_not_counted_twice(tmp_path):
@@ -419,7 +419,7 @@ def test_a_repeated_tag_is_not_counted_twice(tmp_path):
     assert r.catalog_version == "dedupe-fixture", "the override did not take effect"
     assert r.total_call_sites == 1
     assert r.categories == {"REFLECTION": 1}
-    assert r.api_hits[0].categories == ["REFLECTION"]
+    assert r.api_usages[0].categories == ["REFLECTION"]
 
 
 def test_flags_survive_the_sdk_and_mcp_layers():
@@ -446,13 +446,13 @@ def test_flags_survive_the_sdk_and_mcp_layers():
     adapter._dk = dk  # type: ignore[attr-defined]
     sdk_report = DexKitAdapter.summarize_capabilities(adapter)
     assert dict(sdk_report.flags) == {"IDENTIFIER": 2}
-    assert sdk_report.api_hits[0].flags == ("IDENTIFIER",)
+    assert sdk_report.api_usages[0].flags == ("IDENTIFIER",)
 
     from dexllm.tools import TOOL_IMPLS
 
     out = TOOL_IMPLS["summarize_capabilities"](dk)
     assert out["flags"] == {"IDENTIFIER": 2}
-    assert out["api_hits"][0]["flags"] == ["IDENTIFIER"]
+    assert out["api_usages"][0]["flags"] == ["IDENTIFIER"]
     assert out["catalog_version"] == raw.catalog_version
 
 
@@ -501,7 +501,7 @@ def test_the_permission_view_of_a_caller_is_still_recoverable():
 
     This is the join the docstrings hand the reader; it is a guard because the
     field-level half of the argument for signatures over permissions rests on it.
-    (The report-level half does NOT: `api_hits` carries `callers`, so either view
+    (The report-level half does NOT: `api_usages` carries `callers`, so either view
     was always derivable from a report — including a pre-fix one. The bug lost no
     data, only the index.)
 
@@ -514,7 +514,7 @@ def test_the_permission_view_of_a_caller_is_still_recoverable():
     dk = _StubDk({_GET_DEVICE_ID: ["La/B;->m()V"], _FOR_NAME: ["La/B;->m()V"]})
     report = summarize_capabilities(dk)
 
-    by_api = {h.api_descriptor: h for h in report.api_hits}
+    by_api = {h.api_descriptor: h for h in report.api_usages}
     perms = {p for a in report.by_caller["La/B;->m()V"] for p in by_api[a].permissions}
     expected = set(_entries()[_GET_DEVICE_ID].get("permissions") or ()) | set(
         _entries()[_FOR_NAME].get("permissions") or ()
@@ -541,7 +541,7 @@ def test_by_caller_is_the_exact_transpose_of_the_hit_callers():
     report = summarize_capabilities(dk)
 
     expected: dict = {}
-    for hit in report.api_hits:
+    for hit in report.api_usages:
         for caller in hit.callers:
             expected.setdefault(caller, set()).add(hit.api_descriptor)
     assert report.by_caller == expected
@@ -614,7 +614,7 @@ def test_the_sdk_orders_the_caller_index_deterministically():
     for values in report.by_caller.values():
         assert values == tuple(sorted(values))
         assert set(values) == set(many)
-    for hit in report.api_hits:
+    for hit in report.api_usages:
         assert hit.callers == tuple(sorted(hit.callers))
         assert set(hit.callers) == set(callers)
 
@@ -692,14 +692,14 @@ def test_every_indexed_signature_is_a_key_of_the_report_s_own_hits():
     report = summarize_capabilities(dk)
 
     indexed = set().union(*report.by_caller.values())
-    assert indexed <= {h.api_descriptor for h in report.api_hits}
+    assert indexed <= {h.api_descriptor for h in report.api_usages}
     assert indexed == {_GET_DEVICE_ID, _FOR_NAME}
 
 
 def test_only_categories_filters_the_caller_index_with_the_hits():
     """What makes the documented join well-defined per report.
 
-    `only_categories` `continue`s before both `by_caller` and `api_hits` are
+    `only_categories` `continue`s before both `by_caller` and `api_usages` are
     written, so the two stay the same subset. Pre-dexllm#35 this was vacuous for a
     permission-less filter like REFLECTION — the index was empty either way — so it
     is newly observable behaviour with nothing pinning it.
@@ -710,7 +710,7 @@ def test_only_categories_filters_the_caller_index_with_the_hits():
     report = summarize_capabilities(dk, only_categories={"REFLECTION"})
 
     assert report.by_caller == {"La/B;->m()V": {_FOR_NAME}}
-    assert {h.api_descriptor for h in report.api_hits} == {_FOR_NAME}
+    assert {h.api_descriptor for h in report.api_usages} == {_FOR_NAME}
 
 
 # --- dexllm#36: FIELD-descriptor keys -----------------------------------------
@@ -760,7 +760,7 @@ def test_a_field_key_resolves_through_the_field_lookup(write_catalog):
 
     rep = capability.summarize_capabilities(_Dk(), data_dir=write_catalog(catalog))
     assert rep.matched_apis == 1
-    hit = rep.api_hits[0]
+    hit = rep.api_usages[0]
     assert hit.field_access_count == 2
     assert hit.call_site_count == 0, "a field entry must not claim invoke sites"
     assert rep.total_field_accesses == 2 and rep.total_call_sites == 0
@@ -794,7 +794,7 @@ def test_the_two_counters_are_never_summed_into_one(write_catalog):
             return ["La/C;->n()V", "La/D;->o()V"] if descriptor == field_key else []
 
     rep = capability.summarize_capabilities(_Dk(), data_dir=write_catalog(catalog))
-    by_sig = {h.api_descriptor: h for h in rep.api_hits}
+    by_sig = {h.api_descriptor: h for h in rep.api_usages}
     assert by_sig[_FOR_NAME].call_site_count == 1
     assert by_sig[_FOR_NAME].field_access_count == 0
     assert by_sig[field_key].field_access_count == 2
@@ -834,7 +834,7 @@ def test_field_counts_reach_the_sdk_and_mcp_layers(write_catalog, monkeypatch):
     # …through the adapter's real method, not a private converter: the point is
     # that the value survives the layer a consumer actually calls.
     model = DexKitAdapter.summarize_capabilities(type("_A", (), {"_dk": _Dk()})())
-    assert model.api_hits[0].field_access_count == 1
+    assert model.api_usages[0].field_access_count == 1
     # …and the REPORT-level total, which docs/sdk.md documents. It was missing
     # from the SDK model in the first cut while the docs already asserted the
     # inequality that needs it — "a counter nothing propagates is a counter
@@ -846,8 +846,8 @@ def test_field_counts_reach_the_sdk_and_mcp_layers(write_catalog, monkeypatch):
 
     out = tools.execute("summarize_capabilities", {}, _Dk())
     assert out["total_field_accesses"] == 1
-    assert out["api_hits"][0]["field_accesses"] == 1
-    assert out["api_hits"][0]["call_sites"] == 0
+    assert out["api_usages"][0]["field_accesses"] == 1
+    assert out["api_usages"][0]["call_sites"] == 0
 
 
 def test_the_bundled_field_keys_name_real_aosp_fields():
@@ -984,7 +984,7 @@ def test_field_access_count_is_per_instruction_not_per_method(write_catalog):
             return ["La/B;->m()V", "La/B;->m()V"] if descriptor == field_key else []
 
     rep = capability.summarize_capabilities(_Dk(), data_dir=write_catalog(catalog))
-    hit = rep.api_hits[0]
+    hit = rep.api_usages[0]
     assert hit.field_access_count == 2, "instructions, not methods"
     assert len(hit.callers) == 1, "…while `callers` is a set, so they differ"
     assert rep.total_field_accesses == 2
@@ -1021,7 +1021,7 @@ def test_the_mcp_ranking_counts_field_accesses(write_catalog, monkeypatch):
     monkeypatch.setenv(datadir.ENV_VAR, write_catalog(catalog))
     datadir.clear_data_caches()
     out = tools.execute("summarize_capabilities", {}, _Dk())
-    assert [h["descriptor"] for h in out["api_hits"]] == [
+    assert [h["descriptor"] for h in out["api_usages"]] == [
         field_key,
         _FOR_NAME,
     ], "5 field accesses must outrank 1 call site"
@@ -1062,7 +1062,9 @@ def test_the_ranking_is_a_total_order(write_catalog, monkeypatch):
         seen.append(
             [
                 h["descriptor"]
-                for h in tools.execute("summarize_capabilities", {}, _Dk())["api_hits"]
+                for h in tools.execute("summarize_capabilities", {}, _Dk())[
+                    "api_usages"
+                ]
             ]
         )
     assert (
@@ -1291,15 +1293,15 @@ def test_library_callers_are_dropped_by_default():
     app = summarize_capabilities(dk)
     assert app.matched_apis == 1
     assert app.total_call_sites == 1
-    assert app.api_hits[0].call_site_count == 1
-    assert app.api_hits[0].callers == {_APP_CALLER}
+    assert app.api_usages[0].call_site_count == 1
+    assert app.api_usages[0].callers == {_APP_CALLER}
     assert app.categories["REFLECTION"] == 1
     assert set(app.by_caller) == {_APP_CALLER}
 
     every = summarize_capabilities(dk, app_only=False)
     assert every.total_call_sites == 3
-    assert every.api_hits[0].call_site_count == 3
-    assert every.api_hits[0].callers == {_LIB_CALLER, _APP_CALLER, _LIB_CALLER2}
+    assert every.api_usages[0].call_site_count == 3
+    assert every.api_usages[0].callers == {_LIB_CALLER, _APP_CALLER, _LIB_CALLER2}
     assert every.categories["REFLECTION"] == 3
     assert set(every.by_caller) == {_LIB_CALLER, _APP_CALLER, _LIB_CALLER2}
 
@@ -1309,7 +1311,7 @@ def test_an_api_only_libraries_call_leaves_the_report_entirely():
 
     `BIOMETRIC` fires wherever `FingerprintManagerCompat` is bundled at all — 100%
     of the corpus's touches — so "the report no longer says this" is the intended
-    outcome, and it has to reach `matched_apis` / `api_hits` / the Counters, not
+    outcome, and it has to reach `matched_apis` / `api_usages` / the Counters, not
     just the totals. Filtering AFTER the emptiness check would leave a hit behind
     with BOTH counters 0 — and `tools.py` ranks by
     `-(call_site_count + field_access_count)`, whose maximum is 0, so every such
@@ -1321,7 +1323,7 @@ def test_an_api_only_libraries_call_leaves_the_report_entirely():
 
     app = summarize_capabilities(dk)
     assert app.matched_apis == 0
-    assert app.api_hits == []
+    assert app.api_usages == []
     assert app.total_call_sites == 0
     assert app.by_caller == {}
     assert not app.categories and not app.permissions and not app.flags
@@ -1351,8 +1353,8 @@ def test_the_field_lookup_is_filtered_too():
 
     app = summarize_capabilities(dk)
     assert app.total_field_accesses == 1
-    assert app.api_hits[0].field_access_count == 1
-    assert app.api_hits[0].callers == {_APP_CALLER}
+    assert app.api_usages[0].field_access_count == 1
+    assert app.api_usages[0].callers == {_APP_CALLER}
     assert summarize_capabilities(dk, app_only=False).total_field_accesses == 2
 
 
@@ -1425,8 +1427,8 @@ def test_the_sdk_adapter_forwards_app_only(monkeypatch):
                 if mode
                 else {_APP_CALLER: {_FOR_NAME}, _LIB_CALLER: {_FOR_NAME}}
             ),
-            api_hits=[
-                capability.ApiHit(
+            api_usages=[
+                capability.ApiUsage(
                     api_descriptor=_FOR_NAME,
                     permissions=["P"],
                     categories=["C"],
@@ -1457,8 +1459,8 @@ def test_the_sdk_adapter_forwards_app_only(monkeypatch):
         assert report.total_call_sites == sites
         assert report.categories["C"] == sites
         assert report.permissions["P"] == sites
-        assert report.api_hits[0].call_site_count == sites
-        assert len(report.api_hits[0].callers) == callers
+        assert report.api_usages[0].call_site_count == sites
+        assert len(report.api_usages[0].callers) == callers
         assert len(report.by_caller) == callers
         assert (report.dropped_touches, report.dropped_apis) == dropped
     assert seen == [True, False], f"the adapter did not forward app_only: {seen}"
@@ -1887,7 +1889,7 @@ def test_the_real_notification_listener_subclass_is_reported(loadable_apks):
     found = []
     for path in loadable_apks:
         report = capability.summarize_capabilities(dexllm.DexKit(path))
-        hit = next((h for h in report.api_hits if h.api_descriptor == key), None)
+        hit = next((h for h in report.api_usages if h.api_descriptor == key), None)
         if hit is None:
             continue
         found.append(path)
@@ -2040,7 +2042,7 @@ def test_the_hostname_verifier_registration_is_reported_on_a_real_apk(loadable_a
     found = []
     for path in loadable_apks:
         report = capability.summarize_capabilities(dexllm.DexKit(path))
-        hit = next((h for h in report.api_hits if h.api_descriptor == key), None)
+        hit = next((h for h in report.api_usages if h.api_descriptor == key), None)
         if hit is None:
             continue
         found.append(path)
@@ -2085,8 +2087,8 @@ def test_an_implemented_interface_is_reported_through_its_registration(loadable_
             "registration call is what makes an interface visible"
         )
         assert any(
-            "requestLocationUpdates" in h.api_descriptor for h in report.api_hits
-        ), sorted(h.api_descriptor for h in report.api_hits)
+            "requestLocationUpdates" in h.api_descriptor for h in report.api_usages
+        ), sorted(h.api_descriptor for h in report.api_usages)
 
     require_corpus_shape(
         found,

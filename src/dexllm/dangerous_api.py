@@ -647,7 +647,7 @@ def permission_api_callers(
             bundled).
 
     Returns:
-        A list of ``{"perm", "protectionLevel", "rows": [{"api", "descriptors",
+        A list of ``{"perm", "protectionLevel", "apis": [{"api", "descriptors",
         "callers"}]}`` sorted by permission — the same shape the C++ / WASM
         ``permission_callers`` binding returns. Only perms/APIs with ≥1 kept caller.
     """
@@ -663,5 +663,5 @@ def permission_api_callers(
             continue
         rows = _rows_for_perm(dk, table[perm], index, overloads, app_only)
         if rows:
-            result.append({"perm": perm, "protectionLevel": lvl, "rows": rows})
+            result.append({"perm": perm, "protectionLevel": lvl, "apis": rows})
     return result

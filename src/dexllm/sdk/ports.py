@@ -19,7 +19,7 @@ from .model import (
     CallSite,
     CapabilityReport,
     ClassInfo,
-    ClassMatch,
+    ClassRef,
     ContainerInfo,
     ContentProviderUse,
     DecompiledClass,
@@ -30,12 +30,12 @@ from .model import (
     ExternalTypeRef,
     ExtractedDex,
     FieldInfo,
-    FieldMatch,
+    FieldRef,
     IocReport,
     MethodAst,
     MethodInfo,
-    MethodMatch,
-    PermissionCallerGroup,
+    MethodRef,
+    PermissionCallers,
     ResolvedCallSite,
     TypeReferences,
 )
@@ -307,7 +307,7 @@ class SearchPort(Protocol):
     """DexKit's L1–L7 static search over classes and methods.
 
     Find classes / methods by name, hierarchy, annotation, referenced strings, or
-    numeric literals. Each hit is a light :class:`ClassMatch` / :class:`MethodMatch`
+    numeric literals. Each hit is a light :class:`ClassRef` / :class:`MethodRef`
     (descriptor + dex location). ``match_type`` is one of :data:`MatchType`. The
     ``batch_*`` forms run many string queries at once over a shared Aho-Corasick
     trie (far faster than N single calls) and return a mapping keyed by query key.
@@ -319,25 +319,25 @@ class SearchPort(Protocol):
         *,
         match_type: MatchType = "contains",
         ignore_case: bool = False,
-    ) -> tuple[ClassMatch, ...]:
+    ) -> tuple[ClassRef, ...]:
         """Find classes whose name matches ``name`` under ``match_type``."""
         ...
 
     def find_classes_by_super(
         self, super_class: str, *, match_type: MatchType = "equals"
-    ) -> tuple[ClassMatch, ...]:
+    ) -> tuple[ClassRef, ...]:
         """Find classes whose direct superclass matches ``super_class``."""
         ...
 
     def find_classes_implementing(
         self, interface_class: str, *, match_type: MatchType = "equals"
-    ) -> tuple[ClassMatch, ...]:
+    ) -> tuple[ClassRef, ...]:
         """Find classes that declare the given interface."""
         ...
 
     def find_classes_by_annotation(
         self, annotation_class: str, *, match_type: MatchType = "equals"
-    ) -> tuple[ClassMatch, ...]:
+    ) -> tuple[ClassRef, ...]:
         """Find classes annotated with ``annotation_class`` (obfuscated name ok)."""
         ...
 
@@ -347,7 +347,7 @@ class SearchPort(Protocol):
         *,
         match_type: MatchType = "contains",
         ignore_case: bool = False,
-    ) -> tuple[ClassMatch, ...]:
+    ) -> tuple[ClassRef, ...]:
         """Find classes whose bytecode references ALL of ``strings``."""
         ...
 
@@ -357,7 +357,7 @@ class SearchPort(Protocol):
         *,
         match_type: MatchType = "contains",
         ignore_case: bool = False,
-    ) -> tuple[ClassMatch, ...]:
+    ) -> tuple[ClassRef, ...]:
         """Find classes that DECLARE all of ``strings`` as static-field constants.
 
         The declaration-side counterpart of :meth:`find_classes_using_strings`, which
@@ -374,7 +374,7 @@ class SearchPort(Protocol):
         match_type: MatchType = "contains",
         declaring_class: str = "",
         ignore_case: bool = False,
-    ) -> tuple[MethodMatch, ...]:
+    ) -> tuple[MethodRef, ...]:
         """Find methods by name, optionally scoped to a declaring class."""
         ...
 
@@ -385,7 +385,7 @@ class SearchPort(Protocol):
         match_type: MatchType = "contains",
         declaring_class: str = "",
         ignore_case: bool = False,
-    ) -> tuple[FieldMatch, ...]:
+    ) -> tuple[FieldRef, ...]:
         """Find fields by name, optionally scoped to a declaring class.
 
         With a ``declaring_class`` the hits are DECLARATIONS — a field the dex
@@ -399,7 +399,7 @@ class SearchPort(Protocol):
 
     def find_methods_by_annotation(
         self, annotation_class: str, *, match_type: MatchType = "equals"
-    ) -> tuple[MethodMatch, ...]:
+    ) -> tuple[MethodRef, ...]:
         """Find methods annotated with ``annotation_class``."""
         ...
 
@@ -409,19 +409,19 @@ class SearchPort(Protocol):
         *,
         match_type: MatchType = "contains",
         ignore_case: bool = False,
-    ) -> tuple[MethodMatch, ...]:
+    ) -> tuple[MethodRef, ...]:
         """Find methods whose body references ALL of ``strings``."""
         ...
 
     def find_methods_using_int_literals(
         self, values: Sequence[int]
-    ) -> tuple[MethodMatch, ...]:
+    ) -> tuple[MethodRef, ...]:
         """Find methods whose body contains ALL of the given int literals."""
         ...
 
     def find_methods_using_double_literals(
         self, values: Sequence[float]
-    ) -> tuple[MethodMatch, ...]:
+    ) -> tuple[MethodRef, ...]:
         """Find methods whose body contains ALL of the given double literals."""
         ...
 
@@ -431,7 +431,7 @@ class SearchPort(Protocol):
         *,
         match_type: MatchType = "contains",
         ignore_case: bool = False,
-    ) -> Mapping[str, tuple[ClassMatch, ...]]:
+    ) -> Mapping[str, tuple[ClassRef, ...]]:
         """Run many class-by-strings queries at once; result keyed by query key."""
         ...
 
@@ -441,7 +441,7 @@ class SearchPort(Protocol):
         *,
         match_type: MatchType = "contains",
         ignore_case: bool = False,
-    ) -> Mapping[str, tuple[MethodMatch, ...]]:
+    ) -> Mapping[str, tuple[MethodRef, ...]]:
         """Run many method-by-strings queries at once; result keyed by query key."""
         ...
 
@@ -511,10 +511,10 @@ class PermissionAnalysisPort(Protocol):
 
     def permission_callers(
         self, *, app_only: bool = True
-    ) -> tuple[PermissionCallerGroup, ...]:
+    ) -> tuple[PermissionCallers, ...]:
         """Return every permission the app exercises through real API calls.
 
-        Covers ALL protection levels — each :class:`PermissionCallerGroup` is tagged
+        Covers ALL protection levels — each :class:`PermissionCallers` is tagged
         with its ``protection_level`` (dangerous / signature / internal / normal /
         other) and carries the gated APIs + the app methods that call them. This is
         the full permission surface. ``app_only`` drops framework/library callers.

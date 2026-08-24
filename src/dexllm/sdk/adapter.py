@@ -19,12 +19,12 @@ import dexllm
 from .._argkinds import ARG_VALUE_ATTR_BY_KIND
 from ..descriptors import require_member_descriptor, require_type_descriptor
 from .model import (
-    ArgOrigin,
+    ApiCallers,
+    ApiUsage,
     CallSite,
-    CapabilityHit,
     CapabilityReport,
     ClassInfo,
-    ClassMatch,
+    ClassRef,
     ContainerInfo,
     ContentProviderUse,
     DecompiledClass,
@@ -35,14 +35,14 @@ from .model import (
     ExternalTypeRef,
     ExtractedDex,
     FieldInfo,
-    FieldMatch,
+    FieldRef,
     Indicator,
     IocReport,
     MethodAst,
     MethodInfo,
-    MethodMatch,
-    PermissionCallerGroup,
-    PermissionCallerRow,
+    MethodRef,
+    PermissionCallers,
+    ResolvedArg,
     ResolvedCallSite,
     SourceLocation,
     StatementLocation,
@@ -58,13 +58,13 @@ Sources = Union[SourceLike, "list[SourceLike]", "tuple[SourceLike, ...]"]
 # ── raw → model converters ────────────────────────────────────────────────────
 
 
-def _to_arg(a: object) -> ArgOrigin:
-    """Convert a pybind ArgOrigin to the typed model (only the kind's field set)."""
+def _to_arg(a: object) -> ResolvedArg:
+    """Convert a pybind ResolvedArg to the typed model (only the kind's field set)."""
     field = ARG_VALUE_ATTR_BY_KIND.get(a.kind)  # type: ignore[attr-defined]
     kw = {field: getattr(a, field)} if field else {}
-    return ArgOrigin(
+    return ResolvedArg(
         kind=a.kind,  # type: ignore[attr-defined]
-        reg_num=a.reg_num,  # type: ignore[attr-defined]
+        register_index=a.register_index,  # type: ignore[attr-defined]
         crossed_branch=a.crossed_branch,  # type: ignore[attr-defined]
         **kw,
     )
@@ -105,7 +105,7 @@ def _to_ext_type_ref(r: object) -> ExternalTypeRef:
     """Convert a pybind external type ref to the typed model."""
     return ExternalTypeRef(
         descriptor=r.descriptor,  # type: ignore[attr-defined]
-        java_name=r.java_name,  # type: ignore[attr-defined]
+        java_type=r.java_type,  # type: ignore[attr-defined]
         referenced_in_dex_ids=tuple(r.referenced_in_dex_ids),  # type: ignore[attr-defined]
     )
 
@@ -125,28 +125,28 @@ def _str_seq(strings: Sequence[str]) -> list[str]:
     return list(strings)
 
 
-def _to_class_match(r: object) -> ClassMatch:
-    """Convert a pybind ClassMatch to the typed model."""
-    return ClassMatch(
-        class_id=r.class_id,  # type: ignore[attr-defined]
+def _to_class_ref(r: object) -> ClassRef:
+    """Convert a pybind ClassRef to the typed model."""
+    return ClassRef(
+        class_idx=r.class_idx,  # type: ignore[attr-defined]
         descriptor=r.descriptor,  # type: ignore[attr-defined]
         dex_id=r.dex_id,  # type: ignore[attr-defined]
     )
 
 
-def _to_method_match(r: object) -> MethodMatch:
-    """Convert a pybind MethodMatch to the typed model."""
-    return MethodMatch(
-        method_id=r.method_id,  # type: ignore[attr-defined]
+def _to_method_ref(r: object) -> MethodRef:
+    """Convert a pybind MethodRef to the typed model."""
+    return MethodRef(
+        method_idx=r.method_idx,  # type: ignore[attr-defined]
         descriptor=r.descriptor,  # type: ignore[attr-defined]
         dex_id=r.dex_id,  # type: ignore[attr-defined]
     )
 
 
-def _to_field_match(r: object) -> FieldMatch:
-    """Convert a pybind FieldMatch to the typed model."""
-    return FieldMatch(
-        field_id=r.field_id,  # type: ignore[attr-defined]
+def _to_field_ref(r: object) -> FieldRef:
+    """Convert a pybind FieldRef to the typed model."""
+    return FieldRef(
+        field_idx=r.field_idx,  # type: ignore[attr-defined]
         descriptor=r.descriptor,  # type: ignore[attr-defined]
         dex_id=r.dex_id,  # type: ignore[attr-defined]
     )
@@ -276,12 +276,12 @@ class DexKitAdapter:
         )
         return MethodAst(
             found=r["found"],
-            class_name=r["cls_name"],
+            class_descriptor=r["class_descriptor"],
             name=r["name"],
             proto=r["proto"],
-            return_type=r["ret_type"],
-            param_types=tuple(r["params_type"]),
-            access_flags=tuple(r["access"]),
+            return_type=r["return_type"],
+            param_types=tuple(r["param_types"]),
+            access_flags=tuple(r["access_flags"]),
             source=r["source"],
             ast=r["ast"],
             pc_map=tuple(
@@ -489,37 +489,37 @@ class DexKitAdapter:
         *,
         match_type: MatchType = "contains",
         ignore_case: bool = False,
-    ) -> tuple[ClassMatch, ...]:
+    ) -> tuple[ClassRef, ...]:
         """Find classes whose name matches ``name`` under ``match_type``."""
         return tuple(
-            _to_class_match(m)
+            _to_class_ref(m)
             for m in self._dk.find_classes_by_name(name, match_type, ignore_case)
         )
 
     def find_classes_by_super(
         self, super_class: str, *, match_type: MatchType = "equals"
-    ) -> tuple[ClassMatch, ...]:
+    ) -> tuple[ClassRef, ...]:
         """Find classes whose direct superclass matches ``super_class``."""
         return tuple(
-            _to_class_match(m)
+            _to_class_ref(m)
             for m in self._dk.find_classes_by_super(super_class, match_type)
         )
 
     def find_classes_implementing(
         self, interface_class: str, *, match_type: MatchType = "equals"
-    ) -> tuple[ClassMatch, ...]:
+    ) -> tuple[ClassRef, ...]:
         """Find classes that declare the given interface."""
         return tuple(
-            _to_class_match(m)
+            _to_class_ref(m)
             for m in self._dk.find_classes_implementing(interface_class, match_type)
         )
 
     def find_classes_by_annotation(
         self, annotation_class: str, *, match_type: MatchType = "equals"
-    ) -> tuple[ClassMatch, ...]:
+    ) -> tuple[ClassRef, ...]:
         """Find classes annotated with ``annotation_class``."""
         return tuple(
-            _to_class_match(m)
+            _to_class_ref(m)
             for m in self._dk.find_classes_by_annotation(annotation_class, match_type)
         )
 
@@ -529,10 +529,10 @@ class DexKitAdapter:
         *,
         match_type: MatchType = "contains",
         ignore_case: bool = False,
-    ) -> tuple[ClassMatch, ...]:
+    ) -> tuple[ClassRef, ...]:
         """Find classes whose bytecode references ALL of ``strings``."""
         return tuple(
-            _to_class_match(m)
+            _to_class_ref(m)
             for m in self._dk.find_classes_using_strings(
                 _str_seq(strings), match_type, ignore_case
             )
@@ -544,10 +544,10 @@ class DexKitAdapter:
         *,
         match_type: MatchType = "contains",
         ignore_case: bool = False,
-    ) -> tuple[ClassMatch, ...]:
+    ) -> tuple[ClassRef, ...]:
         """Find classes that DECLARE ALL of ``strings`` as static-field constants."""
         return tuple(
-            _to_class_match(m)
+            _to_class_ref(m)
             for m in self._dk.find_classes_declaring_strings(
                 _str_seq(strings), match_type, ignore_case
             )
@@ -560,10 +560,10 @@ class DexKitAdapter:
         match_type: MatchType = "contains",
         declaring_class: str = "",
         ignore_case: bool = False,
-    ) -> tuple[MethodMatch, ...]:
+    ) -> tuple[MethodRef, ...]:
         """Find methods by name, optionally scoped to a declaring class."""
         return tuple(
-            _to_method_match(m)
+            _to_method_ref(m)
             for m in self._dk.find_methods_by_name(
                 name, match_type, declaring_class, ignore_case
             )
@@ -576,10 +576,10 @@ class DexKitAdapter:
         match_type: MatchType = "contains",
         declaring_class: str = "",
         ignore_case: bool = False,
-    ) -> tuple[FieldMatch, ...]:
+    ) -> tuple[FieldRef, ...]:
         """Find fields by name, optionally scoped to a declaring class."""
         return tuple(
-            _to_field_match(f)
+            _to_field_ref(f)
             for f in self._dk.find_fields_by_name(
                 name, match_type, declaring_class, ignore_case
             )
@@ -587,10 +587,10 @@ class DexKitAdapter:
 
     def find_methods_by_annotation(
         self, annotation_class: str, *, match_type: MatchType = "equals"
-    ) -> tuple[MethodMatch, ...]:
+    ) -> tuple[MethodRef, ...]:
         """Find methods annotated with ``annotation_class``."""
         return tuple(
-            _to_method_match(m)
+            _to_method_ref(m)
             for m in self._dk.find_methods_by_annotation(annotation_class, match_type)
         )
 
@@ -600,10 +600,10 @@ class DexKitAdapter:
         *,
         match_type: MatchType = "contains",
         ignore_case: bool = False,
-    ) -> tuple[MethodMatch, ...]:
+    ) -> tuple[MethodRef, ...]:
         """Find methods whose body references ALL of ``strings``."""
         return tuple(
-            _to_method_match(m)
+            _to_method_ref(m)
             for m in self._dk.find_methods_using_strings(
                 _str_seq(strings), match_type, ignore_case
             )
@@ -611,19 +611,19 @@ class DexKitAdapter:
 
     def find_methods_using_int_literals(
         self, values: Sequence[int]
-    ) -> tuple[MethodMatch, ...]:
+    ) -> tuple[MethodRef, ...]:
         """Find methods whose body contains ALL of the given int literals."""
         return tuple(
-            _to_method_match(m)
+            _to_method_ref(m)
             for m in self._dk.find_methods_using_int_literals(list(values))
         )
 
     def find_methods_using_double_literals(
         self, values: Sequence[float]
-    ) -> tuple[MethodMatch, ...]:
+    ) -> tuple[MethodRef, ...]:
         """Find methods whose body contains ALL of the given double literals."""
         return tuple(
-            _to_method_match(m)
+            _to_method_ref(m)
             for m in self._dk.find_methods_using_double_literals(list(values))
         )
 
@@ -633,13 +633,13 @@ class DexKitAdapter:
         *,
         match_type: MatchType = "contains",
         ignore_case: bool = False,
-    ) -> Mapping[str, tuple[ClassMatch, ...]]:
+    ) -> Mapping[str, tuple[ClassRef, ...]]:
         """Run many class-by-strings queries at once; result keyed by query key."""
         raw = self._dk.batch_find_classes_using_strings(
             {k: _str_seq(v) for k, v in query_map.items()}, match_type, ignore_case
         )
         return MappingProxyType(
-            {k: tuple(_to_class_match(m) for m in v) for k, v in raw.items()}
+            {k: tuple(_to_class_ref(m) for m in v) for k, v in raw.items()}
         )
 
     def batch_find_methods_using_strings(
@@ -648,13 +648,13 @@ class DexKitAdapter:
         *,
         match_type: MatchType = "contains",
         ignore_case: bool = False,
-    ) -> Mapping[str, tuple[MethodMatch, ...]]:
+    ) -> Mapping[str, tuple[MethodRef, ...]]:
         """Run many method-by-strings queries at once; result keyed by query key."""
         raw = self._dk.batch_find_methods_using_strings(
             {k: _str_seq(v) for k, v in query_map.items()}, match_type, ignore_case
         )
         return MappingProxyType(
-            {k: tuple(_to_method_match(m) for m in v) for k, v in raw.items()}
+            {k: tuple(_to_method_ref(m) for m in v) for k, v in raw.items()}
         )
 
     # -- ClassInspectionPort --
@@ -668,8 +668,8 @@ class DexKitAdapter:
             dex_id=s.dex_id,
             is_internal=s.is_internal,
             access_flags=s.access_flags,
-            superclass=s.superclass_descriptor,
-            interfaces=tuple(s.interface_descriptors),
+            superclass_descriptor=s.superclass_descriptor,
+            interface_descriptors=tuple(s.interface_descriptors),
             source_file=s.source_file,
             dex_name=self._dex_name(s.dex_id),
         )
@@ -679,7 +679,13 @@ class DexKitAdapter:
         require_type_descriptor(class_descriptor)
         s = self._dk.get_class_summary(class_descriptor)
         return tuple(
-            FieldInfo(name=f.name, type=f.type, access_flags=f.access_flags)
+            FieldInfo(
+                name=f.name,
+                type=f.type,
+                access_flags=f.access_flags,
+                class_descriptor=f.class_descriptor,
+                descriptor=f.descriptor,
+            )
             for f in s.fields
         )
 
@@ -688,7 +694,13 @@ class DexKitAdapter:
         require_type_descriptor(class_descriptor)
         s = self._dk.get_class_summary(class_descriptor)
         return tuple(
-            MethodInfo(name=m.name, proto=m.proto, access_flags=m.access_flags)
+            MethodInfo(
+                name=m.name,
+                proto=m.proto,
+                access_flags=m.access_flags,
+                class_descriptor=m.class_descriptor,
+                descriptor=m.descriptor,
+            )
             for m in s.methods
         )
 
@@ -701,19 +713,19 @@ class DexKitAdapter:
 
     def permission_callers(
         self, *, app_only: bool = True
-    ) -> tuple[PermissionCallerGroup, ...]:
+    ) -> tuple[PermissionCallers, ...]:
         """Return permissions the app exercises through real API calls, with callers."""
         return tuple(
-            PermissionCallerGroup(
+            PermissionCallers(
                 permission=g["perm"],
                 protection_level=g["protectionLevel"],
-                rows=tuple(
-                    PermissionCallerRow(
+                apis=tuple(
+                    ApiCallers(
                         api=row["api"],
                         descriptors=tuple(row["descriptors"]),
                         callers=tuple(row["callers"]),
                     )
-                    for row in g["rows"]
+                    for row in g["apis"]
                 ),
             )
             for g in self._dk.permission_callers(app_only)
@@ -753,8 +765,8 @@ class DexKitAdapter:
             permissions=dict(c.permissions),
             categories=dict(c.categories),
             flags=dict(c.flags),
-            api_hits=tuple(
-                CapabilityHit(
+            api_usages=tuple(
+                ApiUsage(
                     api_descriptor=h.api_descriptor,
                     call_site_count=h.call_site_count,
                     permissions=tuple(h.permissions),
@@ -768,7 +780,7 @@ class DexKitAdapter:
                     callers=tuple(sorted(h.callers)),
                     field_access_count=h.field_access_count,
                 )
-                for h in c.api_hits
+                for h in c.api_usages
             ),
             by_caller={k: tuple(sorted(v)) for k, v in c.by_caller.items()},
             total_field_accesses=c.total_field_accesses,

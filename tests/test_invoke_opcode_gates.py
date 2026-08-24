@@ -333,7 +333,7 @@ def test_a_polymorphic_call_site_resolves_its_arguments(fixture_dk) -> None:
     # non-emptiness assertion while emitting 48 and 5 fabricated arguments. Ground
     # truth is androguard's own decode of this file: `{v1}` at 0x1e, `{v1,v2,v3}`
     # at 0x7a.
-    assert [[a.reg_num for a in r.args] for r in rows] == [[1], [1, 2, 3]]
+    assert [[a.register_index for a in r.args] for r in rows] == [[1], [1, 2, 3]]
 
 
 def test_an_ordinary_invoke_is_unaffected(fixture_dk) -> None:
@@ -431,7 +431,7 @@ def test_the_cfg_mark_is_load_bearing(polymorphic_dk) -> None:
     rows = polymorphic_dk.resolve_call_args(_MH_INVOKE)
     assert len(rows) == 10, f"the extractor produced {len(rows)} rows, expected 10"
     # Every site here is `invoke-polymorphic {v0, v2, v3}` at 0x4 (androguard oracle).
-    assert [[a.reg_num for a in r.args] for r in rows] == [[0, 2, 3]] * 10
+    assert [[a.register_index for a in r.args] for r in rows] == [[0, 2, 3]] * 10
 
 
 # -- 0xFB, and the verifier bound this change made necessary -------------------
@@ -461,7 +461,7 @@ def test_the_range_form_is_answered_with_its_full_register_window(range_dk) -> N
     window to empty.
     """
     rows = range_dk.resolve_call_args(_MH_INVOKE)
-    by_op = {r.invoke_opcode: [a.reg_num for a in r.args] for r in rows}
+    by_op = {r.invoke_opcode: [a.register_index for a in r.args] for r in rows}
     assert 0xFB in by_op, "the range form produced no row at all"
     assert by_op[0xFB] == [0, 1, 2, 3, 4, 5, 6]
     # …and the 45cc sibling in the same file uses the G nibble (A=5), which the

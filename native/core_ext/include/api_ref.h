@@ -54,15 +54,26 @@ struct CallSite {
 // methods / 8.7% of fields / 34.9% of classes in the test corpus), so a 0 default
 // makes "unknown" indistinguishable from a real declaration and reads the whole
 // framework surface as package-private.
+//
+// `class_descriptor` is the class the member is declared on (dexllm#69 §3). It is
+// what makes a `*Info` able to produce the IDENTITY string every other
+// method-shaped record already carries — `MethodRef.descriptor`,
+// `ExternalMethodRef.descriptor` and `ClassSummary.descriptor` all have one and
+// `*Info` was the only one without, so a caller reading `class_methods()` had to
+// re-assemble `Lcls;->name(proto)ret` by hand. The joined form is NOT stored: the
+// binding exposes it as a computed `descriptor` property, so the struct pays one
+// string per member rather than two.
 struct MethodInfo {
     std::string name;
     std::string proto;
     std::optional<uint32_t> access_flags;  // empty = unknown (external)
+    std::string class_descriptor;          // "Lcom/x/Y;" — the declaring class
 };
 struct FieldInfo {
     std::string name;
     std::string type;
     std::optional<uint32_t> access_flags;  // empty = unknown (external)
+    std::string class_descriptor;          // "Lcom/x/Y;" — the declaring class
 };
 struct ClassSummary {
     std::string descriptor;                // "Lcom/x/Y;"
@@ -76,38 +87,46 @@ struct ClassSummary {
     std::string source_file;               // empty if absent
 };
 
-// Find/Match result — lightweight class identity, matches what upstream's
-// ClassMetaArrayHolder yields.
-struct ClassMatch {
+// A LOCATED REFERENCE to a dex entity: an identity plus where it lives. The
+// suffix names WHAT THE RECORD IS, never how it was obtained (dexllm#69 §2) —
+// these were `*Match` because a `find_*` query produced them, which is
+// provenance, and provenance was spelled three ways (`Match` / `Hit` /
+// `Origin`) across the API. `External*Ref` keeps its suffix for the same reason:
+// there the STATUS ("declared in no loaded dex") is carried by the `External`
+// prefix, which is where a status belongs.
+//
+// The ordinal is `_idx`, the dex spec's own word for a position in a `*_ids`
+// table; `dex_id` stays `_id` because a dex id is a handle dexllm assigns by
+// load order, not a position in any dex structure (dexllm#69 §5).
+struct ClassRef {
     std::string descriptor;
     uint16_t dex_id = 0;
-    uint32_t class_id = 0;
+    uint32_t class_idx = 0;
 };
 
-// Find/Match result — method identity. dex_descriptor is upstream's full
-// "Lpkg/Cls;->name(...)Ret;" form.
-struct MethodMatch {
+// Method identity. `descriptor` is upstream's full "Lpkg/Cls;->name(...)Ret;".
+struct MethodRef {
     std::string descriptor;                 // upstream's dex_descriptor form
     uint16_t dex_id = 0;
-    uint32_t method_id = 0;
+    uint32_t method_idx = 0;
 };
 
-// Field match for upstream's FindField.
-struct FieldMatch {
+// Field identity, from upstream's FindField.
+struct FieldRef {
     std::string descriptor;
     uint16_t dex_id = 0;
-    uint32_t field_id = 0;
+    uint32_t field_idx = 0;
 };
 
-// L4 — origin of a single invoke argument. `kind` selects which value field
+// L4 — what a single invoke argument RESOLVES TO. `kind` selects which value field
 // is meaningful. All values are resolved to user-facing forms (string content,
 // Dalvik descriptors) on the C++ side so Python clients don't have to reach back
 // into dex tables.
-struct ArgOrigin {
+struct ResolvedArg {
     std::string kind;       // "ConstString", "ConstInt", "ConstWide",
                             // "ConstClass", "ConstNull", "FieldRead",
                             // "MethodReturn", "Parameter", "Unknown"
-    uint16_t reg_num = 0;
+    uint16_t register_index = 0;
     std::string string_value;       // ConstString
     int64_t int_value = 0;          // ConstInt / ConstWide
     std::string class_descriptor;   // ConstClass
@@ -131,7 +150,7 @@ struct ResolvedCallSite {
     std::string callee_descriptor;
     int32_t bytecode_offset = -1;
     uint8_t invoke_opcode = 0;
-    std::vector<ArgOrigin> args;
+    std::vector<ResolvedArg> args;
 };
 
 }  // namespace dexkit::ext

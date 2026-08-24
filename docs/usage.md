@@ -145,7 +145,7 @@ for ref in dk.list_external_method_refs(framework_only=True):
 
 # Types
 for ref in dk.list_external_type_refs(framework_only=True):
-    print(ref.java_name)
+    print(ref.java_type)
     # → android.app.Activity
     # → android.util.Log
 
@@ -265,7 +265,7 @@ report.flags            # Counter() on this APK; Counter({'IDENTIFIER': 2}) on o
 
 # Filter to a subset (only crypto-related APIs)
 crypto = dexllm.summarize_capabilities(dk, only_categories={"CRYPTO"})
-for hit in crypto.api_hits:
+for hit in crypto.api_usages:
     print(hit.api_descriptor, "→", hit.permissions, hit.categories, hit.flags)
 ```
 
@@ -304,7 +304,7 @@ Four entries are the CONSTRUCTOR of a class an app **subclasses** —
 
 ```python
 report = dexllm.summarize_capabilities(dexllm.DexKit("a2dp.Vol_137.apk"))
-listeners = [h for h in report.api_hits
+listeners = [h for h in report.api_usages
              if "NotificationListenerService" in h.api_descriptor]
 for hit in listeners:
     print(hit.api_descriptor, hit.call_site_count, sorted(hit.callers))
@@ -469,7 +469,7 @@ callers are library code — which is why a Google TV *sample app* used to repor
 (100% `FingerprintManagerCompat`). Since dexllm#49 **`app_only=True` is the
 default**, the same verb, default and predicate as
 [`dangerous_permission_api_callers`](#dangerous-permission-api-usage), so the
-counters describe the app; an API left with no kept caller drops out of `api_hits`
+counters describe the app; an API left with no kept caller drops out of `api_usages`
 entirely, so a category can disappear — and `report.dropped_touches` /
 `report.dropped_apis` say what went, so a zero report is readable as "only the
 bundled libraries do this" rather than as "this APK does none of it" (11 of the
@@ -521,7 +521,7 @@ ciphers = sorted({
 # → ['AES/CBC/PKCS5Padding', 'AES/ECB/NoPadding', ...]
 ```
 
-`ArgOrigin.kind` values: `ConstString`, `ConstInt`, `ConstWide`, `ConstClass`, `ConstNull`, `FieldRead`, `MethodReturn`, `Parameter`, `NewInstance`, `NewArray`, `Unknown`. Available fields depend on kind (`string_value`, `int_value`, `class_descriptor`, …).
+`ResolvedArg.kind` values: `ConstString`, `ConstInt`, `ConstWide`, `ConstClass`, `ConstNull`, `FieldRead`, `MethodReturn`, `Parameter`, `NewInstance`, `NewArray`, `Unknown`. Available fields depend on kind (`string_value`, `int_value`, `class_descriptor`, …).
 
 **How far it looks — `depth`.** The analysis is bounded to a **basic-block window**:
 the call site's own block plus `depth` predecessor levels above it, and nothing
@@ -894,7 +894,7 @@ the ~25 dangerous permissions, but all levels (`dangerous` / `signature` / `inte
 
 ```python
 for g in dexllm.permission_api_callers(dk):           # app_only=True by default
-    print(g["protectionLevel"], g["perm"], "→", len(g["rows"]), "APIs")
+    print(g["protectionLevel"], g["perm"], "→", len(g["apis"]), "APIs")
 # signature  android.permission.WRITE_SECURE_SETTINGS → 1 APIs
 # dangerous  android.permission.READ_SMS → 2 APIs
 
@@ -902,7 +902,7 @@ for g in dexllm.permission_api_callers(dk):           # app_only=True by default
 sig = dexllm.permission_api_callers(dk, levels={"signature", "internal"})
 ```
 
-It returns `[{"perm", "protectionLevel", "rows": [{"api", "descriptors", "callers"}]}]`
+It returns `[{"perm", "protectionLevel", "apis": [{"api", "descriptors", "callers"}]}]`
 sorted by permission — the same shape the C++/WASM `permission_callers()` binding
 returns (the dangerous slice is just this filtered to `protectionLevel == "dangerous"`).
 
@@ -1018,20 +1018,20 @@ refs = session.list_external_method_refs(framework_only=True)  # -> tuple[Extern
 sites = session.find_call_sites_to("Landroid/util/Log;->d(...)I")     # -> tuple[CallSite, ...] (callee fixed)
 callees = session.find_call_sites_from("Lcom/x/Y;->m(I)V")              # -> tuple[CallSite, ...] (caller fixed)
 for rc in session.resolve_call_args("...->getInstance(Ljava/lang/String;)..."):
-    for arg in rc.args: arg.kind, arg.string_value          # -> ArgOrigin (only the kind's field set)
+    for arg in rc.args: arg.kind, arg.string_value          # -> ResolvedArg (only the kind's field set)
 session.find_methods_reading_field("Lcom/x/Y;->token:Ljava/lang/String;")  # -> methods that iget/sget it
 session.find_methods_writing_field("Lcom/x/Y;->token:Ljava/lang/String;")  # -> methods that iput/sput it
 session.find_type_references("Lcom/x/Y;")                 # -> TypeReferences(fields, methods_returning, methods_with_param)
 
-info = session.class_info("Lcom/x/Y;")                    # -> ClassInfo(superclass, interfaces, access_flags, ...)
-fields = session.class_fields("Lcom/x/Y;")                # -> tuple[FieldInfo(name, type, access_flags)]
-methods = session.class_methods("Lcom/x/Y;")              # -> tuple[MethodInfo(name, proto, access_flags)]
+info = session.class_info("Lcom/x/Y;")                    # -> ClassInfo(superclass_descriptor, interface_descriptors, ...)
+fields = session.class_fields("Lcom/x/Y;")                # -> tuple[FieldInfo(name, type, access_flags, class_descriptor, descriptor)]
+methods = session.class_methods("Lcom/x/Y;")              # -> tuple[MethodInfo(name, proto, access_flags, class_descriptor, descriptor)]
 # access_flags is None (UNKNOWN) on an external class — see sdk.md / api.md
 descs = session.list_class_methods("Lcom/x/Y;")           # -> the descriptor-only view of the same members
 
-for g in session.permission_callers(app_only=True):       # -> tuple[PermissionCallerGroup, ...]
+for g in session.permission_callers(app_only=True):       # -> tuple[PermissionCallers, ...]
     g.permission, g.protection_level                        # dangerous|signature|internal|normal|other
-    for row in g.rows: row.api, row.callers                 # PermissionCallerRow
+    for api in g.apis: api.api, api.callers                 # ApiCallers
 
 ioc = session.extract_iocs()                              # -> IocReport; ioc.domains: tuple[Indicator(value, methods, declared_in)]
 cap = session.summarize_capabilities()                   # -> CapabilityReport(...); app_only=True by default

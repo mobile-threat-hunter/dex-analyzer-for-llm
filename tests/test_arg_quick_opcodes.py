@@ -275,7 +275,7 @@ def _args_at(path: str, method: str, off: int):
 
 def _arg(args, reg: int):
     for a in args:
-        if a.reg_num == reg:
+        if a.register_index == reg:
             return a
     return None
 

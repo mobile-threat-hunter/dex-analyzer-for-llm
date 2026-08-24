@@ -249,7 +249,7 @@ dk.list_class_strings('Lcom/example/android/tvleanback/Utils;')
   come back as U+FFFD and every reverse query on it then returned nothing, silently.
   Both directions now use CPython's `surrogatepass` handler instead of pybind11's
   strict UTF-8 codec, so the pool's 3-byte form survives OUT (`list_value_strings`,
-  `list_class_strings`, `list_method_strings`, `ArgOrigin.string_value`, AST string
+  `list_class_strings`, `list_method_strings`, `ResolvedArg.string_value`, AST string
   values) and IN (the five content matchers — which still accept `bytes` and
   `bytearray` unchanged, so the former `bytes` workaround keeps working).
   The rule for what stays LOSSY is **display vs query**, not identifier vs
@@ -430,17 +430,17 @@ Signature components + Java `source` + the full DAD nested-list AST + D-3 pc_map
 `include_source=False` skips the text-emit pipeline (~1.7× faster, AST only).
 ```python
 dk.decompile_method_ast(M).keys()
-# ['found', 'cls_name', 'name', 'proto', 'ret_type', 'params_type', 'access', 'source', 'ast', 'pc_map']
+# ['found', 'class_descriptor', 'name', 'proto', 'return_type', 'param_types', 'access_flags', 'source', 'ast', 'pc_map']
 ```
 | key | type | example |
 |---|---|---|
 | `found` | `bool` | `True` |
-| `cls_name` | `str` | `'Lcom/example/android/tvleanback/Utils;'` |
+| `class_descriptor` | `str` | `'Lcom/example/android/tvleanback/Utils;'` |
 | `name` | `str` | `'convertDpToPixel'` |
 | `proto` | `str` | `'(Landroid/content/Context;I)I'` |
-| `ret_type` | `str` | `'I'` |
-| `params_type` | `list[str]` | `['Landroid/content/Context;', 'I']` |
-| `access` | `list[str]` | `['public', 'static']` |
+| `return_type` | `str` | `'I'` |
+| `param_types` | `list[str]` | `['Landroid/content/Context;', 'I']` |
+| `access_flags` | `list[str]` | `['public', 'static']` |
 | `source` | `str` | Java text (omitted body if `include_source=False`) |
 | `ast` | `dict` | keys `{triple, flags, ret, params, comments, body}` — the DAD `get_ast()` nested-list tree (50+ node types). `comments` is `[]` in DAD and stays `[]` here except for the dexllm#75 marker, which it carries as `['entry is not at offset 0']` so an `include_source=False` consumer can see the reinterpretation too |
 | `pc_map` | `list[tuple[int,int]]` | `(statement_seq, byte_off)` — sidechannel kept OUT of `ast` |
@@ -535,16 +535,16 @@ anchors, NOT full regex** (`"^com/foo"`, `"Activity$"`); an unrecognised
 `match_type` falls back to `contains`. (The typed `dexllm.sdk` layer narrows this
 to a `Literal` of the five canonical values — see [sdk.md](sdk.md).)
 
-### Name search → `list[ClassMatch]` / `list[MethodMatch]` / `list[FieldMatch]`
+### Name search → `list[ClassRef]` / `list[MethodRef]` / `list[FieldRef]`
 ```python
-dk.find_classes_by_name('Utils')      # list[ClassMatch]  len 19
-dk.find_methods_by_name('onCreate')   # list[MethodMatch] len 296
-dk.find_fields_by_name('DB')          # list[FieldMatch]  len 8
+dk.find_classes_by_name('Utils')      # list[ClassRef]  len 19
+dk.find_methods_by_name('onCreate')   # list[MethodRef] len 296
+dk.find_fields_by_name('DB')          # list[FieldRef]  len 8
 ```
 `find_methods_by_name` and `find_fields_by_name` also take
 `declaring_class=` (a class descriptor) to scope the search, plus `match_type=` /
 `ignore_case=`. The field arm completes the class/method/field symmetry: before
-dexllm#37 `FieldMatch` was a registered public type that **no call could
+dexllm#37 `FieldRef` was a registered public type that **no call could
 produce**.
 
 **Scoped searches answer with DECLARATIONS; unscoped ones include references.**
@@ -567,13 +567,13 @@ whole `find_*_by_name` family, not of dexllm#45). The 3 missing here are spelled
 under framework classes — `ViewGroup$MarginLayoutParams`, `FrameLayout$LayoutParams`,
 `LinearLayout$LayoutParams`. Only `list_fields()` enumerates those.
 
-### String search → `list[ClassMatch]` / `list[MethodMatch]`
+### String search → `list[ClassRef]` / `list[MethodRef]`
 ```python
-dk.find_classes_using_strings(['entry'])   # list[ClassMatch]  len 9
-dk.find_methods_using_strings(['entry'])   # list[MethodMatch] len 14
+dk.find_classes_using_strings(['entry'])   # list[ClassRef]  len 9
+dk.find_methods_using_strings(['entry'])   # list[MethodRef] len 14
 ```
 
-### `dk.find_classes_declaring_strings(strings, match_type='contains', ignore_case=False) -> list[ClassMatch]`
+### `dk.find_classes_declaring_strings(strings, match_type='contains', ignore_case=False) -> list[ClassRef]`
 The **declaration** side of `find_classes_using_strings`. The `using` family searches
 the `const-string` **bytecode** index — "which code LOADS S" — so a `static final
 String` the app declares but never loads is invisible to it. That empty result is
@@ -584,7 +584,7 @@ solely in a constant.
 ```python
 dk.find_classes_using_strings(['android.contentMaturity.all'], 'equals')      # []
 dk.find_classes_declaring_strings(['android.contentMaturity.all'], 'equals')
-# [ClassMatch 'Landroid/support/app/recommendation/ContentRecommendation;']
+# [ClassRef 'Landroid/support/app/recommendation/ContentRecommendation;']
 ```
 - Same match semantics as the rest of the family (it reuses the core's own
   `IsStringMatched`): `equals` / `contains` / `starts_with` / `ends_with` / `regex`
@@ -604,27 +604,27 @@ dk.find_classes_declaring_strings(['android.contentMaturity.all'], 'equals')
   binding boundary (dexllm#19), so a supplementary-plane or NUL-bearing constant is
   findable here too.
 
-### Literal search → `list[MethodMatch]`
+### Literal search → `list[MethodRef]`
 ```python
 dk.find_methods_using_int_literals([255])      # len 133
 dk.find_methods_using_double_literals([1.0])   # len 243
 ```
 
-### Hierarchy / annotation search → `list[ClassMatch]` / `list[MethodMatch]`
+### Hierarchy / annotation search → `list[ClassRef]` / `list[MethodRef]`
 ```python
-dk.find_classes_by_super('Landroid/app/Activity;')      # list[ClassMatch]  len 6
-dk.find_classes_implementing('Ljava/lang/Runnable;')    # list[ClassMatch]  len 217
+dk.find_classes_by_super('Landroid/app/Activity;')      # list[ClassRef]  len 6
+dk.find_classes_implementing('Ljava/lang/Runnable;')    # list[ClassRef]  len 217
 dk.find_classes_by_annotation('Landroid/annotation/TargetApi;')  # len 29
-dk.find_methods_by_annotation('L.../SomeAnno;')         # list[MethodMatch]
+dk.find_methods_by_annotation('L.../SomeAnno;')         # list[MethodRef]
 ```
 
-### Batch string search → `dict[str, list[MethodMatch]]`
+### Batch string search → `dict[str, list[MethodRef]]`
 Query map is `{group_name: [strings]}`; returns per-group matches.
 ```python
 dk.batch_find_methods_using_strings({'grpA': ['entry'], 'grpB': ['density']},
                                     match_type='contains', ignore_case=False)
-# {'grpA': [<14 MethodMatch>], 'grpB': [<3 MethodMatch>]}
-dk.batch_find_classes_using_strings({...})   # dict[str, list[ClassMatch]]
+# {'grpA': [<14 MethodRef>], 'grpB': [<3 MethodRef>]}
+dk.batch_find_classes_using_strings({...})   # dict[str, list[ClassRef]]
 ```
 
 ### Call sites → `list[CallSite]`
@@ -654,7 +654,7 @@ the MCP tool catalog — and there is no longer any other: the pre-unification n
 carries the role (`_to` = the callee whose callers you want, `_from` = the caller
 whose callees you want), so the parameter names what the value IS. It was
 `api_descriptor` on the `_to` side, which said "framework API" — only the common
-case, and not what the value is. (`CapabilityHit.api_descriptor` keeps the
+case, and not what the value is. (`ApiUsage.api_descriptor` keeps the
 `api_` prefix for the opposite reason: that record IS one catalog-API hit, so
 the prefix names the catalog entry rather than asserting anything about a
 callee — dexllm#68.) The MCP catalog likewise advertises exactly one
@@ -666,7 +666,7 @@ alias there would silently lose input validation.
 Same as call sites, plus the resolved origin of each argument (L4 dataflow).
 ```python
 dk.resolve_call_args('Landroid/content/Context;->getSystemService(Ljava/lang/String;)Ljava/lang/Object;')
-# list[ResolvedCallSite]  len 54; each has .args -> list[ArgOrigin]
+# list[ResolvedCallSite]  len 54; each has .args -> list[ResolvedArg]
 ```
 **How far it looks: `depth`.** The analysis is bounded to a **basic-block window** —
 the call site's own block plus `depth` predecessor levels above it. `depth=0` is that
@@ -699,7 +699,7 @@ register file (nothing is carried in, so nothing is tombstoned there either), an
 cycle inside the window is resolved by taking nothing from the not-yet-resolved edge.
 The method **entry** counts as an edge of the entry block, so a loop that reassigns a
 parameter register yields `Unknown` at the header rather than the loop-carried value.
-`ArgOrigin.crossed_branch` separates the two flavours of `Unknown`:
+`ResolvedArg.crossed_branch` separates the two flavours of `Unknown`:
 
 | `kind` | `crossed_branch` | meaning |
 |---|---|---|
@@ -918,7 +918,7 @@ on a real APK implementing `LocationListener`.
 `app_only=True` (the default since dexllm#49) counts only the app's own callers,
 dropping bundled framework / library plumbing by the same predicate and the same
 default as [`dangerous_permission_api_callers`](#dexllmdangerous_permission_api_callersdk--dataset_pathnone-app_onlytrue---dict).
-An API left with no kept caller drops out of `api_hits` entirely, so a whole
+An API left with no kept caller drops out of `api_usages` entirely, so a whole
 category can disappear — which is the point: on this same APK the unfiltered run
 reports `REFLECTION: 120`, of which **2** are the app's, and `USE_FINGERPRINT: 3`,
 of which none are (`FingerprintManagerCompat` is merely bundled). `app_only=False`
@@ -954,7 +954,7 @@ identifier-returning APIs even though it is a flag. A tag the catalog does not
 declare raises `ValueError` rather than returning an empty report.
 
 `r.by_caller` is the caller-indexed view — which method in the app invokes which
-catalog API, the transpose of `ApiHit.callers`:
+catalog API, the transpose of `ApiUsage.callers`:
 ```python
 r = dexllm.summarize_capabilities(dk)
 next(iter(r.by_caller.items()), None)
@@ -970,21 +970,21 @@ at all, including `Settings$Secure.getString`, the ANDROID_ID read. Measured on 
 (5.4%)**; the corpus now has 515 distinct callers under `app_only=False` and every
 one is indexed — 52 of them are the apps' own, which is what the default reports.
 
-Either view is derivable from `api_hits`, so `by_caller` is a convenience index
+Either view is derivable from `api_usages`, so `by_caller` is a convenience index
 rather than new information; descriptors make it the more primary one, and within
 the field the derivation runs only one way — APIs give back permissions and tags,
 a permission set could not give back an API:
 ```python
 r = dexllm.summarize_capabilities(dk)
-by_api = {h.api_descriptor: h for h in r.api_hits}
+by_api = {h.api_descriptor: h for h in r.api_usages}
 for caller, apis in r.by_caller.items():
     {p for a in apis for p in by_api[a].permissions}   # the pre-dexllm#35 value
 ```
 The join is defined WITHIN one report: `only_categories` filters `by_caller` and
-`api_hits` together, so joining across two differently filtered calls is
+`api_usages` together, so joining across two differently filtered calls is
 meaningless.
 
-The `dexllm.capability` module also exposes `ApiHit` / `CapabilityReport` types.
+The `dexllm.capability` module also exposes `ApiUsage` / `CapabilityReport` types.
 
 ---
 
@@ -1045,7 +1045,7 @@ Same, plus the calling methods (default drops bundled framework/library callers)
 
 ### `dexllm.permission_api_callers(dk, *, app_only=True, levels=None, dataset_path=None) -> list`
 The full-surface generalisation (issue #14): **all** protection levels, not just the
-dangerous slice. Returns `[{"perm", "protectionLevel", "rows": [{"api", "descriptors",
+dangerous slice. Returns `[{"perm", "protectionLevel", "apis": [{"api", "descriptors",
 "callers"}]}]` sorted by permission, each group with its real `protectionLevel` bucket
 (`dexllm.PERM_LEVELS = (dangerous, signature, internal, normal, other)`); pass `levels=`
 to filter. `dk.permission_callers(app_only)` is the C++ engine port shared with the
@@ -1127,28 +1127,28 @@ dexllm.tools.tool_definitions()    # list of 36 MCP tool schemas
 Typed objects returned by the search/ref APIs. All are pybind11-bound; fields
 are read-only attributes.
 
-### `ClassMatch`
+### `ClassRef`
 | field | type |
 |---|---|
 | `descriptor` | `str` |
-| `class_id` | `int` |
+| `class_idx` | `int` |
 | `dex_id` | `int` |
 
-### `MethodMatch`
+### `MethodRef`
 | field | type |
 |---|---|
 | `descriptor` | `str` |
-| `method_id` | `int` |
+| `method_idx` | `int` |
 | `dex_id` | `int` |
 
-### `FieldMatch`
+### `FieldRef`
 Returned by `find_fields_by_name` (dexllm#37 — the type existed from the start but
 had no producer until then).
 
 | field | type |
 |---|---|
 | `descriptor` | `str` (`Lcls;->name:Type`) |
-| `field_id` | `int` |
+| `field_idx` | `int` |
 | `dex_id` | `int` |
 
 ### `ExternalMethodRef`
@@ -1159,7 +1159,7 @@ had no producer until then).
 
 ### `ExternalFieldRef` / `ExternalTypeRef`
 Field: class/name/type descriptors + `descriptor`. Type: `descriptor` +
-`java_name` + `referenced_in_dex_ids`.
+`java_type` + `referenced_in_dex_ids`.
 
 ### `CallSite`
 | field | type | meaning |
@@ -1177,21 +1177,39 @@ fixes `callee_descriptor` and varies `caller_*` ("who calls X");
 ("what M calls"), so the repeated caller on every element is the queried method.
 
 ### `ResolvedCallSite`
-All `CallSite` fields plus `args: list[ArgOrigin]`. Only `resolve_call_args` produces
+All `CallSite` fields plus `args: list[ResolvedArg]`. Only `resolve_call_args` produces
 it, i.e. always the reverse direction (callee fixed).
 
-### `ArgOrigin`
+### `ResolvedArg`
 Where one argument came from (intra-method).
 | field | type | meaning |
 |---|---|---|
 | `kind` | `str` | `'MethodReturn'` \| `'NewInstance'` \| `'StringConst'` \| `'IntConst'` \| `'Field'` \| `'Parameter'` \| … |
-| `reg_num` | `int` | register holding the arg |
+| `register_index` | `int` | register holding the arg |
 | `string_value` | `str` | for string constants |
 | `int_value` | `int` | for int constants |
 | `class_descriptor` | `str` | for new-instance/type origins |
 | `method_descriptor` | `str` | for method-return origins |
 | `field_descriptor` | `str` | for field origins |
 | `parameter_index` | `int` | for parameter origins (`-1` if n/a) |
+
+### `MethodInfo` / `FieldInfo`
+One member a class DECLARES, carried by `ClassSummary.methods` / `.fields` and by
+the SDK's `class_methods` / `class_fields`.
+
+| field | type | meaning |
+|---|---|---|
+| `name` | `str` | the member's SimpleName |
+| `proto` (method) / `type` (field) | `str` | `(args)Ret` / the field's type descriptor |
+| `access_flags` | `int \| None` | RAW dex bits; `None` when UNKNOWN (every member of an external class) |
+| `class_descriptor` | `str` | the class it is DECLARED on |
+| `descriptor` | `str` | the IDENTITY the xref / decompile APIs consume — `Lcls;->name(proto)ret` / `Lcls;->name:Type` |
+
+The last two arrived in dexllm#69: every other member-shaped record already carried
+an identity string — `MethodRef`, `ExternalMethodRef`, `ClassSummary` — and `*Info`
+was the only one without, so a caller reading `class_methods()` had to re-assemble it
+by hand. `descriptor` is COMPUTED from `class_descriptor` plus the member's own
+fields, so the two cannot disagree.
 
 ### `ClassSummary`
 `descriptor`, `superclass_descriptor`, `source_file` (`str`); `dex_id` (`int`);
@@ -1214,13 +1232,13 @@ DexKit rewrote `0x20000` → `0x20` for Modifier compatibility; dexllm removed t
 because it conflates the two and because the decompiler already reported the raw
 form, so one method described itself two ways.) The same bits drive the
 `declared_synchronized` modifier in `decompile_class` /
-`decompile_method_ast(...)["access"]`.
+`decompile_method_ast(...)["access_flags"]`.
 
 ### `CapabilityReport`
 `permissions: collections.Counter[str]`, `categories: collections.Counter[str]`,
 `flags: collections.Counter[str]`, `by_caller: dict[str, set[str]]` (caller
 descriptor → the catalog API descriptors it invokes — dexllm#35; it was
-`→ {permissions}` before), `api_hits: list[ApiHit]`, `total_call_sites: int`
+`→ {permissions}` before), `api_usages: list[ApiUsage]`, `total_call_sites: int`
 (invoke instructions), `catalog_version: str`, `catalog_size: int`,
 `matched_apis: int`, `total_field_accesses: int` (READ INSTRUCTIONS against a
 field-descriptor entry — dexllm#36; `find_methods_reading_field` is not
@@ -1280,7 +1298,7 @@ from dexllm.sdk import open_apk, identify, DexAnalysisUseCase
 
 session: DexAnalysisUseCase = open_apk("app.apk")   # or open_apk([dump, apk], lenient=True)
 session.decompile_method("Lcom/x/Y;->m(I)V")        # -> DecompiledMethod
-session.permission_callers(app_only=True)           # -> tuple[PermissionCallerGroup]
+session.permission_callers(app_only=True)           # -> tuple[PermissionCallers]
 session.extract_iocs()                              # -> IocReport
 session.raw                                          # underlying DexKit (escape hatch)
 ```
@@ -1302,10 +1320,11 @@ source in `src/dexllm/sdk/`.
   for the dotted Java rendering (`java_signature`), which dexllm#68 made the
   rule rather than a coincidence. Two ROLE names on those records also hold a
   descriptor and say what it IS rather than repeating the word (`type` on a
-  field ref, `return_type` / `parameters` on a method ref); and the SDK drops the
-  suffix on `ClassInfo.superclass` / `.interfaces` where raw says
-  `superclass_descriptor` / `interface_descriptors` — dexllm#69's axis, not this
-  one.
+  field ref, `return_type` / `parameters` on a method ref). dexllm#69 closed the
+  rest: the SDK used to drop the suffix on `ClassInfo.superclass` / `.interfaces`
+  where raw says `superclass_descriptor` / `interface_descriptors`, and
+  `MethodAst` said `class_name` for a value that is a descriptor — all three now
+  agree with the raw layer, so the audit's DRIFT list is empty.
 - **Threading.** Decompile calls release the GIL — parallelize across threads
   for whole-APK sweeps. Use the `safe_*` wrappers in automation.
 - **Framework filtering.** `is_framework_descriptor` + the `filter_*_refs`

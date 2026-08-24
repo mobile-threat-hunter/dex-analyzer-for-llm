@@ -54,16 +54,23 @@ def descriptor_to_java(descriptor: str) -> str:
     return base + "[]" * n_arr
 
 
-def java_to_descriptor(java_name: str) -> str:
-    """Inverse of descriptor_to_java. Accepts "android.util.Log", "int", "java.lang.String[]"."""
+def java_to_descriptor(java_type: str) -> str:
+    """Inverse of descriptor_to_java. Accepts "android.util.Log", "int", "java.lang.String[]".
+
+    The parameter was `java_name` until dexllm#69, which reserved `java_type` for
+    the dotted rendering of a TYPE descriptor — and this value is exactly that: a
+    class, a primitive, or an array. Its inverse names its own parameter
+    `descriptor`, i.e. after WHAT THE VALUE IS rather than the role it plays, and
+    that is the convention this family follows.
+    """
     n_arr = 0
-    while java_name.endswith("[]"):
+    while java_type.endswith("[]"):
         n_arr += 1
-        java_name = java_name[:-2]
-    if java_name in _PRIMITIVE_INV:
-        base = _PRIMITIVE_INV[java_name]
+        java_type = java_type[:-2]
+    if java_type in _PRIMITIVE_INV:
+        base = _PRIMITIVE_INV[java_type]
     else:
-        base = "L" + java_name.replace(".", "/") + ";"
+        base = "L" + java_type.replace(".", "/") + ";"
     return "[" * n_arr + base
 
 

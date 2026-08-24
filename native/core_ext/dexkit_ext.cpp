@@ -47,43 +47,43 @@ dexkit::schema::StringMatchType ParseStringMatchType(std::string_view s) {
     return dexkit::schema::StringMatchType::Contains;  // default
 }
 
-// Parse a flatbuffer ClassMetaArrayHolder result into POD ClassMatch vector.
-std::vector<ClassMatch> ParseClassMetaArray(
+// Parse a flatbuffer ClassMetaArrayHolder result into POD ClassRef vector.
+std::vector<ClassRef> ParseClassMetaArray(
     const dexkit::schema::ClassMetaArrayHolder* holder) {
-    std::vector<ClassMatch> out;
+    std::vector<ClassRef> out;
     if (holder == nullptr || holder->classes() == nullptr) return out;
     for (const auto* cls : *holder->classes()) {
-        ClassMatch m;
+        ClassRef m;
         m.dex_id = cls->dex_id();
-        m.class_id = cls->id();
+        m.class_idx = cls->id();
         if (cls->dex_descriptor()) m.descriptor = cls->dex_descriptor()->str();
         out.push_back(std::move(m));
     }
     return out;
 }
 
-std::vector<MethodMatch> ParseMethodMetaArray(
+std::vector<MethodRef> ParseMethodMetaArray(
     const dexkit::schema::MethodMetaArrayHolder* holder) {
-    std::vector<MethodMatch> out;
+    std::vector<MethodRef> out;
     if (holder == nullptr || holder->methods() == nullptr) return out;
     for (const auto* m : *holder->methods()) {
-        MethodMatch mm;
+        MethodRef mm;
         mm.dex_id = m->dex_id();
-        mm.method_id = m->id();
+        mm.method_idx = m->id();
         if (m->dex_descriptor()) mm.descriptor = m->dex_descriptor()->str();
         out.push_back(std::move(mm));
     }
     return out;
 }
 
-std::vector<FieldMatch> ParseFieldMetaArray(
+std::vector<FieldRef> ParseFieldMetaArray(
     const dexkit::schema::FieldMetaArrayHolder* holder) {
-    std::vector<FieldMatch> out;
+    std::vector<FieldRef> out;
     if (holder == nullptr || holder->fields() == nullptr) return out;
     for (const auto* f : *holder->fields()) {
-        FieldMatch fm;
+        FieldRef fm;
         fm.dex_id = f->dex_id();
-        fm.field_id = f->id();
+        fm.field_idx = f->id();
         if (f->dex_descriptor()) fm.descriptor = f->dex_descriptor()->str();
         out.push_back(std::move(fm));
     }
@@ -990,7 +990,7 @@ std::string BuildMethodDescriptor(const dexkit::DexItem& item, uint32_t method_i
     const auto& type_names = item.GetTypeNames();
     const auto& strings = item.GetStrings();
     // Bound the index (mirrors BuildFieldDescriptor). method_idx can be a raw
-    // invoke operand (ArgOrigin MethodReturn → last_invoke_callee), which lenient
+    // invoke operand (ResolvedArg MethodReturn → last_invoke_callee), which lenient
     // mode leaves unvalidated; an OOB index here would OOB-read MethodIds().
     if (method_idx >= reader.MethodIds().size()) return {};
     const auto& m = reader.MethodIds()[method_idx];
@@ -1149,6 +1149,12 @@ DexKitExt::GetClassSummary(std::string_view descriptor) const {
         // External classes returning empty (no refs anywhere) → descriptor stays
         // set, but is_internal=false and members are empty. Caller can check.
     }
+    // dexllm#69 §3 — stamp the declaring class on every member, in ONE place
+    // rather than at each of the four construction sites, so a future third fill
+    // path cannot ship members whose `descriptor` property silently reads
+    // `->name(proto)ret` with no class in front of it.
+    for (auto& m : out.methods) m.class_descriptor = out.descriptor;
+    for (auto& f : out.fields) f.class_descriptor = out.descriptor;
     return out;
 }
 
@@ -1158,7 +1164,7 @@ DexKitExt::GetClassSummary(std::string_view descriptor) const {
 // core_->FindXxx, and convert results back to POD vectors. The matcher tree
 // can be deeply nested in upstream; we expose the most common shapes.
 
-std::vector<ClassMatch>
+std::vector<ClassRef>
 DexKitExt::FindClassesByName(std::string_view name,
                              std::string_view match_type,
                              bool ignore_case) {
@@ -1181,7 +1187,7 @@ DexKitExt::FindClassesByName(std::string_view name,
     return ParseClassMetaArray(holder);
 }
 
-std::vector<ClassMatch>
+std::vector<ClassRef>
 DexKitExt::FindClassesUsingStrings(const std::vector<std::string>& strings,
                                    std::string_view match_type,
                                    bool ignore_case) {
@@ -1259,11 +1265,11 @@ void DexKitExt::EnsureDeclaredStringIndex() {
     declared_string_index_built_ = true;
 }
 
-std::vector<ClassMatch>
+std::vector<ClassRef>
 DexKitExt::FindClassesDeclaringStrings(const std::vector<std::string>& strings,
                                        std::string_view match_type,
                                        bool ignore_case) {
-    std::vector<ClassMatch> out;
+    std::vector<ClassRef> out;
     // Empty query returns nothing. This DIVERGES from the `using` family, where an
     // empty matcher list is vacuously true and returns every class; returning
     // everything for "find classes declaring []" is a footgun, so it is deliberate
@@ -1303,9 +1309,9 @@ DexKitExt::FindClassesDeclaringStrings(const std::vector<std::string>& strings,
             if (!any) return;
         }
         const auto& type_names = item.GetTypeNames();
-        ClassMatch m;
+        ClassRef m;
         m.dex_id = item.GetDexId();
-        m.class_id = type_idx;
+        m.class_idx = type_idx;
         if (type_idx < type_names.size())
             m.descriptor = std::string(type_names[type_idx]);
         out.push_back(std::move(m));
@@ -1338,7 +1344,7 @@ DexKitExt::FindClassesDeclaringStrings(const std::vector<std::string>& strings,
     return out;
 }
 
-std::vector<MethodMatch>
+std::vector<MethodRef>
 DexKitExt::FindMethodsUsingStrings(const std::vector<std::string>& strings,
                                    std::string_view match_type,
                                    bool ignore_case) {
@@ -1366,7 +1372,7 @@ DexKitExt::FindMethodsUsingStrings(const std::vector<std::string>& strings,
     return ParseMethodMetaArray(holder);
 }
 
-std::map<std::string, std::vector<ClassMatch>>
+std::map<std::string, std::vector<ClassRef>>
 DexKitExt::BatchFindClassesUsingStrings(
     const std::map<std::string, std::vector<std::string>>& query_map,
     std::string_view match_type, bool ignore_case) {
@@ -1394,16 +1400,16 @@ DexKitExt::BatchFindClassesUsingStrings(
     auto holder = ::flatbuffers::GetRoot<dexkit::schema::BatchClassMetaArrayHolder>(
         result->GetBufferPointer());
 
-    std::map<std::string, std::vector<ClassMatch>> out;
+    std::map<std::string, std::vector<ClassRef>> out;
     if (holder == nullptr || holder->items() == nullptr) return out;
     for (const auto* item : *holder->items()) {
         std::string key = item->union_key() ? item->union_key()->str() : "";
-        std::vector<ClassMatch> ms;
+        std::vector<ClassRef> ms;
         if (item->classes()) {
             for (const auto* cls : *item->classes()) {
-                ClassMatch m;
+                ClassRef m;
                 m.dex_id = cls->dex_id();
-                m.class_id = cls->id();
+                m.class_idx = cls->id();
                 if (cls->dex_descriptor()) m.descriptor = cls->dex_descriptor()->str();
                 ms.push_back(std::move(m));
             }
@@ -1413,7 +1419,7 @@ DexKitExt::BatchFindClassesUsingStrings(
     return out;
 }
 
-std::map<std::string, std::vector<MethodMatch>>
+std::map<std::string, std::vector<MethodRef>>
 DexKitExt::BatchFindMethodsUsingStrings(
     const std::map<std::string, std::vector<std::string>>& query_map,
     std::string_view match_type, bool ignore_case) {
@@ -1441,16 +1447,16 @@ DexKitExt::BatchFindMethodsUsingStrings(
     auto holder = ::flatbuffers::GetRoot<dexkit::schema::BatchMethodMetaArrayHolder>(
         result->GetBufferPointer());
 
-    std::map<std::string, std::vector<MethodMatch>> out;
+    std::map<std::string, std::vector<MethodRef>> out;
     if (holder == nullptr || holder->items() == nullptr) return out;
     for (const auto* item : *holder->items()) {
         std::string key = item->union_key() ? item->union_key()->str() : "";
-        std::vector<MethodMatch> ms;
+        std::vector<MethodRef> ms;
         if (item->methods()) {
             for (const auto* m : *item->methods()) {
-                MethodMatch mm;
+                MethodRef mm;
                 mm.dex_id = m->dex_id();
-                mm.method_id = m->id();
+                mm.method_idx = m->id();
                 if (m->dex_descriptor()) mm.descriptor = m->dex_descriptor()->str();
                 ms.push_back(std::move(mm));
             }
@@ -1460,7 +1466,7 @@ DexKitExt::BatchFindMethodsUsingStrings(
     return out;
 }
 
-std::vector<MethodMatch>
+std::vector<MethodRef>
 DexKitExt::FindMethodsByName(std::string_view name,
                              std::string_view match_type,
                              std::string_view declaring_class,
@@ -1493,7 +1499,7 @@ DexKitExt::FindMethodsByName(std::string_view name,
     return ParseMethodMetaArray(holder);
 }
 
-std::vector<FieldMatch>
+std::vector<FieldRef>
 DexKitExt::FindFieldsByName(std::string_view name,
                             std::string_view match_type,
                             std::string_view declaring_class,
@@ -1552,11 +1558,11 @@ DexKitExt::FindFieldsByName(std::string_view name,
     // Filtered HERE, not in the vendored matcher, so upstream FindField semantics
     // are untouched.
     if (!declaring_class.empty()) {
-        std::erase_if(matches, [this](const FieldMatch& fm) {
+        std::erase_if(matches, [this](const FieldRef& fm) {
             auto* item = core_->GetDexItem(fm.dex_id);
             if (item == nullptr) return true;
             const auto& declared = item->GetFieldAccessFlagsDeclared();
-            return fm.field_id >= declared.size() || !declared[fm.field_id];
+            return fm.field_idx >= declared.size() || !declared[fm.field_idx];
         });
     }
     return matches;
@@ -1594,7 +1600,7 @@ BuildSingleAnnotationsMatcher(flatbuffers::FlatBufferBuilder& fbb,
         dexkit::schema::MatchType::Contains);
 }
 
-std::vector<ClassMatch>
+std::vector<ClassRef>
 DexKitExt::FindClassesByAnnotation(std::string_view annotation_class,
                                    std::string_view match_type) {
     flatbuffers::FlatBufferBuilder fbb;
@@ -1613,7 +1619,7 @@ DexKitExt::FindClassesByAnnotation(std::string_view annotation_class,
     return ParseClassMetaArray(holder);
 }
 
-std::vector<MethodMatch>
+std::vector<MethodRef>
 DexKitExt::FindMethodsByAnnotation(std::string_view annotation_class,
                                    std::string_view match_type) {
     flatbuffers::FlatBufferBuilder fbb;
@@ -1632,7 +1638,7 @@ DexKitExt::FindMethodsByAnnotation(std::string_view annotation_class,
     return ParseMethodMetaArray(holder);
 }
 
-std::vector<ClassMatch>
+std::vector<ClassRef>
 DexKitExt::FindClassesBySuperclass(std::string_view super_class_name,
                                    std::string_view match_type) {
     flatbuffers::FlatBufferBuilder fbb;
@@ -1654,7 +1660,7 @@ DexKitExt::FindClassesBySuperclass(std::string_view super_class_name,
     return ParseClassMetaArray(holder);
 }
 
-std::vector<ClassMatch>
+std::vector<ClassRef>
 DexKitExt::FindClassesImplementing(std::string_view interface_class_name,
                                    std::string_view match_type) {
     flatbuffers::FlatBufferBuilder fbb;
@@ -1680,7 +1686,7 @@ DexKitExt::FindClassesImplementing(std::string_view interface_class_name,
     return ParseClassMetaArray(holder);
 }
 
-std::vector<MethodMatch>
+std::vector<MethodRef>
 DexKitExt::FindMethodsUsingIntLiterals(const std::vector<int64_t>& values) {
     flatbuffers::FlatBufferBuilder fbb;
     std::vector<dexkit::schema::Number> types;
@@ -1709,7 +1715,7 @@ DexKitExt::FindMethodsUsingIntLiterals(const std::vector<int64_t>& values) {
     return ParseMethodMetaArray(holder);
 }
 
-std::vector<MethodMatch>
+std::vector<MethodRef>
 DexKitExt::FindMethodsUsingDoubleLiterals(const std::vector<double>& values) {
     flatbuffers::FlatBufferBuilder fbb;
     std::vector<dexkit::schema::Number> types;
@@ -1832,11 +1838,11 @@ std::string BuildFieldDescriptor(const dexkit::DexItem& item, uint32_t field_idx
     return out;
 }
 
-ArgOrigin ConvertArg(const dexkit::DexItem& item,
-                     const dexkit::ext::InvokeArg& src) {
-    ArgOrigin o;
+ResolvedArg ConvertArg(const dexkit::DexItem& item,
+                       const dexkit::ext::InvokeArg& src) {
+    ResolvedArg o;
     o.kind = ArgKindName(src.kind);
-    o.reg_num = src.reg_num;
+    o.register_index = src.reg_num;
     o.crossed_branch = src.crossed_branch;
     const auto& reader = item.GetReader();
     const auto& strings = item.GetStrings();

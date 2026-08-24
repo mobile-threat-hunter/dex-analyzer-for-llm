@@ -33,7 +33,7 @@ ACC_DECLARED_SYNCHRONIZED = 0x20000
 _EITHER_SYNC = ACC_SYNCHRONIZED | ACC_DECLARED_SYNCHRONIZED
 
 # native/dad_cpp/util.cpp AccessFlagsMethodsTable (DAD util.py:67), which is what
-# decompile_method_ast()["access"] renders. Kept in step with that table — note
+# decompile_method_ast()["access_flags"] renders. Kept in step with that table — note
 # 0x200/0x2000/0x4000 are absent there too (faithful to androguard), and the C++
 # emits "unkn_<flag>" for those; see _ast_modifiers.
 _METHOD_FLAG_NAMES = {
@@ -63,7 +63,7 @@ def _ast_modifiers(ast) -> set[str]:
     (docs/dexkit-vs-art-dex-handling.md), so a crafted or obfuscated dex can set
     them; drop those so this suite compares only the named bits it models.
     """
-    return {a for a in ast["access"] if not a.startswith("unkn_")}
+    return {a for a in ast["access_flags"] if not a.startswith("unkn_")}
 
 
 def _sync_candidates(dk, limit=None):
@@ -107,7 +107,7 @@ def test_declared_synchronized_bit_survives_class_summary(loadable_apks):
             ast = dk.decompile_method_ast(
                 f"{cls}->{m.name}{m.proto}", include_source=False
             )
-            if not ast["found"] or "declared_synchronized" not in ast["access"]:
+            if not ast["found"] or "declared_synchronized" not in ast["access_flags"]:
                 continue  # a genuine JNI synchronized-native method, or bodiless
             checked += 1
             assert m.access_flags & ACC_DECLARED_SYNCHRONIZED, (
@@ -177,7 +177,7 @@ def test_summary_flags_agree_with_the_decompiler_modifiers(dk):
         }
         assert expected == _ast_modifiers(ast), (
             f"{cls}->{m.name}{m.proto}: summary {m.access_flags:#x} decodes to "
-            f"{sorted(expected)} but the AST says {sorted(ast['access'])}"
+            f"{sorted(expected)} but the AST says {sorted(ast['access_flags'])}"
         )
         checked += 1
         if m.access_flags & _EITHER_SYNC:
@@ -210,8 +210,12 @@ def test_dad_path_still_reports_declared_synchronized(loadable_apks):
             continue
         ast = dk.decompile_method_ast(f"{target_cls}->size()I", include_source=False)
         assert ast["found"], f"{apk}: {target_cls}->size()I has no body"
-        assert set(ast["access"]) == {"public", "final", "declared_synchronized"}, (
-            f"{apk}: LruCache.size() modifiers are {sorted(ast['access'])} — the DAD "
+        assert set(ast["access_flags"]) == {
+            "public",
+            "final",
+            "declared_synchronized",
+        }, (
+            f"{apk}: LruCache.size() modifiers are {sorted(ast['access_flags'])} — the DAD "
             f"path no longer sees the raw declared_synchronized bit"
         )
         src = dk.decompile_class(target_cls)
@@ -429,7 +433,7 @@ def test_a_declared_zero_is_still_zero_and_is_corroborated(dk):
 
     Unknown moved out of the encoding; 0 did not move with it. `zero_seen` alone
     would be satisfied by a fabricated 0, so a declared 0 is corroborated through
-    the DAD path (`decompile_method_ast(...)["access"]`), which reads the same
+    the DAD path (`decompile_method_ast(...)["access_flags"]`), which reads the same
     class_data by a different route: no modifier name may appear for it.
     """
     zero_corroborated = 0

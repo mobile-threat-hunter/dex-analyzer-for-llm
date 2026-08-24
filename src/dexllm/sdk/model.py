@@ -204,14 +204,14 @@ class MethodAst:
 
     Example (real, Fragment#getId)::
 
-        MethodAst(found=True, class_name='Landroid/support/v4/app/Fragment;',
+        MethodAst(found=True, class_descriptor='Landroid/support/v4/app/Fragment;',
                   name='getId', proto='()I', return_type='I', param_types=(),
                   access_flags=..., source='public int getId() { ... }',
                   ast={'triple': (...), 'body': [...]}, pc_map=(...,))
     """
 
     found: bool
-    class_name: str
+    class_descriptor: str
     name: str
     proto: str
     return_type: str
@@ -306,12 +306,12 @@ class ExternalTypeRef:
 
         ExternalTypeRef(
             descriptor='Landroid/accessibilityservice/AccessibilityServiceInfo;',
-            java_name='android.accessibilityservice.AccessibilityServiceInfo',
+            java_type='android.accessibilityservice.AccessibilityServiceInfo',
             referenced_in_dex_ids=(0,))
     """
 
     descriptor: str
-    java_name: str
+    java_type: str
     referenced_in_dex_ids: tuple[int, ...]
 
 
@@ -322,53 +322,53 @@ class ExternalTypeRef:
 
 
 @dataclass(frozen=True)
-class ClassMatch:
+class ClassRef:
     """One class hit from a search query: descriptor + dex location.
 
     Example (real, a2dp.Vol_137.apk)::
 
-        ClassMatch(class_id=6, descriptor='La2dp/Vol/ALauncher;', dex_id=0)
+        ClassRef(class_idx=6, descriptor='La2dp/Vol/ALauncher;', dex_id=0)
     """
 
-    class_id: int
+    class_idx: int
     descriptor: str
     dex_id: int
 
 
 @dataclass(frozen=True)
-class MethodMatch:
+class MethodRef:
     """One method hit from a search query: descriptor + dex location.
 
     Example (real, a2dp.Vol_137.apk)::
 
-        MethodMatch(method_id=1,
+        MethodRef(method_idx=1,
                     descriptor='La2dp/Vol/ALauncher;->onBind(Landroid/content/Intent;)'
                                'Landroid/os/IBinder;',
                     dex_id=0)
     """
 
-    method_id: int
+    method_idx: int
     descriptor: str
     dex_id: int
 
 
 @dataclass(frozen=True)
-class FieldMatch:
+class FieldRef:
     """One field hit from a search query: descriptor + dex location.
 
     The field arm of the search family. Its raw counterpart was a registered but
     UNPRODUCIBLE type until dexllm#37 built ``find_fields_by_name`` — so unlike
-    :class:`ClassMatch` / :class:`MethodMatch` this model is new rather than a
+    :class:`ClassRef` / :class:`MethodRef` this model is new rather than a
     rename.
 
     Example (real, a2dp.Vol_137.apk)::
 
-        FieldMatch(field_id=520,
+        FieldRef(field_idx=520,
                    descriptor='La2dp/Vol/StoreLoc;->DB:La2dp/Vol/DeviceDB;',
                    dex_id=0)
     """
 
-    field_id: int
+    field_idx: int
     descriptor: str
     dex_id: int
 
@@ -385,7 +385,8 @@ class FieldMatch:
 class FieldInfo:
     """One declared field of a class: name, dex type descriptor, access flags.
 
-    Its full descriptor is ``f"{class_descriptor}->{name}:{type}"``.
+    :attr:`descriptor` is the identity the xref / decompile APIs consume; before
+    dexllm#69 a caller had to assemble ``f"{cls}->{name}:{type}"`` by hand.
 
     ``access_flags`` is ``None`` when UNKNOWN — every field of an EXTERNAL class,
     which has no ``class_data`` to read modifiers from. See :class:`MethodInfo`
@@ -400,12 +401,19 @@ class FieldInfo:
 
     Example (real, a2dp.Vol StoreLoc.DB)::
 
-        FieldInfo(name='DB', type='La2dp/Vol/DeviceDB;', access_flags=2)
+        FieldInfo(name='DB', type='La2dp/Vol/DeviceDB;', access_flags=2,
+                  class_descriptor='La2dp/Vol/StoreLoc;',
+                  descriptor='La2dp/Vol/StoreLoc;->DB:La2dp/Vol/DeviceDB;')
     """
 
     name: str
     type: str
     access_flags: Optional[int]
+    #: The class this field is DECLARED on, and the identity string every other
+    #: field-shaped record already carries (dexllm#69 §3). Appended last, so the
+    #: three positional arguments above keep their meaning.
+    class_descriptor: str
+    descriptor: str
 
 
 @dataclass(frozen=True)
@@ -440,7 +448,8 @@ class MethodInfo:
     what was OBSERVED, the latter what a loaded dex DECLARES), so the two agree
     only for internal classes.
 
-    Its full descriptor is ``f"{class_descriptor}->{name}{proto}"``.
+    :attr:`descriptor` is the identity the xref / decompile APIs consume; before
+    dexllm#69 a caller had to assemble ``f"{cls}->{name}{proto}"`` by hand.
 
     Example (real, a2dp.Vol AppChooser)::
 
@@ -448,12 +457,18 @@ class MethodInfo:
 
     Example (real, the EXTERNAL android.app.Activity)::
 
-        MethodInfo(name='onCreate', proto='(Landroid/os/Bundle;)V', access_flags=None)
+        MethodInfo(name='onCreate', proto='(Landroid/os/Bundle;)V', access_flags=None,
+                   class_descriptor='Landroid/app/Activity;',
+                   descriptor='Landroid/app/Activity;->onCreate(Landroid/os/Bundle;)V')
     """
 
     name: str
     proto: str
     access_flags: Optional[int]
+    #: See the :class:`FieldInfo` twin — the declaring class and the identity
+    #: string, appended last (dexllm#69 §3).
+    class_descriptor: str
+    descriptor: str
 
 
 @dataclass(frozen=True)
@@ -461,7 +476,7 @@ class ClassInfo:
     """A class's metadata (no field/method bodies — those are separate queries).
 
     ``is_internal`` is False for a class only REFERENCED (not declared) in a loaded
-    dex — such an external class has ``dex_id=-1``, ``dex_name=""``, ``superclass=""``,
+    dex — such an external class has ``dex_id=-1``, ``dex_name=""``, ``superclass_descriptor=""``,
     ``access_flags=None`` (UNKNOWN, not 0 — see :class:`MethodInfo`) and (via
     ``class_fields``) fields deduped + sorted by (name, type) rather than in
     declared order. ``source_file`` may be empty. ``dex_name`` is the declaring dex's
@@ -471,16 +486,17 @@ class ClassInfo:
     Example (real, a2dp.Vol StoreLoc)::
 
         ClassInfo(descriptor='La2dp/Vol/StoreLoc;', dex_id=0, dex_name='classes.dex',
-                  is_internal=True, access_flags=1, superclass='Landroid/app/Service;',
-                  interfaces=(), source_file='StoreLoc.java')
+                  is_internal=True, access_flags=1,
+                  superclass_descriptor='Landroid/app/Service;',
+                  interface_descriptors=(), source_file='StoreLoc.java')
     """
 
     descriptor: str
     dex_id: int
     is_internal: bool
     access_flags: Optional[int]
-    superclass: str
-    interfaces: tuple[str, ...]
+    superclass_descriptor: str
+    interface_descriptors: tuple[str, ...]
     source_file: str
     dex_name: str = ""
 
@@ -489,7 +505,7 @@ class ClassInfo:
 
 
 @dataclass(frozen=True)
-class ArgOrigin:
+class ResolvedArg:
     """The provenance of one invoke argument register.
 
     Basic-block-scoped forward simulation; only the field(s) relevant to ``kind``
@@ -499,11 +515,11 @@ class ArgOrigin:
 
     Example (real, the first arg of a Log.d call in a2dp.Vol)::
 
-        ArgOrigin(kind='ConstString', reg_num=1, string_value='A2DP Volume')
+        ResolvedArg(kind='ConstString', register_index=1, string_value='A2DP Volume')
     """
 
     kind: str
-    reg_num: int
+    register_index: int
     string_value: Optional[str] = None
     int_value: Optional[int] = None
     class_descriptor: Optional[str] = None
@@ -561,7 +577,7 @@ class CallSite:
 
 @dataclass(frozen=True)
 class ResolvedCallSite:
-    """A call site plus a resolved :class:`ArgOrigin` per argument register.
+    """A call site plus a resolved :class:`ResolvedArg` per argument register.
 
     Produced only by ``resolve_call_args(X)``, i.e. the same reverse direction as
     ``find_call_sites_to``: ``callee_descriptor`` is constant and the ``caller_*`` fields
@@ -573,7 +589,7 @@ class ResolvedCallSite:
                          caller_dex_id=0, caller_method_idx=278,
                          callee_descriptor='Landroid/util/Log;->d(...)I',
                          bytecode_offset=14, invoke_opcode=113,
-                         args=(ArgOrigin(kind='ConstString', reg_num=1,
+                         args=(ResolvedArg(kind='ConstString', register_index=1,
                                          string_value='A2DP Volume'), ...))
     """
 
@@ -583,7 +599,7 @@ class ResolvedCallSite:
     callee_descriptor: str
     bytecode_offset: int
     invoke_opcode: int
-    args: tuple[ArgOrigin, ...]
+    args: tuple[ResolvedArg, ...]
 
 
 @dataclass(frozen=True)
@@ -613,7 +629,7 @@ class TypeReferences:
 
 
 @dataclass(frozen=True)
-class PermissionCallerRow:
+class ApiCallers:
     """One gated API under a permission, plus the app methods that call it.
 
     ``api`` is the AOSP dataset signature (e.g. ``android.telephony.SmsManager#
@@ -623,7 +639,7 @@ class PermissionCallerRow:
 
     Example (real, a2dp.Vol under ACCESS_COARSE_LOCATION)::
 
-        PermissionCallerRow(
+        ApiCallers(
             api='android.location.LocationManager#getLastKnownLocation(String)',
             descriptors=('Landroid/location/LocationManager;->'
                          'getLastKnownLocation(Ljava/lang/String;)Landroid/location/Location;',),
@@ -636,7 +652,7 @@ class PermissionCallerRow:
 
 
 @dataclass(frozen=True)
-class PermissionCallerGroup:
+class PermissionCallers:
     """A permission, its protection-level bucket, and its referenced gated APIs.
 
     Each row has a (kept) caller. ``protection_level`` is the Android
@@ -658,16 +674,16 @@ class PermissionCallerGroup:
 
     Example (real, a2dp.Vol)::
 
-        PermissionCallerGroup(
+        PermissionCallers(
             permission='android.permission.ACCESS_COARSE_LOCATION',
             protection_level='dangerous',
-            rows=(PermissionCallerRow(api='android.location.LocationManager#'
+            apis=(ApiCallers(api='android.location.LocationManager#'
                                           'getLastKnownLocation(String)', ...), ...))
     """
 
     permission: str
     protection_level: str
-    rows: tuple[PermissionCallerRow, ...]
+    apis: tuple[ApiCallers, ...]
 
 
 # ── indicators (IOC) ─────────────────────────────────────────────────────────
@@ -719,7 +735,7 @@ class IocReport:
 
 
 @dataclass(frozen=True)
-class CapabilityHit:
+class ApiUsage:
     """One capability-catalog API the app exercises.
 
     Carries its touch count, the permissions it maps to, and the catalog's two
@@ -736,7 +752,7 @@ class CapabilityHit:
 
     Example (real, a2dp.Vol)::
 
-        CapabilityHit(
+        ApiUsage(
             api_descriptor='Landroid/location/LocationManager;->'
                           'getLastKnownLocation(Ljava/lang/String;)Landroid/location/Location;',
             call_site_count=1,
@@ -771,14 +787,14 @@ class CapabilityReport:
     caller → catalog-APIs map. Holds ``Mapping`` fields, so this model is immutable
     (the mappings are read-only views) but NOT hashable.
 
-    ``by_caller`` is the transpose of ``CapabilityHit.callers`` — which method in
+    ``by_caller`` is the transpose of ``ApiUsage.callers`` — which method in
     this app invokes which catalog API. It held ``{permissions}`` until dexllm#35,
     and was built inside the permission loop, so an API declaring none contributed
     no callers at all; every REFLECTION / PROCESS_EXEC / DYNAMIC_LOAD /
     NATIVE_CODE / CRYPTO / WEBVIEW / STORAGE entry is permission-less, as are 6
     domain entries incl. the ANDROID_ID read, and the index covered 17 of the
     corpus's 317 distinct callers (5.4%). Both views are derivable from
-    ``api_hits``, so this is a convenience index rather than new information; the
+    ``api_usages``, so this is a convenience index rather than new information; the
     value is descriptors because that is the more primary view, and because the
     FIELD only derives one way — ``{p for a in by_caller[c] for p in
     by_api[a].permissions}`` recovers the old value, a permission set could not
@@ -794,7 +810,7 @@ class CapabilityReport:
                          matched_apis=5, total_call_sites=8,
                          permissions={'android.permission.INTERNET': 2},
                          categories={'STORAGE': 2, 'REFLECTION': 2, ...}, flags={},
-                         api_hits=(CapabilityHit(...), ...),
+                         api_usages=(ApiUsage(...), ...),
                          by_caller={'Lcom/example/android/tvleanback/recommendation/'
                                     'RecommendationReceiver;->scheduleRecommendation'
                                     'Update(...)':
@@ -817,7 +833,7 @@ class CapabilityReport:
     permissions: Mapping[str, int]
     categories: Mapping[str, int]
     flags: Mapping[str, int]
-    api_hits: tuple[CapabilityHit, ...]
+    api_usages: tuple[ApiUsage, ...]
     by_caller: Mapping[str, tuple[str, ...]]
     # Appended (dexllm#36). docs/sdk.md documents the inequality
     # `sum(categories.values()) >= total_call_sites + total_field_accesses`, which

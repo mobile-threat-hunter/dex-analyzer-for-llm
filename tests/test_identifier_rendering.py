@@ -208,7 +208,7 @@ def test_ast_identifier_fields_and_source_agree(tmp_path):
     methods = dk.list_class_methods(cls)
     assert methods, cls
     ast = dk.decompile_method_ast(methods[0])
-    assert _CHAR in ast["cls_name"], ast["cls_name"]
+    assert _CHAR in ast["class_descriptor"], ast["class_descriptor"]
     assert _CHAR in ast["source"], ast["source"]
     assert "\\ud800" not in ast["source"]
     # ...and the text API agrees with the AST's own copy of it.

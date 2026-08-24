@@ -378,7 +378,7 @@ from dexllm.sdk import open_apk, DexAnalysisUseCase
 
 session: DexAnalysisUseCase = open_apk("app.apk")
 session.decompile_method("Lcom/x/Y;->m(I)V")   # -> DecompiledMethod
-session.permission_callers(app_only=True)      # -> tuple[PermissionCallerGroup]
+session.permission_callers(app_only=True)      # -> tuple[PermissionCallers]
 ```
 
 See [docs/usage.md](docs/usage.md#typed-sdk--ports--adapters-dexllmsdk).

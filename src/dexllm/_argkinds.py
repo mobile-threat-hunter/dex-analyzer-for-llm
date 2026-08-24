@@ -1,4 +1,4 @@
-"""Which `ArgOrigin` attribute each `kind` fills — ONE definition.
+"""Which `ResolvedArg` attribute each `kind` fills — ONE definition.
 
 `tools.py` (the MCP compact view) and `sdk/adapter.py` (the typed model) each
 carried a private copy of this map, so a rename on either side had to be applied
@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from types import MappingProxyType
 
-#: ``ArgOrigin.kind`` -> the attribute holding that kind's value. Read-only, so
+#: ``ResolvedArg.kind`` -> the attribute holding that kind's value. Read-only, so
 #: a consumer cannot mutate the map both layers share.
 ARG_VALUE_ATTR_BY_KIND = MappingProxyType(
     {

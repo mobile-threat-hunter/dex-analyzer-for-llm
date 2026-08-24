@@ -180,7 +180,7 @@ def test_a_catch_handler_is_entered_with_an_empty_state(loadable_apks):
         }
         for off, is_handler in _REFL_SITES:
             args = seen[off]
-            assert args[1].reg_num == 1, (off, args[1].reg_num)
+            assert args[1].register_index == 1, (off, args[1].register_index)
             if is_handler:
                 assert (args[1].kind, args[1].crossed_branch) == ("Unknown", False), (
                     f"0x{off:x} at depth {depth}: {args[1].kind}/"
@@ -339,7 +339,7 @@ def test_raising_depth_only_adds_information(dk):
                 compared += 1
                 if x.kind != "Unknown" and y.kind != "Unknown":
                     assert x.kind == y.kind, (
-                        f"{api} @0x{a.bytecode_offset:x} v{x.reg_num}: "
+                        f"{api} @0x{a.bytecode_offset:x} v{x.register_index}: "
                         f"{x.kind} at depth 1 but {y.kind} at depth 3"
                     )
     require_corpus_shape(

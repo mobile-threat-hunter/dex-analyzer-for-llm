@@ -270,7 +270,7 @@ by extracting the raw `.dex` and loading it individually.
     `list_classes()` views — a correlation failure for anyone reading them side by
     side or pasting a class name into a hooking script, and one a BMP identifier
     never had. The string **VALUE** accessors (`list_*_strings`,
-    `ArgOrigin.string_value`, AST string values) return the combined code point for a
+    `ResolvedArg.string_value`, AST string values) return the combined code point for a
     pair and, since dexllm#29, preserve a LONE surrogate rather than replacing it with
     U+FFFD, because a caller feeds those values back as queries. The smali listing is
     display text and keeps the lossy decode. See docs/api.md.

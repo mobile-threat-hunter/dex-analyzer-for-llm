@@ -10,15 +10,15 @@ import pathlib
 from types import MappingProxyType
 
 import pytest
+from _records import assert_skips_are_optional, public_record_attrs
 from conftest import require_corpus_shape
 
 from dexllm.sdk import (
-    ArgOrigin,
     CacheControlPort,
     CapabilityPort,
     CapabilityReport,
     ClassInspectionPort,
-    ClassMatch,
+    ClassRef,
     ContainerInfo,
     ContainerProbe,
     ContainerProbePort,
@@ -35,9 +35,10 @@ from dexllm.sdk import (
     IndicatorExtractionPort,
     IocReport,
     MethodAst,
-    MethodMatch,
+    MethodRef,
     PermissionAnalysisPort,
-    PermissionCallerGroup,
+    PermissionCallers,
+    ResolvedArg,
     SearchPort,
     SourceLocation,
     StatementLocation,
@@ -66,14 +67,14 @@ _HASHABLE_MODELS = [
     DecompiledMethod,
     SourceLocation,
     StatementLocation,
-    ArgOrigin,
-    PermissionCallerGroup,
+    ResolvedArg,
+    PermissionCallers,
     IocReport,
     ExternalMethodRef,
     ExternalFieldRef,
     ExternalTypeRef,
-    ClassMatch,
-    MethodMatch,
+    ClassRef,
+    MethodRef,
 ]
 # models carrying a Mapping — frozen but NOT hashable (documented)
 _MAPPING_MODELS = [CapabilityReport, MethodAst]
@@ -118,9 +119,9 @@ _SDK_ONLY_MODELS = {
     "Indicator",
     "ContentProviderUse",
     "CapabilityReport",
-    "CapabilityHit",
-    "PermissionCallerGroup",
-    "PermissionCallerRow",
+    "ApiUsage",
+    "PermissionCallers",
+    "ApiCallers",
     # the ISP split of raw's ClassSummary (see _RAW_DECOMPOSED)
     "ClassInfo",
 }
@@ -173,7 +174,7 @@ def test_mapping_backed_models_are_immutable_but_not_hashable():
         permissions={"A": 1},
         categories={},
         flags={},
-        api_hits=(),
+        api_usages=(),
         by_caller={},
     )
     assert isinstance(cr.permissions, MappingProxyType)
@@ -185,7 +186,7 @@ def test_mapping_backed_models_are_immutable_but_not_hashable():
 
     ma = MethodAst(
         found=True,
-        class_name="C",
+        class_descriptor="C",
         name="m",
         proto="()V",
         return_type="void",
@@ -202,7 +203,7 @@ def test_mapping_backed_models_are_immutable_but_not_hashable():
     assert (
         MethodAst(
             found=False,
-            class_name="",
+            class_descriptor="",
             name="",
             proto="",
             return_type="",
@@ -217,8 +218,8 @@ def test_mapping_backed_models_are_immutable_but_not_hashable():
 
 
 def test_arg_origin_only_kinds_field_is_set():
-    """The typed ArgOrigin sets only the field its kind carries."""
-    a = ArgOrigin(kind="ConstString", reg_num=2, string_value="s")
+    """The typed ResolvedArg sets only the field its kind carries."""
+    a = ResolvedArg(kind="ConstString", register_index=2, string_value="s")
     assert a.string_value == "s" and a.int_value is None and a.class_descriptor is None
 
 
@@ -268,7 +269,7 @@ def test_typed_decompile_and_pc_map(apk_path, sample_method):
     assert ast.found and isinstance(ast.ast, MappingProxyType)
     assert all(isinstance(e, StatementLocation) for e in ast.pc_map)
     # access_flags is the decoded modifier-name tuple[str, ...] (NOT an int bitmask);
-    # guards against a revert of adapter.py's tuple(r["access"]) back to a list.
+    # guards against a revert of adapter.py's tuple(r["access_flags"]) back to a list.
     assert isinstance(ast.access_flags, tuple)
     assert all(isinstance(a, str) for a in ast.access_flags)
 
@@ -303,14 +304,14 @@ def test_typed_enumeration_and_xref(apk_path):
     assert all(isinstance(t, ExternalTypeRef) for t in trefs)
     # external types are reference (L…;) or array ([…) descriptors, never primitives
     assert all(t.descriptor and t.descriptor[0] in "L[" for t in trefs)
-    # find_call_sites_to / resolve_call_args → typed, with per-kind ArgOrigin
+    # find_call_sites_to / resolve_call_args → typed, with per-kind ResolvedArg
     crossed = 0
     for rc in session.resolve_call_args(
         "Landroid/util/Log;->d(Ljava/lang/String;Ljava/lang/String;)I"
     ):
         assert rc.callee_descriptor.endswith(")I")
         for arg in rc.args:
-            assert isinstance(arg, ArgOrigin) and isinstance(arg.kind, str)
+            assert isinstance(arg, ResolvedArg) and isinstance(arg.kind, str)
             # dexllm#16: the merge marker is typed through and only ever set on
             # Unknown (a resolved value holds on every path, so it cannot "vary").
             assert isinstance(arg.crossed_branch, bool)
@@ -382,7 +383,7 @@ def test_typed_smali_rendering(apk_path):
 
 
 def test_typed_search(apk_path):
-    """SearchPort — DexKit's L1–L7 search returns typed ClassMatch / MethodMatch.
+    """SearchPort — DexKit's L1–L7 search returns typed ClassRef / MethodRef.
 
     Verifies each hit is the right typed model with a real descriptor + dex location,
     that a hit round-trips (its descriptor is a decompilable/enumerable member), that
@@ -391,14 +392,14 @@ def test_typed_search(apk_path):
     """
     session = open_apk(apk_path)
 
-    # class search → ClassMatch; every hit descriptor is a real declared class
+    # class search → ClassRef; every hit descriptor is a real declared class
     all_classes = set(session.list_classes())
     # the needle is derived from a REAL class, so the search is exercised on any
     # sample — a hard-coded "a" matches nothing in StringTests.dex and made a
     # working search look broken (issue #46).
     needle = sorted(all_classes)[0][1:-1].rsplit("/", 1)[-1][:3]
     cmatches = session.find_classes_by_name(needle, match_type="contains")
-    assert cmatches and all(isinstance(c, ClassMatch) for c in cmatches)
+    assert cmatches and all(isinstance(c, ClassRef) for c in cmatches)
     c0 = cmatches[0]
     assert c0.descriptor in all_classes and c0.dex_id >= 0 and needle in c0.descriptor
     # match_type is load-bearing: equals on a real descriptor returns exactly it,
@@ -407,15 +408,15 @@ def test_typed_search(apk_path):
     assert c0.descriptor in {c.descriptor for c in exact}
     assert session.find_classes_by_name("No/Such/Zzz;", match_type="equals") == ()
 
-    # method search → MethodMatch; body-string search hits are real methods
+    # method search → MethodRef; body-string search hits are real methods
     mmatches = session.find_methods_using_strings(["http"])
-    assert all(isinstance(m, MethodMatch) for m in mmatches)
+    assert all(isinstance(m, MethodRef) for m in mmatches)
     for mm in mmatches:
         assert mm.descriptor.startswith("L") and "->" in mm.descriptor
 
     # int-literal search returns typed matches (may be empty on a tiny APK)
     assert all(
-        isinstance(m, MethodMatch) for m in session.find_methods_using_int_literals([1])
+        isinstance(m, MethodRef) for m in session.find_methods_using_int_literals([1])
     )
 
     # find_methods_by_name is the ONLY 4-positional-arg forwarder
@@ -447,12 +448,12 @@ def test_typed_search(apk_path):
     # the remaining class/method search families return the right typed tuple
     # (possibly empty — smoke coverage so an arg/converter regression surfaces)
     for hits, model in (
-        (session.find_classes_by_super("Ljava/lang/Object;"), ClassMatch),
-        (session.find_classes_implementing("Landroid/os/Parcelable;"), ClassMatch),
-        (session.find_classes_by_annotation("Lkotlin/Metadata;"), ClassMatch),
-        (session.find_classes_using_strings(["a"]), ClassMatch),
-        (session.find_methods_by_annotation("Lkotlin/Metadata;"), MethodMatch),
-        (session.find_methods_using_double_literals([1.0]), MethodMatch),
+        (session.find_classes_by_super("Ljava/lang/Object;"), ClassRef),
+        (session.find_classes_implementing("Landroid/os/Parcelable;"), ClassRef),
+        (session.find_classes_by_annotation("Lkotlin/Metadata;"), ClassRef),
+        (session.find_classes_using_strings(["a"]), ClassRef),
+        (session.find_methods_by_annotation("Lkotlin/Metadata;"), MethodRef),
+        (session.find_methods_using_double_literals([1.0]), MethodRef),
     ):
         assert isinstance(hits, tuple) and all(isinstance(h, model) for h in hits)
 
@@ -463,7 +464,7 @@ def test_typed_search(apk_path):
     assert {m.descriptor for m in batch["q"]} == {m.descriptor for m in mmatches}
     cbatch = session.batch_find_classes_using_strings({"q": ["a"]})
     assert isinstance(cbatch, MappingProxyType) and set(cbatch) == {"q"}
-    assert all(isinstance(c, ClassMatch) for c in cbatch["q"])
+    assert all(isinstance(c, ClassRef) for c in cbatch["q"])
 
 
 def test_search_rejects_bare_string(apk_path):
@@ -692,7 +693,7 @@ def test_class_inspection_decomposed(apk_path):
     )
     info = session.class_info(cls)
     assert isinstance(info, ClassInfo)
-    assert info.descriptor == cls and info.superclass.startswith("L")
+    assert info.descriptor == cls and info.superclass_descriptor.startswith("L")
     # the declaring dex's file name is reported directly (an internal class → non-empty,
     # and it agrees with verify_report's name for that dex_id)
     dex_names = {v.dex_id: v.name for v in session.verify_report()}
@@ -1062,7 +1063,7 @@ def test_raw_and_sdk_share_one_spelling_per_record_type():
         f"stale exceptions: {_SDK_ONLY_MODELS - (sdk_types - raw_types)}"
     )
     # …and the other direction, so a raw type the SDK never models (the thing
-    # `FieldMatch` WAS before #37) cannot appear unnoticed either.
+    # `FieldRef` WAS before #37) cannot appear unnoticed either.
     assert raw_types - sdk_types == _RAW_ONLY_MODELS, (
         f"undeclared raw-only models: {(raw_types - sdk_types) - _RAW_ONLY_MODELS} | "
         f"stale exceptions: {_RAW_ONLY_MODELS - (raw_types - sdk_types)}"
@@ -1072,7 +1073,7 @@ def test_raw_and_sdk_share_one_spelling_per_record_type():
     # sibling method audit applies to its alias/decomposition lists. Without it the
     # cheapest way past a failure is to add BOTH names to the two lists, which
     # absorbs the exact defect this test exists for (constructed: renaming SDK
-    # `MethodMatch` to `MethodHit` goes green that way, and the assertion messages
+    # `MethodRef` to `MethodHit` goes green that way, and the assertion messages
     # above name the entries to add). A raw-only type that is field-identical to an
     # SDK-only model is not two records — it is one record under two names.
     for raw_name in sorted(_RAW_ONLY_MODELS):
@@ -1106,61 +1107,13 @@ _JAVA_RENDERING_ATTRS = frozenset(
 )
 
 
-#: Modules that need an OPTIONAL extra and may legitimately be absent, so the
-#: record scan below is allowed to skip them. Anything else failing to import is
-#: a broken import, not a smaller API, and must not shrink the audit silently.
-_OPTIONAL_MODULES = frozenset({"dexllm.mcp_server", "dexllm.server"})
-
-
-def _public_record_attrs():
-    """``{'raw.X' | '<module>.X': {public attribute names}}``, and the skips.
-
-    Every pybind record plus EVERY dataclass in the package — walked rather than
-    hand-listed, because a hand list is how `dexllm.capability.ApiHit` (a public
-    record, the raw counterpart of the SDK's `CapabilityHit`) would sit outside
-    the audit while looking covered.
-    """
-    import dataclasses
-    import importlib
-    import pkgutil
-
-    import dexllm
-    from dexllm import _dexkit_core as core
-
-    out, skipped = {}, []
-    for n in dir(core):
-        t = getattr(core, n)
-        if n.startswith("_") or n == "DexKit" or not isinstance(t, type):
-            continue
-        out[f"raw.{n}"] = {a for a in dir(t) if not a.startswith("_")}
-    for m in pkgutil.walk_packages(dexllm.__path__, "dexllm."):
-        try:
-            mod = importlib.import_module(m.name)
-        except ImportError as e:  # an optional extra is not installed
-            skipped.append((m.name, str(e)))
-            continue
-        for n in dir(mod):
-            t = getattr(mod, n)
-            if not isinstance(t, type) or getattr(t, "__module__", "") != m.name:
-                continue
-            if n.startswith("_"):
-                continue
-            # dataclasses AND NamedTuples: a reviewer added a `NamedTuple` record
-            # carrying a `signature` attribute and the walk did not enumerate it.
-            if dataclasses.is_dataclass(t):
-                out[f"{m.name}.{n}"] = set(t.__dataclass_fields__)
-            elif issubclass(t, tuple) and hasattr(t, "_fields"):
-                out[f"{m.name}.{n}"] = set(t._fields)
-    return out, skipped
-
-
 def test_signature_is_reserved_for_the_dotted_java_rendering():
     """dexllm#68: the fourth NAME axis — record ATTRIBUTES.
 
     #21 locks method names, #37 type names, #44 argument names. Attributes were
     the axis nothing audited, and it had drifted: `ExternalMethodRef.signature`,
-    `ExternalFieldRef.signature`, `ArgOrigin.field_signature` / `.method_signature`
-    and `CapabilityHit.api_signature` all carried the SAME Dalvik grammar the rest
+    `ExternalFieldRef.signature`, `ResolvedArg.field_signature` / `.method_signature`
+    and `ApiUsage.api_signature` all carried the SAME Dalvik grammar the rest
     of the API spells `descriptor` — and one side's OUTPUT is the other side's
     INPUT: `find_call_sites_to(ref.signature)` resolved, at a parameter named
     `method_descriptor`. Worse than the `AttributeError` #21 removed, because BOTH
@@ -1173,7 +1126,7 @@ def test_signature_is_reserved_for_the_dotted_java_rendering():
     audited is the WORD, and a COHERENT rename across every layer was caught only
     incidentally and unevenly: `ExternalFieldRef.signature` failed **1** test (a
     value-composition assertion that happens to spell the name),
-    `CapabilityHit.api_signature` failed **13**. Whether a rename was noticed
+    `ApiUsage.api_signature` failed **13**. Whether a rename was noticed
     depended on how often the name appeared in an assertion.
 
     Set equality both ways, so a new `*signature*` attribute AND a stale exception
@@ -1181,41 +1134,8 @@ def test_signature_is_reserved_for_the_dotted_java_rendering():
     """
     import dexllm
 
-    records, skipped = _public_record_attrs()
-    # A module the scan could not import is one it did not audit. An optional
-    # extra may be absent; anything else is a broken import, not a smaller API,
-    # and must fail loudly rather than shrink the scan.
-    for name, err in skipped:
-        assert name in _OPTIONAL_MODULES, f"{name} failed to import: {err}"
-    # …and the exception must be EARNED, like every other list here: when the
-    # extra IS installed, the module must genuinely declare no record, or listing
-    # it would hide one from the audit in any environment lacking the extra.
-    import dataclasses
-    import importlib
-
-    for name in sorted(_OPTIONAL_MODULES):
-        try:
-            mod = importlib.import_module(name)
-        except ImportError:
-            continue  # the extra is absent here; nothing to verify
-        declared = [
-            n
-            for n in dir(mod)
-            if not n.startswith("_")
-            and isinstance(getattr(mod, n), type)
-            and getattr(getattr(mod, n), "__module__", "") == name
-            and (
-                dataclasses.is_dataclass(getattr(mod, n))
-                or (
-                    issubclass(getattr(mod, n), tuple)
-                    and hasattr(getattr(mod, n), "_fields")
-                )
-            )
-        ]
-        assert not declared, (
-            f"{name} is listed as an optional module the audit may skip, but it "
-            f"declares records {declared} — they would be unaudited without the extra"
-        )
+    records, skipped = public_record_attrs()
+    assert_skips_are_optional(skipped)
     # Non-vacuity. The set equality below is self-guarding in one direction (an
     # empty scan cannot equal a non-empty exception set), but a floor names the
     # cause instead of reporting four "stale exceptions".
@@ -1335,20 +1255,19 @@ _DESCRIPTOR_ROLE_ATTRS = frozenset(
         "sdk.ExternalMethodRef.parameters",
         "sdk.MethodAst.return_type",
         "sdk.MethodAst.param_types",
-        "sdk.CapabilityHit.callers",
-        "sdk.PermissionCallerRow.descriptors",  # spelled, listed for completeness
+        "raw.ApiUsage.callers",
+        "sdk.ApiUsage.callers",
+        "sdk.ApiCallers.descriptors",  # spelled, listed for completeness
     }
 )
-#: DRIFT — a genuine one-value-two-names divergence, all of it dexllm#69's, all of
-#: it PRE-EXISTING and none of it reachable by the `signature` ban (neither name
-#: contains the word). Listed so the audit does not silently tolerate a NEW one.
-_DESCRIPTOR_NAME_DRIFT = frozenset(
-    {
-        "sdk.ClassInfo.superclass",  # raw `ClassSummary.superclass_descriptor`
-        "sdk.ClassInfo.interfaces",  # raw `ClassSummary.interface_descriptors`
-        "sdk.MethodAst.class_name",  # raw `cls_name`; elsewhere `class_descriptor`
-    }
-)
+#: DRIFT — a genuine one-value-two-names divergence. dexllm#69 CLOSED the three
+#: this list was created to hold (`sdk.ClassInfo.superclass` /
+#: `.interfaces`, which the SDK had shortened away from the raw
+#: `*_descriptor(s)` spelling, and `sdk.MethodAst.class_name`, whose raw key was
+#: a third spelling `cls_name`), so it is EMPTY. It is kept as a declaration
+#: rather than deleted: re-introducing a drift then has to be a conscious edit,
+#: the same shape as dexllm#21 stage 4's now-empty alias lists.
+_DESCRIPTOR_NAME_DRIFT: frozenset[str] = frozenset()
 
 
 def _descriptor_valued_attrs(source):
@@ -1389,20 +1308,27 @@ def _descriptor_valued_attrs(source):
         for r in h.list_external_type_refs()[:3]:
             probe(f"{layer}.ExternalTypeRef", r)
         for m in h.find_classes_by_name("a", match_type="Contains")[:3]:
-            probe(f"{layer}.ClassMatch", m)
+            probe(f"{layer}.ClassRef", m)
         for m in h.find_methods_by_name("a", match_type="Contains")[:3]:
-            probe(f"{layer}.MethodMatch", m)
+            probe(f"{layer}.MethodRef", m)
         for md in h.list_class_methods(cls)[:6]:
             for cs in h.find_call_sites_from(md)[:3]:
                 probe(f"{layer}.CallSite", cs)
             for rs in h.resolve_call_args(md)[:3]:
                 probe(f"{layer}.ResolvedCallSite", rs)
                 for arg in rs.args[:4]:
-                    probe(f"{layer}.ArgOrigin", arg)
-    probe("raw.ClassSummary", dk.get_class_summary(cls))
+                    probe(f"{layer}.ResolvedArg", arg)
+    summary = dk.get_class_summary(cls)
+    probe("raw.ClassSummary", summary)
     probe("sdk.ClassInfo", sdk.class_info(cls))
+    for f in summary.fields[:3]:
+        probe("raw.FieldInfo", f)
+    for m in summary.methods[:3]:
+        probe("raw.MethodInfo", m)
     for f in sdk.class_fields(cls)[:3]:
         probe("sdk.FieldInfo", f)
+    for m in sdk.class_methods(cls)[:3]:
+        probe("sdk.MethodInfo", m)
     md = sdk.list_class_methods(cls)[0]
     probe("sdk.DecompiledMethod", sdk.decompile_method(md))
     probe("sdk.MethodAst", sdk.decompile_method_ast(md))
@@ -1412,9 +1338,9 @@ def _descriptor_valued_attrs(source):
     # corpus-gated probe would leave it invisible in exactly the CI leg that has
     # no corpus.
     for hit in _stub_capability_hits():
-        probe("raw.ApiHit", hit)
-    for hit in sdk.summarize_capabilities(app_only=False).api_hits[:3]:
-        probe("sdk.CapabilityHit", hit)
+        probe("raw.ApiUsage", hit)
+    for hit in sdk.summarize_capabilities(app_only=False).api_usages[:3]:
+        probe("sdk.ApiUsage", hit)
     return found
 
 
@@ -1441,13 +1367,13 @@ class _CapStubDk:
 
 
 def _stub_capability_hits():
-    """Real `capability.ApiHit`s, built by the real pass over a stub `dk`."""
+    """Real `capability.ApiUsage`s, built by the real pass over a stub `dk`."""
     import dexllm
     from dexllm.capability import _load_catalog
 
     key = next(k for k in _load_catalog()["entries"] if "(" in k.partition(";->")[2])
     rep = dexllm.summarize_capabilities(_CapStubDk(key), app_only=False)
-    return rep.api_hits[:3]
+    return rep.api_usages[:3]
 
 
 def test_a_descriptor_valued_attribute_is_spelled_descriptor():
@@ -1506,7 +1432,7 @@ def test_the_arg_kind_attribute_map_has_one_definition():
     """dexllm#68: `_ARG_VALUE_FIELD` was two copies that had to move in lockstep.
 
     `tools.py` and `sdk/adapter.py` each carried a private copy mapping an
-    `ArgOrigin.kind` to the attribute it fills, and this issue renamed two of the
+    `ResolvedArg.kind` to the attribute it fills, and this issue renamed two of the
     values — so "must change in lockstep" stopped being theoretical. They share
     one object now (the `_callers.py` precedent from dexllm#49).
 
@@ -1528,8 +1454,8 @@ def test_the_arg_kind_attribute_map_has_one_definition():
     assert len(shared) >= 9, f"only {len(shared)} kinds mapped"
     for kind, attr in shared.items():
         assert hasattr(
-            core.ArgOrigin, attr
-        ), f"kind {kind!r} maps to {attr!r}, which ArgOrigin does not have"
+            core.ResolvedArg, attr
+        ), f"kind {kind!r} maps to {attr!r}, which ResolvedArg does not have"
 
     # …and the USE SITE, not only the module attribute. An adversarial reviewer
     # kept the shared import (so identity passes, and ruff sees the name used) and
@@ -1542,7 +1468,7 @@ def test_the_arg_kind_attribute_map_has_one_definition():
     for mod in (tools, adapter):
         src = inspect.getsource(mod)
         assert "ARG_VALUE_ATTR_BY_KIND" in src, f"{mod.__name__} never names it"
-        # A dict literal mapping any ArgOrigin kind to an attribute string IS a
+        # A dict literal mapping any ResolvedArg kind to an attribute string IS a
         # second definition, whatever it is called.
         for kind in shared:
             pattern = rf'["\']{kind}["\']\s*:\s*["\']'
@@ -1591,7 +1517,7 @@ def test_typed_analysis_surface(apk_path):
     """Permission / IOC / capability returns are the typed models, not raw dicts."""
     session = open_apk(apk_path)
     for g in session.permission_callers(app_only=False):
-        assert isinstance(g, PermissionCallerGroup)
+        assert isinstance(g, PermissionCallers)
         assert g.protection_level in {
             "dangerous",
             "signature",

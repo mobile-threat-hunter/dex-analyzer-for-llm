@@ -197,7 +197,7 @@ def _is_field_key(key: str) -> bool:
 
 
 @dataclass
-class ApiHit:
+class ApiUsage:
     """A single API in the catalog that was found in the APK."""
 
     api_descriptor: str
@@ -229,7 +229,7 @@ class CapabilityReport:
     """Aggregated capability profile of an APK across all matched catalog APIs.
 
     ``by_caller`` maps a calling method to the catalog APIs it invokes — the
-    transpose of ``ApiHit.callers``, and the index that answers "who in this app
+    transpose of ``ApiUsage.callers``, and the index that answers "who in this app
     calls ``Runtime.exec`` / ``DexClassLoader`` / ``Class.forName``".
 
     It held ``{permissions}`` until dexllm#35, populated inside the permission
@@ -240,7 +240,7 @@ class CapabilityReport:
     (``Settings$Secure.getString``). The index covered **17 of the corpus's 317
     distinct callers (5.4%)**.
 
-    It is a CONVENIENCE INDEX, not new information: ``api_hits`` carries
+    It is a CONVENIENCE INDEX, not new information: ``api_usages`` carries
     ``callers`` per API, so either view has always been derivable from a report —
     including from a PRE-fix one, which is why the bug lost no data. The value is
     descriptors because that is the more primary view (the caller-indexed question
@@ -248,12 +248,12 @@ class CapabilityReport:
     runs one way — APIs give back permissions and tags, a permission set could not
     give back an API::
 
-        by_api = {h.api_descriptor: h for h in report.api_hits}
+        by_api = {h.api_descriptor: h for h in report.api_usages}
         perms = {p for a in report.by_caller[caller] for p in by_api[a].permissions}
         tags = {t for a in report.by_caller[caller] for t in by_api[a].categories}
 
     The join is defined WITHIN one report: ``only_categories`` **and**
-    ``app_only`` each filter ``by_caller`` and ``api_hits`` together, so joining
+    ``app_only`` each filter ``by_caller`` and ``api_usages`` together, so joining
     against a differently filtered call is meaningless. The second one is easy
     to trip over precisely because the docs suggest reading an unfiltered caller
     index next to a default report: ``by_api`` built from a default report is
@@ -269,12 +269,12 @@ class CapabilityReport:
     categories: Counter  # category -> count of touches
     flags: Counter  # cross-domain concern -> count of touches
     by_caller: Dict[str, Set[str]]  # caller descriptor -> {api descriptors}
-    api_hits: List[ApiHit]  # one entry per matched API
+    api_usages: List[ApiUsage]  # one entry per matched API
     total_call_sites: int  # invoke instructions, method entries only
     catalog_version: str
     catalog_size: int
     matched_apis: int
-    # Appended, like ApiHit.field_access_count and for the same positional-arity
+    # Appended, like ApiUsage.field_access_count and for the same positional-arity
     # reason. Read instructions against field-descriptor entries; 0 when the
     # catalog has no field keys, which is why an existing consumer sees no change.
     total_field_accesses: int = 0
@@ -287,7 +287,7 @@ class CapabilityReport:
     # anything at all report NOTHING under it. `dropped_touches` is in the same
     # unit as `total_call_sites + total_field_accesses` — instructions, of
     # either key form, which dexllm#36 documents as one unit; `dropped_apis`
-    # counts the catalog entries that left `api_hits` entirely. APPENDED after
+    # counts the catalog entries that left `api_usages` entirely. APPENDED after
     # the dexllm#36 field, not beside `matched_apis` where they read better:
     # inserting mid-signature would silently rebind a positional
     # `total_field_accesses`, the hazard the comment above records.
@@ -337,7 +337,7 @@ def summarize_capabilities(
             ``android.support.*``, ``kotlin.*``, ``com.google.android.*``, …), as
             :func:`dexllm.dangerous_permission_api_callers` does — the same verb,
             the same default, and the same shared predicate. An API left with no
-            kept touch is omitted from ``api_hits`` entirely, so a category can
+            kept touch is omitted from ``api_usages`` entirely, so a category can
             disappear from the report; that is the point (dexllm#49 —
             ``BIOMETRIC`` fires wherever ``FingerprintManagerCompat`` is bundled
             at all, and 98% of the corpus's ``REFLECTION`` touches are androidx /
@@ -388,7 +388,7 @@ def summarize_capabilities(
     categories: Counter = Counter()
     flags: Counter = Counter()
     by_caller: Dict[str, Set[str]] = {}
-    api_hits: List[ApiHit] = []
+    api_usages: List[ApiUsage] = []
     total_sites = 0
 
     total_field_accesses = 0
@@ -418,7 +418,7 @@ def summarize_capabilities(
         # every number downstream then derives from this one list, so the
         # Counters, `by_caller`, the per-hit counts and both totals cannot
         # disagree. Its placement BEFORE the emptiness check buys exactly one
-        # further thing: an emptied API leaves `api_hits` / `matched_apis`
+        # further thing: an emptied API leaves `api_usages` / `matched_apis`
         # instead of staying as a hit with both counters 0 — which would sort to
         # the TOP of `tools.py`'s `-(call_site_count + field_access_count)`
         # ranking, 0 being the maximum of a negated non-negative sum.
@@ -437,7 +437,7 @@ def summarize_capabilities(
             continue
 
         perms = meta.get("permissions", [])
-        hit = ApiHit(
+        hit = ApiUsage(
             api_descriptor=api_desc,
             permissions=list(perms),
             categories=list(cats),
@@ -468,19 +468,19 @@ def summarize_capabilities(
                 categories[cat] += 1
             for flag in entry_flags:
                 flags[flag] += 1
-        api_hits.append(hit)
+        api_usages.append(hit)
 
     return CapabilityReport(
         permissions=permissions,
         categories=categories,
         flags=flags,
         by_caller=by_caller,
-        api_hits=api_hits,
+        api_usages=api_usages,
         total_call_sites=total_sites,
         total_field_accesses=total_field_accesses,
         catalog_version=catalog.get("version", "unknown"),
         catalog_size=len(entries),
-        matched_apis=len(api_hits),
+        matched_apis=len(api_usages),
         dropped_touches=dropped_touches,
         dropped_apis=dropped_apis,
     )

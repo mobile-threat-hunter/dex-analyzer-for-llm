@@ -17,7 +17,7 @@ TESTS = Path(__file__).resolve().parent
 # Modules that deliberately hold no pytest test functions (helpers, harnesses).
 # They are checked to STAY that way: adding a `def test_*` to one silently buys
 # a test that never runs.
-NOT_COLLECTED = {"conftest.py", "dvclass_parity.py"}
+NOT_COLLECTED = {"conftest.py", "dvclass_parity.py", "_records.py"}
 
 
 def _test_functions(path: Path) -> list[str]:

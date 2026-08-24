@@ -26,19 +26,19 @@ from . import (
 )
 from . import tools as tools  # noqa: F401 — public sub-module for LLM integrations
 from ._dexkit_core import (
-    ArgOrigin,
     CallSite,
     DexKit,
     ExternalFieldRef,
     ExternalMethodRef,
     ExternalTypeRef,
+    ResolvedArg,
     ResolvedCallSite,
     identify,
     is_framework_descriptor,
     verify,
 )
 from .capability import (
-    ApiHit,
+    ApiUsage,
     CapabilityReport,
     summarize_capabilities,
 )
@@ -75,8 +75,8 @@ from .safe import (
 )
 
 __all__ = [
-    "ApiHit",
-    "ArgOrigin",
+    "ApiUsage",
+    "ResolvedArg",
     "CallSite",
     "CapabilityReport",
     "DEFAULT_TIMEOUT_S",

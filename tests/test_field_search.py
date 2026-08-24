@@ -1,9 +1,9 @@
 """Guards for the field arm of the L7 search family and the SDK method record.
 
-Issue #37 found `FieldMatch` registered as a public pybind type and declared in
+Issue #37 found `FieldRef` registered as a public pybind type and declared in
 the stub while **no binding could return one** — the field arm of the C/M/F search
-family was declared and never built. Its siblings were live (`ClassMatch` from six
-`find_classes_*`, `MethodMatch` from five `find_methods_*`), so the asymmetry was
+family was declared and never built. Its siblings were live (`ClassRef` from six
+`find_classes_*`, `MethodRef` from five `find_methods_*`), so the asymmetry was
 invisible unless you grepped for a producer.
 
 The same issue found the one gap that cost a consumer capability rather than a
@@ -21,7 +21,7 @@ import pytest
 
 from dexllm import _dexkit_core as core
 from dexllm import tools
-from dexllm.sdk import FieldMatch, MethodInfo, open_apk
+from dexllm.sdk import FieldRef, MethodInfo, open_apk
 
 
 def _a_declared_field(dk):
@@ -34,24 +34,24 @@ def _a_declared_field(dk):
 
 
 def test_find_fields_by_name_produces_a_field_match(dk):
-    """The raw binding returns FieldMatch objects — the type now has a producer.
+    """The raw binding returns FieldRef objects — the type now has a producer.
 
     Asserts the TYPE, not just non-emptiness: before #37 nothing constructed one,
-    so `isinstance(..., core.FieldMatch)` is the assertion that would have failed.
+    so `isinstance(..., core.FieldRef)` is the assertion that would have failed.
     """
     cls, name = _a_declared_field(dk)
 
     hits = dk.find_fields_by_name(name, match_type="equals")
     assert hits, f"{name!r} is declared but not found"
-    assert all(isinstance(h, core.FieldMatch) for h in hits)
+    assert all(isinstance(h, core.FieldRef) for h in hits)
 
     hit = next(h for h in hits if h.descriptor.startswith(cls + "->"))
     assert hit.descriptor.startswith(f"{cls}->{name}:")
-    # dex_id/field_id are unsigned in C++, so a `>= 0` assertion would be
+    # dex_id/field_idx are unsigned in C++, so a `>= 0` assertion would be
     # vacuous — pin them against the session instead.
     assert hit.dex_id < dk.dex_count()
-    assert hit.field_id < len(dk.list_fields_in_dex(hit.dex_id))
-    assert repr(hit).startswith("FieldMatch(")
+    assert hit.field_idx < len(dk.list_fields_in_dex(hit.dex_id))
+    assert repr(hit).startswith("FieldRef(")
 
 
 def test_find_fields_by_name_honours_declaring_class_and_ignore_case(dk):
@@ -93,7 +93,7 @@ def test_the_field_search_reaches_every_layer(apk_path, dk):
     session = open_apk(apk_path)
 
     typed = session.find_fields_by_name(name, match_type="equals", declaring_class=cls)
-    assert typed and all(isinstance(h, FieldMatch) for h in typed)
+    assert typed and all(isinstance(h, FieldRef) for h in typed)
 
     out = tools.execute(
         "find_fields_by_name",
@@ -147,7 +147,9 @@ def test_class_methods_is_the_only_way_to_a_method_modifier(apk_path, dk):
             if m.access_flags & interesting:
                 assert isinstance(m, MethodInfo)
                 # the same fact the AST path spells as decoded NAMES
-                names = dk.decompile_method_ast(f"{cls}->{m.name}{m.proto}")["access"]
+                names = dk.decompile_method_ast(f"{cls}->{m.name}{m.proto}")[
+                    "access_flags"
+                ]
                 assert names, "the AST path reports no modifiers for the same method"
                 return
     pytest.skip("no corpus method carries a non-trivial modifier")

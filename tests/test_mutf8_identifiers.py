@@ -270,10 +270,53 @@ def test_astral_class_enumerates_and_round_trips(astral_dex):
     assert cls in dk.render_class_smali(cls)
     for m in methods:
         assert dk.render_method_smali(m).startswith(m)
-        assert dk.decompile_method_ast(m, False)["cls_name"] == cls
+        assert dk.decompile_method_ast(m, False)["class_descriptor"] == cls
 
     # …and the descriptor must appear decoded in the whole-dex listings too.
     assert any(_CHAR in d for d in dk.list_methods())
+
+
+@pytest.mark.parametrize("kind", ["class", "field"])
+def test_astral_member_identity_is_decoded_exactly_once(
+    kind, astral_dex, astral_field_dex
+):
+    """dexllm#69 §3 — the computed `*Info.descriptor` is a JOIN of pool bytes.
+
+    `MethodInfo.descriptor` and its `FieldInfo` twin are built in the binding as
+    ``class_descriptor + "->" + name + proto`` / ``... + ":" + type`` and passed
+    through `ident_out` ONCE, on the joined string. A raw-byte leak raises
+    `UnicodeDecodeError` at the pybind boundary — the dexllm#22 failure class this
+    project closed — and a double decode mangles the surrogate pair. An ASCII
+    identifier cannot tell any of those apart, and every member in the corpus is
+    ASCII, so a crafted astral one is the only input that separates them. An
+    adversarial reviewer removed BOTH `ident_out` wrappers and the whole suite
+    stayed green.
+
+    BOTH crafts are needed and neither is redundant: the class-name craft yields
+    astral METHOD identities and no field one, the field-name craft the reverse.
+    Guarding one leaves the other's decode site free to be deleted.
+    """
+    dex = astral_dex if kind == "class" else astral_field_dex
+    dk = dexllm.DexKit(dex)
+
+    seen = 0
+    for cls in dk.list_classes():
+        summary = dk.get_class_summary(cls)
+        for m in summary.methods:
+            assert m.class_descriptor == cls
+            assert m.descriptor == f"{cls}->{m.name}{m.proto}"
+            # …and the joined form is the one the identity APIs accept back.
+            assert dk.render_method_smali(m.descriptor).startswith(m.descriptor)
+            seen += _CHAR in m.descriptor
+        for f in summary.fields:
+            assert f.class_descriptor == cls
+            assert f.descriptor == f"{cls}->{f.name}:{f.type}"
+            assert f.descriptor in dk.list_fields()
+            seen += _CHAR in f.descriptor
+    assert seen, (
+        f"no {kind} identity string carried the astral char — the guard ran "
+        f"vacuously and would not have seen a missing ident_out"
+    )
 
 
 def test_astral_identifier_is_findable_by_name(astral_dex):
@@ -446,7 +489,7 @@ def test_overlong_identifier_is_rejected_not_silently_canonicalised(tmp_path):
 
 
 def test_const_string_arg_origin_decodes(loadable_apks):
-    """`ArgOrigin.string_value` is a const-string OPERAND — pool bytes like any
+    """`ResolvedArg.string_value` is a const-string OPERAND — pool bytes like any
     other, and it RAISED for the same reason the identifiers did.
 
     Corpus-reproducible (an embedded NUL, `C0 80`), so this is a value check, not

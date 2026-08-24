@@ -18,7 +18,7 @@ Design notes
 - All decompile calls go through `safe_decompile_*` wrappers with a
   10s deadline. A hung method emits a `// TIMEOUT` marker but the call
   always returns.
-- ClassMatch / MethodMatch result objects are reduced to descriptor
+- ClassRef / MethodRef result objects are reduced to descriptor
   strings + a few useful fields. The LLM rarely needs the full object.
 - The caller is responsible for opening / caching the `DexKit` instance.
   Tools that touch the APK take a `DexKit` object via the `dk` param to
@@ -86,11 +86,14 @@ def _truncate(text: str, max_chars: int) -> dict:
 
 
 def _match_to_desc(m: Any) -> str:
-    """ClassMatch / MethodMatch → just the descriptor string the LLM cares about."""
+    """ClassRef / MethodRef / FieldRef → the descriptor string the LLM cares about.
+
+    The `class_name` fallback this used to carry named nothing on any layer after
+    dexllm#69 renamed `MethodAst.class_name` — and `MethodAst` never reached here
+    anyway, since the search family returns records that all have `descriptor`.
+    """
     if hasattr(m, "descriptor"):
         return m.descriptor
-    if hasattr(m, "class_name"):
-        return m.class_name
     return str(m)
 
 
@@ -345,7 +348,7 @@ def _t_summarize_capabilities(
 
     Returns top permissions/categories, the cross-domain `flags` rollup, and the
     `limit` most-TOUCHED APIs (invoke sites plus field reads, dexllm#36). The raw report's per-caller sets (`by_caller`,
-    `ApiHit.callers`) can be huge on a large APK, so they are intentionally
+    `ApiUsage.callers`) can be huge on a large APK, so they are intentionally
     omitted here to keep the response within the model's context.
 
     `app_only` (default True) counts only the app's own callers — without it the
@@ -384,7 +387,7 @@ def _t_summarize_capabilities(
     # re-serialising the catalog (as dexllm#36 did) silently reordered `top_apis`
     # on 16 of 32 corpus sources without any count changing.
     hits = sorted(
-        rep.api_hits,
+        rep.api_usages,
         key=lambda h: (-(h.call_site_count + h.field_access_count), h.api_descriptor),
     )
     return {
@@ -418,7 +421,7 @@ def _t_summarize_capabilities(
         # spells the Dalvik form `descriptors` in the same dict. One key, two
         # grammars, on the surface an LLM reads — the dexllm#38 shape, reached
         # through the `api_signature` spelling this issue removed (dexllm#68).
-        "api_hits": [
+        "api_usages": [
             {
                 "descriptor": h.api_descriptor,
                 "permissions": h.permissions,
@@ -429,8 +432,8 @@ def _t_summarize_capabilities(
             }
             for h in hits[:limit]
         ],
-        "api_hits_total": len(rep.api_hits),
-        "api_hits_truncated": len(rep.api_hits) > limit,
+        "api_usages_total": len(rep.api_usages),
+        "api_usages_truncated": len(rep.api_usages) > limit,
     }
 
 
@@ -491,7 +494,7 @@ def _t_dangerous_permission_api_callers(dk: DexKit, app_only: bool = True) -> di
 
 
 def _arg_to_compact(index: int, a: Any) -> dict:
-    """One ArgOrigin → a compact ``{index, kind, value}`` dict.
+    """One ResolvedArg → a compact ``{index, kind, value}`` dict.
 
     The resolved constant / field descriptor / callee descriptor / param-slot,
     without the raw multi-field struct.
@@ -505,7 +508,7 @@ def _arg_to_compact(index: int, a: Any) -> dict:
     ``"crossed_branch": True``. Read it as *not proven*, not as *no value* — and not
     as a proven pair of values either: the merged edges may genuinely disagree, or one
     of them simply carried nothing because it came from outside the analysis window.
-    The key is named for the raw ``ArgOrigin.crossed_branch`` it mirrors; an earlier
+    The key is named for the raw ``ResolvedArg.crossed_branch`` it mirrors; an earlier
     ``varies_by_path`` claimed the stronger reading the flag does not support
     (dexllm#32).
     """
@@ -1290,7 +1293,7 @@ TOOL_DEFINITIONS: list[dict] = [
                 "limit": {
                     "type": "integer",
                     "default": 50,
-                    "description": "max api_hits to return (by call-site count)",
+                    "description": "max api_usages to return (by call-site count)",
                 },
                 "app_only": {
                     "type": "boolean",

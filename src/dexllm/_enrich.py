@@ -61,7 +61,13 @@ def _patch_field_ref() -> None:
 
 def _patch_type_ref() -> None:
     cls = ExternalTypeRef
-    cls.java_name = property(lambda s: _d.descriptor_to_java(s.descriptor))  # type: ignore[method-assign, assignment]
+    # dexllm#69 §1 — `java_type`, not `java_name`. All three `java_*` properties
+    # in this file are the same `descriptor_to_java()` transform, and this one's
+    # input IS a type descriptor (55 of a2dp.Vol's 576 external type refs are
+    # ARRAYS, so the record is rightly `Type` and not `Class`), which makes
+    # `java_type` the same word its `ExternalFieldRef` twin already uses. `_name`
+    # named neither the input's kind nor the output's.
+    cls.java_type = property(lambda s: _d.descriptor_to_java(s.descriptor))  # type: ignore[method-assign, assignment]
 
 
 _patch_method_ref()

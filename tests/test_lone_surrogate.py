@@ -180,10 +180,10 @@ def test_class_scoped_accessor_keeps_the_lone_surrogate(lone):
 
 
 def test_arg_origin_string_value_keeps_the_lone_surrogate(lone):
-    """`ArgOrigin.string_value` is a const-string OPERAND — pool CONTENT.
+    """`ResolvedArg.string_value` is a const-string OPERAND — pool CONTENT.
 
     It was switched from the lossy decode to `content_out` and had no guard: the
-    pre-existing dexllm#22 ArgOrigin test filters to NUL / astral literals, which
+    pre-existing dexllm#22 ResolvedArg test filters to NUL / astral literals, which
     are exactly the cases where the two decoders AGREE, so it cannot discriminate.
     """
     path, _raw, s = lone
@@ -196,7 +196,9 @@ def test_arg_origin_string_value_keeps_the_lone_surrogate(lone):
     for cs in dk.find_call_sites_from(owners[0].descriptor):
         for site in dk.resolve_call_args(cs.callee_descriptor):
             seen += [a.string_value for a in site.args if a.kind == "ConstString"]
-    assert seen, "no ConstString ArgOrigin reached — this guard must not pass vacuously"
+    assert (
+        seen
+    ), "no ConstString ResolvedArg reached — this guard must not pass vacuously"
     assert s in seen, f"{s!r} not among {len(seen)} ConstString origins"
 
 

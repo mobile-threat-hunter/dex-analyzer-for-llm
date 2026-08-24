@@ -127,7 +127,7 @@ def test_tool_catalog_definitions_match_impls():
 
 def test_resolve_call_args_shapes_compact_args(dk):
     """resolve_call_args yields JSON-safe {index, kind, value} args whose value
-    matches the raw ArgOrigin, and the same call sites as find_call_sites_to."""
+    matches the raw ResolvedArg, and the same call sites as find_call_sites_to."""
     api = "Landroid/util/Log;->d(Ljava/lang/String;Ljava/lang/String;)I"
     out = tools.execute("resolve_call_args", {"method_descriptor": api}, dk)
     json.dumps(out)  # must be serialisable for the transport
@@ -176,7 +176,7 @@ def test_crossed_branch_reaches_the_tool_output(dk):
     )
     # (api, caller, offset, reg) for every argument the RAW layer flags.
     expected = {
-        (api, s.caller_descriptor, s.bytecode_offset, a.reg_num)
+        (api, s.caller_descriptor, s.bytecode_offset, a.register_index)
         for api in apis
         for s in dk.resolve_call_args(api)
         for a in s.args
@@ -301,11 +301,11 @@ def test_arg_compact_covers_every_arg_kind():
 
 
 class _Arg:
-    """The duck an ArgOrigin presents to `_arg_to_compact` — no corpus needed."""
+    """The duck an ResolvedArg presents to `_arg_to_compact` — no corpus needed."""
 
     def __init__(self, kind, **kw):
         self.kind = kind
-        self.reg_num = 0
+        self.register_index = 0
         self.string_value = ""
         self.int_value = 0
         self.class_descriptor = ""
@@ -1077,8 +1077,8 @@ def test_the_capability_tool_shares_no_key_with_a_second_grammar_corpus_free():
 
     cap = tools.execute("summarize_capabilities", {"limit": 200}, stub)
     assert "error" not in cap, cap
-    assert cap["api_hits"], "the stub produced no capability hit — guard is vacuous"
-    for h in cap["api_hits"]:
+    assert cap["api_usages"], "the stub produced no capability hit — guard is vacuous"
+    for h in cap["api_usages"]:
         assert "api" not in h, f"the collided key is back: {sorted(h)}"
         assert is_member_descriptor(h["descriptor"]), h["descriptor"]
 
@@ -1094,7 +1094,7 @@ def test_the_capability_tool_shares_no_key_with_a_second_grammar_corpus_free():
 def test_the_capability_tool_no_longer_shares_the_api_key_with_a_second_grammar(dk):
     """dexllm#68: one MCP key, two grammars, on the surface an LLM reads.
 
-    `summarize_capabilities` abbreviated `CapabilityHit.api_signature` to `"api"`,
+    `summarize_capabilities` abbreviated `ApiUsage.api_signature` to `"api"`,
     landing on a key `dangerous_permission_api_callers` already used for the AOSP
     DATASET form — and that sibling spells the Dalvik form `"descriptors"` in the
     SAME dict. So `payload["api"]` meant `Landroid/...;->m()V` in one tool and
@@ -1108,7 +1108,7 @@ def test_the_capability_tool_no_longer_shares_the_api_key_with_a_second_grammar(
     """
     cap = tools.execute("summarize_capabilities", {"limit": 200}, dk)
     assert "error" not in cap, cap
-    hits = cap["api_hits"]
+    hits = cap["api_usages"]
     require_corpus_shape(
         bool(hits),
         "an APK matching at least one catalog API",

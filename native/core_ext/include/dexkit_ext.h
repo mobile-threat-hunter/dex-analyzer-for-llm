@@ -258,7 +258,7 @@ public:
     // binding. match_type: "equals" | "contains" | "starts_with" | "ends_with" | "regex".
 
     // Find classes whose name (Java-style or descriptor) matches a pattern.
-    [[nodiscard]] std::vector<ClassMatch>
+    [[nodiscard]] std::vector<ClassRef>
     FindClassesByName(std::string_view name,
                       std::string_view match_type = "contains",
                       bool ignore_case = false);
@@ -266,7 +266,7 @@ public:
     // Find classes whose bytecode uses the given strings.
     // If match_all is true (default) the class must contain ALL strings;
     // otherwise ANY match suffices.
-    [[nodiscard]] std::vector<ClassMatch>
+    [[nodiscard]] std::vector<ClassRef>
     FindClassesUsingStrings(const std::vector<std::string>& strings,
                             std::string_view match_type = "contains",
                             bool ignore_case = false);
@@ -296,13 +296,13 @@ public:
     // There is deliberately no method-level analogue: a static-field EncodedValue
     // belongs to a class_def, not to a method (method annotations carry EncodedValues
     // too, but those are not what this index scans).
-    [[nodiscard]] std::vector<ClassMatch>
+    [[nodiscard]] std::vector<ClassRef>
     FindClassesDeclaringStrings(const std::vector<std::string>& strings,
                                 std::string_view match_type = "contains",
                                 bool ignore_case = false);
 
     // Find methods whose body uses the given strings.
-    [[nodiscard]] std::vector<MethodMatch>
+    [[nodiscard]] std::vector<MethodRef>
     FindMethodsUsingStrings(const std::vector<std::string>& strings,
                             std::string_view match_type = "contains",
                             bool ignore_case = false);
@@ -310,31 +310,31 @@ public:
     // Batch class-by-strings query: {key → [strings]}. Returns {key → matches}.
     // Far faster than running N independent FindClassesUsingStrings calls
     // (upstream uses a shared Aho-Corasick trie internally).
-    [[nodiscard]] std::map<std::string, std::vector<ClassMatch>>
+    [[nodiscard]] std::map<std::string, std::vector<ClassRef>>
     BatchFindClassesUsingStrings(
         const std::map<std::string, std::vector<std::string>>& query_map,
         std::string_view match_type = "contains",
         bool ignore_case = false);
 
     // Batch method-by-strings query.
-    [[nodiscard]] std::map<std::string, std::vector<MethodMatch>>
+    [[nodiscard]] std::map<std::string, std::vector<MethodRef>>
     BatchFindMethodsUsingStrings(
         const std::map<std::string, std::vector<std::string>>& query_map,
         std::string_view match_type = "contains",
         bool ignore_case = false);
 
     // Find methods by name (optionally scoped to a declaring class).
-    [[nodiscard]] std::vector<MethodMatch>
+    [[nodiscard]] std::vector<MethodRef>
     FindMethodsByName(std::string_view name,
                       std::string_view match_type = "contains",
                       std::string_view declaring_class = "",
                       bool ignore_case = false);
 
     // Find fields by name (optionally scoped to a declaring class). The field
-    // arm of the L7 search family — `FieldMatch` was declared for it in
+    // arm of the L7 search family — `FieldRef` was declared for it in
     // api_ref.h and registered in the binding, but nothing produced one until
     // dexllm#37.
-    [[nodiscard]] std::vector<FieldMatch>
+    [[nodiscard]] std::vector<FieldRef>
     FindFieldsByName(std::string_view name,
                      std::string_view match_type = "contains",
                      std::string_view declaring_class = "",
@@ -342,20 +342,20 @@ public:
 
     // Annotation-based search. annotation_class is matched against the
     // annotation's declared class descriptor (e.g. "Lkotlin/Metadata;").
-    [[nodiscard]] std::vector<ClassMatch>
+    [[nodiscard]] std::vector<ClassRef>
     FindClassesByAnnotation(std::string_view annotation_class,
                             std::string_view match_type = "equals");
 
-    [[nodiscard]] std::vector<MethodMatch>
+    [[nodiscard]] std::vector<MethodRef>
     FindMethodsByAnnotation(std::string_view annotation_class,
                             std::string_view match_type = "equals");
 
     // Structural class queries.
-    [[nodiscard]] std::vector<ClassMatch>
+    [[nodiscard]] std::vector<ClassRef>
     FindClassesBySuperclass(std::string_view super_class_name,
                             std::string_view match_type = "equals");
 
-    [[nodiscard]] std::vector<ClassMatch>
+    [[nodiscard]] std::vector<ClassRef>
     FindClassesImplementing(std::string_view interface_class_name,
                             std::string_view match_type = "equals");
 
@@ -365,10 +365,10 @@ public:
     // being put into EncodeValueInt (matches dex int storage semantics, so
     // 0xCAFEBABE passed from Python matches the same value in dex as
     // -889275714 in two's-complement).
-    [[nodiscard]] std::vector<MethodMatch>
+    [[nodiscard]] std::vector<MethodRef>
     FindMethodsUsingIntLiterals(const std::vector<int64_t>& values);
 
-    [[nodiscard]] std::vector<MethodMatch>
+    [[nodiscard]] std::vector<MethodRef>
     FindMethodsUsingDoubleLiterals(const std::vector<double>& values);
 
     // L4 — for every call site that invokes the given API, walk the caller's

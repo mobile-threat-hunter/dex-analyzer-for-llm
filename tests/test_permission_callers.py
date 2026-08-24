@@ -169,7 +169,7 @@ def _norm(groups):
             g["protectionLevel"],
             tuple(
                 (r["api"], tuple(r["descriptors"]), tuple(r["callers"]))
-                for r in g["rows"]
+                for r in g["apis"]
             ),
         )
         for g in groups
@@ -220,7 +220,7 @@ def test_protection_levels_span_and_are_valid():
             continue
         for g in dk.permission_callers(False):
             assert g["protectionLevel"] in PERM_LEVELS
-            assert g["rows"], "a group with no rows should be omitted"
+            assert g["apis"], "a group with no rows should be omitted"
             seen.add(g["protectionLevel"])
     # Issue #14: the full surface must expose non-dangerous levels the old
     # dangerous-only slice hid (the bundled corpus references signature/normal APIs).

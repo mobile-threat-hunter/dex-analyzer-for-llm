@@ -7,7 +7,7 @@ reader of that section runs — used names or signatures that do not exist. Thre
 them are corrected alongside this file; the fourth (``crypto.hits``) had already
 been fixed in 7747246. The headline case is ``ref.java_class``, which the stubs had
 deliberately avoided because introspecting the live module showed the real
-attribute is ``java_name``: the stubs dodged the mistake, the docs kept it, and a
+attribute is ``java_type``: the stubs dodged the mistake, the docs kept it, and a
 FIFTH instance of the same one survived in an ``api.md`` prose table that no fence
 runner can ever see.
 
@@ -295,7 +295,7 @@ def test_the_runner_is_not_vacuous():
     the API. Pinning `"method_ref_java"` as a bare substring was demonstrably
     vacuous — replacing the call with `# dexllm.method_ref_java(...) removed` keeps
     the needle, keeps the fence collected, and stops exercising anything; and
-    `print(ref)` instead of `print(ref.java_name)` defeats it without even a
+    `print(ref)` instead of `print(ref.java_type)` defeats it without even a
     comment. What broke in #34 was an ATTRIBUTE and an ARITY, so those are what is
     pinned.
     """
@@ -310,7 +310,7 @@ def test_the_runner_is_not_vacuous():
 
     bodies = [_strip_comments(c.values[2]) for c in cases]
     for needle in (
-        "ref.java_name",  # the attribute, not just the call that returns it
+        "ref.java_type",  # the attribute, not just the call that returns it
         "method_ref_java('Lcom/foo/Bar;', 'baz', '(I)V')",  # the arity
         "summary.is_internal",
         "open_apk",  # the SDK surface, otherwise wholly unexercised

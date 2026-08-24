@@ -38,8 +38,8 @@ from dexllm.sdk import open_apk, identify, DexAnalysisUseCase
 info = identify("app.apk")                       # ContainerInfo (no load)
 session: DexAnalysisUseCase = open_apk("app.apk")  # or open_apk([dump, apk], lenient=True)
 
-for g in session.permission_callers(app_only=True):   # tuple[PermissionCallerGroup]
-    print(g.permission, g.protection_level, len(g.rows))
+for g in session.permission_callers(app_only=True):   # tuple[PermissionCallers]
+    print(g.permission, g.protection_level, len(g.apis))
 
 m   = session.decompile_method("Lcom/x/Y;->m(I)V")    # DecompiledMethod
 ioc = session.extract_iocs()                          # IocReport
@@ -81,7 +81,7 @@ fields are `tuple`s; `Mapping` fields are read-only views. See
 - **`DecompiledMethod`** `(descriptor, source, found, pc_map)` — Java text of one
   method. `found` = non-empty `source` produced (see [`found` semantics](#found)).
 - **`DecompiledClass`** `(descriptor, source)` — full Java text of one class.
-- **`MethodAst`** `(found, class_name, name, proto, return_type, param_types,
+- **`MethodAst`** `(found, class_descriptor, name, proto, return_type, param_types,
   access_flags, source, ast, pc_map)` — the DAD nested-list AST. `ast` is a
   read-only mapping `{triple, flags, ret, params, comments, body}` **or `None`**
   for a not-found method; `pc_map` is a tuple of `StatementLocation`. Note
@@ -90,13 +90,13 @@ fields are `tuple`s; `Mapping` fields are read-only views. See
   `FieldInfo` that shares the name.
 
 ### Enumeration
-- **`ExternalMethodRef`** `(class_descriptor, name, proto, java_class,
-  java_signature, signature, return_type, parameters, is_constructor,
+- **`ExternalMethodRef`** `(class_descriptor, name, proto, descriptor, java_class,
+  java_signature, return_type, parameters, is_constructor,
   is_static_initializer, referenced_in_dex_ids)` — a framework/library method the
   app references but does not define.
-- **`ExternalFieldRef`** `(class_descriptor, name, type, java_class, java_type,
-  java_signature, signature, referenced_in_dex_ids)` — the field analogue.
-- **`ExternalTypeRef`** `(descriptor, java_name, referenced_in_dex_ids)` — a
+- **`ExternalFieldRef`** `(class_descriptor, name, type, descriptor, java_class,
+  java_type, java_signature, referenced_in_dex_ids)` — the field analogue.
+- **`ExternalTypeRef`** `(descriptor, java_type, referenced_in_dex_ids)` — a
   framework/library type the app references but does not declare (may be an array
   descriptor, e.g. `[Landroid/content/Intent;`).
 
@@ -104,10 +104,10 @@ fields are `tuple`s; `Mapping` fields are read-only views. See
 DexKit's headline capability — fast static class/method search (`SearchPort`). A hit
 is a light match record; `MatchType` is the name-match mode.
 - **`MatchType`** = `Literal["equals", "contains", "starts_with", "ends_with", "regex"]` — note `regex` is DexKit's *SimilarRegex* (`^`/`$` anchors only, not full regex).
-- **`ClassMatch`** `(class_id, descriptor, dex_id)` — one class hit.
-- **`MethodMatch`** `(method_id, descriptor, dex_id)` — one method hit. The `batch_*`
+- **`ClassRef`** `(class_idx, descriptor, dex_id)` — one class hit.
+- **`MethodRef`** `(method_idx, descriptor, dex_id)` — one method hit. The `batch_*`
   searches return `Mapping[str, tuple[Match, ...]]` keyed by the query key.
-- **`FieldMatch`** `(field_id, descriptor, dex_id)` — one field hit, from
+- **`FieldRef`** `(field_idx, descriptor, dex_id)` — one field hit, from
   `find_fields_by_name`. Unlike its two siblings this model is NEW rather than a
   rename: the raw type existed but nothing produced one until dexllm#37.
 
@@ -115,16 +115,23 @@ is a light match record; `MatchType` is the name-match mode.
 The C++ `get_class_summary` bundles class metadata + fields + methods into one
 object; the SDK layer splits it (ISP) so a consumer depends only on what it
 needs — metadata, fields and methods are three queries.
-- **`ClassInfo`** `(descriptor, dex_id, is_internal, access_flags, superclass,
-  interfaces, source_file, dex_name)` — class metadata, no members. `dex_name` is the
+- **`ClassInfo`** `(descriptor, dex_id, is_internal, access_flags,
+  superclass_descriptor, interface_descriptors, source_file, dex_name)` — class metadata, no members. `dex_name` is the
   declaring dex's file name (`classes.dex` / `classes2.dex` / …); `""` for an external
   class (`dex_id == -1`).
-- **`FieldInfo`** `(name, type, access_flags)` — one declared field; its descriptor
-  is `f"{cls}->{name}:{type}"`.
-- **`MethodInfo`** `(name, proto, access_flags)` — one declared method, returned by
-  `class_methods`; its descriptor is `f"{cls}->{name}{proto}"`. Both names are
-  shared verbatim with the raw layer (dexllm#37 renamed raw's `ClassMemberField` /
-  `ClassMemberMethod`, which were a second name for the same records).
+- **`FieldInfo`** `(name, type, access_flags, class_descriptor, descriptor)` — one
+  declared field.
+- **`MethodInfo`** `(name, proto, access_flags, class_descriptor, descriptor)` — one
+  declared method, returned by `class_methods`. Both names are shared verbatim with
+  the raw layer (dexllm#37 renamed raw's `ClassMemberField` / `ClassMemberMethod`,
+  which were a second name for the same records).
+
+`descriptor` is the IDENTITY the xref / decompile APIs consume, and
+`class_descriptor` the class it is declared on. dexllm#69 added both: every other
+member-shaped record already carried one — `MethodRef`, `ExternalMethodRef`,
+`ClassSummary` — and `*Info` was the only one without, so a caller reading
+`class_methods()` had to re-assemble `f"{cls}->{name}{proto}"` by hand. They are
+APPENDED, so the three positional arguments before them keep their meaning.
 
 `access_flags` on all three is `int | None` — the **raw dex bit-field**, or
 `None` when UNKNOWN.
@@ -148,7 +155,7 @@ The bit-field is not normalized to `java.lang.reflect.Modifier`. Since dexllm#37
 other spelling, and the reason `MethodInfo` exposes the bits instead.
 
 ### Cross-reference
-- **`ArgOrigin`** `(kind, reg_num, string_value?, int_value?, class_descriptor?,
+- **`ResolvedArg`** `(kind, register_index, string_value?, int_value?, class_descriptor?,
   field_descriptor?, method_descriptor?, parameter_index?, crossed_branch)` — the
   provenance of one invoke argument. Only the field its `kind` carries is set; `kind`
   ∈ ConstString / ConstInt / ConstWide / ConstClass / ConstNull / FieldRead /
@@ -169,7 +176,7 @@ other spelling, and the reason `MethodInfo` exposes the bits instead.
   which method produced the list**. `bytecode_offset` is always an offset inside the
   CALLER; `caller_method_idx` is a **dex-local** `method_ids` index, meaningful only
   paired with `caller_dex_id` (not a stable global id).
-- **`ResolvedCallSite`** — a `CallSite` plus `args: tuple[ArgOrigin, ...]`. Only the
+- **`ResolvedCallSite`** — a `CallSite` plus `args: tuple[ResolvedArg, ...]`. Only the
   reverse direction produces it (`resolve_call_args`), so callee is the fixed half.
 - Field read/write xref (`find_methods_reading_field` / `find_methods_writing_field`
   — named for what they RETURN, like every other `find_*`; the former
@@ -183,9 +190,9 @@ other spelling, and the reason `MethodInfo` exposes the bits instead.
   a field type, a method return type, or a method parameter (each a `tuple[str]`).
 
 ### Permission analysis
-- **`PermissionCallerRow`** `(api, descriptors, callers)` — one gated API and the
+- **`ApiCallers`** `(api, descriptors, callers)` — one gated API and the
   app methods that call it.
-- **`PermissionCallerGroup`** `(permission, protection_level, rows)` — a permission,
+- **`PermissionCallers`** `(permission, protection_level, apis)` — a permission,
   its protection-level bucket, and its referenced gated APIs (ALL protection levels).
   See the [protection-level reference](#protection-levels). The dangerous-only view
   is a one-liner filter (`[g for g in permission_callers(app_only=False) if
@@ -201,7 +208,7 @@ other spelling, and the reason `MethodInfo` exposes the bits instead.
   `Indicator`; defang-aware, public-suffix-validated.
 
 ### Capabilities
-- **`CapabilityHit`** `(api_descriptor, call_site_count, permissions, categories,
+- **`ApiUsage`** `(api_descriptor, call_site_count, permissions, categories,
   flags, callers, field_access_count)` — one catalog API the app exercises. Which
   counter is filled follows the catalog key's form: a METHOD key fills
   `call_site_count` (invoke instructions), a FIELD key — how an app reaches
@@ -211,7 +218,7 @@ other spelling, and the reason `MethodInfo` exposes the bits instead.
   is meaningful; they are kept apart only so `call_site_count`'s released meaning
   is untouched.
 - **`CapabilityReport`** `(catalog_version, catalog_size, matched_apis,
-  total_call_sites, permissions, categories, flags, api_hits, by_caller,
+  total_call_sites, permissions, categories, flags, api_usages, by_caller,
   total_field_accesses)` — the
   app's capability profile (holds `Mapping`s → immutable, **not hashable**).
   `categories` is one axis (domain / behaviour), so one call site is never counted
@@ -220,11 +227,11 @@ other spelling, and the reason `MethodInfo` exposes the bits instead.
   total_call_sites + total_field_accesses` (both, because the Counters count
   TOUCHES of either kind while the two totals keep the units apart). `flags` is the orthogonal cross-domain axis (today only
   `IDENTIFIER`). `by_caller` maps a calling method to the catalog APIs it invokes
-  — the transpose of `CapabilityHit.callers`, and what answers "who calls
+  — the transpose of `ApiUsage.callers`, and what answers "who calls
   `Runtime.exec` / `DexClassLoader` here". It held `{permissions}` until
   dexllm#35, built inside the permission loop, so an API declaring none registered
   no callers and the index covered 17 of the corpus's 317 distinct callers (5.4%).
-  Either view is derivable from `api_hits`, so this is a convenience index; the
+  Either view is derivable from `api_usages`, so this is a convenience index; the
   permission view is one join away
   (`{p for a in by_caller[c] for p in by_api[a].permissions}`) while a permission
   set could not give back an API.
@@ -254,7 +261,7 @@ so a consumer depends on just what it needs:
 | **`DexExtractionPort`** | `extract_dex` → `ExtractedDex` / `extract_dexes` → all of them in `dex_id` order (bytes + provenance: `source` / `entry` / `offset`; the packer/dump primitive). Provenance is not derivable elsewhere — the verify report's `name` is only the entry name for a zip member, so two sources both report `classes.dex`, and only `offset` says where in a concatenated container a dex starts |
 | **`ClassInspectionPort`** | `class_info`, `class_fields`, `class_methods`, `locate_class_dex` (the ISP split of raw's `get_class_summary`; `class_methods` is the structured twin of `class_fields` — `EnumerationPort.list_class_methods` returns descriptors, which carry no access flags, so before dexllm#37 a method modifier was reachable only by dropping to `.raw`; `locate_class_dex` = cheap declaring-dex lookup, vs the heavy `class_info().dex_id`) |
 | **`CrossReferencePort`** | `find_call_sites_to` (a target's callers — the reverse edge) / `find_call_sites_from` (a method's callees — the forward edge), `resolve_call_args`, `find_methods_reading_field`, `find_methods_writing_field`, `find_type_references`. `find_call_sites_to` / `find_call_sites_from` is the same pair the raw `DexKit` and the MCP catalog use — one spelling across all three layers, and the only one: the pre-unification adapter aliases (`find_call_sites`, `find_call_sites_to_api`, `find_call_sites_from_method`, `find_field_readers`, `find_field_writers`) were removed. Both call-site directions and `resolve_call_args` take `method_descriptor` |
-| **`SearchPort`** | `find_classes_by_name` / `by_super` / `implementing` / `by_annotation` / `using_strings` / `declaring_strings` (the declaration side — static-field constants the `using` index cannot see), `find_methods_by_name` / `by_annotation` / `using_strings` / `using_int_literals` / `using_double_literals`, `find_fields_by_name` (the field arm, dexllm#37 — `FieldMatch` was a public type nothing could produce), `batch_find_{classes,methods}_using_strings` (DexKit's L1–L7 search; `match_type` ∈ `MatchType`) |
+| **`SearchPort`** | `find_classes_by_name` / `by_super` / `implementing` / `by_annotation` / `using_strings` / `declaring_strings` (the declaration side — static-field constants the `using` index cannot see), `find_methods_by_name` / `by_annotation` / `using_strings` / `using_int_literals` / `using_double_literals`, `find_fields_by_name` (the field arm, dexllm#37 — `FieldRef` was a public type nothing could produce), `batch_find_{classes,methods}_using_strings` (DexKit's L1–L7 search; `match_type` ∈ `MatchType`) |
 | **`PermissionAnalysisPort`** | `permission_callers` (all protection levels) |
 | **`IndicatorExtractionPort`** | `extract_iocs` |
 | **`CapabilityPort`** | `summarize_capabilities` (`app_only=True` by default — the app's own callers, not the bundled libraries it ships; `dropped_touches` / `dropped_apis` say what that removed, so an empty report is not mistaken for an inert APK; dexllm#49) |
@@ -324,7 +331,7 @@ matches; `decompile_*` return a model with `found=False` / empty `source`.
 
 ## <a name="protection-levels"></a>Protection-level reference
 
-`PermissionCallerGroup.protection_level` (Android `protectionLevel`, bucketed):
+`PermissionCallers.protection_level` (Android `protectionLevel`, bucketed):
 
 | Bucket | Granted how | A normal app can hold it? | Triage meaning |
 |---|---|---|---|

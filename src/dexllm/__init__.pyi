@@ -10,9 +10,6 @@ exports appear here.
 from . import descriptors as descriptors
 from . import tools as tools
 from ._dexkit_core import (
-    ArgOrigin as ArgOrigin,
-)
-from ._dexkit_core import (
     CallSite as CallSite,
 )
 from ._dexkit_core import (
@@ -28,6 +25,9 @@ from ._dexkit_core import (
     ExternalTypeRef as ExternalTypeRef,
 )
 from ._dexkit_core import (
+    ResolvedArg as ResolvedArg,
+)
+from ._dexkit_core import (
     ResolvedCallSite as ResolvedCallSite,
 )
 from ._dexkit_core import (
@@ -40,7 +40,7 @@ from ._dexkit_core import (
     verify as verify,
 )
 from .capability import (
-    ApiHit as ApiHit,
+    ApiUsage as ApiUsage,
 )
 from .capability import (
     CapabilityReport as CapabilityReport,
@@ -123,8 +123,8 @@ from .safe import (
 __version__: str
 
 __all__ = [
-    "ApiHit",
-    "ArgOrigin",
+    "ApiUsage",
+    "ResolvedArg",
     "CallSite",
     "CapabilityReport",
     "DEFAULT_TIMEOUT_S",

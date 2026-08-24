@@ -57,25 +57,33 @@ class _DecompiledMethodWithPc(TypedDict):
 
 class _MethodAstResult(TypedDict):
     found: bool
-    cls_name: str
+    # dexllm#69 §4 — the KEYS say what every other record on every layer says.
+    # The C++ struct fields behind them keep DAD's own spellings (`cls_name`,
+    # `ret_type`, `params_type`, `access`), which are part of the port's `// DAD:`
+    # 1:1 traceability; the key is the API, the field is the port.
+    class_descriptor: str
     name: str
     proto: str
-    ret_type: str
-    params_type: list[str]
-    access: list[str]
+    return_type: str
+    param_types: list[str]
+    access_flags: list[str]
     source: str
     ast: dict[str, Any] | None  # None for an external / not-found method
     pc_map: list[tuple[int, int]]  # (statement_seq, byte_off)
 
-class _PermissionCallerRow(TypedDict):
+class _ApiCallers(TypedDict):
     api: str
     descriptors: list[str]
     callers: list[str]
 
-class _PermissionCallerGroup(TypedDict):
+class _PermissionCallers(TypedDict):
+    # `perm` / `protectionLevel` are the raw layer's own spellings and the SDK
+    # renames both (`permission` / `protection_level`); `protectionLevel` is also
+    # the only camelCase key in the API. Measured by dexllm#69 but NOT in the
+    # decisions it lists, so it is recorded rather than changed here.
     perm: str
     protectionLevel: str
-    rows: list[_PermissionCallerRow]
+    apis: list[_ApiCallers]
 
 # ── module-level functions ───────────────────────────────────────────────────
 
@@ -133,7 +141,7 @@ class ExternalTypeRef:
     def referenced_in_dex_ids(self) -> list[int]: ...
     # attached by _enrich.py
     @property
-    def java_name(self) -> str: ...
+    def java_type(self) -> str: ...
 
 class ExternalMethodRef:
     @property
@@ -179,29 +187,29 @@ class ExternalFieldRef:
     @property
     def java_signature(self) -> str: ...
 
-class ClassMatch:
+class ClassRef:
     @property
     def descriptor(self) -> str: ...
     @property
     def dex_id(self) -> int: ...
     @property
-    def class_id(self) -> int: ...
+    def class_idx(self) -> int: ...
 
-class MethodMatch:
+class MethodRef:
     @property
     def descriptor(self) -> str: ...
     @property
     def dex_id(self) -> int: ...
     @property
-    def method_id(self) -> int: ...
+    def method_idx(self) -> int: ...
 
-class FieldMatch:
+class FieldRef:
     @property
     def descriptor(self) -> str: ...
     @property
     def dex_id(self) -> int: ...
     @property
-    def field_id(self) -> int: ...
+    def field_idx(self) -> int: ...
 
 class FieldInfo:
     @property
@@ -221,6 +229,20 @@ class FieldInfo:
         always known: an inherited field it only REFERENCES is not listed
         (dexllm#45), even though the dex ``field_ids`` table groups that reference
         under it. Read those from ``list_fields()``, which is the whole table.
+        """
+
+    @property
+    def class_descriptor(self) -> str:
+        """The class this member is DECLARED on (dexllm#69 §3)."""
+
+    @property
+    def descriptor(self) -> str:
+        """The IDENTITY string the xref / decompile APIs consume.
+
+        Every other member-shaped record already carried one — ``MethodRef``,
+        ``ExternalMethodRef``, ``ClassSummary`` — and ``*Info`` was the only one
+        without, so a caller reading ``class_methods()`` had to re-assemble it by
+        hand. COMPUTED from ``class_descriptor`` + the member's own name.
         """
 
 class MethodInfo:
@@ -243,6 +265,20 @@ class MethodInfo:
         DECLARED method always knows its flags (``class_method_ids`` is built from
         ``class_data``); the field side has one more unknown case — see
         :class:`FieldInfo`.
+        """
+
+    @property
+    def class_descriptor(self) -> str:
+        """The class this member is DECLARED on (dexllm#69 §3)."""
+
+    @property
+    def descriptor(self) -> str:
+        """The IDENTITY string the xref / decompile APIs consume.
+
+        Every other member-shaped record already carried one — ``MethodRef``,
+        ``ExternalMethodRef``, ``ClassSummary`` — and ``*Info`` was the only one
+        without, so a caller reading ``class_methods()`` had to re-assemble it by
+        hand. COMPUTED from ``class_descriptor`` + the member's own name.
         """
 
 class ClassSummary:
@@ -271,14 +307,14 @@ class ClassSummary:
     @property
     def source_file(self) -> str: ...
 
-class ArgOrigin:
+class ResolvedArg:
     # The raw pybind object populates every field (empty-string / 0 default when
-    # the ``kind`` does not carry it); the typed dexllm.sdk.ArgOrigin is the
+    # the ``kind`` does not carry it); the typed dexllm.sdk.ResolvedArg is the
     # derived, Optional-narrowed view.
     @property
     def kind(self) -> str: ...
     @property
-    def reg_num(self) -> int: ...
+    def register_index(self) -> int: ...
     @property
     def string_value(self) -> str: ...
     @property
@@ -341,7 +377,7 @@ class ResolvedCallSite:
     @property
     def invoke_opcode(self) -> int: ...
     @property
-    def args(self) -> list[ArgOrigin]: ...
+    def args(self) -> list[ResolvedArg]: ...
 
 class TypeReferences:
     @property
@@ -577,7 +613,7 @@ class DexKit:
         Example::
 
             >>> t = dk.list_external_type_refs()[0]
-            >>> t.descriptor, t.java_name, t.referenced_in_dex_ids
+            >>> t.descriptor, t.java_type, t.referenced_in_dex_ids
             ('Landroid/accessibilityservice/AccessibilityServiceInfo;',
              'android.accessibilityservice.AccessibilityServiceInfo', [0])
         """
@@ -707,7 +743,7 @@ class DexKit:
         name: str,
         match_type: str = "contains",
         ignore_case: bool = False,
-    ) -> list[ClassMatch]:
+    ) -> list[ClassRef]:
         """Search class NAMES. Accepts dotted or Dalvik form.
 
         Example::
@@ -722,7 +758,7 @@ class DexKit:
         strings: Sequence[str | bytes | bytearray],
         match_type: str = "contains",
         ignore_case: bool = False,
-    ) -> list[ClassMatch]:
+    ) -> list[ClassRef]:
         """Classes whose CODE loads all of these strings (``const-string`` index).
 
         Cannot see a ``static final String`` that is declared but never loaded —
@@ -740,7 +776,7 @@ class DexKit:
         strings: Sequence[str | bytes | bytearray],
         match_type: str = "contains",
         ignore_case: bool = False,
-    ) -> list[ClassMatch]:
+    ) -> list[ClassRef]:
         """Classes DECLARING all of these as static-field constants.
 
         The declaration-side counterpart of ``find_classes_using_strings`` — the
@@ -758,7 +794,7 @@ class DexKit:
         strings: Sequence[str | bytes | bytearray],
         match_type: str = "contains",
         ignore_case: bool = False,
-    ) -> list[MethodMatch]:
+    ) -> list[MethodRef]:
         """Methods whose body loads all of these strings.
 
         Example::
@@ -772,7 +808,7 @@ class DexKit:
         query_map: Mapping[str, Sequence[str | bytes | bytearray]],
         match_type: str = "contains",
         ignore_case: bool = False,
-    ) -> dict[str, list[ClassMatch]]:
+    ) -> dict[str, list[ClassRef]]:
         """Many labelled queries in one pass — one shared index build, not N.
 
         Example::
@@ -787,7 +823,7 @@ class DexKit:
         query_map: Mapping[str, Sequence[str | bytes | bytearray]],
         match_type: str = "contains",
         ignore_case: bool = False,
-    ) -> dict[str, list[MethodMatch]]:
+    ) -> dict[str, list[MethodRef]]:
         """Method-scoped ``batch_find_classes_using_strings``."""
 
     def find_methods_by_name(
@@ -796,7 +832,7 @@ class DexKit:
         match_type: str = "contains",
         declaring_class: str = "",
         ignore_case: bool = False,
-    ) -> list[MethodMatch]:
+    ) -> list[MethodRef]:
         """Search method NAMES, optionally narrowed to a declaring class.
 
         Example::
@@ -811,11 +847,11 @@ class DexKit:
         match_type: str = "contains",
         declaring_class: str = "",
         ignore_case: bool = False,
-    ) -> list[FieldMatch]:
+    ) -> list[FieldRef]:
         """Search field NAMES, optionally narrowed to a declaring class.
 
         The field arm of the L7 search family, completing the class/method/field
-        symmetry the match types already named (dexllm#37: ``FieldMatch`` was a
+        symmetry the match types already named (dexllm#37: ``FieldRef`` was a
         public type nothing could produce).
 
         With a ``declaring_class`` only DECLARATIONS match — a field REFERENCE the
@@ -839,7 +875,7 @@ class DexKit:
 
     def find_classes_by_annotation(
         self, annotation_class: str, match_type: str = "equals"
-    ) -> list[ClassMatch]:
+    ) -> list[ClassRef]:
         """Classes carrying the annotation.
 
         Example::
@@ -851,12 +887,12 @@ class DexKit:
 
     def find_methods_by_annotation(
         self, annotation_class: str, match_type: str = "equals"
-    ) -> list[MethodMatch]:
+    ) -> list[MethodRef]:
         """Method-scoped ``find_classes_by_annotation``."""
 
     def find_classes_by_super(
         self, super_class: str, match_type: str = "equals"
-    ) -> list[ClassMatch]:
+    ) -> list[ClassRef]:
         """Direct subclasses (one level — not a transitive hierarchy walk).
 
         Example::
@@ -868,7 +904,7 @@ class DexKit:
 
     def find_classes_implementing(
         self, interface_class: str, match_type: str = "equals"
-    ) -> list[ClassMatch]:
+    ) -> list[ClassRef]:
         """Classes declaring the interface.
 
         Example::
@@ -878,9 +914,7 @@ class DexKit:
             ['Landroid/support/v14/preference/PreferenceFragment$2;']
         """
 
-    def find_methods_using_int_literals(
-        self, values: Sequence[int]
-    ) -> list[MethodMatch]:
+    def find_methods_using_int_literals(self, values: Sequence[int]) -> list[MethodRef]:
         """Methods whose body materializes all of these int constants.
 
         Useful for magic numbers (a port, an XOR key, a state code). ``[]`` when
@@ -889,7 +923,7 @@ class DexKit:
 
     def find_methods_using_double_literals(
         self, values: Sequence[float]
-    ) -> list[MethodMatch]:
+    ) -> list[MethodRef]:
         """Float/double counterpart of ``find_methods_using_int_literals``.
 
         Example::
@@ -953,7 +987,7 @@ class DexKit:
 
         ``source`` is byte-identical to ``decompile_method``; pass
         ``include_source=False`` to skip that emit pass (~1.7x faster, ``source``
-        comes back empty). ``access`` is decoded modifier NAMES off the raw dex
+        comes back empty). ``access_flags`` is decoded modifier NAMES off the raw dex
         bits, so a Java ``synchronized`` method reads ``declared_synchronized``.
 
         Example::
@@ -962,7 +996,7 @@ class DexKit:
             ...     "Lcom/example/android/tvleanback/Utils;"
             ...     "->convertDpToPixel(Landroid/content/Context;I)I",
             ...     include_source=False)
-            >>> a["ret_type"], a["params_type"], a["access"]
+            >>> a["return_type"], a["param_types"], a["access_flags"]
             ('I', ['Landroid/content/Context;', 'I'], ['public', 'static'])
             >>> sorted(a["ast"])
             ['body', 'comments', 'flags', 'params', 'ret', 'triple']
@@ -994,7 +1028,7 @@ class DexKit:
         (dexllm#45).
         """
     # permissions
-    def permission_callers(self, app_only: bool = True) -> list[_PermissionCallerGroup]:
+    def permission_callers(self, app_only: bool = True) -> list[_PermissionCallers]:
         """Dangerous-permission APIs the app calls, grouped by permission.
 
         Joins AOSP's permission->API map against this APK's external method refs,
@@ -1003,7 +1037,7 @@ class DexKit:
 
         Example::
 
-            >>> [(g["perm"], g["protectionLevel"], len(g["rows"]))
+            >>> [(g["perm"], g["protectionLevel"], len(g["apis"]))
             ...  for g in dk.permission_callers()][:2]
             [('android.permission.ACCESS_NETWORK_STATE', 'normal', 1),
              ('android.permission.INTERACT_ACROSS_USERS', 'signature', 4)]
