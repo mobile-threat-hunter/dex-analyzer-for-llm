@@ -101,8 +101,8 @@ struct FieldMatch {
 
 // L4 — origin of a single invoke argument. `kind` selects which value field
 // is meaningful. All values are resolved to user-facing forms (string content,
-// descriptors, signatures) on the C++ side so Python clients don't have to
-// reach back into dex tables.
+// Dalvik descriptors) on the C++ side so Python clients don't have to reach back
+// into dex tables.
 struct ArgOrigin {
     std::string kind;       // "ConstString", "ConstInt", "ConstWide",
                             // "ConstClass", "ConstNull", "FieldRead",
@@ -111,8 +111,8 @@ struct ArgOrigin {
     std::string string_value;       // ConstString
     int64_t int_value = 0;          // ConstInt / ConstWide
     std::string class_descriptor;   // ConstClass
-    std::string field_signature;    // FieldRead — "Lcls;->name:Type"
-    std::string method_signature;   // MethodReturn — "Lcls;->name(args)Ret"
+    std::string field_descriptor;   // FieldRead — "Lcls;->name:Type"
+    std::string method_descriptor;  // MethodReturn — "Lcls;->name(args)Ret"
     int16_t parameter_index = -1;   // Parameter
     // Unknown only (dexllm#16): the register HAD a tracked definition that a
     // control-flow merge discarded — the paths carry different values (a genuinely

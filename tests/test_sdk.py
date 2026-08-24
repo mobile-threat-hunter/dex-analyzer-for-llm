@@ -296,7 +296,9 @@ def test_typed_enumeration_and_xref(apk_path):
     # external field / type refs — symmetric with method refs, distinct typed models.
     frefs = session.list_external_field_refs(framework_only=True)
     assert all(isinstance(f, ExternalFieldRef) for f in frefs)
-    assert all(f.signature == f"{f.class_descriptor}->{f.name}:{f.type}" for f in frefs)
+    assert all(
+        f.descriptor == f"{f.class_descriptor}->{f.name}:{f.type}" for f in frefs
+    )
     trefs = session.list_external_type_refs(framework_only=True)
     assert all(isinstance(t, ExternalTypeRef) for t in trefs)
     # external types are reference (L…;) or array ([…) descriptors, never primitives
@@ -1081,6 +1083,472 @@ def test_raw_and_sdk_share_one_spelling_per_record_type():
                 f"{raw_name} (raw) and {sdk_name} (SDK) have identical fields "
                 f"{sorted(raw_attrs)} — that is one record under two names, not "
                 f"two records; unify the name instead of listing both"
+            )
+
+
+# ── dexllm#68: one Dalvik descriptor, one word for it ────────────────────────
+# `signature` is reserved for the DOTTED JAVA rendering
+# (`android.util.Log.d(java.lang.String) -> int`) — a genuinely different
+# artifact, and the `java_` prefix already says so. Every OTHER public name
+# holding the Dalvik form is `descriptor`, which is what every PARAMETER, every
+# validator and every MCP schema already said while five attributes did not.
+#
+# Pinned as a LITERAL rather than derived: a set built by scanning for a `java_`
+# prefix would accept any rename that kept the prefix, and a guard parametrised
+# over the thing it guards cannot catch an EDIT of it (the dexllm#49 lesson).
+_JAVA_RENDERING_ATTRS = frozenset(
+    {
+        "raw.ExternalFieldRef.java_signature",
+        "raw.ExternalMethodRef.java_signature",
+        "dexllm.sdk.model.ExternalFieldRef.java_signature",
+        "dexllm.sdk.model.ExternalMethodRef.java_signature",
+    }
+)
+
+
+#: Modules that need an OPTIONAL extra and may legitimately be absent, so the
+#: record scan below is allowed to skip them. Anything else failing to import is
+#: a broken import, not a smaller API, and must not shrink the audit silently.
+_OPTIONAL_MODULES = frozenset({"dexllm.mcp_server", "dexllm.server"})
+
+
+def _public_record_attrs():
+    """``{'raw.X' | '<module>.X': {public attribute names}}``, and the skips.
+
+    Every pybind record plus EVERY dataclass in the package — walked rather than
+    hand-listed, because a hand list is how `dexllm.capability.ApiHit` (a public
+    record, the raw counterpart of the SDK's `CapabilityHit`) would sit outside
+    the audit while looking covered.
+    """
+    import dataclasses
+    import importlib
+    import pkgutil
+
+    import dexllm
+    from dexllm import _dexkit_core as core
+
+    out, skipped = {}, []
+    for n in dir(core):
+        t = getattr(core, n)
+        if n.startswith("_") or n == "DexKit" or not isinstance(t, type):
+            continue
+        out[f"raw.{n}"] = {a for a in dir(t) if not a.startswith("_")}
+    for m in pkgutil.walk_packages(dexllm.__path__, "dexllm."):
+        try:
+            mod = importlib.import_module(m.name)
+        except ImportError as e:  # an optional extra is not installed
+            skipped.append((m.name, str(e)))
+            continue
+        for n in dir(mod):
+            t = getattr(mod, n)
+            if not isinstance(t, type) or getattr(t, "__module__", "") != m.name:
+                continue
+            if n.startswith("_"):
+                continue
+            # dataclasses AND NamedTuples: a reviewer added a `NamedTuple` record
+            # carrying a `signature` attribute and the walk did not enumerate it.
+            if dataclasses.is_dataclass(t):
+                out[f"{m.name}.{n}"] = set(t.__dataclass_fields__)
+            elif issubclass(t, tuple) and hasattr(t, "_fields"):
+                out[f"{m.name}.{n}"] = set(t._fields)
+    return out, skipped
+
+
+def test_signature_is_reserved_for_the_dotted_java_rendering():
+    """dexllm#68: the fourth NAME axis — record ATTRIBUTES.
+
+    #21 locks method names, #37 type names, #44 argument names. Attributes were
+    the axis nothing audited, and it had drifted: `ExternalMethodRef.signature`,
+    `ExternalFieldRef.signature`, `ArgOrigin.field_signature` / `.method_signature`
+    and `CapabilityHit.api_signature` all carried the SAME Dalvik grammar the rest
+    of the API spells `descriptor` — and one side's OUTPUT is the other side's
+    INPUT: `find_call_sites_to(ref.signature)` resolved, at a parameter named
+    `method_descriptor`. Worse than the `AttributeError` #21 removed, because BOTH
+    names resolved, so a consumer that guessed wrong got a wrong attribute.
+
+    The gap was MEASURED, not assumed, and the issue's own claim ("renaming
+    `signature` in model.py to anything at all passes the whole suite") is FALSE:
+    a ONE-layer rename fails 2 tests — `test_raw_and_sdk_share_one_spelling_per_
+    record_type` above compares the two layers' attribute SETS. What nothing
+    audited is the WORD, and a COHERENT rename across every layer was caught only
+    incidentally and unevenly: `ExternalFieldRef.signature` failed **1** test (a
+    value-composition assertion that happens to spell the name),
+    `CapabilityHit.api_signature` failed **13**. Whether a rename was noticed
+    depended on how often the name appeared in an assertion.
+
+    Set equality both ways, so a new `*signature*` attribute AND a stale exception
+    both fail; the exception is JUSTIFIED by the test below, not merely listed.
+    """
+    import dexllm
+
+    records, skipped = _public_record_attrs()
+    # A module the scan could not import is one it did not audit. An optional
+    # extra may be absent; anything else is a broken import, not a smaller API,
+    # and must fail loudly rather than shrink the scan.
+    for name, err in skipped:
+        assert name in _OPTIONAL_MODULES, f"{name} failed to import: {err}"
+    # …and the exception must be EARNED, like every other list here: when the
+    # extra IS installed, the module must genuinely declare no record, or listing
+    # it would hide one from the audit in any environment lacking the extra.
+    import dataclasses
+    import importlib
+
+    for name in sorted(_OPTIONAL_MODULES):
+        try:
+            mod = importlib.import_module(name)
+        except ImportError:
+            continue  # the extra is absent here; nothing to verify
+        declared = [
+            n
+            for n in dir(mod)
+            if not n.startswith("_")
+            and isinstance(getattr(mod, n), type)
+            and getattr(getattr(mod, n), "__module__", "") == name
+            and (
+                dataclasses.is_dataclass(getattr(mod, n))
+                or (
+                    issubclass(getattr(mod, n), tuple)
+                    and hasattr(getattr(mod, n), "_fields")
+                )
+            )
+        ]
+        assert not declared, (
+            f"{name} is listed as an optional module the audit may skip, but it "
+            f"declares records {declared} — they would be unaudited without the extra"
+        )
+    # Non-vacuity. The set equality below is self-guarding in one direction (an
+    # empty scan cannot equal a non-empty exception set), but a floor names the
+    # cause instead of reporting four "stale exceptions".
+    assert len(records) >= 25, f"only {len(records)} records enumerated"
+    n_attrs = sum(len(v) for v in records.values())
+    assert n_attrs >= 120, f"only {n_attrs} attributes enumerated"
+
+    found = {
+        f"{rec}.{attr}"
+        for rec, attrs in records.items()
+        for attr in attrs
+        if "signature" in attr
+    }
+    # …and the MODULE surface, so `dexllm.signature()` — the helper that BUILT the
+    # very string, and which this issue renamed to `method_descriptor` — cannot
+    # come back either. A record audit alone would not have seen it.
+    # The module NAMESPACE, not just `__all__`: an adversarial reviewer re-added
+    # `dexllm.signature()` without listing it, and `from dexllm import signature`
+    # worked while the audit saw nothing.
+    found |= {
+        f"dexllm.{n}"
+        for n in set(dexllm.__all__) | {n for n in dir(dexllm) if not n.startswith("_")}
+        if "signature" in n
+    }
+
+    assert found == _JAVA_RENDERING_ATTRS, (
+        f"a Dalvik descriptor spelled `signature`: "
+        f"{sorted(found - _JAVA_RENDERING_ATTRS)} | stale exceptions: "
+        f"{sorted(_JAVA_RENDERING_ATTRS - found)}"
+    )
+
+    # The module HELPER by name and by value. A ban on one word cannot see a
+    # rename to a third (`build_method_sig`), and the value audit below walks
+    # record attributes, not module functions — so this one function, which is
+    # the thing this issue renamed, is pinned directly.
+    assert dexllm.method_descriptor("Lc/D;", "m", "(I)V") == "Lc/D;->m(I)V"
+
+
+def test_the_java_rendering_exception_is_earned():
+    """dexllm#68: an exception must be JUSTIFIED, not merely listed.
+
+    Without this the cheapest way past the audit above is to add the offending
+    name to `_JAVA_RENDERING_ATTRS`, which absorbs the exact defect it exists for
+    — the same defence `test_raw_and_sdk_share_one_spelling_per_record_type`
+    applies to its own two lists. So each exempted attribute must NOT hold a
+    Dalvik descriptor, and the `descriptor` sibling on the same record must.
+
+    Runs on the one container this repo commits, so it holds in the corpus-less
+    CI leg and under any `$DEXLLM_TEST_APK` narrowing.
+    """
+    from conftest import REPO_ROOT
+
+    import dexllm
+    from dexllm.descriptors import is_member_descriptor, is_type_descriptor
+    from dexllm.sdk import open_apk
+
+    blob = REPO_ROOT / "tests" / "data" / "multidex.apk"
+    dk = dexllm.DexKit(str(blob))
+    holders = {
+        "raw.ExternalMethodRef": dk.list_external_method_refs()[0],
+        "raw.ExternalFieldRef": dk.list_external_field_refs()[0],
+    }
+    sdk = open_apk(str(blob))
+    holders["dexllm.sdk.model.ExternalMethodRef"] = sdk.list_external_method_refs()[0]
+    holders["dexllm.sdk.model.ExternalFieldRef"] = sdk.list_external_field_refs()[0]
+
+    checked = 0
+    for pinned in sorted(_JAVA_RENDERING_ATTRS):
+        rec, _, attr = pinned.rpartition(".")
+        obj = holders[rec]
+        v = getattr(obj, attr)
+        assert not is_member_descriptor(v) and not is_type_descriptor(v), (
+            f"{pinned} holds the Dalvik descriptor {v!r} — the exception is not "
+            f"earned; spell it `descriptor` rather than adding it to the list"
+        )
+        # …and not a Dalvik form the two validators happen not to cover. An
+        # adversarial reviewer showed a proto `(Ljava/lang/String;)I`, a shorty
+        # `ILL`, a bare internal name `android/util/Log` and a truncated
+        # `Lc;->d` are all EXEMPTABLE under those two alone, so anything carrying
+        # the internal `/` separator or the `;->` arrow is refused here too. A
+        # dotted Java rendering — the ONE thing this list is for — has neither.
+        assert "/" not in v and ";->" not in v, (
+            f"{pinned} holds {v!r}, which is a Dalvik form (internal separator), "
+            f"not the dotted Java rendering the exception is for"
+        )
+        # …and the other half of the rule: the record's Dalvik identity IS the
+        # attribute spelled for it. Without this the audit is satisfied by
+        # DELETING the descriptor attribute rather than renaming it.
+        assert is_member_descriptor(
+            obj.descriptor
+        ), f"{rec}.descriptor holds {obj.descriptor!r}, not a member descriptor"
+        checked += 1
+    # …and the loop RAN: an empty exception set would satisfy every assertion
+    # above by executing none of them.
+    assert checked == len(_JAVA_RENDERING_ATTRS) >= 4, checked
+
+
+# The audit above is a BAN on one word. The rule the docs state is the POSITIVE
+# one — every name holding a Dalvik descriptor is `descriptor` — and a ban does
+# not enforce it: a correctness reviewer renamed `api_descriptor` to `api_sig`
+# coherently across four layers, the tests and the docs, and the whole suite stayed
+# green. A third word re-creates the exact one-concept-two-names defect this issue
+# exists to ratchet, so the positive half is checked by VALUE below.
+#
+# These are the attributes whose live value IS a descriptor and whose name is not.
+# Each must be JUSTIFIED, and the two kinds are different:
+_DESCRIPTOR_ROLE_ATTRS = frozenset(
+    {
+        # ROLE — the name says WHICH descriptor it is, and BOTH layers agree, so
+        # there is one concept with one name. `type` on a field ref is the field's
+        # type, not its identity; that identity is `descriptor`.
+        "raw.ExternalFieldRef.type",
+        "sdk.ExternalFieldRef.type",
+        "raw.ExternalMethodRef.return_type",
+        "sdk.ExternalMethodRef.return_type",
+        "raw.ExternalMethodRef.parameters",
+        "sdk.ExternalMethodRef.parameters",
+        "sdk.MethodAst.return_type",
+        "sdk.MethodAst.param_types",
+        "sdk.CapabilityHit.callers",
+        "sdk.PermissionCallerRow.descriptors",  # spelled, listed for completeness
+    }
+)
+#: DRIFT — a genuine one-value-two-names divergence, all of it dexllm#69's, all of
+#: it PRE-EXISTING and none of it reachable by the `signature` ban (neither name
+#: contains the word). Listed so the audit does not silently tolerate a NEW one.
+_DESCRIPTOR_NAME_DRIFT = frozenset(
+    {
+        "sdk.ClassInfo.superclass",  # raw `ClassSummary.superclass_descriptor`
+        "sdk.ClassInfo.interfaces",  # raw `ClassSummary.interface_descriptors`
+        "sdk.MethodAst.class_name",  # raw `cls_name`; elsewhere `class_descriptor`
+    }
+)
+
+
+def _descriptor_valued_attrs(source):
+    """``{'raw.X.attr'|'sdk.X.attr'}`` whose LIVE value is a Dalvik descriptor."""
+    import dexllm
+    from dexllm.descriptors import is_member_descriptor, is_type_descriptor
+    from dexllm.sdk import open_apk
+
+    def is_desc(v):
+        return isinstance(v, str) and (is_member_descriptor(v) or is_type_descriptor(v))
+
+    def desc_valued(v):
+        if is_desc(v):
+            return True
+        return bool(isinstance(v, (list, tuple)) and v and all(is_desc(x) for x in v))
+
+    found = set()
+
+    def probe(label, obj):
+        for a in dir(obj):
+            if a.startswith("_"):
+                continue
+            try:
+                v = getattr(obj, a)
+            except Exception:  # noqa: BLE001 - a property may legitimately raise
+                continue
+            if not callable(v) and desc_valued(v):
+                found.add(f"{label}.{a}")
+
+    dk = dexllm.DexKit(source)
+    sdk = open_apk(source)
+    cls = sorted(dk.list_classes())[0]
+    for layer, h in (("raw", dk), ("sdk", sdk)):
+        for r in h.list_external_method_refs()[:3]:
+            probe(f"{layer}.ExternalMethodRef", r)
+        for r in h.list_external_field_refs()[:3]:
+            probe(f"{layer}.ExternalFieldRef", r)
+        for r in h.list_external_type_refs()[:3]:
+            probe(f"{layer}.ExternalTypeRef", r)
+        for m in h.find_classes_by_name("a", match_type="Contains")[:3]:
+            probe(f"{layer}.ClassMatch", m)
+        for m in h.find_methods_by_name("a", match_type="Contains")[:3]:
+            probe(f"{layer}.MethodMatch", m)
+        for md in h.list_class_methods(cls)[:6]:
+            for cs in h.find_call_sites_from(md)[:3]:
+                probe(f"{layer}.CallSite", cs)
+            for rs in h.resolve_call_args(md)[:3]:
+                probe(f"{layer}.ResolvedCallSite", rs)
+                for arg in rs.args[:4]:
+                    probe(f"{layer}.ArgOrigin", arg)
+    probe("raw.ClassSummary", dk.get_class_summary(cls))
+    probe("sdk.ClassInfo", sdk.class_info(cls))
+    for f in sdk.class_fields(cls)[:3]:
+        probe("sdk.FieldInfo", f)
+    md = sdk.list_class_methods(cls)[0]
+    probe("sdk.DecompiledMethod", sdk.decompile_method(md))
+    probe("sdk.MethodAst", sdk.decompile_method_ast(md))
+    # A capability HIT is not reachable from the committed fixture (it matches no
+    # catalog API), and that record is one this issue renames — so it is driven
+    # from a STUB through the real pipeline rather than left unaudited. A
+    # corpus-gated probe would leave it invisible in exactly the CI leg that has
+    # no corpus.
+    for hit in _stub_capability_hits():
+        probe("raw.ApiHit", hit)
+    for hit in sdk.summarize_capabilities(app_only=False).api_hits[:3]:
+        probe("sdk.CapabilityHit", hit)
+    return found
+
+
+class _CapSite:
+    def __init__(self, caller):
+        self.caller_descriptor = caller
+
+
+class _CapStubDk:
+    """Answers the two lookups `summarize_capabilities` makes, for one key."""
+
+    def __init__(self, key):
+        self._key = key
+
+    def find_call_sites_to(self, descriptor):
+        return (
+            [_CapSite("Lcom/example/App;->onCreate()V")]
+            if descriptor == self._key
+            else []
+        )
+
+    def find_methods_reading_field(self, descriptor):
+        return []
+
+
+def _stub_capability_hits():
+    """Real `capability.ApiHit`s, built by the real pass over a stub `dk`."""
+    import dexllm
+    from dexllm.capability import _load_catalog
+
+    key = next(k for k in _load_catalog()["entries"] if "(" in k.partition(";->")[2])
+    rep = dexllm.summarize_capabilities(_CapStubDk(key), app_only=False)
+    return rep.api_hits[:3]
+
+
+def test_a_descriptor_valued_attribute_is_spelled_descriptor():
+    """dexllm#68: the POSITIVE half of the rule, checked by VALUE not by name.
+
+    `test_signature_is_reserved_for_the_dotted_java_rendering` bans ONE word, so a
+    THIRD one evades it — a correctness reviewer built `api_descriptor` ->
+    `api_sig` coherently across every layer, the tests and the docs, and the whole
+    suite stayed green. This asserts what the docs actually claim: an attribute
+    whose LIVE value is a Dalvik descriptor is spelled `descriptor`, unless it is
+    pinned as a ROLE name (both layers agree, so it is one concept with one name)
+    or as KNOWN pre-existing DRIFT that dexllm#69 owns.
+
+    SUBSET, not equality: which records are reachable depends on the sample — a
+    class with no interfaces never produces `ClassInfo.interfaces` — so an absent
+    exception is an environment fact, while a NEW offender is a product fact and
+    fails. Runs on the one container this repo commits.
+    """
+    from conftest import REPO_ROOT
+
+    blob = REPO_ROOT / "tests" / "data" / "multidex.apk"
+    found = _descriptor_valued_attrs(str(blob))
+    # Non-vacuity: the scan must actually have resolved descriptors, and must have
+    # reached the records this issue renamed.
+    assert len(found) >= 20, f"only {len(found)} descriptor-valued attributes seen"
+    for must in ("raw.ExternalMethodRef.descriptor", "sdk.ExternalFieldRef.descriptor"):
+        assert must in found, f"the scan never reached {must}"
+
+    allowed = _DESCRIPTOR_ROLE_ATTRS | _DESCRIPTOR_NAME_DRIFT
+    offenders = {a for a in found if "descriptor" not in a.rsplit(".", 1)[1]} - allowed
+    assert not offenders, (
+        f"these hold a Dalvik descriptor and are not spelled `descriptor`: "
+        f"{sorted(offenders)} — rename them, or pin them as a ROLE (both layers "
+        f"agree) / as dexllm#69 DRIFT, with the reason"
+    )
+
+    # An exception must be JUSTIFIED, not merely listed. A ROLE name is one BOTH
+    # layers use — that is exactly what separates it from a cross-layer rename —
+    # so a `sdk.` entry must have its `raw.` twin listed too when the raw layer has
+    # that record at all. Without this the list is a dumping ground and the audit
+    # is satisfied by adding to it, the defect it exists to catch.
+    assert not (_DESCRIPTOR_ROLE_ATTRS & _DESCRIPTOR_NAME_DRIFT), "an attr in both"
+    raw_records = {a.split(".")[1] for a in found if a.startswith("raw.")}
+    for entry in sorted(_DESCRIPTOR_ROLE_ATTRS):
+        layer, record, attr = entry.split(".", 2)
+        if layer != "sdk" or record not in raw_records:
+            continue
+        twin = f"raw.{record}.{attr}"
+        assert twin in _DESCRIPTOR_ROLE_ATTRS, (
+            f"{entry} is pinned as a ROLE but its raw twin {twin} is not — a name "
+            f"only ONE layer uses is drift, not a role"
+        )
+
+
+def test_the_arg_kind_attribute_map_has_one_definition():
+    """dexllm#68: `_ARG_VALUE_FIELD` was two copies that had to move in lockstep.
+
+    `tools.py` and `sdk/adapter.py` each carried a private copy mapping an
+    `ArgOrigin.kind` to the attribute it fills, and this issue renamed two of the
+    values — so "must change in lockstep" stopped being theoretical. They share
+    one object now (the `_callers.py` precedent from dexllm#49).
+
+    IDENTITY, not equal contents: a correct COPY passes every behavioural test in
+    the suite and drifts on the first edit, which is the shape #49's own review
+    had to construct.
+    """
+    from dexllm import _argkinds, tools
+    from dexllm import _dexkit_core as core
+    from dexllm.sdk import adapter
+
+    shared = _argkinds.ARG_VALUE_ATTR_BY_KIND
+    assert tools.ARG_VALUE_ATTR_BY_KIND is shared, "tools.py holds its own copy"
+    assert adapter.ARG_VALUE_ATTR_BY_KIND is shared, "adapter.py holds its own copy"
+
+    # …and every value must be an attribute the raw record ACTUALLY has, so a
+    # rename that misses the map fails HERE — structurally, corpus-free — rather
+    # than as an AttributeError inside a corpus-dependent xref call.
+    assert len(shared) >= 9, f"only {len(shared)} kinds mapped"
+    for kind, attr in shared.items():
+        assert hasattr(
+            core.ArgOrigin, attr
+        ), f"kind {kind!r} maps to {attr!r}, which ArgOrigin does not have"
+
+    # …and the USE SITE, not only the module attribute. An adversarial reviewer
+    # kept the shared import (so identity passes, and ruff sees the name used) and
+    # had the consumer read a correct PRIVATE copy — the exact hole dexllm#49's own
+    # review had to construct one axis over. So neither consumer may declare a
+    # kind->attribute mapping of its own, and each must NAME the shared one.
+    import inspect
+    import re
+
+    for mod in (tools, adapter):
+        src = inspect.getsource(mod)
+        assert "ARG_VALUE_ATTR_BY_KIND" in src, f"{mod.__name__} never names it"
+        # A dict literal mapping any ArgOrigin kind to an attribute string IS a
+        # second definition, whatever it is called.
+        for kind in shared:
+            pattern = rf'["\']{kind}["\']\s*:\s*["\']'
+            assert not re.search(pattern, src), (
+                f"{mod.__name__} declares its own mapping for {kind!r} — the map "
+                f"has ONE definition, in _argkinds.py"
             )
 
 

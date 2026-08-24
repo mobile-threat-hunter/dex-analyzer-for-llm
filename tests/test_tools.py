@@ -17,6 +17,7 @@ from conftest import require_corpus_shape
 
 import dexllm
 import dexllm.tools as tools
+from dexllm.descriptors import is_member_descriptor
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -276,8 +277,13 @@ def test_literal_tools_reject_empty_values(dk):
 
 def test_arg_compact_covers_every_arg_kind():
     """_arg_to_compact handles EXACTLY the ArgKind set the C++ ArgKindName emits — a
-    drift guard so a new native kind isn't silently mapped to value=None."""
-    handled = set(tools._ARG_VALUE_FIELD) | {"Parameter", "ConstNull", "Unknown"}
+    drift guard so a new native kind isn't silently mapped to value=None.
+
+    The map is the one `sdk/adapter.py` shares (dexllm#68), and it now carries
+    `Parameter` too — this view renders that kind as `pN` rather than reading the
+    raw index, so it consults the map only after its own branch.
+    """
+    handled = set(tools.ARG_VALUE_ATTR_BY_KIND) | {"ConstNull", "Unknown"}
     expected = {
         "ConstString",
         "ConstInt",
@@ -292,6 +298,49 @@ def test_arg_compact_covers_every_arg_kind():
         "Unknown",
     }
     assert handled == expected, f"drift: {handled ^ expected}"
+
+
+class _Arg:
+    """The duck an ArgOrigin presents to `_arg_to_compact` — no corpus needed."""
+
+    def __init__(self, kind, **kw):
+        self.kind = kind
+        self.reg_num = 0
+        self.string_value = ""
+        self.int_value = 0
+        self.class_descriptor = ""
+        self.field_descriptor = ""
+        self.method_descriptor = ""
+        self.parameter_index = -1
+        self.crossed_branch = False
+        for k, v in kw.items():
+            setattr(self, k, v)
+
+
+def test_a_parameter_arg_renders_as_pN_not_as_a_bare_index():
+    """dexllm#68: the `Parameter` -> `pN` rendering, which nothing asserted.
+
+    An adversarial reviewer deleted `_arg_to_compact`'s `Parameter` branch and the
+    WHOLE suite plus the lint trio stayed green — and this change made losing it
+    WORSE, not merely equally bad: HEAD's private map had no `Parameter` key, so
+    the deletion yielded `None`, while the SHARED map has one, so it now yields a
+    bare INT under the same `value` key that carries a `ConstInt` literal. One key,
+    two grammars, on the LLM-facing surface — the defect class this issue exists to
+    close, re-created by its own refactor. The sibling test above compares the KEY
+    SET only, so it cannot see this.
+    """
+    out = tools._arg_to_compact(2, _Arg("Parameter", parameter_index=3))
+    assert out["value"] == "p3", out
+    assert not isinstance(out["value"], int), "a bare index is a ConstInt's grammar"
+    # …and the kinds whose value the shared map DOES supply are unaffected.
+    assert tools._arg_to_compact(0, _Arg("ConstInt", int_value=7))["value"] == 7
+    assert (
+        tools._arg_to_compact(0, _Arg("FieldRead", field_descriptor="Lc/D;->f:I"))[
+            "value"
+        ]
+        == "Lc/D;->f:I"
+    )
+    assert tools._arg_to_compact(0, _Arg("ConstNull"))["value"] is None
 
 
 def test_type_references_paging_is_recoverable(dk):
@@ -952,3 +1001,132 @@ def test_tool_catalog_carries_no_aliases(dk):
         assert gone not in tools.TOOL_IMPLS
         assert tools.execute(gone, {}, dk)["error"].startswith("unknown tool")
     assert tools.execute("no_such_tool", {}, dk)["error"].startswith("unknown tool")
+
+
+class _KeySite:
+    def __init__(self, caller):
+        self.caller_descriptor = caller
+        self.callee_descriptor = ""
+        self.caller_dex_id = 0
+        self.caller_method_idx = 0
+        self.bytecode_offset = 0
+        self.invoke_opcode = 0x6E
+
+
+class _KeyRef:
+    """The two attributes `dangerous_permission_api_callers` reads off a ref."""
+
+    def __init__(self, cls, name, proto):
+        self.class_descriptor, self.name, self.proto = cls, name, proto
+        self.descriptor = f"{cls}->{name}{proto}"
+        self.java_class = cls[1:-1].replace("/", ".")
+
+
+class _KeyStubDk:
+    """A dk answering both tools' lookups, so the guard needs no corpus."""
+
+    def __init__(self, cap_key, dang_desc):
+        self._cap, self._dang = cap_key, dang_desc
+
+    def list_external_method_refs(self, framework_only=True):
+        cls, _, member = self._dang.partition(";->")
+        name, _, proto = member.partition("(")
+        return [_KeyRef(cls + ";", name, "(" + proto)]
+
+    def find_call_sites_to(self, descriptor):
+        if descriptor in (self._cap, self._dang):
+            return [_KeySite("Lcom/example/App;->onCreate()V")]
+        return []
+
+    def find_methods_reading_field(self, descriptor):
+        return []
+
+
+def _key_stub():
+    """A stub whose two payloads each carry at least one row, corpus-free."""
+    from dexllm.capability import _load_catalog
+    from dexllm.dangerous_api import dangerous_permission_apis
+
+    cap_key = next(
+        k for k in _load_catalog()["entries"] if "(" in k.partition(";->")[2]
+    )
+    # Pick a DANGEROUS api the bundled AOSP table actually carries, by asking the
+    # table itself rather than hard-coding a descriptor that a refresh could drop.
+    probe = _KeyStubDk(cap_key, "")
+    seed = "Landroid/location/LocationManager;->getLastKnownLocation(Ljava/lang/String;)Landroid/location/Location;"
+    probe._dang = seed
+    if not dangerous_permission_apis(probe):
+        return None
+    return _KeyStubDk(cap_key, seed)
+
+
+def test_the_capability_tool_shares_no_key_with_a_second_grammar_corpus_free():
+    """dexllm#68: the same two halves as below, driven by a STUB.
+
+    The corpus-driven version cannot run in the CI leg — `test_tools.py`'s own
+    module-local `dk` fixture globs `test_apk/APK/*.apk` and SKIPS without it — so
+    an adversarial reviewer showed the guard's UNIQUE half (that the sibling tool
+    still spells `api` for the AOSP DOTTED form) had no coverage there: making the
+    dangerous tool's `api` carry the Dalvik form survived the corpus-less run
+    byte-identically. This drives both tools through a stub `dk`, so both halves
+    hold with no corpus at all.
+    """
+    stub = _key_stub()
+    if stub is None:  # pragma: no cover - the bundled AOSP table always has it
+        pytest.skip("the bundled dangerous-API table no longer carries the seed")
+
+    cap = tools.execute("summarize_capabilities", {"limit": 200}, stub)
+    assert "error" not in cap, cap
+    assert cap["api_hits"], "the stub produced no capability hit — guard is vacuous"
+    for h in cap["api_hits"]:
+        assert "api" not in h, f"the collided key is back: {sorted(h)}"
+        assert is_member_descriptor(h["descriptor"]), h["descriptor"]
+
+    dang = tools.execute("dangerous_permission_api_callers", {}, stub)
+    assert "error" not in dang, dang
+    rows = [r for v in dang.get("permissions", {}).values() for r in v]
+    assert rows, "the stub produced no dangerous-API row — guard is vacuous"
+    for r in rows:
+        assert ";->" not in r["api"], f"`api` is no longer the dataset form: {r['api']}"
+        assert all(is_member_descriptor(d) for d in r["descriptors"]), r["descriptors"]
+
+
+def test_the_capability_tool_no_longer_shares_the_api_key_with_a_second_grammar(dk):
+    """dexllm#68: one MCP key, two grammars, on the surface an LLM reads.
+
+    `summarize_capabilities` abbreviated `CapabilityHit.api_signature` to `"api"`,
+    landing on a key `dangerous_permission_api_callers` already used for the AOSP
+    DATASET form — and that sibling spells the Dalvik form `"descriptors"` in the
+    SAME dict. So `payload["api"]` meant `Landroid/...;->m()V` in one tool and
+    `android.location.LocationManager#getLastKnownLocation(String)` in the other:
+    the dexllm#38 shape, reached through the `signature` spelling rather than
+    independently. The capability key is `"descriptor"` now; the dangerous-API one
+    is untouched, because there `api` genuinely names a different artifact.
+
+    Both halves are asserted: renaming the key without checking the sibling would
+    pass a build that renamed BOTH and re-created the collision one word over.
+    """
+    cap = tools.execute("summarize_capabilities", {"limit": 200}, dk)
+    assert "error" not in cap, cap
+    hits = cap["api_hits"]
+    require_corpus_shape(
+        bool(hits),
+        "an APK matching at least one catalog API",
+        "summarize_capabilities reports no hits at all",
+    )
+    for h in hits:
+        assert "api" not in h, f"the collided key is back: {sorted(h)}"
+        assert is_member_descriptor(h["descriptor"]), h["descriptor"]
+
+    dang = tools.execute("dangerous_permission_api_callers", {}, dk)
+    assert "error" not in dang, dang
+    rows = [r for v in dang.get("permissions", {}).values() for r in v]
+    require_corpus_shape(
+        bool(rows),
+        "an APK calling at least one dangerous-permission API",
+        "dangerous_permission_api_callers reports no rows at all",
+    )
+    for r in rows:
+        # …still `api`, and still the DOTTED form — the key kept its meaning.
+        assert ";->" not in r["api"], f"`api` is no longer the dataset form: {r['api']}"
+        assert all(is_member_descriptor(d) for d in r["descriptors"]), r["descriptors"]

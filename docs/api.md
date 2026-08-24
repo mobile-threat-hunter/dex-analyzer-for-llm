@@ -654,7 +654,10 @@ the MCP tool catalog — and there is no longer any other: the pre-unification n
 carries the role (`_to` = the callee whose callers you want, `_from` = the caller
 whose callees you want), so the parameter names what the value IS. It was
 `api_descriptor` on the `_to` side, which said "framework API" — only the common
-case, and not what the value is. The MCP catalog likewise advertises exactly one
+case, and not what the value is. (`CapabilityHit.api_descriptor` keeps the
+`api_` prefix for the opposite reason: that record IS one catalog-API hit, so
+the prefix names the catalog entry rather than asserting anything about a
+callee — dexllm#68.) The MCP catalog likewise advertises exactly one
 name per tool, and an unadvertised spelling returns `{"error": "unknown tool: ..."}`:
 mcp validates arguments only against the schema of the tool it ADVERTISES, so an
 alias there would silently lose input validation.
@@ -794,7 +797,7 @@ APIs the app calls but doesn't define (framework/library refs).
 ### `dk.list_external_method_refs() -> list[ExternalMethodRef]`
 ```python
 em = dk.list_external_method_refs()[0]   # len 4821
-em.signature        # 'Landroid/accessibilityservice/AccessibilityServiceInfo;->getCanRetrieveWindowContent()Z'
+em.descriptor       # 'Landroid/accessibilityservice/AccessibilityServiceInfo;->getCanRetrieveWindowContent()Z'
 em.java_signature   # 'android.accessibilityservice.AccessibilityServiceInfo.getCanRetrieveWindowContent() -> boolean'
 em.class_descriptor # 'Landroid/accessibilityservice/AccessibilityServiceInfo;'
 em.java_class       # 'android.accessibilityservice.AccessibilityServiceInfo'
@@ -820,7 +823,7 @@ em.referenced_in_dex_ids      # [0]      (list[int])
 Python-side filter helpers: `dexllm.filter_method_refs(refs, ...)`,
 `filter_field_refs`, `filter_type_refs` (e.g. keep only `android.content.*`).
 `dexllm.find_call_sites_to_ref(dk, ref)` → the `list[CallSite]` for an
-`ExternalMethodRef` (the convenience that resolves `ref.signature` and calls
+`ExternalMethodRef` (the convenience that resolves `ref.descriptor` and calls
 `find_call_sites_to`).
 
 ---
@@ -968,12 +971,12 @@ at all, including `Settings$Secure.getString`, the ANDROID_ID read. Measured on 
 one is indexed — 52 of them are the apps' own, which is what the default reports.
 
 Either view is derivable from `api_hits`, so `by_caller` is a convenience index
-rather than new information; signatures make it the more primary one, and within
+rather than new information; descriptors make it the more primary one, and within
 the field the derivation runs only one way — APIs give back permissions and tags,
 a permission set could not give back an API:
 ```python
 r = dexllm.summarize_capabilities(dk)
-by_api = {h.api_signature: h for h in r.api_hits}
+by_api = {h.api_descriptor: h for h in r.api_hits}
 for caller, apis in r.by_caller.items():
     {p for a in apis for p in by_api[a].permissions}   # the pre-dexllm#35 value
 ```
@@ -1093,7 +1096,13 @@ dexllm.is_framework_descriptor('Landroid/app/Activity;')   # True
 dexllm.method_ref_java('Lcom/foo/Bar;', 'baz', '(I)V')     # 'com.foo.Bar.baz(int) -> void'
 dexllm.parse_proto('(ILjava/lang/String;)Z')  # (['I', 'Ljava/lang/String;'], 'Z')  — (param descriptors, return)
 dexllm.pretty_proto('(ILjava/lang/String;)Z') # '(int, java.lang.String) -> boolean'
+dexllm.method_descriptor('Lcom/foo/Bar;', 'baz', '(I)V')   # 'Lcom/foo/Bar;->baz(I)V'
 ```
+
+`method_descriptor` builds the wire form the `method_descriptor` PARAMETER of
+`find_call_sites_to` / `resolve_call_args` / `decompile_method` consumes, and
+that `require_member_descriptor` validates. It was `dexllm.signature()` until
+dexllm#68 — a builder and its validator naming one grammar two ways.
 
 ### Safe (hang-guarded) decompile wrappers
 Run the decompile on a daemon thread with a wall-clock deadline. **Use in
@@ -1143,13 +1152,13 @@ had no producer until then).
 | `dex_id` | `int` |
 
 ### `ExternalMethodRef`
-`class_descriptor`, `name`, `proto`, `return_type`, `signature` (`str`);
+`class_descriptor`, `name`, `proto`, `return_type`, `descriptor` (`str`);
 `java_class`, `java_signature` (`str`); `parameters` (`list[str]`);
 `referenced_in_dex_ids` (`list[int]`); `is_constructor`,
 `is_static_initializer` (`bool`).
 
 ### `ExternalFieldRef` / `ExternalTypeRef`
-Field: class/name/type descriptors + `signature`. Type: `descriptor` +
+Field: class/name/type descriptors + `descriptor`. Type: `descriptor` +
 `java_name` + `referenced_in_dex_ids`.
 
 ### `CallSite`
@@ -1180,8 +1189,8 @@ Where one argument came from (intra-method).
 | `string_value` | `str` | for string constants |
 | `int_value` | `int` | for int constants |
 | `class_descriptor` | `str` | for new-instance/type origins |
-| `method_signature` | `str` | for method-return origins |
-| `field_signature` | `str` | for field origins |
+| `method_descriptor` | `str` | for method-return origins |
+| `field_descriptor` | `str` | for field origins |
 | `parameter_index` | `int` | for parameter origins (`-1` if n/a) |
 
 ### `ClassSummary`
@@ -1210,7 +1219,7 @@ form, so one method described itself two ways.) The same bits drive the
 ### `CapabilityReport`
 `permissions: collections.Counter[str]`, `categories: collections.Counter[str]`,
 `flags: collections.Counter[str]`, `by_caller: dict[str, set[str]]` (caller
-descriptor → the catalog API signatures it invokes — dexllm#35; it was
+descriptor → the catalog API descriptors it invokes — dexllm#35; it was
 `→ {permissions}` before), `api_hits: list[ApiHit]`, `total_call_sites: int`
 (invoke instructions), `catalog_version: str`, `catalog_size: int`,
 `matched_apis: int`, `total_field_accesses: int` (READ INSTRUCTIONS against a
@@ -1289,7 +1298,14 @@ source in `src/dexllm/sdk/`.
 
 - **Descriptors in / typed objects or strings out.** Enumeration + decompile
   return `str`; search returns typed match objects; refs return typed ref
-  objects. Read `.descriptor` / `.signature` to get back a string.
+  objects. Read `.descriptor` to get back a string — `signature` is reserved
+  for the dotted Java rendering (`java_signature`), which dexllm#68 made the
+  rule rather than a coincidence. Two ROLE names on those records also hold a
+  descriptor and say what it IS rather than repeating the word (`type` on a
+  field ref, `return_type` / `parameters` on a method ref); and the SDK drops the
+  suffix on `ClassInfo.superclass` / `.interfaces` where raw says
+  `superclass_descriptor` / `interface_descriptors` — dexllm#69's axis, not this
+  one.
 - **Threading.** Decompile calls release the GIL — parallelize across threads
   for whole-APK sweeps. Use the `safe_*` wrappers in automation.
 - **Framework filtering.** `is_framework_descriptor` + the `filter_*_refs`

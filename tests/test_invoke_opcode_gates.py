@@ -369,11 +369,11 @@ def test_no_call_site_carries_an_opcode_that_is_not_a_method_reference(
     """
     seen = set()
     targets = [
-        # `.signature`, not a `__repr__` slice: this repo has changed `__repr__`
+        # `.descriptor`, not a `__repr__` slice: this repo has changed `__repr__`
         # twice (dexllm#22, #29), and a malformed descriptor would make every
         # external query return [] while the test still passed on the internal
         # targets alone.
-        r.signature
+        r.descriptor
         for r in fixture_dk.list_external_method_refs()
     ]
     targets += [

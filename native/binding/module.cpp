@@ -738,7 +738,7 @@ PYBIND11_MODULE(_dexkit_core, m) {
                       &dexkit::ext::ExternalMethodRef::referenced_in_dex_ids)
         // Decode each component, THEN join: decoding the concatenation could pair
         // a trailing surrogate half with the next component's leading one.
-        .def_property_readonly("signature",
+        .def_property_readonly("descriptor",
             [](const dexkit::ext::ExternalMethodRef& r) {
                 return py::str(DecodeMutf8ForPy(r.class_descriptor) + "->" +
                                DecodeMutf8ForPy(r.name) +
@@ -870,13 +870,13 @@ PYBIND11_MODULE(_dexkit_core, m) {
             [](const dexkit::ext::ArgOrigin& a) {
                 return ident_out(a.class_descriptor);
             })
-        .def_property_readonly("field_signature",
+        .def_property_readonly("field_descriptor",
             [](const dexkit::ext::ArgOrigin& a) {
-                return ident_out(a.field_signature);
+                return ident_out(a.field_descriptor);
             })
-        .def_property_readonly("method_signature",
+        .def_property_readonly("method_descriptor",
             [](const dexkit::ext::ArgOrigin& a) {
-                return ident_out(a.method_signature);
+                return ident_out(a.method_descriptor);
             })
         .def_readonly("parameter_index",  &dexkit::ext::ArgOrigin::parameter_index)
         .def_readonly("crossed_branch",   &dexkit::ext::ArgOrigin::crossed_branch)
@@ -887,8 +887,8 @@ PYBIND11_MODULE(_dexkit_core, m) {
             else if (a.kind == "ConstInt" || a.kind == "ConstWide") body = std::to_string(a.int_value);
             else if (a.kind == "ConstClass" || a.kind == "NewInstance" || a.kind == "NewArray")
                 body = DecodeMutf8ForPy(a.class_descriptor);
-            else if (a.kind == "FieldRead")    body = DecodeMutf8ForPy(a.field_signature);
-            else if (a.kind == "MethodReturn") body = DecodeMutf8ForPy(a.method_signature);
+            else if (a.kind == "FieldRead")    body = DecodeMutf8ForPy(a.field_descriptor);
+            else if (a.kind == "MethodReturn") body = DecodeMutf8ForPy(a.method_descriptor);
             else if (a.kind == "Parameter")    body = "#" + std::to_string(a.parameter_index);
             else if (a.crossed_branch)         body = "(unproven: definition discarded)";  // ASCII only: a repr is printed in loops
             return "ArgOrigin(" + a.kind + (body.empty() ? "" : " " + body) + ")";

@@ -52,7 +52,7 @@ def _patch_field_ref() -> None:
     cls = ExternalFieldRef
     cls.java_class = property(lambda s: _d.descriptor_to_java(s.class_descriptor))  # type: ignore[method-assign, assignment]
     cls.java_type = property(lambda s: _d.descriptor_to_java(s.type))  # type: ignore[method-assign, assignment]
-    cls.signature = property(lambda s: f"{s.class_descriptor}->{s.name}:{s.type}")  # type: ignore[method-assign, assignment]
+    cls.descriptor = property(lambda s: f"{s.class_descriptor}->{s.name}:{s.type}")  # type: ignore[method-assign, assignment]
     cls.java_signature = property(  # type: ignore[method-assign, assignment]
         lambda s: f"{_d.descriptor_to_java(s.class_descriptor)}.{s.name} : "
         f"{_d.descriptor_to_java(s.type)}"

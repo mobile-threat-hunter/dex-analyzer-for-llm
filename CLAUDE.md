@@ -2313,7 +2313,7 @@ rather than merely extended.
 
 Exposed via `dexllm.DexKit(apk_path)`. The constructor identifies the file **by content, not extension** — a `dex\n` magic loads as a bare `.dex` via the core's `AddImage`; otherwise it must prove out as a real zip/apk container (PK signature + parseable central directory via `ZipArchive::Open`) and carry at least one sequential `classes*.dex`. A disguised `.apk` (renamed, wrong, or absent extension) therefore still loads; a non-dex/non-zip file or a zip with no `classes*.dex` now raises a clear `std::runtime_error` (the error reports whether `AndroidManifest.xml` was present) instead of the old silent 0-dex load. Detection lives in `DexKitExt::DexKitExt` ([dexkit_ext.cpp](native/core_ext/dexkit_ext.cpp)). Arg name stays `apk_path` for backward compatibility.
 
-**Multi-source / packer-unpack load.** `DexKit(sources: list[str], lenient=False)` loads several sources (each a `.dex` or zip/apk) **in order** — earlier sources get lower dex_ids, so first-wins prefers them. List a runtime-decrypted/dumped dex BEFORE the original apk to make the unpacked class win a collision (mirrors ART, where the packer orders the decrypted dex first). `lenient=True` runs the verifier in **ART-structural-equivalent** mode (`VerifyDex(..., check_insns=false)` — skips `VerifyInsns`, the one part beyond ART's structural `DexFileVerifier`) so a *partially*-decrypted dump (valid structure, garbage method bodies) still loads, exactly as ART loads it; header/ids/code_item bounds stay verified. A **concatenated** dump (several dexes in one file — what unpackers actually produce) is verified per LOGICAL dex, and the ones that verify still load even when a sibling is rejected (dexllm#25); `lenient` was the mode that walked straight into that hole. **Lenient memory-safety:** skipping `VerifyInsns` lets unvalidated instruction operands reach the core's cross-ref collectors, so those bound each operand index at the source ([dex_item.cpp](vendor/dexkit_core/Core/dexkit/dex_item.cpp) `InitBaseCache` / `GetUsingStringsFromCode`; a third, `GetInvokeMethodsFromCode`, was bounded by the same pass and turned out to be dead code — deleted in dexllm#61): an out-of-range `const-string` string index, `iget/sget` field index, or `invoke-*` method index is dropped so `method_using_string_ids` / `method_using_field_ids` / `method_invoking_ids` never feed an OOB id into the load-time cross-ref maps (`field_get/put_method_ids`, `method_caller_ids`) or the L7 matchers — without this a crafted dump OOB-read the string pool (SEGV on a 32-bit `const-string/jumbo` index) or OOB-indexed the caller maps at load. The decompile path was already safe (snapshot `ResolveConstRef` + adapter getters bound-check); this extends the guarantee to `list_value_strings` / L7 search / IOC-xref / `dangerous_*`. A second-pass review also bounded `BuildMethodSignature` in [dexkit_ext.cpp](native/core_ext/dexkit_ext.cpp) (it OOB-read `MethodIds()` for a `resolve_call_args` `ArgOrigin` whose `method_idx` is a raw `invoke` operand — its sibling `BuildFieldSignature` already had the guard). Bounds are no-ops on strict-verified input. (Session adversarial-review finding; regression `test_lenient_oob_operand_does_not_crash` in [tests/test_lenient_verify.py](tests/test_lenient_verify.py) exercises `list_value_strings` / `find_methods_using_strings` / `decompile` / `resolve_call_args` / `extract_iocs` on crafted OOB-operand dumps.) `dexllm.add_dumped_dexes(dk, dumps, prefer=True, lenient=True)` ([packer.py](src/dexllm/packer.py)) is the "re-analyze after dumping" verb — returns a fresh `DexKit` over `dumps + dk.sources()` (clean rebuild → consistent caches). Both constructors share `CollectSource` (per-source probe + VerifyDex + collect). The constructor refactor and these knobs are the packer-analysis scaffold ([[project-packer-analysis-direction]]); `detect_packer` (attachBaseContext + unpacker-API signals) is the next step.
+**Multi-source / packer-unpack load.** `DexKit(sources: list[str], lenient=False)` loads several sources (each a `.dex` or zip/apk) **in order** — earlier sources get lower dex_ids, so first-wins prefers them. List a runtime-decrypted/dumped dex BEFORE the original apk to make the unpacked class win a collision (mirrors ART, where the packer orders the decrypted dex first). `lenient=True` runs the verifier in **ART-structural-equivalent** mode (`VerifyDex(..., check_insns=false)` — skips `VerifyInsns`, the one part beyond ART's structural `DexFileVerifier`) so a *partially*-decrypted dump (valid structure, garbage method bodies) still loads, exactly as ART loads it; header/ids/code_item bounds stay verified. A **concatenated** dump (several dexes in one file — what unpackers actually produce) is verified per LOGICAL dex, and the ones that verify still load even when a sibling is rejected (dexllm#25); `lenient` was the mode that walked straight into that hole. **Lenient memory-safety:** skipping `VerifyInsns` lets unvalidated instruction operands reach the core's cross-ref collectors, so those bound each operand index at the source ([dex_item.cpp](vendor/dexkit_core/Core/dexkit/dex_item.cpp) `InitBaseCache` / `GetUsingStringsFromCode`; a third, `GetInvokeMethodsFromCode`, was bounded by the same pass and turned out to be dead code — deleted in dexllm#61): an out-of-range `const-string` string index, `iget/sget` field index, or `invoke-*` method index is dropped so `method_using_string_ids` / `method_using_field_ids` / `method_invoking_ids` never feed an OOB id into the load-time cross-ref maps (`field_get/put_method_ids`, `method_caller_ids`) or the L7 matchers — without this a crafted dump OOB-read the string pool (SEGV on a 32-bit `const-string/jumbo` index) or OOB-indexed the caller maps at load. The decompile path was already safe (snapshot `ResolveConstRef` + adapter getters bound-check); this extends the guarantee to `list_value_strings` / L7 search / IOC-xref / `dangerous_*`. A second-pass review also bounded `BuildMethodDescriptor` in [dexkit_ext.cpp](native/core_ext/dexkit_ext.cpp) (it OOB-read `MethodIds()` for a `resolve_call_args` `ArgOrigin` whose `method_idx` is a raw `invoke` operand — its sibling `BuildFieldDescriptor` already had the guard). Bounds are no-ops on strict-verified input. (Session adversarial-review finding; regression `test_lenient_oob_operand_does_not_crash` in [tests/test_lenient_verify.py](tests/test_lenient_verify.py) exercises `list_value_strings` / `find_methods_using_strings` / `decompile` / `resolve_call_args` / `extract_iocs` on crafted OOB-operand dumps.) `dexllm.add_dumped_dexes(dk, dumps, prefer=True, lenient=True)` ([packer.py](src/dexllm/packer.py)) is the "re-analyze after dumping" verb — returns a fresh `DexKit` over `dumps + dk.sources()` (clean rebuild → consistent caches). Both constructors share `CollectSource` (per-source probe + VerifyDex + collect). The constructor refactor and these knobs are the packer-analysis scaffold ([[project-packer-analysis-direction]]); `detect_packer` (attachBaseContext + unpacker-API signals) is the next step.
 
 `dexllm.identify(path)` is the load-free probe behind the same logic — returns `{format: "dex"|"zip"|"unknown", is_apk, has_manifest, dex_count, source}` without constructing a `DexKit` (`source` echoes the path, so a probe result can say what it describes — dexllm#26's lesson, and what lets `dk.source_info()` reuse the shape). Use it to pre-filter resources-only containers (0-dex) before loading, e.g. in sweep harnesses (`dexkit_ext.cpp::Identify`, bound in [module.cpp](native/binding/module.cpp)).
 
@@ -2347,7 +2347,7 @@ The class+method enumeration APIs let drivers (sweep, bench) drop the androguard
 
 **Option (b) of the issue — the value is now the API SIGNATURES, not the permissions.** The nesting was *consistent* with the declared `caller → {permissions}` type, so this is a deliberate re-definition of what the field is FOR, not a patch: it is the transpose of `ApiHit.callers`. Rejected: (a) keep it a permission map and just document the exclusion — leaves the caller-indexed question unanswerable; (c) add a second `by_caller_apis` field — two overlapping caller indices, and the released one stays 95% blind.
 
-**The first cut justified (b) as "lossless — the reverse could not be recovered", and a reviewer REFUTED that.** `api_hits` carries `callers` per API and always did, so `{h.api_signature for h in api_hits if c in h.callers}` reconstructs the new index from a **pre-fix** report — demonstrated by rebuilding the full 76-entry tvleanback index from a pre-fix run whose own `by_caller` had 4 entries. Both directions were always derivable; the bug lost the INDEX, never the data (the issue said as much and the first draft talked past it). The honest statement, now in all four doc sites: `by_caller` is a CONVENIENCE INDEX, and signatures make it the more primary view — the field-level asymmetry (APIs give back permissions and tags, a permission set cannot give back an API) is real but is a claim about the FIELD, not about the report.
+**The first cut justified (b) as "lossless — the reverse could not be recovered", and a reviewer REFUTED that.** `api_hits` carries `callers` per API and always did, so `{h.api_descriptor for h in api_hits if c in h.callers}` reconstructs the new index from a **pre-fix** report — demonstrated by rebuilding the full 76-entry tvleanback index from a pre-fix run whose own `by_caller` had 4 entries. Both directions were always derivable; the bug lost the INDEX, never the data (the issue said as much and the first draft talked past it). The honest statement, now in all four doc sites: `by_caller` is a CONVENIENCE INDEX, and signatures make it the more primary view — the field-level asymmetry (APIs give back permissions and tags, a permission set cannot give back an API) is real but is a claim about the FIELD, not about the report.
 
 **Measured (a/b, SAME script, the field changes by construction so the gate is "ONLY `by_caller` changes"):** over 31 sources × 4 `only_categories` filters, every other field — `permissions`, `categories`, `flags`, `total_call_sites`, `catalog_*`, `matched_apis`, and every `api_hits` entry INCLUDING its `callers` set — hashes **identical**; the MCP tool dict is **byte-identical** (it omits `by_caller` for context size, asserted rather than assumed). Per-source `by_caller` sizes sum **27 → 691** over those 31 sources (**26 → 634** over the 22 bundled `.apk` alone — the same quantity at two scopes, which the first draft quoted side by side as if they were one). Corpus invariant: `by_caller` equals the transpose of the hits' callers on **31/31 sources, 0 mismatch**. corpus-less 128 passed, lint trio clean, both new doc fences now EXECUTED by the runner (they were free-variable fences the collector silently skipped — 71 → 73 collected, floor ratcheted 67 → 69).
 
@@ -2424,6 +2424,348 @@ Both are breaking for anyone on the released spellings — deliberately, and the
 Provenance is resolved through the **IMAGE**, not by load-order index: `DexKitExt::CollectSource` records `MemMap* → (source, entry)` BEFORE moving the image into the core, and `GetDexOrigin(dex_id)` matches `DexItem::GetImage()` against that map — because one source can back several dex_ids, the load-order index is not the dex_id. `offset` is the logical dex's start within its image (nonzero only for the concatenated case), computed from the same reader-header base `GetDexBytes` slices with.
 
 Beware the coupled contract: `verify()` (load-free) is documented as **byte-identical** to `DexKit(path).verify_report()`, so the static path had to grow `source` on all five of its row-emitting sites too — adding it to only the load path broke that equality, and `test_verify_matches_verify_report` caught it. That test compares the two IMPLEMENTATIONS to each other, so it catches an ASYMMETRIC omission only; a review showed a symmetric one passes, so it now also PINS the value (`r["source"] == apk`). Guards: `test_extract_dex_provenance_disambiguates_sources` (two sources sharing an entry name; asserts the ambiguity EXISTS in the fixtures, else it proves nothing) + the provenance half of `test_extract_dex_slices_concatenated_container` (asserts `offset` separates the two logical dexes AND that `verify_report` has only one row, pinning the assumption that does not hold). a/b: whole-corpus decompile text byte-identical, parity 28/28, sweep 25,309/0-crash, pytest 246.
+
+### One Dalvik descriptor, one word for it (dexllm#68, 2026-08-24)
+
+v0.12.0 finished locking the NAME axes — but only three of four: raw <-> port
+METHOD names (dexllm#21), raw <-> SDK TYPE names (dexllm#37) and the four-layer
+ARGUMENT names (dexllm#44). Record **ATTRIBUTE** names were the axis nothing
+audited, and unlike #44 this was not a ratchet over a clean state: it had drifted
+into the defect #37 removed one axis over — one concept, two names.
+
+Five public attributes held a Dalvik descriptor and spelled it `signature` —
+`ExternalMethodRef.signature`, `ExternalFieldRef.signature`,
+`ArgOrigin.field_signature` / `.method_signature`, `CapabilityHit.api_signature`
+— while every `find_*` PARAMETER, `is_member_descriptor`, every MCP schema and
+every other record (`MethodMatch.descriptor`, `CallSite.caller_descriptor`, …)
+say `descriptor`. And one side's OUTPUT is the other side's INPUT:
+`dk.find_call_sites_to(ref.signature)` resolves, at a parameter named
+`method_descriptor`. **Worse than the `AttributeError` dexllm#21 removed**,
+because both names resolve — so a consumer that guessed wrong got a wrong
+ATTRIBUTE rather than an error.
+
+`signature` is RESERVED now for the dotted Java rendering
+(`android.util.Log.d(java.lang.String) -> int`), which is a genuinely different
+artifact that the `java_` prefix already marks.
+
+## The issue's own "why nothing caught it" was FALSE, and measuring it shaped the guard
+
+It claimed renaming `signature` in `model.py` *"to anything at all passes the
+whole suite"*. Each was applied to the PRE-change tree (all three are
+python-only, so no rebuild is involved) and the WHOLE suite run:
+
+| mutant | fails | what caught it |
+|---|---:|---|
+| ONE layer (`model.py` alone) | **2** | dexllm#37's own audit compares the two layers' attribute SETS; the adapter's keyword call raises |
+| COHERENT `ExternalFieldRef.signature` (`_enrich` + `model` + `adapter` + `.pyi`) | **1** | a value-composition assertion that happens to SPELL the name |
+| COHERENT `CapabilityHit.api_signature` (its 4 python layers) | **13** | tests and doc fences that happen to spell it |
+
+So the axis was not unguarded — it was guarded **incidentally and unevenly**, and
+whether a rename was noticed depended on how often the name appeared in an
+assertion. **Nothing audited the WORD**, which is what the new guard does.
+
+## What changed, and the two decisions the user made
+
+The direction and both open sub-decisions were escalated (CLAUDE.md rule 5 — this
+BREAKS released public attributes and this repo keeps no aliases, dexllm#24), and
+the user chose: rename everything; `CapabilityHit.api_descriptor` with the MCP key
+`"descriptor"`; and `dexllm.signature()` renamed NOW rather than deferred to
+dexllm#69.
+
+| layer | before | after |
+|---|---|---|
+| raw pybind | `ExternalMethodRef.signature` | `.descriptor` |
+| py `_enrich` | `ExternalFieldRef.signature` | `.descriptor` |
+| raw + SDK | `ArgOrigin.field_signature` / `.method_signature` | `.field_descriptor` / `.method_descriptor` |
+| `capability.ApiHit` + SDK `CapabilityHit` | `api_signature` | `api_descriptor` |
+| module | `dexllm.signature(cls, name, proto)` | `dexllm.method_descriptor(...)` |
+| MCP `summarize_capabilities` | per-hit key `"api"` | `"descriptor"` |
+| C++ | `ArgOrigin::field_signature` / `method_signature`, `BuildMethodSignature` / `BuildFieldSignature`, the `caller_sig` locals | `*_descriptor` / `Build*Descriptor` / `caller_desc` |
+
+The C++ struct fields are renamed because the pybind property reads them TWO
+LINES away, and the builders because they are assigned to a `*_descriptor` field
+ONE line away — the "a builder and its validator disagree" shape the issue names,
+on the internal side. `dexllm.method_descriptor()` is the same shape one layer up:
+it BUILDS the string `require_member_descriptor` validates in the same module.
+
+**`api_descriptor` keeps the `api_` prefix that dexllm#21 stage 4 REMOVED from a
+PARAMETER, and the reason is the opposite one**: `find_call_sites_to`'s argument
+was renamed because `api_descriptor` asserted "framework API" of an arbitrary
+callee, whereas `CapabilityHit` IS one catalog-API hit, so the prefix names the
+catalog entry rather than assuming anything. Stated in `sdk/model.py` and
+`docs/api.md` so it is not read as a relapse.
+
+## The MCP `"api"` key meant two things, and that is the collision this closes
+
+`summarize_capabilities` abbreviated `api_signature` to `"api"`, landing on a key
+`dangerous_permission_api_callers` already used for the AOSP DATASET form — and
+that sibling spells the Dalvik form `"descriptors"` in the SAME dict. So
+`payload["api"]` meant `Landroid/…;->m()V` in one tool and
+`android.location.LocationManager#getLastKnownLocation(String)` in the other: the
+dexllm#38 shape, on the surface an LLM reads, reached through the `signature`
+spelling rather than independently. The capability key is `"descriptor"` now; the
+dangerous-API one is UNTOUCHED, because there `api` genuinely names a different
+artifact — and the a/b proves it did not move.
+
+## `_ARG_VALUE_FIELD` was two copies; it is one object now
+
+`tools.py` and `sdk/adapter.py` each held a private map from `ArgOrigin.kind` to
+the attribute it fills, and this change renames two of the VALUES — so "must
+change in lockstep" stopped being theoretical. They share
+[src/dexllm/_argkinds.py](src/dexllm/_argkinds.py) (a `MappingProxyType`, so
+neither layer can mutate what both read), the `_callers.py` precedent from
+dexllm#49. The guard asserts object **IDENTITY**, not equal contents: a correct
+COPY passes every behavioural test and drifts on the first edit, which is the
+shape #49's own review had to construct. The map now carries `Parameter` too; the
+MCP view renders that kind as `pN`, so it consults the map only after its own
+branch.
+
+## Measured
+
+a/b OFF=`9f1baa1247b5b2796d7458f615c00033` vs ON=`30f53ca61e161e7d39714de1798247b9`,
+SAME script, both `.so` md5-verified before AND after each capture — and the OFF
+build **BIT-REPRODUCES the recorded HEAD md5**, which is the diff's functional
+content stated as a measurement. 43 sources — the whole bundled corpus plus every
+committed fixture — x 29 axes = **1107 axis records present, 14 changed**, on
+exactly TWO axes (`mcp_cap`, `mcp_cap_keys`) and exactly SEVEN sources, and those
+7 are **precisely the sources carrying at least one capability hit** (re-derived
+programmatically, not asserted). The 1107 is re-derivable rather than a harness
+number: 38 sources load and carry all 29 axes, 5 are not containers at all and
+carry only `load` — 29x38 + 1x5
+[[published-counts-need-the-repos-own-predicate]]. Every VALUE is captured under a
+NEUTRAL key, so the two halves compare VALUES rather than names: external method
+refs, external field refs, every `resolve_call_args` argument, every capability
+hit, `by_caller`, `dangerous_permission_api_callers` and its MCP payload, all four
+SDK-layer axes, the decompiled Java, the smali and the class lists are
+**identical on every source**.
+
+A separate probe pins that the rename is a **RENAME**: on ON the OLD spelling is
+ABSENT from every record and from `dexllm.__all__`, and on OFF the new one is.
+
+**The a/b harness lied TWICE, and both halves were re-measured from scratch each
+time.** (1) `mcp_cap` reported all 38 loadable sources as changed — the harness
+called `tools.execute(dk, name, args)` with the arguments in the wrong order, so
+that axis captured an error string containing the DexKit object's `repr`, i.e.
+**a memory address**, and the 38 "changes" were pure ASLR
+[[ab-harness-must-itself-be-deterministic]]. The tell was its SIBLING axis
+`mcp_cap_keys` reporting ZERO: two axes that must move together did not. (2) The
+four SDK-layer axes were **never captured at all** — the block did
+`with open_apk(...) as sdk:` and `open_apk` returns the adapter, not a context
+manager, so it raised on EVERY source and stored the exception under a single
+`sdk` key. That string is IDENTICAL on both halves, so it compared EQUAL and read
+as coverage; the claim "the SDK models are identical on every source" was
+unsupported until this was found and fixed. **An axis that silently degrades to a
+constant is worse than a missing axis, because it looks verified.** The harness
+now exits non-zero on any erroring axis — scoped to exclude `load`, where an
+error IS the measurement for the five bundled sources that are certificates or
+resources-only containers.
+
+## Guards
+
+Four in [tests/test_sdk.py](tests/test_sdk.py), beside their three siblings, and
+two in [tests/test_tools.py](tests/test_tools.py). All six are corpus-INDEPENDENT
+— those that need live values run on the committed `tests/data/multidex.apk`
+(which yields both an external method ref and an external field ref) or drive the
+real pass over a STUB `dk` — so they hold in the corpus-less CI leg and under any
+`$DEXLLM_TEST_APK` narrowing. **That sentence was FALSE when first written**: the
+MCP-key guard took `test_tools.py`'s module-local `dk` fixture, which globs the
+corpus and SKIPS without it; an adversarial reviewer measured the skip and showed
+the guard's unique half had no CI coverage at all. The corpus-driven version is
+KEPT — it is real evidence on a real APK — and a stub-driven twin covers the CI
+leg.
+
+`test_signature_is_reserved_for_the_dotted_java_rendering` collects every public
+attribute of every record on BOTH layers (43 records / 232 attributes today) plus
+every name in `dexllm.__all__`, and requires the ones containing `signature` to
+EQUAL a PINNED exception list — set equality both ways, so a new offender AND a
+stale exception both fail. The list is a LITERAL rather than a `java_`-prefix
+scan, because a guard parametrised over the thing it guards cannot catch an EDIT
+of it. The module half is not decoration: a record-only audit would not have seen
+`dexllm.signature()`.
+
+`test_the_java_rendering_exception_is_earned` is the JUSTIFICATION half, without
+which the cheapest way past the audit is to ADD the offender to the list — which
+absorbs the very defect, the same defence dexllm#37 applies to its own two lists.
+Each exempted attribute's live value must NOT be a Dalvik descriptor, AND the
+`descriptor` sibling on the same record must BE one (so the audit cannot be
+satisfied by DELETING the attribute instead of renaming it), and the loop must be
+shown to have RUN.
+
+`test_the_arg_kind_attribute_map_has_one_definition` pins object identity and that
+every mapped attribute EXISTS on the raw record — so a rename that misses the map
+fails structurally and corpus-free, rather than as an `AttributeError` inside a
+corpus-dependent xref call.
+
+`test_the_capability_tool_no_longer_shares_the_api_key_with_a_second_grammar`
+(corpus) and `..._corpus_free` (stub) each assert BOTH halves: the capability
+payload no longer carries `api` and its `descriptor` is a member descriptor, AND
+the sibling tool still says `api` with the DOTTED form. Checking only the renamed
+key would pass a build that renamed both and re-created the collision one word
+over — measured: that mutant survives the corpus-less run byte-identically
+without the stub twin.
+
+`test_a_descriptor_valued_attribute_is_spelled_descriptor` is the POSITIVE half —
+by VALUE, because a ban on one word cannot enforce a rule about all of them. Its
+two exception lists are different in kind and are checked as such: a ROLE name
+must be used by BOTH layers (that is what separates it from a cross-layer rename,
+so a `sdk.` entry whose `raw.` twin is unlisted FAILS), while DRIFT is the three
+pre-existing dexllm#69 cases named above. SUBSET, not equality, because which
+records a sample reaches is an environment fact — a class with no interfaces never
+produces `ClassInfo.interfaces` — while a NEW offender is a product fact.
+
+`test_a_parameter_arg_renders_as_pN_not_as_a_bare_index` pins the one rendering
+the shared map does NOT supply, which nothing asserted and which this change made
+newly dangerous to lose.
+
+The record scan WALKS the package rather than naming two modules, and that is not
+tidiness: a hand list had `_dexkit_core` + `sdk.model` and therefore left
+**`dexllm.capability.ApiHit`** — the raw counterpart of the SDK's `CapabilityHit`,
+returned by `summarize_capabilities` — outside an audit that looked complete.
+Walking finds 43 records / 232 attributes. Stated honestly, this closes a SCOPE
+gap and not a silent hole: the adapter reads that record, so a one-module rename
+breaks loudly elsewhere (measured: 18 failures in `test_capability_catalog.py`
+alone). What the widening buys is that the audit
+NAMES the cause, and that a record added to some future module is covered without
+anyone remembering to extend a list. A module that fails to IMPORT is recorded and
+must be a declared optional-extra one, so a missing dependency cannot shrink the
+scan into vacuity.
+
+## What the two reviewers found — 3 CONFIRMED, and one of them the change itself CAUSED
+
+Both worked in FULLY ISOLATED copies (own venv, own `.so`), and both built their
+own OFF half rather than trusting mine — one of them reproduced `ab_old.json`
+BYTE-FOR-BYTE, and the other caught its own first OFF build being a **no-op**
+because `cp -a` preserved mtimes and ninja said "no work to do" while the `.so`
+still carried the change [[mutation-harness-restore-pitfalls]].
+
+**CONFIRMED — the audit banned ONE WORD while the docs claimed the POSITIVE
+rule.** `found = {... if "signature" in attr}` enforces *"no descriptor is spelled
+`signature`"*; CLAUDE.md, `docs/api.md` and the docstrings all stated *"every name
+holding a Dalvik descriptor is `descriptor`"*. A THIRD word sails through, so a
+correctness reviewer renamed `api_descriptor` -> `api_sig` coherently across four
+layers, the tests and the docs, and **the whole suite stayed green** — the exact
+one-concept-two-names defect this issue exists to ratchet, re-created past its own
+guard. Closed by `test_a_descriptor_valued_attribute_is_spelled_descriptor`, which
+checks the positive half BY VALUE: it instantiates every reachable record and
+requires any attribute whose LIVE value is a Dalvik descriptor to be spelled
+`descriptor`. A capability HIT is not reachable from the committed fixture, and
+that is one of the renamed records, so it is driven through the real pass over a
+STUB `dk` rather than left corpus-gated.
+
+**CONFIRMED — the `Parameter` -> `pN` rendering had no guard, and this change made
+losing it WORSE.** An adversarial reviewer deleted `_arg_to_compact`'s `Parameter`
+branch: the whole suite AND the lint trio stayed green. Attribution is exact and
+belongs to this change — HEAD's private map had NO `Parameter` key, so the same
+deletion yielded `None`, while the SHARED map has one, so it now yields a bare
+INT under the same `value` key that carries a `ConstInt` literal. **One key, two
+grammars, on the LLM-facing surface** — the dexllm#38 shape, re-created by the
+refactor that was closing another instance of it. The sibling drift test compares
+KEY SETS only and cannot see it; `test_a_parameter_arg_renders_as_pN_not_as_a_bare_index`
+pins the value.
+
+**CONFIRMED — the MCP-key guard was corpus-DEPENDENT, and the record said the
+opposite.** `tests/test_tools.py` carries its own module-local `dk` fixture that
+globs `test_apk/APK/*.apk` and SKIPS without it, ignoring `$DEXLLM_TEST_APK`
+entirely — so the claim "all four guards are corpus-INDEPENDENT" was false, both
+`require_corpus_shape` calls inside it were unreachable, and its UNIQUE half (that
+the SIBLING tool still spells `api` for the AOSP DOTTED form) had no CI coverage:
+making that sibling's `api` carry the Dalvik form survived the corpus-less run
+BYTE-IDENTICALLY. `test_the_capability_tool_shares_no_key_with_a_second_grammar_corpus_free`
+drives BOTH tools through a stub `dk`, so both halves hold with no corpus.
+
+**Three more holes they constructed, each of which passed the suite as it then
+stood**, all closed: the identity guard on the shared map checked the module
+SYMBOL and not the USE SITE (keep the import, read a correct private copy — the
+hole dexllm#49's own review had to construct, one axis over); `dexllm.signature()`
+re-added OUTSIDE `__all__` was invisible, because the module half scanned `__all__`
+rather than the namespace; and a record declared as a **NamedTuple** rather than a
+dataclass was not enumerated at all. The optional-module exception list gained an
+EARNED half too (a listed module must genuinely declare no record, or listing it
+hides one in any environment without the extra), and the "earned" predicate now
+refuses any Dalvik form the two validators happen not to cover — a proto, a
+shorty, a bare internal name — since each was launderable into the exception list.
+
+**Two pre-existing counterexamples to the positive rule, which no audit could
+see** (a value-driven sweep found 32 descriptor-holding attributes, 6 not spelled
+`descriptor`; 4 are ROLE names both layers agree on): `ClassSummary.superclass_descriptor`
+-> `ClassInfo.superclass` and `interface_descriptors` -> `interfaces`, plus
+`MethodAst.class_name`. `ClassSummary` is in `_RAW_DECOMPOSED`, so dexllm#37's
+field-set equality never runs for it, and neither name contains `signature`. They
+are dexllm#69 §4 and §6, not this issue, and are PINNED as declared DRIFT so the
+audit tolerates exactly these three and no new one.
+
+**Everything else they attacked, they REFUTED with their own instruments:**
+`_arg_to_compact`'s restructure is behaviour-preserving over **20,601 real
+arguments across all 11 kinds, 0 differences**, plus 48 synthetic cases covering
+the `UnicodeDecodeError` containment and an unknown future kind; the a/b
+re-derives on independently built halves; the blast radius is clean (no consumer
+left reading an old name, `mcp_server.py` / `server.py` never touch the capability
+keys); `filters.find_call_sites_to_ref`'s `hasattr` discriminator is unchanged in
+strength; a broken subpackage fails the audit LOUDLY rather than shrinking it; and
+all four guards pass narrowed to six different bundled samples.
+
+## Mutation matrix
+
+20 mutants, four of them constructed by the REVIEWERS. The harness restores from a
+pristine SNAPSHOT (not `git checkout`,
+which would delete the untracked `_argkinds.py`), `touch`es every restored file
+(`copy2` preserves mtime, so ninja would SKIP), REBUILDS to the control before
+every mutant and ASSERTS `md5() == CONTROL` at that point, and asserts the control
+again when it ends. It runs the two GUARD files — `tests/test_sdk.py` +
+`tests/test_tools.py` — so a kill count says how many of THOSE die, which isolates
+the new guards instead of counting the incidental spellings elsewhere in the suite
+(the "13" above was the WHOLE suite against the PRE-change code; the two are not
+the same measurement and are not comparable).
+
+| mutant | md5 | killed |
+|---|---|---|
+| M0  CONTROL: all 25 files at HEAD | `9f1baa12` — **HEAD's exactly** | 0, by design: the guards go with them, so nothing CAN fail. The md5 identity is the diff's functional content stated as a measurement. |
+| M0b PRE-FIX: production at HEAD, the guards KEPT | `9f1baa12` | **9** |
+| M1  sdk model alone | control | 5 |
+| M2  COHERENT `ExternalFieldRef` (4 py layers) | control | 4 |
+| M3  COHERENT `CapabilityHit` (4 py layers) | control | 2 |
+| M4  `dexllm.method_descriptor` -> `signature` | control | **1** — the MODULE half of the name audit, which a record-only scan misses |
+| M5  the shared map DUPLICATED as a CORRECT copy | control | **1** — object identity, invisible to every behavioural test |
+| M6  a rename that MISSED the shared map | control | 8 |
+| M7  the MCP collision back (capability key -> `api`) | control | 2 — the corpus guard AND its stub twin |
+| M8  the collision one word over (dangerous row -> `descriptor`) | control | 2 |
+| M9  a `signature` descriptor ADDED and ABSORBED into the exception list | control | 3 — incl. the justification half |
+| M10 the audit satisfied WITHOUT the rename (`descriptor` -> `ident`) | control | 3 |
+| M14 `capability.ApiHit` ALONE | control | 4 |
+| **M15 REVIEW: a THIRD word — `api_descriptor` -> `api_sig`, coherently** | control | **1** — `test_a_descriptor_valued_attribute_is_spelled_descriptor`, and nothing else. This is the mutant that passed the WHOLE suite before that guard existed. |
+| **M16 REVIEW: `_arg_to_compact`'s `Parameter` -> `pN` branch DELETED** | control | **1** — `test_a_parameter_arg_renders_as_pN_not_as_a_bare_index`; it passed the suite AND the lint trio before |
+| **M17 REVIEW: the sibling tool's `api` made DALVIK** | control | 2 — and the STUB twin is the one that catches it corpus-less |
+| **M18 REVIEW: use-site drift — shared import kept, a correct private copy read** | control | **1** — the use-site half of the identity guard |
+| M11 raw only: the pybind property | `f37319e2` | 5 |
+| M12 COHERENT across C++ AND python | `f37319e2` — the SAME C++ edit as M11, so an identical `.so` is a FACT, not a harness failure; the python halves differ and the kill sets show it | 4 |
+| M13 `ArgOrigin` pybind property | `99d73046` | 9 |
+
+**M4, M5, M15, M16 and M18 each die to exactly ONE guard and to nothing else**, so
+none of the six is redundant — and four of those five are the guards a REVIEWER
+forced into existence. M9, M10 and M14 are caught by the JUSTIFICATION half rather
+than by either audit.
+
+## The MUTATION harness lied three times too, and one round was discarded whole
+
+(The a/b harness's own two failures are recorded above; these are separate.)
+
+1. **The restore set was the CHANGED files**, so M8's edit to `dangerous_api.py`
+   — a file the change does not touch — SURVIVED the restore and sat in the tree
+   while the post-run `.so` md5 reported the control as OK. **A `.so` md5 cannot
+   see a python mutant** [[mutation-harness-restore-pitfalls]].
+2. **Restoring the SOURCE without REBUILDING** let every python-only mutant
+   measure the previous C++ mutant's binary: after M0b reverted the C++ to HEAD,
+   M1..M10 all reported HEAD's md5 rather than the control's. That whole round was
+   discarded and re-run; the harness now rebuilds to the control before every
+   mutant and ASSERTS it there.
+3. **M0 reverted the GUARDS too**, so nothing could fail and it reported 0 kills
+   while looking like a pre-fix mutant. It is a CONTROL now (its value is the md5
+   identity with HEAD), and M0b is the real pre-fix half.
+
+Two `pkill -f` invocations also killed their own shells, because the wrapper's
+command line contains the pattern — the self-matching-pgrep shape the same memory
+records — and two anchors went stale under `black`, which is why an anchor that
+does not match exactly once is reported as **not a mutant** rather than skipped.
 
 ### Type stubs (PEP 561) — `py.typed` + `.pyi` typed shadow (2026-07)
 
@@ -4382,7 +4724,7 @@ length-preserving patch of one 0xFA's BBBB to 0xFFFF in `method_handles.dex`
 verifies **valid in STRICT mode** and then yields a `find_call_sites_from` row whose
 `callee_descriptor` is **empty** — a shape previously reachable only under
 `lenient=True`, since every opcode that reached the site enumerators had a
-VerifyInsns-bounded index. Not a crash (`BuildMethodSignature` is bounded and
+VerifyInsns-bounded index. Not a crash (`BuildMethodDescriptor` is bounded and
 returns `{}`) but a wrong answer on strict-verified input, and the safety contract's
 own justification had silently become false. `kIndexMethodAndProtoRef` now shares
 the `kIndexMethodRef` bound; the PROTO half (`arg[4]`, not `ridx`) stays unbounded

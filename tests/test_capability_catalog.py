@@ -338,11 +338,11 @@ def test_only_categories_matches_either_axis():
 
     by_flag = summarize_capabilities(dk, only_categories={"IDENTIFIER"})
     assert by_flag.matched_apis == 1
-    assert by_flag.api_hits[0].api_signature == _GET_DEVICE_ID
+    assert by_flag.api_hits[0].api_descriptor == _GET_DEVICE_ID
 
     by_category = summarize_capabilities(dk, only_categories={"REFLECTION"})
     assert by_category.matched_apis == 1
-    assert by_category.api_hits[0].api_signature == _FOR_NAME
+    assert by_category.api_hits[0].api_descriptor == _FOR_NAME
 
 
 def test_unknown_only_categories_tag_raises_instead_of_reporting_nothing():
@@ -514,7 +514,7 @@ def test_the_permission_view_of_a_caller_is_still_recoverable():
     dk = _StubDk({_GET_DEVICE_ID: ["La/B;->m()V"], _FOR_NAME: ["La/B;->m()V"]})
     report = summarize_capabilities(dk)
 
-    by_api = {h.api_signature: h for h in report.api_hits}
+    by_api = {h.api_descriptor: h for h in report.api_hits}
     perms = {p for a in report.by_caller["La/B;->m()V"] for p in by_api[a].permissions}
     expected = set(_entries()[_GET_DEVICE_ID].get("permissions") or ()) | set(
         _entries()[_FOR_NAME].get("permissions") or ()
@@ -543,7 +543,7 @@ def test_by_caller_is_the_exact_transpose_of_the_hit_callers():
     expected: dict = {}
     for hit in report.api_hits:
         for caller in hit.callers:
-            expected.setdefault(caller, set()).add(hit.api_signature)
+            expected.setdefault(caller, set()).add(hit.api_descriptor)
     assert report.by_caller == expected
     assert set(report.by_caller) == {"La/B;->m()V", "La/C;->n()V", "La/D;->o()V"}
 
@@ -692,7 +692,7 @@ def test_every_indexed_signature_is_a_key_of_the_report_s_own_hits():
     report = summarize_capabilities(dk)
 
     indexed = set().union(*report.by_caller.values())
-    assert indexed <= {h.api_signature for h in report.api_hits}
+    assert indexed <= {h.api_descriptor for h in report.api_hits}
     assert indexed == {_GET_DEVICE_ID, _FOR_NAME}
 
 
@@ -710,7 +710,7 @@ def test_only_categories_filters_the_caller_index_with_the_hits():
     report = summarize_capabilities(dk, only_categories={"REFLECTION"})
 
     assert report.by_caller == {"La/B;->m()V": {_FOR_NAME}}
-    assert {h.api_signature for h in report.api_hits} == {_FOR_NAME}
+    assert {h.api_descriptor for h in report.api_hits} == {_FOR_NAME}
 
 
 # --- dexllm#36: FIELD-descriptor keys -----------------------------------------
@@ -794,7 +794,7 @@ def test_the_two_counters_are_never_summed_into_one(write_catalog):
             return ["La/C;->n()V", "La/D;->o()V"] if descriptor == field_key else []
 
     rep = capability.summarize_capabilities(_Dk(), data_dir=write_catalog(catalog))
-    by_sig = {h.api_signature: h for h in rep.api_hits}
+    by_sig = {h.api_descriptor: h for h in rep.api_hits}
     assert by_sig[_FOR_NAME].call_site_count == 1
     assert by_sig[_FOR_NAME].field_access_count == 0
     assert by_sig[field_key].field_access_count == 2
@@ -1021,7 +1021,7 @@ def test_the_mcp_ranking_counts_field_accesses(write_catalog, monkeypatch):
     monkeypatch.setenv(datadir.ENV_VAR, write_catalog(catalog))
     datadir.clear_data_caches()
     out = tools.execute("summarize_capabilities", {}, _Dk())
-    assert [h["api"] for h in out["api_hits"]] == [
+    assert [h["descriptor"] for h in out["api_hits"]] == [
         field_key,
         _FOR_NAME,
     ], "5 field accesses must outrank 1 call site"
@@ -1061,7 +1061,7 @@ def test_the_ranking_is_a_total_order(write_catalog, monkeypatch):
         datadir.clear_data_caches()
         seen.append(
             [
-                h["api"]
+                h["descriptor"]
                 for h in tools.execute("summarize_capabilities", {}, _Dk())["api_hits"]
             ]
         )
@@ -1427,7 +1427,7 @@ def test_the_sdk_adapter_forwards_app_only(monkeypatch):
             ),
             api_hits=[
                 capability.ApiHit(
-                    api_signature=_FOR_NAME,
+                    api_descriptor=_FOR_NAME,
                     permissions=["P"],
                     categories=["C"],
                     call_site_count=1 if mode else 9,
@@ -1887,7 +1887,7 @@ def test_the_real_notification_listener_subclass_is_reported(loadable_apks):
     found = []
     for path in loadable_apks:
         report = capability.summarize_capabilities(dexllm.DexKit(path))
-        hit = next((h for h in report.api_hits if h.api_signature == key), None)
+        hit = next((h for h in report.api_hits if h.api_descriptor == key), None)
         if hit is None:
             continue
         found.append(path)
@@ -2040,7 +2040,7 @@ def test_the_hostname_verifier_registration_is_reported_on_a_real_apk(loadable_a
     found = []
     for path in loadable_apks:
         report = capability.summarize_capabilities(dexllm.DexKit(path))
-        hit = next((h for h in report.api_hits if h.api_signature == key), None)
+        hit = next((h for h in report.api_hits if h.api_descriptor == key), None)
         if hit is None:
             continue
         found.append(path)
@@ -2085,8 +2085,8 @@ def test_an_implemented_interface_is_reported_through_its_registration(loadable_
             "registration call is what makes an interface visible"
         )
         assert any(
-            "requestLocationUpdates" in h.api_signature for h in report.api_hits
-        ), sorted(h.api_signature for h in report.api_hits)
+            "requestLocationUpdates" in h.api_descriptor for h in report.api_hits
+        ), sorted(h.api_descriptor for h in report.api_hits)
 
     require_corpus_shape(
         found,

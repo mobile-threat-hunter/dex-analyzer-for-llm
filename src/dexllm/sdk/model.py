@@ -246,7 +246,7 @@ class ExternalMethodRef:
             java_class='android.accessibilityservice.AccessibilityServiceInfo',
             java_signature='android.accessibilityservice.AccessibilityServiceInfo.'
                            'getCanRetrieveWindowContent() -> boolean',
-            signature='Landroid/accessibilityservice/AccessibilityServiceInfo;->'
+            descriptor='Landroid/accessibilityservice/AccessibilityServiceInfo;->'
                       'getCanRetrieveWindowContent()Z',
             return_type='Z', parameters=(), is_constructor=False,
             is_static_initializer=False, referenced_in_dex_ids=(0,))
@@ -257,7 +257,7 @@ class ExternalMethodRef:
     proto: str
     java_class: str
     java_signature: str
-    signature: str
+    descriptor: str
     return_type: str
     parameters: tuple[str, ...]
     is_constructor: bool
@@ -270,7 +270,8 @@ class ExternalFieldRef:
     """A field whose declaring class is not defined in any loaded dex.
 
     That is, a framework / library field the app reads or writes. Its full
-    descriptor is ``signature`` (``Lcls;->name:Type``).
+    identity is ``descriptor`` (``Lcls;->name:Type``) — spelled ``signature``
+    until dexllm#68.
 
     Example (real, a2dp.Vol_137.apk)::
 
@@ -280,7 +281,7 @@ class ExternalFieldRef:
             java_class='android.app.ActivityManager$RunningAppProcessInfo',
             java_type='int',
             java_signature='android.app.ActivityManager$RunningAppProcessInfo.pid : int',
-            signature='Landroid/app/ActivityManager$RunningAppProcessInfo;->pid:I',
+            descriptor='Landroid/app/ActivityManager$RunningAppProcessInfo;->pid:I',
             referenced_in_dex_ids=(0,))
     """
 
@@ -290,7 +291,7 @@ class ExternalFieldRef:
     java_class: str
     java_type: str
     java_signature: str
-    signature: str
+    descriptor: str
     referenced_in_dex_ids: tuple[int, ...]
 
 
@@ -506,8 +507,8 @@ class ArgOrigin:
     string_value: Optional[str] = None
     int_value: Optional[int] = None
     class_descriptor: Optional[str] = None
-    field_signature: Optional[str] = None
-    method_signature: Optional[str] = None
+    field_descriptor: Optional[str] = None
+    method_descriptor: Optional[str] = None
     parameter_index: Optional[int] = None
     #: ``Unknown`` only: a control-flow merge discarded this register's definition —
     #: the value depends on which path reached the call, or one merged edge carried
@@ -736,7 +737,7 @@ class CapabilityHit:
     Example (real, a2dp.Vol)::
 
         CapabilityHit(
-            api_signature='Landroid/location/LocationManager;->'
+            api_descriptor='Landroid/location/LocationManager;->'
                           'getLastKnownLocation(Ljava/lang/String;)Landroid/location/Location;',
             call_site_count=1,
             permissions=('android.permission.ACCESS_FINE_LOCATION',
@@ -744,7 +745,12 @@ class CapabilityHit:
             categories=('LOCATION',), flags=(), callers=(...))
     """
 
-    api_signature: str
+    #: The catalog entry's Dalvik descriptor — a METHOD one, or a FIELD one for
+    #: the `CONTENT_URI` entries (dexllm#36). Spelled `api_signature` until
+    #: dexllm#68; the `api_` prefix survives that rename (unlike the PARAMETER
+    #: dexllm#21 retired for it) because this record IS one catalog-API hit, so
+    #: the prefix names the entry rather than asserting a callee is framework.
+    api_descriptor: str
     call_site_count: int
     permissions: tuple[str, ...]
     categories: tuple[str, ...]
@@ -773,7 +779,7 @@ class CapabilityReport:
     domain entries incl. the ANDROID_ID read, and the index covered 17 of the
     corpus's 317 distinct callers (5.4%). Both views are derivable from
     ``api_hits``, so this is a convenience index rather than new information; the
-    value is signatures because that is the more primary view, and because the
+    value is descriptors because that is the more primary view, and because the
     FIELD only derives one way — ``{p for a in by_caller[c] for p in
     by_api[a].permissions}`` recovers the old value, a permission set could not
     recover an API.

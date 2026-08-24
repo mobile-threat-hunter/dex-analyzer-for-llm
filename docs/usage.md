@@ -266,7 +266,7 @@ report.flags            # Counter() on this APK; Counter({'IDENTIFIER': 2}) on o
 # Filter to a subset (only crypto-related APIs)
 crypto = dexllm.summarize_capabilities(dk, only_categories={"CRYPTO"})
 for hit in crypto.api_hits:
-    print(hit.api_signature, "→", hit.permissions, hit.categories, hit.flags)
+    print(hit.api_descriptor, "→", hit.permissions, hit.categories, hit.flags)
 ```
 
 The catalog carries **two axes**, kept apart so the counters stay meaningful:
@@ -305,9 +305,9 @@ Four entries are the CONSTRUCTOR of a class an app **subclasses** —
 ```python
 report = dexllm.summarize_capabilities(dexllm.DexKit("a2dp.Vol_137.apk"))
 listeners = [h for h in report.api_hits
-             if "NotificationListenerService" in h.api_signature]
+             if "NotificationListenerService" in h.api_descriptor]
 for hit in listeners:
-    print(hit.api_signature, hit.call_site_count, sorted(hit.callers))
+    print(hit.api_descriptor, hit.call_site_count, sorted(hit.callers))
 # → Landroid/service/notification/NotificationListenerService;-><init>()V 1
 #   ['La2dp/Vol/NotificationCatcher;-><init>()V']
 ```

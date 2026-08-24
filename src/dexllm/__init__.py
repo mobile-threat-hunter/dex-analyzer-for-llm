@@ -52,10 +52,10 @@ from .datadir import clear_data_caches
 from .descriptors import (
     descriptor_to_java,
     java_to_descriptor,
+    method_descriptor,
     method_ref_java,
     parse_proto,
     pretty_proto,
-    signature,
 )
 from .filters import (
     filter_field_refs,
@@ -106,12 +106,12 @@ __all__ = [
     "is_framework_descriptor",
     "is_timeout_marker",
     "java_to_descriptor",
+    "method_descriptor",
     "method_ref_java",
     "parse_proto",
     "pretty_proto",
     "safe_decompile_class",
     "safe_decompile_method",
-    "signature",
     "summarize_capabilities",
     "verify",
 ]

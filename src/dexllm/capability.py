@@ -136,7 +136,7 @@ def _validate_catalog(obj: object, path: Path) -> None:
     """Reject a malformed override loudly, naming the file (issue #33).
 
     Only the shape :func:`summarize_capabilities` relies on is checked — an
-    ``entries`` mapping of API signature to metadata, whose three tag lists must be
+    ``entries`` mapping of API descriptor to metadata, whose three tag lists must be
     lists of strings. A user-supplied catalog is untrusted input on the analysis
     path, and the alternative is a bare ``KeyError`` / ``TypeError`` raised from
     inside a cached loader.
@@ -200,7 +200,7 @@ def _is_field_key(key: str) -> bool:
 class ApiHit:
     """A single API in the catalog that was found in the APK."""
 
-    api_signature: str
+    api_descriptor: str
     permissions: List[str]
     categories: List[str]
     # INVOKE INSTRUCTIONS, one per call site. A FIELD entry leaves this 0 and
@@ -243,12 +243,12 @@ class CapabilityReport:
     It is a CONVENIENCE INDEX, not new information: ``api_hits`` carries
     ``callers`` per API, so either view has always been derivable from a report —
     including from a PRE-fix one, which is why the bug lost no data. The value is
-    signatures because that is the more primary view (the caller-indexed question
+    descriptors because that is the more primary view (the caller-indexed question
     is what the index is FOR), and because within the FIELD the derivation only
     runs one way — APIs give back permissions and tags, a permission set could not
     give back an API::
 
-        by_api = {h.api_signature: h for h in report.api_hits}
+        by_api = {h.api_descriptor: h for h in report.api_hits}
         perms = {p for a in report.by_caller[caller] for p in by_api[a].permissions}
         tags = {t for a in report.by_caller[caller] for t in by_api[a].categories}
 
@@ -268,7 +268,7 @@ class CapabilityReport:
     permissions: Counter  # permission -> count of touches
     categories: Counter  # category -> count of touches
     flags: Counter  # cross-domain concern -> count of touches
-    by_caller: Dict[str, Set[str]]  # caller descriptor -> {api signatures}
+    by_caller: Dict[str, Set[str]]  # caller descriptor -> {api descriptors}
     api_hits: List[ApiHit]  # one entry per matched API
     total_call_sites: int  # invoke instructions, method entries only
     catalog_version: str
@@ -395,7 +395,7 @@ def summarize_capabilities(
     dropped_touches = 0
     dropped_apis = 0
 
-    for api_sig, meta in entries.items():
+    for api_desc, meta in entries.items():
         # dict.fromkeys dedupes while preserving order: a tag repeated inside one
         # entry's list is malformed input, not a fact to count twice, and counting
         # it twice would reproduce the very inflation the two-axis split removed.
@@ -407,11 +407,11 @@ def summarize_capabilities(
         # The key's SHAPE selects the lookup — a type descriptor cannot contain
         # `(`, so a field key is unambiguous and needs no schema flag to say so
         # (dexllm#36). A field entry resolves to the METHODS that read it.
-        is_field = _is_field_key(api_sig)
+        is_field = _is_field_key(api_desc)
         if is_field:
-            touches = list(dk.find_methods_reading_field(api_sig))
+            touches = list(dk.find_methods_reading_field(api_desc))
         else:
-            touches = [s.caller_descriptor for s in dk.find_call_sites_to(api_sig)]
+            touches = [s.caller_descriptor for s in dk.find_call_sites_to(api_desc)]
         # Per TOUCH, not per API: a register of callers mixes both kinds (18 of
         # tvleanback's 20 `Class.forName` sites are androidx), so dropping the API
         # only when EVERY caller is a library would still count the 18 — and
@@ -438,7 +438,7 @@ def summarize_capabilities(
 
         perms = meta.get("permissions", [])
         hit = ApiHit(
-            api_signature=api_sig,
+            api_descriptor=api_desc,
             permissions=list(perms),
             categories=list(cats),
             flags=list(entry_flags),
@@ -461,7 +461,7 @@ def summarize_capabilities(
             # corpus's 317 distinct callers. A replacement catalog need not give
             # an entry any tag either, so this must not be nested in a tag loop
             # for the same reason.
-            by_caller.setdefault(caller, set()).add(api_sig)
+            by_caller.setdefault(caller, set()).add(api_desc)
             for perm in perms:
                 permissions[perm] += 1
             for cat in cats:

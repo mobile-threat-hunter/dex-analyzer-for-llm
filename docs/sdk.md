@@ -149,7 +149,7 @@ other spelling, and the reason `MethodInfo` exposes the bits instead.
 
 ### Cross-reference
 - **`ArgOrigin`** `(kind, reg_num, string_value?, int_value?, class_descriptor?,
-  field_signature?, method_signature?, parameter_index?, crossed_branch)` — the
+  field_descriptor?, method_descriptor?, parameter_index?, crossed_branch)` — the
   provenance of one invoke argument. Only the field its `kind` carries is set; `kind`
   ∈ ConstString / ConstInt / ConstWide / ConstClass / ConstNull / FieldRead /
   MethodReturn / Parameter / NewInstance / NewArray / Unknown. A reported origin holds
@@ -201,7 +201,7 @@ other spelling, and the reason `MethodInfo` exposes the bits instead.
   `Indicator`; defang-aware, public-suffix-validated.
 
 ### Capabilities
-- **`CapabilityHit`** `(api_signature, call_site_count, permissions, categories,
+- **`CapabilityHit`** `(api_descriptor, call_site_count, permissions, categories,
   flags, callers, field_access_count)` — one catalog API the app exercises. Which
   counter is filled follows the catalog key's form: a METHOD key fills
   `call_site_count` (invoke instructions), a FIELD key — how an app reaches

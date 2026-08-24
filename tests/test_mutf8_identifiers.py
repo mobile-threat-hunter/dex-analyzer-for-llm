@@ -466,7 +466,7 @@ def test_const_string_arg_origin_decodes(loadable_apks):
         ):  # noqa: BLE001 - unloadable containers are not this test's subject
             continue
         for ref in dk.list_external_method_refs(False)[:40]:
-            for site in dk.resolve_call_args(ref.signature):  # raised before the fix
+            for site in dk.resolve_call_args(ref.descriptor):  # raised before the fix
                 for arg in site.args:
                     if arg.kind != "ConstString":
                         continue

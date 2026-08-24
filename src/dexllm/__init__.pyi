@@ -70,6 +70,9 @@ from .descriptors import (
     java_to_descriptor as java_to_descriptor,
 )
 from .descriptors import (
+    method_descriptor as method_descriptor,
+)
+from .descriptors import (
     method_ref_java as method_ref_java,
 )
 from .descriptors import (
@@ -77,9 +80,6 @@ from .descriptors import (
 )
 from .descriptors import (
     pretty_proto as pretty_proto,
-)
-from .descriptors import (
-    signature as signature,
 )
 from .filters import (
     filter_field_refs as filter_field_refs,
@@ -154,12 +154,12 @@ __all__ = [
     "is_framework_descriptor",
     "is_timeout_marker",
     "java_to_descriptor",
+    "method_descriptor",
     "method_ref_java",
     "parse_proto",
     "pretty_proto",
     "safe_decompile_class",
     "safe_decompile_method",
-    "signature",
     "summarize_capabilities",
     "verify",
 ]

@@ -127,8 +127,15 @@ def method_ref_java(class_descriptor: str, name: str, proto: str) -> str:
     return f"{cls}.{name}({args}) -> {descriptor_to_java(ret)}"
 
 
-def signature(class_descriptor: str, name: str, proto: str) -> str:
-    """Build the wire-form API signature accepted by find_call_sites_to."""
+def method_descriptor(class_descriptor: str, name: str, proto: str) -> str:
+    """Build the ``Lcls;->name(proto)ret`` a method-taking API consumes.
+
+    The wire form `find_call_sites_to` / `resolve_call_args` / `decompile_method`
+    accept at their ``method_descriptor`` parameter, and what
+    `require_member_descriptor` validates further down this same module — this was
+    ``dexllm.signature()`` until dexllm#68, i.e. a builder and its validator
+    naming one grammar two ways.
+    """
     return f"{class_descriptor}->{name}{proto}"
 
 

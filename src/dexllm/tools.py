@@ -31,6 +31,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Callable
 
+from ._argkinds import ARG_VALUE_ATTR_BY_KIND
 from .descriptors import require_member_descriptor, require_type_descriptor
 from .safe import (
     DEFAULT_TIMEOUT_S,
@@ -384,7 +385,7 @@ def _t_summarize_capabilities(
     # on 16 of 32 corpus sources without any count changing.
     hits = sorted(
         rep.api_hits,
-        key=lambda h: (-(h.call_site_count + h.field_access_count), h.api_signature),
+        key=lambda h: (-(h.call_site_count + h.field_access_count), h.api_descriptor),
     )
     return {
         # Echoed, because every count below depends on it and the per-caller sets
@@ -411,9 +412,15 @@ def _t_summarize_capabilities(
         "top_permissions": rep.top_permissions(20),
         "top_categories": rep.top_categories(20),
         "flags": dict(rep.flags),
+        # `descriptor`, NOT `api`: the sibling `dangerous_permission_api_callers`
+        # tool already spells `api` for the AOSP DATASET form
+        # (`android.location.LocationManager#getLastKnownLocation(String)`) and
+        # spells the Dalvik form `descriptors` in the same dict. One key, two
+        # grammars, on the surface an LLM reads — the dexllm#38 shape, reached
+        # through the `api_signature` spelling this issue removed (dexllm#68).
         "api_hits": [
             {
-                "api": h.api_signature,
+                "descriptor": h.api_descriptor,
                 "permissions": h.permissions,
                 "categories": h.categories,
                 "flags": h.flags,
@@ -482,26 +489,15 @@ def _t_dangerous_permission_api_callers(dk: DexKit, app_only: bool = True) -> di
 
 # ─── xref / dataflow / literal tools ──────────────────────────────────────
 
-_ARG_VALUE_FIELD = {
-    "ConstString": "string_value",
-    "ConstInt": "int_value",
-    "ConstWide": "int_value",
-    "ConstClass": "class_descriptor",
-    "NewInstance": "class_descriptor",
-    "NewArray": "class_descriptor",
-    "FieldRead": "field_signature",
-    "MethodReturn": "method_signature",
-}
-
 
 def _arg_to_compact(index: int, a: Any) -> dict:
     """One ArgOrigin → a compact ``{index, kind, value}`` dict.
 
-    The resolved constant / field-sig / callee-sig / param-slot, without the raw
-    multi-field struct.
+    The resolved constant / field descriptor / callee descriptor / param-slot,
+    without the raw multi-field struct.
     `index` is the position in the invoke's argument list: for an INSTANCE method
     index 0 is the receiver, so a 3-param instance call's Java params sit at 1/2/3.
-    `value` is the literal for a const kind; the field/method signature for a
+    `value` is the literal for a const kind; the field/method DESCRIPTOR for a
     FieldRead/MethodReturn (the value is NOT followed — that is a separate hop);
     `pN` for a Parameter; None for ConstNull/Unknown.
 
@@ -513,15 +509,16 @@ def _arg_to_compact(index: int, a: Any) -> dict:
     ``varies_by_path`` claimed the stronger reading the flag does not support
     (dexllm#32).
     """
-    field = _ARG_VALUE_FIELD.get(a.kind)
     try:
-        if field is not None:
+        # Parameter first: this view renders it as `pN`, so it does NOT read the
+        # shared map's raw `parameter_index` (dexllm#68).
+        if a.kind == "Parameter":
+            value: Any = f"p{a.parameter_index}"
+        elif (attr := ARG_VALUE_ATTR_BY_KIND.get(a.kind)) is not None:
             # A const-string / descriptor field is raw dex MUTF-8; pybind's strict
             # UTF-8 decode can raise on a surrogate-pair / embedded-null string. Keep
             # that contained to THIS arg instead of failing the whole call.
-            value: Any = getattr(a, field)
-        elif a.kind == "Parameter":
-            value = f"p{a.parameter_index}"
+            value = getattr(a, attr)
         else:  # ConstNull, Unknown
             value = None
     except UnicodeDecodeError:
@@ -1106,7 +1103,7 @@ TOOL_DEFINITIONS: list[dict] = [
             "Like find_call_sites_to, but ALSO resolves the ARGUMENT VALUES "
             "passed at each call site (intra-method dataflow). Each arg is "
             "{index, kind, value}: a literal for a const (kind ConstInt/"
-            "ConstString/...), the field/method signature for FieldRead/"
+            "ConstString/...), the field/method descriptor for FieldRead/"
             "MethodReturn (the value is NOT followed further), or pN for a "
             "Parameter. For an INSTANCE method index 0 is the receiver, so the "
             "Java params start at index 1. Use this to match value-specific "

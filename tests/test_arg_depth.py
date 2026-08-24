@@ -281,7 +281,7 @@ def test_the_site_set_does_not_depend_on_depth(dk, apk_path):
     could not resolve would silently drop rows. This is also what lets
     `find_call_sites_from` ask for depth 0 without changing its own output.
     """
-    apis = sorted({r.signature for r in dk.list_external_method_refs()})[:120]
+    apis = sorted({r.descriptor for r in dk.list_external_method_refs()})[:120]
     checked = 0
     for api in apis:
         sets = {}
@@ -328,7 +328,7 @@ def test_raising_depth_only_adds_information(dk):
     A concrete→concrete flip is the one shape that means an answer was wrong at one of
     the two depths, so it is the property worth asserting corpus-wide.
     """
-    apis = sorted({r.signature for r in dk.list_external_method_refs()})[:200]
+    apis = sorted({r.descriptor for r in dk.list_external_method_refs()})[:200]
     compared = 0
     for api in apis:
         shallow = dk.resolve_call_args(api, 1)

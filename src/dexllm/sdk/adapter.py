@@ -16,6 +16,7 @@ from typing import Any, Union
 
 import dexllm
 
+from .._argkinds import ARG_VALUE_ATTR_BY_KIND
 from ..descriptors import require_member_descriptor, require_type_descriptor
 from .model import (
     ArgOrigin,
@@ -56,24 +57,10 @@ Sources = Union[SourceLike, "list[SourceLike]", "tuple[SourceLike, ...]"]
 
 # ── raw → model converters ────────────────────────────────────────────────────
 
-# The argument field carried by each ArgOrigin kind (only that field is meaningful;
-# the rest are pybind defaults, so we map by kind for clean, minimal models).
-_ARG_FIELD_BY_KIND = {
-    "ConstString": "string_value",
-    "ConstInt": "int_value",
-    "ConstWide": "int_value",
-    "ConstClass": "class_descriptor",
-    "NewInstance": "class_descriptor",
-    "NewArray": "class_descriptor",
-    "FieldRead": "field_signature",
-    "MethodReturn": "method_signature",
-    "Parameter": "parameter_index",
-}
-
 
 def _to_arg(a: object) -> ArgOrigin:
     """Convert a pybind ArgOrigin to the typed model (only the kind's field set)."""
-    field = _ARG_FIELD_BY_KIND.get(a.kind)  # type: ignore[attr-defined]
+    field = ARG_VALUE_ATTR_BY_KIND.get(a.kind)  # type: ignore[attr-defined]
     kw = {field: getattr(a, field)} if field else {}
     return ArgOrigin(
         kind=a.kind,  # type: ignore[attr-defined]
@@ -91,7 +78,7 @@ def _to_ext_ref(r: object) -> ExternalMethodRef:
         proto=r.proto,  # type: ignore[attr-defined]
         java_class=r.java_class,  # type: ignore[attr-defined]
         java_signature=r.java_signature,  # type: ignore[attr-defined]
-        signature=r.signature,  # type: ignore[attr-defined]
+        descriptor=r.descriptor,  # type: ignore[attr-defined]
         return_type=r.return_type,  # type: ignore[attr-defined]
         parameters=tuple(r.parameters),  # type: ignore[attr-defined]
         is_constructor=r.is_constructor,  # type: ignore[attr-defined]
@@ -109,7 +96,7 @@ def _to_ext_field_ref(r: object) -> ExternalFieldRef:
         java_class=r.java_class,  # type: ignore[attr-defined]
         java_type=r.java_type,  # type: ignore[attr-defined]
         java_signature=r.java_signature,  # type: ignore[attr-defined]
-        signature=r.signature,  # type: ignore[attr-defined]
+        descriptor=r.descriptor,  # type: ignore[attr-defined]
         referenced_in_dex_ids=tuple(r.referenced_in_dex_ids),  # type: ignore[attr-defined]
     )
 
@@ -768,7 +755,7 @@ class DexKitAdapter:
             flags=dict(c.flags),
             api_hits=tuple(
                 CapabilityHit(
-                    api_signature=h.api_signature,
+                    api_descriptor=h.api_descriptor,
                     call_site_count=h.call_site_count,
                     permissions=tuple(h.permissions),
                     categories=tuple(h.categories),

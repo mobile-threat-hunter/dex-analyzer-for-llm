@@ -192,7 +192,7 @@ def test_lenient_oob_operand_does_not_crash(kind, _base_classes_dex, tmp_path_fa
     for c in dk.list_classes():
         dk.decompile_class(c)  # load-time cross-ref + decompile
     # resolve_call_args + find_call_sites_from both walk AnalyzeInvokes →
-    # BuildMethodSignature on the raw invoke operand — the same lenient OOB surface (an
+    # BuildMethodDescriptor on the raw invoke operand — the same lenient OOB surface (an
     # out-of-range callee method_idx must yield a bounded "" descriptor, never a crash).
     for m in methods:
         dk.resolve_call_args(m)

@@ -20,7 +20,7 @@ def filter_method_refs(
     proto: Optional[str] = None,
     return_type: Optional[str] = None,
 ) -> List:
-    """Filter ExternalMethodRef list by class/name/signature criteria."""
+    """Filter ExternalMethodRef list by class / name / proto criteria."""
     out = []
     for m in refs:
         if class_descriptor and m.class_descriptor != class_descriptor:
@@ -87,8 +87,8 @@ def filter_type_refs(
 def find_call_sites_to_ref(dk: DexKit, ref: "ExternalMethodRef") -> List:
     """Return the call sites for an ExternalMethodRef.
 
-    Equivalent to dk.find_call_sites_to(ref.signature).
+    Equivalent to dk.find_call_sites_to(ref.descriptor).
     """
-    if not hasattr(ref, "signature") or not hasattr(ref, "proto"):
+    if not hasattr(ref, "descriptor") or not hasattr(ref, "proto"):
         raise TypeError(f"expected ExternalMethodRef, got {type(ref).__name__}")
-    return dk.find_call_sites_to(ref.signature)
+    return dk.find_call_sites_to(ref.descriptor)

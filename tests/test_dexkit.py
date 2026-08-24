@@ -1104,7 +1104,7 @@ def test_unified_argument_names_are_callable_as_keywords(dk):
 
     ref = next(iter(dk.list_external_method_refs(False)), None)
     if ref is not None:
-        sig = ref.signature
+        sig = ref.descriptor
         assert [
             (c.caller_descriptor, c.bytecode_offset)
             for c in dk.find_call_sites_to(method_descriptor=sig)

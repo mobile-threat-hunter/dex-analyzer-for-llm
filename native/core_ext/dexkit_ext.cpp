@@ -985,11 +985,11 @@ uint32_t FindTypeIdx(const dexkit::DexItem& item, std::string_view desc) {
 // (method_idx resolution is now indexed — see FindMethodIdxIndexed + ApiResolveIndex.)
 
 // Build "Lcom/x/Y;->foo(I)V" for a method_idx in a given dex.
-std::string BuildMethodSignature(const dexkit::DexItem& item, uint32_t method_idx) {
+std::string BuildMethodDescriptor(const dexkit::DexItem& item, uint32_t method_idx) {
     const auto& reader = item.GetReader();
     const auto& type_names = item.GetTypeNames();
     const auto& strings = item.GetStrings();
-    // Bound the index (mirrors BuildFieldSignature). method_idx can be a raw
+    // Bound the index (mirrors BuildFieldDescriptor). method_idx can be a raw
     // invoke operand (ArgOrigin MethodReturn → last_invoke_callee), which lenient
     // mode leaves unvalidated; an OOB index here would OOB-read MethodIds().
     if (method_idx >= reader.MethodIds().size()) return {};
@@ -1816,7 +1816,7 @@ const char* ArgKindName(dexkit::ext::ArgKind k) {
 }
 
 // Build "Lcls;->name:Type" for a field_idx in a given dex.
-std::string BuildFieldSignature(const dexkit::DexItem& item, uint32_t field_idx) {
+std::string BuildFieldDescriptor(const dexkit::DexItem& item, uint32_t field_idx) {
     const auto& reader = item.GetReader();
     const auto& type_names = item.GetTypeNames();
     const auto& strings = item.GetStrings();
@@ -1858,11 +1858,11 @@ ArgOrigin ConvertArg(const dexkit::DexItem& item,
                 o.class_descriptor = std::string(type_names[src.type_idx]);
             break;
         case K::FieldRead:
-            o.field_signature = BuildFieldSignature(item, src.field_idx);
+            o.field_descriptor = BuildFieldDescriptor(item, src.field_idx);
             break;
         case K::MethodReturn:
-            o.method_signature =
-                BuildMethodSignature(item, src.method_idx);
+            o.method_descriptor =
+                BuildMethodDescriptor(item, src.method_idx);
             break;
         case K::Parameter:
             o.parameter_index = src.parameter_index;
@@ -2016,13 +2016,13 @@ DexKitExt::ResolveCallArgs(std::string_view api_descriptor, uint32_t depth) {
                                             target_name, target_proto)) {
         const auto& item = *cr.item;
         auto sites = AnalyzeInvokesOf(item, cr.caller_idx, depth);
-        std::string caller_sig = BuildMethodSignature(item, cr.caller_idx);
+        std::string caller_desc = BuildMethodDescriptor(item, cr.caller_idx);
         for (const auto& s : sites) {
             if (s.method_idx != cr.local_target) continue;
             ResolvedCallSite cs;
             cs.caller_dex_id = item.GetDexId();
             cs.caller_method_idx = cr.caller_idx;
-            cs.caller_descriptor = caller_sig;
+            cs.caller_descriptor = caller_desc;
             cs.callee_descriptor = std::string(api_descriptor);
             cs.bytecode_offset = static_cast<int32_t>(s.bytecode_offset);
             cs.invoke_opcode = s.opcode;
@@ -2057,13 +2057,13 @@ DexKitExt::FindCallSitesToApi(std::string_view api_descriptor) {
                                             target_name, target_proto)) {
         const auto& item = *cr.item;
         auto sites = item.EnumerateInvokeSites(cr.caller_idx);
-        std::string caller_sig = BuildMethodSignature(item, cr.caller_idx);
+        std::string caller_desc = BuildMethodDescriptor(item, cr.caller_idx);
         for (const auto& s : sites) {
             if (s.method_idx != cr.local_target) continue;
             CallSite cs;
             cs.caller_dex_id = item.GetDexId();
             cs.caller_method_idx = cr.caller_idx;
-            cs.caller_descriptor = caller_sig;
+            cs.caller_descriptor = caller_desc;
             cs.callee_descriptor = std::string(api_descriptor);
             cs.bytecode_offset = static_cast<int32_t>(s.bytecode_offset);
             cs.invoke_opcode = s.opcode;
@@ -2100,15 +2100,15 @@ DexKitExt::FindCallSitesFromMethod(std::string_view method_descriptor) {
     // Walk the method's own invoke sites (the forward index of FindCallSitesToApi):
     // each site's method_idx is the callee IN THIS DEX. Per-invoke (not deduped),
     // mirroring FindCallSitesToApi's per-site output.
-    std::string caller_sig = BuildMethodSignature(item, m_idx);
+    std::string caller_desc = BuildMethodDescriptor(item, m_idx);
     // Only the site identity is used here, never the arguments, so the window is the
     // call's own block: depth 0 is the cheapest way to ask for exactly that.
     for (const auto& s : AnalyzeInvokesOf(item, m_idx, /*depth=*/0)) {
         CallSite cs;
         cs.caller_dex_id = item.GetDexId();
         cs.caller_method_idx = m_idx;
-        cs.caller_descriptor = caller_sig;
-        cs.callee_descriptor = BuildMethodSignature(item, s.method_idx);
+        cs.caller_descriptor = caller_desc;
+        cs.callee_descriptor = BuildMethodDescriptor(item, s.method_idx);
         cs.bytecode_offset = static_cast<int32_t>(s.bytecode_offset);
         cs.invoke_opcode = s.opcode;
         out.push_back(std::move(cs));
@@ -2228,7 +2228,7 @@ std::vector<std::pair<int, uint32_t>> LocateFields(DexKitExt& ext,
             if (class_idx >= type_names.size() || type_names[class_idx] != cls) {
                 continue;
             }
-            if (std::string_view(BuildFieldSignature(*item, fid)) == fd) {
+            if (std::string_view(BuildFieldDescriptor(*item, fid)) == fd) {
                 out.emplace_back(dex_id, fid);
                 break;  // field_ids are unique per (class, name, type)
             }
@@ -2279,7 +2279,7 @@ TypeReferences DexKitExt::FindTypeReferences(std::string_view type_descriptor) {
     // Mirrors the WASM binding's findTypeReferences: a signature-position type xref
     // (fields OF the type, methods RETURNING it, methods TAKING it as a param). Scans
     // every dex — a type is referenced from other dexes too. Uses the shared
-    // BuildFieldSignature / BuildMethodSignature so descriptors match every other API.
+    // BuildFieldDescriptor / BuildMethodDescriptor so descriptors match every other API.
     TypeReferences out;
     const int dex_num = core_->GetDexNum();
     for (int d = 0; d < dex_num; ++d) {
@@ -2295,7 +2295,7 @@ TypeReferences DexKitExt::FindTypeReferences(std::string_view type_descriptor) {
         const auto field_ids = reader.FieldIds();
         for (uint32_t fid = 0; fid < field_ids.size(); ++fid) {
             if (field_ids[fid].type_idx == type_idx)
-                out.fields.push_back(BuildFieldSignature(*item, fid));
+                out.fields.push_back(BuildFieldDescriptor(*item, fid));
         }
         const auto method_ids = reader.MethodIds();
         const auto proto_ids = reader.ProtoIds();
@@ -2310,7 +2310,7 @@ TypeReferences DexKitExt::FindTypeReferences(std::string_view type_descriptor) {
                         if (tl->list[k].type_idx == type_idx) { param = true; break; }
             }
             if (!returns && !param) continue;
-            std::string sig = BuildMethodSignature(*item, mid);
+            std::string sig = BuildMethodDescriptor(*item, mid);
             if (returns) out.methods_returning.push_back(sig);
             if (param) out.methods_with_param.push_back(std::move(sig));
         }
@@ -2339,7 +2339,7 @@ std::vector<std::string> DexKitExt::ListFieldDescriptorsInDex(int dex_id) const 
     const auto field_ids = item->GetReader().FieldIds();
     out.reserve(field_ids.size());
     for (uint32_t fid = 0; fid < field_ids.size(); ++fid)
-        out.push_back(BuildFieldSignature(*item, fid));
+        out.push_back(BuildFieldDescriptor(*item, fid));
     return out;
 }
 
@@ -2361,7 +2361,7 @@ std::vector<std::string> DexKitExt::ListMethodDescriptorsInDex(int dex_id) const
     const auto method_ids = item->GetReader().MethodIds();
     out.reserve(method_ids.size());
     for (uint32_t mid = 0; mid < method_ids.size(); ++mid)
-        out.push_back(BuildMethodSignature(*item, mid));
+        out.push_back(BuildMethodDescriptor(*item, mid));
     return out;
 }
 
