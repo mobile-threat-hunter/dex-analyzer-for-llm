@@ -3133,6 +3133,56 @@ eleven attribute names, four raw-dict keys and one MCP payload key. This repo ke
 no aliases (#24), so a consumer on the old spellings gets `AttributeError` /
 `KeyError` — loud, which is the point. Release-notes material.
 
+### The docs' PROSE is audited, not just their fences (2026-08-25)
+
+A post-release verification of the two rename issues asked a narrower question
+than "did the renames land": **is every comment and every `.md` file actually
+current?** The renames themselves were clean — **0 retired spellings reachable at
+runtime** across 43 records / 240 attributes / 39 module exports / 47 SDK exports
+/ 54 `DexKit` methods / 36 MCP tools / 39 payload keys / both raw dict producers,
+**0 cross-layer defects**, and all 31 source-comment mentions legitimate (the
+deliberate field-vs-key split, the dex FORMAT's own `field_id` / `method_id`,
+`InvokeArg::reg_num` which is documented "Not surfaced to Python", the `dad_cpp`
+DAD-traceability fields, and the §1 note itself).
+
+**The docs were not.** Absence of an old name is not the same as an accurate
+description of the new state, and a prose field list does not RUN, so nothing
+caught four claims — **all PRE-EXISTING, none caused by the renames**:
+
+| where | said | reality |
+|---|---|---|
+| `docs/api.md` `ResolvedArg.kind` | `'StringConst'` \| `'IntConst'` \| `'Field'` | the binding emits `ConstString` / `ConstInt` / `FieldRead` and **has never emitted those three** — a consumer branching on the documented spelling matches nothing, silently |
+| `docs/api.md` `ResolvedArg` table | 8 of 9 fields | `crossed_branch` missing (dexllm#16) |
+| `docs/api.md` + `docs/sdk.md` `CapabilityReport` | 10 of 12 fields | `dropped_touches` / `dropped_apis` missing (dexllm#49) |
+
+The `kind` one is the worst and the field-NAME audit cannot see it: `kind` is
+present and correctly named; it is its documented VALUE SET that is fiction.
+
+**Guards** (3 new in [tests/test_doc_examples.py](tests/test_doc_examples.py) —
+the file that already owns "the docs must be true", and all corpus-free).
+`test_the_docs_enumerate_the_fields_a_record_actually_has` audits both notations
+against the LIVE attribute set: `sdk.md`'s ``- **`Name`** `(a, b, c)` `` and
+`api.md`'s ``### `Name` `` + `| field |` table, falling back to the first-paragraph
+PROSE form (`` `name: type` ``) — which is what `CapabilityReport` uses and what a
+table-only parser skipped entirely. **A table is checked BOTH ways and prose only
+for MISSING**, because a sentence may legitimately name the record itself or
+cross-reference another API while a table row is a field claim; the two abridged
+one-line summaries are pinned and their exception EARNED (they must have no
+table). `test_the_documented_arg_kinds_are_the_ones_the_binding_emits` reads
+`ArgKindName`'s switch from the C++ source — corpus-free, and the authority
+rather than a second list. `test_no_in_page_doc_link_is_dangling` checks every
+`](#…)` in all 27 md files against the headings AND the explicit `<a name>`
+anchors.
+
+**Each of the four reverts is KILLED**, verified by applying them one at a time.
+Two of them survived the guard's first cut and are why it has two more notations
+than it started with. The anchor guard was written after **I invented a dangling
+`#which-unknown` while fixing the others** — the exact defect the audit was
+looking for, committed by the audit itself. Its slug rule had to be measured too:
+GitHub keeps `[A-Za-z0-9_]`, spaces and hyphens, and maps EACH space to a hyphen
+**without collapsing runs**, so a heading with an em dash slugs with a `--` in it
+— a collapsing slugifier reported three false danglings before that was fixed.
+
 ### Type stubs (PEP 561) — `py.typed` + `.pyi` typed shadow (2026-07)
 
 The pybind extension carries no static types, so consumers / type-checkers would see `Any` for `DexKit`, `CallSite`, `identify()` dict keys, etc. The wheel ships a typed shadow: `src/dexllm/py.typed` (PEP 561 marker) + [`_dexkit_core.pyi`](src/dexllm/_dexkit_core.pyi) (the `DexKit` ctor overload, every `.def` method, each `py::class_` return object + its readonly attrs, the `_enrich.py` Python-side properties, and `TypedDict`s for the dict returns — `identify` / `verify_report` / `decompile_method_ast` / `_with_pc` / `permission_callers`; `match_type` is `str` — the raw binding accepts any string (`ParseStringMatchType` maps an unknown value to `Contains`), so the honest raw contract is `str`; the opinionated `Literal` narrowing lives one layer up in the `dexllm.sdk` `MatchType`) + [`__init__.pyi`](src/dexllm/__init__.pyi) (mirrors `__init__.py`'s re-exports + `__all__`; native names resolve via `_dexkit_core.pyi`, pure-Python helpers via their submodule inline annotations). **Runtime is the source of truth** — the stubs were built by introspecting the LIVE module, so they advertise no name the runtime lacks (e.g. `ExternalTypeRef` exposes `java_type` — `java_name` until dexllm#69 — NOT the `java_class` an early draft assumed), `ResolvedArg` fields are plain (the raw pybind object populates all of them; the Optional-narrowed view is the derived `dexllm.sdk.ResolvedArg`), and `Any` appears only for the genuinely-open DAD AST (`decompile_method_ast` → `ast: dict[str, Any] | None`). **Maintenance (mirror the rebuild loop):** change a binding in `module.cpp` → reflect the added/removed/renamed `.def` / `py::class_` attribute in `_dexkit_core.pyi`; change `__init__.py`'s `__all__` → update `__init__.pyi`. Locked by [`tests/test_stubs.py`](tests/test_stubs.py) (**bidirectional** runtime↔stub coverage — DexKit methods, native module classes, and each return-class's attribute set; a new unstubbed `.def` / `def_readonly` / `_enrich` property fails the test) plus a mypy check (a consumer script type-checks clean; wrong usage — bad return type, unknown method, unexported name, wrong `TypedDict` key — is caught). scikit-build-core's `wheel.packages` includes the `.pyi` + `py.typed` automatically (verified in the built wheel).

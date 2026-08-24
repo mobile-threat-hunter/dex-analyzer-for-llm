@@ -1184,7 +1184,7 @@ it, i.e. always the reverse direction (callee fixed).
 Where one argument came from (intra-method).
 | field | type | meaning |
 |---|---|---|
-| `kind` | `str` | `'MethodReturn'` \| `'NewInstance'` \| `'StringConst'` \| `'IntConst'` \| `'Field'` \| `'Parameter'` \| … |
+| `kind` | `str` | exactly one of `ConstString` \| `ConstInt` \| `ConstWide` \| `ConstClass` \| `ConstNull` \| `FieldRead` \| `MethodReturn` \| `Parameter` \| `NewInstance` \| `NewArray` \| `Unknown` — the full set the binding emits |
 | `register_index` | `int` | register holding the arg |
 | `string_value` | `str` | for string constants |
 | `int_value` | `int` | for int constants |
@@ -1192,6 +1192,7 @@ Where one argument came from (intra-method).
 | `method_descriptor` | `str` | for method-return origins |
 | `field_descriptor` | `str` | for field origins |
 | `parameter_index` | `int` | for parameter origins (`-1` if n/a) |
+| `crossed_branch` | `bool` | `Unknown` only — a definition was DISCARDED at a merge, so the value is UNPROVEN. `crossed_branch` `False` means no definition was found in the window at all — the two flavours are tabled under `resolve_call_args` |
 
 ### `MethodInfo` / `FieldInfo`
 One member a class DECLARES, carried by `ClassSummary.methods` / `.fields` and by
@@ -1240,7 +1241,9 @@ form, so one method described itself two ways.) The same bits drive the
 descriptor → the catalog API descriptors it invokes — dexllm#35; it was
 `→ {permissions}` before), `api_usages: list[ApiUsage]`, `total_call_sites: int`
 (invoke instructions), `catalog_version: str`, `catalog_size: int`,
-`matched_apis: int`, `total_field_accesses: int` (READ INSTRUCTIONS against a
+`matched_apis: int`, `dropped_touches: int` / `dropped_apis: int` (what
+`app_only=True` filtered out — 0 under `app_only=False`; see above),
+`total_field_accesses: int` (READ INSTRUCTIONS against a
 field-descriptor entry — dexllm#36; `find_methods_reading_field` is not
 deduplicated, so this is the same unit as the line above and summing them is
 meaningful. The two are kept apart only so `total_call_sites`' released meaning

@@ -219,7 +219,7 @@ other spelling, and the reason `MethodInfo` exposes the bits instead.
   is untouched.
 - **`CapabilityReport`** `(catalog_version, catalog_size, matched_apis,
   total_call_sites, permissions, categories, flags, api_usages, by_caller,
-  total_field_accesses)` — the
+  total_field_accesses, dropped_touches, dropped_apis)` — the
   app's capability profile (holds `Mapping`s → immutable, **not hashable**).
   `categories` is one axis (domain / behaviour), so one call site is never counted
   twice under two names for the same concern — an API that genuinely spans two

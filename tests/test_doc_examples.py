@@ -319,3 +319,189 @@ def test_the_runner_is_not_vacuous():
         "resolve_call_args(API, depth=6)",
     ):
         assert any(needle in b for b in bodies), f"nothing exercises {needle!r}"
+
+
+# ── the docs' PROSE, not just their fences ───────────────────────────────────
+#
+# A fence RUNS, so a rename breaks it. A prose enumeration of a record's fields
+# does not run, and three of these went stale for several releases before anyone
+# looked: `docs/api.md` advertised `ResolvedArg.kind` values the binding has never
+# emitted (`StringConst` / `IntConst` / `Field` — it emits `ConstString` /
+# `ConstInt` / `FieldRead`), and both `api.md` and `sdk.md` never gained
+# `CapabilityReport.dropped_touches` / `dropped_apis` (dexllm#49). A consumer
+# branching on the documented `kind` gets nothing, silently.
+
+#: A heading may legitimately document TWO records at once; the claimed field set
+#: is then checked against their UNION. JUSTIFIED, not merely listed: both records
+#: must exist, and the doc must genuinely name fields from each.
+_DOC_SHARED_HEADINGS = {"MethodInfo / FieldInfo": ("MethodInfo", "FieldInfo")}
+
+#: Deliberately ABRIDGED prose — a one-line summary rather than an enumeration.
+#: Each must be a single line, or it is an enumeration pretending to be a summary.
+_DOC_ABRIDGED = {
+    (
+        "docs/api.md",
+        "ExternalFieldRef / ExternalTypeRef",
+    ),  # "Field: class/name/type descriptors + `descriptor`."
+    ("docs/api.md", "ResolvedCallSite"),  # "All `CallSite` fields plus `args`."
+}
+
+
+def _runtime_record_attrs():
+    import sys
+
+    sys.path.insert(0, str(pathlib.Path(__file__).parent))
+    from _records import assert_skips_are_optional, public_record_attrs
+
+    recs, skipped = public_record_attrs()
+    assert_skips_are_optional(skipped)
+    out = {}
+    for qual, attrs in recs.items():
+        out.setdefault(qual.rsplit(".", 1)[1], set()).update(attrs)
+    return out
+
+
+def test_the_docs_enumerate_the_fields_a_record_actually_has():
+    """dexllm#68/#69 follow-up: a prose field list is a claim, and it can rot.
+
+    Two notations are audited — `docs/sdk.md`'s ``- **`Name`** `(a, b, c)` `` and
+    `docs/api.md`'s ``### `Name` `` followed by a `| field |` table. Both are
+    compared against the LIVE attribute set, so a rename or an added field that
+    misses the doc fails here rather than in a user's editor.
+    """
+    import re
+
+    runtime = _runtime_record_attrs()
+    offenders, audited = [], 0
+
+    def check(where, name, claimed, both_ways=True):
+        """`both_ways` is False for PROSE: a sentence may legitimately name the
+        record itself or cross-reference another API, so only a MISSING field is
+        a defect there. A TABLE row is a field claim and is checked both ways."""
+        nonlocal audited
+        targets = _DOC_SHARED_HEADINGS.get(name, (name,))
+        if not all(t in runtime for t in targets):
+            return
+        audited += 1
+        actual = set().union(*(runtime[t] for t in targets))
+        missing = actual - claimed
+        extra = (claimed - actual) if both_ways else set()
+        if missing or extra:
+            offenders.append(
+                f"{where} {name}: missing {sorted(missing)} extra {sorted(extra)}"
+            )
+
+    sdk = (REPO_ROOT / "docs/sdk.md").read_text(encoding="utf-8")
+    for m in re.finditer(r"- \*\*`([\w /]+)`\*\*\s*`\(([^`]*)\)`", sdk):
+        body = m.group(2).replace("\n", " ")
+        if "..." in body:
+            continue  # explicitly abridged
+        claimed = {f.strip().rstrip("?") for f in body.split(",") if f.strip()}
+        check("docs/sdk.md", m.group(1), claimed)
+
+    api = (REPO_ROOT / "docs/api.md").read_text(encoding="utf-8")
+    for sec in re.split(r"\n### ", api):
+        m = re.match(r"`([\w /`]+)`", sec)
+        if not m:
+            continue
+        name = m.group(1).replace("`", "").strip()
+        if ("docs/api.md", name) in _DOC_ABRIDGED:
+            continue
+        body = sec.split("\n### ")[0]
+        rows = re.findall(r"^\|\s*([^|]+?)\s*\|", body, re.M)
+        claimed = {i for r in rows for i in re.findall(r"`(\w+)`", r)}
+        if not claimed:
+            # PROSE form — `field: type`, `field` (`type`), … A backticked word
+            # that FOLLOWS an opening paren is the TYPE, not a field, which is
+            # what separates `interface_descriptors` from the `(`list[str]`)`
+            # after it. Without this branch the whole section is skipped, and
+            # `CapabilityReport` — documented that way — sat two fields stale.
+            first = body.split("\n\n")[0]
+            claimed = {
+                w for pre, w in re.findall(r"(.?)`(\w+)(?:`|:)", first) if pre != "("
+            }
+            if len(claimed) < 3:
+                continue
+            check("docs/api.md", name, claimed, both_ways=False)
+            continue
+        check("docs/api.md", name, claimed)
+
+    assert audited >= 8, f"only {audited} documented records audited — the parse broke"
+    assert (
+        not offenders
+    ), "documented field lists disagree with the runtime:\n  " + "\n  ".join(offenders)
+
+    # the abridged exceptions must be EARNED: a real one-line summary, not an
+    # enumeration that would otherwise fail.
+    for doc, name in _DOC_ABRIDGED:
+        sec = re.split(r"\n### ", (REPO_ROOT / doc).read_text(encoding="utf-8"))
+        body = next(s for s in sec if s.startswith(f"`{name.split(' / ')[0]}`"))
+        body = body.split("\n### ")[0].split("\n\n")[0]
+        assert (
+            "|" not in body
+        ), f"{doc} {name} is listed as abridged but has a field TABLE"
+
+
+def test_no_in_page_doc_link_is_dangling():
+    """An invented anchor reads as a working cross-reference and is not one.
+
+    Written after one was added by hand during the dexllm#69 audit — the exact
+    defect the audit was looking for. GitHub's slug keeps `[A-Za-z0-9_]`, spaces
+    and hyphens, lowercases, and maps EACH space to a hyphen (it does not collapse
+    runs), so a heading with an em dash slugs with a `--` in it.
+    """
+    import re
+
+    def slug(h):
+        h = re.sub(r"<[^>]+>", "", h)
+        h = re.sub(r"[^\w\s-]", "", h.lower())
+        return h.strip().replace(" ", "-")
+
+    docs = sorted(REPO_ROOT.glob("*.md")) + sorted((REPO_ROOT / "docs").glob("*.md"))
+    assert len(docs) >= 12, f"only {len(docs)} md files found"
+    total, bad = 0, []
+    for f in docs:
+        t = f.read_text(encoding="utf-8")
+        anchors = {slug(h) for h in re.findall(r"^#{1,6} (.+)$", t, re.M)}
+        anchors |= set(re.findall(r'<a name="([\w-]+)"', t))
+        links = set(re.findall(r"\]\(#([\w-]+)\)", t))
+        total += len(links)
+        bad += [f"{f.name}#{a}" for a in sorted(links - anchors)]
+    assert total >= 10, f"only {total} in-page links found — the scan broke"
+    assert not bad, f"dangling in-page links: {bad}"
+
+
+def test_the_documented_arg_kinds_are_the_ones_the_binding_emits():
+    """A field's documented VALUE SET is a claim too, and it had rotted.
+
+    `docs/api.md` advertised `'StringConst'` / `'IntConst'` / `'Field'` as
+    `ResolvedArg.kind` values. The binding emits `ConstString` / `ConstInt` /
+    `FieldRead` and has never emitted the other three, so a consumer branching on
+    the documented spelling silently matched nothing. The field-NAME audit above
+    cannot see it — `kind` is present and correctly named.
+
+    The authority is `ArgKindName`'s switch in `dexkit_ext.cpp`, read from source
+    so this holds with no corpus.
+    """
+    import re
+
+    cpp = (REPO_ROOT / "native/core_ext/dexkit_ext.cpp").read_text(encoding="utf-8")
+    body = cpp[cpp.index("const char* ArgKindName(") :]
+    body = body[: body.index("\n}")]
+    emitted = set(re.findall(r'return "(\w+)";', body))
+    assert (
+        len(emitted) >= 10
+    ), f"only {len(emitted)} kinds parsed — re-anchor this guard"
+
+    api = (REPO_ROOT / "docs/api.md").read_text(encoding="utf-8")
+    # `| \`kind\` |` starts TWO rows — this one and the crossed_branch flavours
+    # table, whose second column is `crossed_branch` rather than the type. Pick by
+    # the type cell, and fail loudly if that stops being unique.
+    rows = [ln for ln in api.split("\n") if ln.startswith("| `kind` | `str` |")]
+    assert len(rows) == 1, f"expected one `kind`/`str` row, found {len(rows)}"
+    row = rows[0]
+    documented = set(re.findall(r"`'?(\w+)'?`", row)) - {"kind", "str"}
+    assert documented == emitted, (
+        f"documented-but-never-emitted {sorted(documented - emitted)} | "
+        f"emitted-but-undocumented {sorted(emitted - documented)}"
+    )
