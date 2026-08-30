@@ -265,6 +265,35 @@ void RegisterPropagation(Graph& graph, ChainMap& du, ChainMap& ud) {
                     if (locs.size() != 1) continue;
                     const int loc = locs[0];
                     if (loc < 0) continue;
+                    // Beyond-DAD (dexllm#76) — a definition is never
+                    // propagated INTO ITSELF.  `ud[{var, i}] == {i}` says the
+                    // only definition of `var` reaching the use at `i` is the
+                    // one `i` makes, which is a circular data dependency: a
+                    // loop back edge carries `i`'s own def to `i`'s own use,
+                    // and no other def reaches, i.e. the register is READ
+                    // BEFORE IT IS EVER WRITTEN.  ART's runtime verifier
+                    // rejects that; the structural verifier this port mirrors
+                    // does not (instruction dataflow is out of its documented
+                    // scope), so such a dex loads and `verify()` calls it valid
+                    // in BOTH modes.  Substituting a value into its own
+                    // computation is meaningless, and mechanically it splices
+                    // `ins`'s own rhs underneath itself — `BinaryExpression::
+                    // replace` does `var_map[old_v] = new_node`, so the node
+                    // becomes its own operand and `get_used_vars` recurses
+                    // without bound: an uncatchable SIGSEGV (a signal unwinds
+                    // nothing, so the per-method catch and safe.py's deadline
+                    // both miss it).  Upstream DAD has no such guard —
+                    // dataflow.py goes from `if loc < 0: continue` (:219)
+                    // straight to `get_ins_from_loc(loc)` (:221) — and it
+                    // hits the identical defect on the identical bytes.
+                    // Same family as the `SplitVariables` no-op recorded
+                    // under "Root-cause fixes": a variable substituted
+                    // into its own def chain.  Skipping is a pure no-op —
+                    // everything below this point MUTATES (replace, the
+                    // ud/du rewrite, remove_ins, change), nothing is read
+                    // and abandoned, so no chain is left half-rewritten
+                    // and the outer fixpoint cannot gain an iteration.
+                    if (loc == i) continue;
                     IRFormPtr orig_ins = graph.get_ins_from_loc(loc);
                     if (!orig_ins) continue;
                     if (!orig_ins->is_propagable()) continue;

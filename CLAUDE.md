@@ -1491,7 +1491,9 @@ discovered, because **the second row of that table means master already breaks
 them**. Holding this change would not protect the property; it would only keep a
 wrong answer. **Escalated to the user (CLAUDE.md rule 5) with exactly this
 evidence, who chose to ship the fix and file the crash as its own issue** —
-dexllm#76. Bolting a depth guard onto `get_used_vars` here was NOT done and is
+dexllm#76, **FIXED in the section below**: the root is a definition that reaches
+its own use, which `RegisterPropagation` then substituted into its own
+computation. Bolting a depth guard onto `get_used_vars` here was NOT done and is
 the reason the escalation happened: CLAUDE.md's own record is that a
 `GetUsedVarsGuard` in that exact function was REMOVED because it MASKED a real
 port bug, so the root belongs at the dataflow layer with its own a/b, not in this
@@ -1558,6 +1560,285 @@ guard file references a member the pre-fix ABI lacks, so the OFF build FAILED TO
 COMPILE and ninja left the previous `.so` in place — a mutant that does not
 compile is not a mutant, and the md5 assertion is what caught it every time
 [[mutation-harness-restore-pitfalls]].
+
+### A definition is never propagated into itself (dexllm#76, 2026-08-25)
+
+`RegisterPropagation` ([dataflow.cpp](native/dad_cpp/dataflow.cpp), DAD
+`dataflow.py:190`) substitutes a uniquely-reaching definition into its use. It
+read the reaching-definition chain without asking WHERE that definition is, and
+`ud[{var, i}] == {i}` is a legal answer: a loop back edge carries `i`'s own
+definition to `i`'s own use, and when no other definition reaches — i.e. the
+register is **read before it is ever written** — that self-definition is the
+ONLY one, so `locs.size() != 1` does not filter it out.
+
+Substituting a value into its own computation is meaningless, and mechanically
+it splices the instruction's own rhs underneath itself. `IRForm::var_map` is a
+per-node child map, so `BinaryExpression::replace`'s `var_map[old_v] = new_node`
+makes the node **its own operand**. The IR is then CYCLIC, and every recursive
+walk over it runs away: an **uncatchable SIGSEGV** — a signal unwinds nothing,
+so the per-method `catch (...)`, `safe.py`'s deadline and the SDK wrapper all
+miss it, which is what dexllm#75's review verified across every decompile
+surface.
+
+**Which walker dies is a property of the input, not of the defect**, and the
+first draft of this section said `get_used_vars` as though it were the whole
+surface. Measured under gdb: the issue's repro and every crafted shape here
+bottom out in the respective `get_used_vars` (`BinaryExpression`'s,
+`UnaryExpression`'s, `ArrayLengthExpression`'s, `ArrayLoadExpression`'s — and
+MUTUALLY between two of them when two IR classes alternate around the cycle),
+while the adversarial review's own fuzz found inputs that die inside
+**`replace`** instead (`UnaryExpression::replace` ↔ `BinaryExpression::replace`).
+That widening matters because it strengthens the case against the masking
+alternative below: a depth cap on one walker leaves the others.
+
+It breaks the two properties this project markets — 0-crash on malformed dex,
+and `VerifyDex` as the single gate — on a dex that verifies **strict**-valid, so
+`lenient=True` was never the boundary. **Pre-existing**: it reproduces on
+`238911494b43c603829140b2820f5f63` with nothing from dexllm#75 involved; that
+change made it reachable through one more shape (a body whose first code units
+are a payload used to have its body DROPPED, which incidentally prevented the
+pipeline from ever building the cyclic IR) and was shipped after an escalation
+that filed this separately. It is also the residual of a family this file
+already records: the "Root-cause fixes" section above documents
+`RegisterPropagation` substituting un-split variables "into their own def chains
+→ IR cycles → stack overflow", and the two masking guards that hid it being
+REMOVED.
+
+**Fix — one condition, at the root:** `if (loc == i) continue;`. The value used
+at `i` is defined by `i` itself; there is nothing to propagate. The instruction
+then stays as the bytecode wrote it and renders honestly — the issue's own repro
+becomes `do { int v1 <<= -1; } while(v0 == null);`, which is exactly what the
+smali view lists, so the two views of one method agree.
+
+**Confirmed upstream, by running it:** androguard DAD hits the identical defect
+on the identical bytes (with the adler32 corrected — that check is out of THIS
+gate's documented scope), recursing in `instruction.py:1095
+BinaryExpression.get_used_vars` until `RecursionError`; a correctness reviewer
+reproduced it with a second overload of the same method as a built-in control
+that decompiles fine. Upstream goes from `if loc < 0: continue` (:219) straight
+to `get_ins_from_loc(loc)` (:221) — a first draft of the C++ comment cited
+`:214`, which is the sibling `len(locs) != 1` check one position early. Python
+turns the same defect into a catchable exception and C++ into a signal. So the
+guard is a **beyond-DAD** production divergence on the return-literal /
+catch-clamp precedent — no `*DADFaithful` sibling, since the parity suites do
+not assert propagation of a self-definition. **Parity passes on BOTH halves**
+(29/29 pre-fix and post-fix, a reviewer's measurement), which is the statement
+that no suite asserts the changed behaviour.
+
+## Two alternatives were rejected, and one of them by measurement
+
+**A recursion-depth cap on `get_used_vars` is the MASK, not the fix**, and the
+issue says why: CLAUDE.md's own record is that a `GetUsedVarsGuard` in that exact
+function was REMOVED because it hid a real port bug. Built as mutant M4 and RUN,
+it is worse on three separate axes — it leaves the self-substituted expression in
+the output (`do { }`, the statement gone), it takes the guard file from **27 s to
+907 s**, and **it does not even contain the crash**: a reviewer's fuzz inputs and
+the non-`BinaryExpression` shapes below still SIGSEGV under it, because the cycle
+is still built and the OTHER walkers still run away. 18 of 32 cases fail.
+
+**The gate is the wrong place.** This is instruction DATAFLOW semantics, which
+`dex_verifier.h` scopes out explicitly and which ART itself only checks in the
+6032-line runtime `method_verifier` this port refuses to vendor — and rejecting
+the whole dex over one method is the trade-off dexllm#73 already declined.
+
+## The condition was MEASURED, not argued — twice, independently
+
+An instrumented build logged (a) `loc == i` and (b) a **definitive** path-based
+cycle detector run over `ins` after every splice — a node that reappears on the
+CURRENT ancestor path, so a shared subtree (a DAG) does not count. An earlier,
+coarser probe asked whether `rhs` was already reachable from `ins` and fired
+**1,145 times on one ordinary APK**; it was measuring DAGs, and replacing it was
+the difference between a number and a fact.
+
+| population | classes | cycles | of which `loc != i` |
+|---|---:|---:|---:|
+| 93 sources — bundled corpus, every committed fixture, `art/test/dexdump`, `tools/dexter/testdata`, all four ART fuzzer corpora | 33,853 | **0** | 0 |
+| 600 structured fuzz bodies (valid encodings, random registers/literals, random back edge) — **600/600 verify strict+lenient** | — | **12** | **0** |
+| 4 hand-built mutual-recursion shapes | — | 3 | 0 |
+
+On the fuzz the cycle detector and the SIGSEGV correspond **1:1** (12 and 12),
+which is the mechanism confirmed from both ends. And the mutual shapes are the
+natural objection to a `loc == i` guard — they build the cycle through two and
+three instructions — yet every one of them reports `same=1`: the ud/du
+bookkeeping rewrites the chain onto the surviving instruction FIRST, so the step
+that actually creates the cycle is always a self-definition.
+
+**An adversarial reviewer re-derived this with its own instrument and got the
+same answer at ten times the scale** — an ITERATIVE colour DFS (mine is
+recursive; it terminates because it stops at the first repeat, but a reviewer
+correctly noted that a recursive detector over a deep chain can lose its own log,
+and it misread one run that way before rewriting it): **4,881 bodies / 371,194
+propagation steps / 932 cycles, every one `same=1`, zero `same=0`**. With the
+guard ON: **600 sources / 40,383 classes → 0 cycles**, and 2,002 bodies from the
+generator that kills 65-in-336 without the guard → 0 cycles, 0 crashes. It also
+found the structural reason: a non-const rhs is `du.size() > 1 → continue`
+guarded and therefore ALWAYS `remove_ins(loc)`-ed after its single splice, so an
+A→B, B→A pair cannot form; and a const rhs is leaf/ident, which the parent's
+`replace` does not descend into.
+
+## Measured
+
+**a/b OFF=`a15d1644ef85c315e9f3f140462ce1c2` vs
+ON=`08104afea5da1252dfe91168d274e3fa`, SAME script, both `.so` md5-verified
+BEFORE and AFTER each capture — and the OFF build BIT-REPRODUCES the recorded
+HEAD md5**, which is the diff's functional content stated as a measurement (the
+pre-fix mutant M0 reproduces it too, from the other direction; a reviewer
+additionally built a statement-only variant with the comment block deleted and
+got a binary bit-identical to the fix, so the 29-line diff is one statement).
+119 sources — 93 real plus **26 crafted** — x {strict verify verdicts + reasons,
+lenient verify, load, `dex_count`, class list, a smali digest, a whole-decompile
+digest, decompiled line count, `// DECOMPILE ERROR` count, an AST digest over
+every method, `warm_analysis_caches`, and the subprocess EXIT STATUS} = **1268
+axis records, 132 changed, 23 sources changed — ALL crafted, 0 REAL**.
+
+Each source runs in a SUBPROCESS whose axes are FLUSHED one per line, so the
+crashing half still reports what it computed before dying (OFF carries 1163 of
+the 1268 records for exactly that reason); judging by EXIT STATUS is not a
+detail, because a `try/except` cannot observe a SIGSEGV. The 23 split cleanly:
+
+* **21 are `_EXIT` -11 → 0** plus the five axes they never reached (`java`,
+  `java_lines`, `decompile_errors`, `ast`, `warm`), with `decompile_errors`
+  **0** — the methods RENDER rather than being reported as errors.
+* **2 never crashed on either half and change only their rendering** —
+  `move v1, v1` and `move-object v1, v1`, a self-assignment. Pre-fix the
+  propagation produced DAD's `// Both branches of the condition point to the
+  same code.` form; with the guard the loop body is empty in the TEXT while the
+  AST still carries a `LocalDeclarationStatement` for the register. Found by an
+  adversarial reviewer, on a shape that was in NEITHER the guard file nor the
+  a/b craft set — so the a/b was widened to hold it rather than only the crashes.
+  Recorded, not repaired: chasing the `Dummy` initializer is a separate defect
+  on a read-before-write register with its own blast radius.
+
+The three non-crashing ablation crafts (`no_self_def`, `no_back_edge`,
+`mutual2_no_back_edge`) are unchanged, which is the ablation stated as a
+measurement: both ingredients are necessary.
+
+The bundled corpus carries **0** instances of the condition, so a corpus-only
+a/b is byte-identical BY CONSTRUCTION and proves 0-regression and nothing about
+the mechanism; the crafts are in the same measurement for exactly that reason
+[[ab-must-prove-the-mechanism-fires]].
+
+parity **29/29**, pytest **1159 passed / 24 skipped**, TRUE corpus-less (`test_apk` MOVED
+aside) **755 passed / 428 skipped / 0 failed**, narrowed to `tests/data/multidex.apk` **1059 passed**, the
+guard file green narrowed to **each of the 34 bundled samples one at a time**
+plus the committed one, sweep **25,309-class / 213,374 method-block 0-crash
+0-timeout, GATE: PASS**, determinism 3 processes x 3 `PYTHONHASHSEED`s -> one
+digest, lint trio clean, doc fences **81**,
+`scripts/check_dad_boundary.sh` clean.
+
+## Guards
+
+32 cases in [tests/test_self_propagation.py](tests/test_self_propagation.py),
+ALL corpus-independent — every craft rewrites code units INSIDE one code item of
+the committed `tests/data/method_handles.dex`, length-preserving to the byte, so
+no offset and no section size moves and nothing but the intended words can be
+what changed. Each craft's verify verdict is ASSERTED in BOTH modes rather than
+assumed: a rejected dex never reaches the IR builder, so a guard that skipped
+this could pass for the wrong reason. **No decompile of a crafted dex runs in
+the pytest process** — the defect is an uncatchable signal, so an in-process
+assertion cannot survive the thing it asserts about; one child gathers the
+observations and the tests assert on its JSON and its EXIT STATUS. (A reviewer
+verified the isolation holds: against the pre-fix build the file reports clean
+assertion failures naming `exited -11 (SIGNAL)` instead of aborting the session.)
+
+Nine cycle shapes, two non-crashing shapes and three controls, plus text/AST
+agreement parametrised over ALL eleven, the whole class surviving, and TWO
+anti-vacuity anchors — a sibling method in the SAME crafted file still renders
+`return this.pickValue(p5.toArray());`, which is only possible because a
+temporary was PROPAGATED into it. Without that, every test here passes against a
+build whose `RegisterPropagation` does nothing at all.
+
+**The loop BODY is pinned as a literal per shape**, and that is what three
+survivors forced — two found by the matrix, one by an adversarial reviewer:
+
+* **`loc >= i`** also suppresses legitimate loop-carried (backward)
+  propagation. Measured against the fix: **0 REAL sources move, 3 crafts do** —
+  `mutual2` renders under the other register and `mutual3` never folds — so only
+  a crafted body can state the difference.
+* **`break` instead of `continue`** abandons the instruction's REMAINING
+  variables. `v1 = v1 + v2` is circular in `v1` and perfectly ordinary in `v2`;
+  the fix renders `int v1 += 3;` and `break` renders `int v2 = 3; int v1 += v2;`
+  — a real loss on a shape the fix is supposed to leave alone.
+* **the guard 1059 passed to a `BinaryExpression` rhs** — the finding that mattered
+  most, and it is [[fixture-dead-branches-hide-guards]] again. The original six
+  shapes encoded three different opcodes and built **one IR class**, so a
+  plausible tidy-up (`loc == i && dynamic_cast<BinaryExpression*>(rhs.get())`)
+  passed all 17 cases AND the whole 1141-test suite while leaving SIX shapes
+  SIGSEGVing. Verified here on a pre-fix build: `neg-int` / `not-int` /
+  `int-to-long` (`UnaryExpression`), `array-length` (`ArrayLengthExpression`),
+  `aget` (`ArrayLoadExpression`) and `check-cast` (`CastExpression`) each fault
+  on their own, each in their OWN `get_used_vars`. Three of them are shapes now,
+  and the mutant fails 8.
+
+**9 mutants, each BUILT and RUN with a distinct `.so` md5, each rebuilt to the
+control (md5 ASSERTED) before the next, with the control asserted again at the
+end — 7 killed, 2 PROVEN equivalent rather than waved away:**
+
+| mutant | outcome |
+|---|---|
+| M0 pre-fix, the guard removed (md5 = the OFF build's, exactly) | **26 fail** |
+| M1 `loc <= i` — kills forward propagation | 8 fail |
+| M2 `loc >= i` — kills backward propagation | 2 fail (the pinned bodies, and nothing else) |
+| M3 the guard moved AFTER the splice | 24 fail |
+| M4 MASK: a depth cap in `get_used_vars` | 18 fail, 27 s → **907 s**, and it still crashes |
+| M5 `break` instead of `continue` | 2 fail (the sibling craft, and nothing else) |
+| **MA the guard narrowed to a `BinaryExpression` rhs** (reviewer-built) | **8 fail** |
+| M6 the guard placed inside the non-const branch | **EQUIVALENT** — 0 of 1268 axis records move |
+| M7 `orig_ins.get() == ins.get()` instead of `loc == i` | **EQUIVALENT** — 0 of 1268 axis records move |
+
+M6's equivalence has an argument as well as a measurement, and the argument is
+the interesting half: a const rhs with a non-empty `get_used_vars` exists only
+as a `Cast`/`CheckCastExpression` over a `Param` (`Variable::is_const` is the
+inherited `false`; only `Param` overrides it), and a `Param` always carries its
+own entry definition at a negative loc — a SECOND reaching def, so
+`locs.size() != 1` skips before the guard is ever consulted. Both reviewers
+reproduced the equivalence independently, and it was re-measured on the
+WIDENED craft set after the review rather than carried over.
+
+## What the reviewers established that I had not
+
+Beyond the two findings above, a correctness review re-derived every headline
+number from its own builds (33,853 classes / 0 probe hits; 25,309-class sweep;
+42-changed a/b on the pre-widening craft set; the corpus-less and narrowed
+totals) and verified every falsifiable claim in the C++ comment — that ART's
+runtime verifier hard-fails a read-before-write register
+(`method_verifier.cc:1010` / `:2963`), that `var_map[old_v] = new_node` is the
+branch it names, and that a thread deadline cannot survive a process-killing
+signal. It also established the DECISIVE narrowness case by construction: a
+register initialized before the loop gives `ud` two locs, so `locs.size() != 1`
+skips first and the guard **fires 0 times** — `int v1 = 5; do { v1 <<= -1; }` is
+rendered with the guard never consulted. And it noted the guard makes
+`remove_ins(i)` — deleting the instruction currently being iterated —
+unreachable, which is a narrowing rather than a new state.
+
+## What the harnesses got wrong, three times
+
+The first cycle probe measured DAGs (above). The a/b keyed each source on its
+BASENAME, so `invoke-custom.dex` at two paths collided and the run reported
+**90 sources where there are 103** — the same shape dexllm#61's diff harness hit,
+in the same repository [[ab-harness-must-itself-be-deterministic]]. And a
+background matrix run was read as finished when the notification was for the
+`nohup` wrapper shell rather than the matrix, so a tree still holding M4 looked
+like a restore failure; the fix is the control-md5 assertion at both ends, which
+is what said the tree was fine.
+
+**Both reviewers hit the same environment trap, independently, and it is worth
+recording:** in a fresh venv `pip install -e . --no-build-isolation` fails with
+`BackendUnavailable: Cannot import 'scikit_build_core'` and **silently leaves the
+stale `.so`** — under `set -e` inside a harness it was swallowed, and only the
+md5 assertion caught it. One of them also hit stale `__pycache__` carried by a
+tree copy, whose `co_filename` made its tracebacks print the ORIGINAL repo's
+paths, i.e. a reviewer's output looked like it came from the author's tree.
+
+## Adjacent, filed with the issue and NOT fixed here
+
+A **mid-body** leader inside a payload silently truncates the body:
+`SplitIntoBlocks` reads `ins_idx_by_byte[start]` at the block START only, so a
+block whose start is not an instruction offset gets an empty `ins` span even
+when instructions lie INSIDE it. Verifies valid in both modes, renders
+`if (1 != 0) { }` while smali lists the instructions after it, and is
+byte-identical on HEAD and with dexllm#75. A wrong ANSWER, not a crash, with its
+own blast radius and its own a/b — dexllm#75 addressed only the ENTRY.
 
 ### A static float/double initializer is zero-extended to the RIGHT (dexllm#70, 2026-08-22)
 
