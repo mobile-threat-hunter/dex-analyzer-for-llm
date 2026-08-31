@@ -1830,7 +1830,7 @@ md5 assertion caught it. One of them also hit stale `__pycache__` carried by a
 tree copy, whose `co_filename` made its tracebacks print the ORIGINAL repo's
 paths, i.e. a reviewer's output looked like it came from the author's tree.
 
-## Adjacent, filed with the issue and NOT fixed here
+## Adjacent, filed with the issue and FIXED in the section below
 
 A **mid-body** leader inside a payload silently truncates the body:
 `SplitIntoBlocks` reads `ins_idx_by_byte[start]` at the block START only, so a
@@ -1839,6 +1839,332 @@ when instructions lie INSIDE it. Verifies valid in both modes, renders
 `if (1 != 0) { }` while smali lists the instructions after it, and is
 byte-identical on HEAD and with dexllm#75. A wrong ANSWER, not a crash, with its
 own blast radius and its own a/b — dexllm#75 addressed only the ENTRY.
+**dexllm#77**, and it turned out to be one of TWO shapes rather than the whole
+condition: a payload is only half the way a leader lands off a boundary.
+
+### A block reads the instructions inside its own span (dexllm#77, 2026-08-31)
+
+The shape dexllm#76 filed as adjacent and left alone. Two measurements widened
+it before a line was written and two reviews widened it again after: **a payload
+is only half of the condition, a dead end is only half of the loss, and the
+fix's own first cut introduced a regression of the same class.**
+
+A basic-block **LEADER only has to be an in-range BYTE OFFSET.** `VerifyInsns`
+bounds a branch/switch target and a try-range start and requires nothing more,
+and ART's *structural* verifier does not either (opcode and dataflow legality
+live in the 6032-line runtime `method_verifier` this port refuses to vendor). So
+a leader can point **into a switch/fill-array payload**, which `DecodeAllInsns`
+skips, or **into the TAIL of a multi-unit instruction** — no payload anywhere.
+Both are `verify()`-valid in BOTH modes, so `lenient=True` was never the
+boundary.
+
+`SplitIntoBlocks` located a block's instruction span through
+`ins_idx_by_byte[start]` — **at the block START alone**. When `start` is not an
+instruction offset that lookup misses, so `blk.ins` came back EMPTY **even when
+instructions lie inside `[start, end)`**, and those instructions then belonged
+to NO BLOCK AT ALL; `ComputeChildEdges` in turn `continue`d on every empty
+block, leaving it with **no successor**:
+
+| | what is dropped |
+|---|---|
+| **(a)** the empty block is a **dead end** | everything reachable only through it |
+| **(b)** the empty block's **own span** is dropped | the real instructions inside it |
+
+`render_method_smali` still listed every instruction in both cases, so the two
+views of one method disagreed and **the Java one — the primary LLM-facing
+surface — was the wrong one**, silently.
+
+## Four rules, and each one is a finding rather than a design flourish
+
+**(H1) the span is read from its FIRST instruction at or after `start`, bounded
+by `end`** (`std::lower_bound`; `ins_storage` is filled by a linear decode so it
+is sorted by `byte_off` and the search is exact). **(H2) a block that is STILL
+empty falls through** to the next block, so what follows stays reachable.
+Neither alone closes it and the matrix shows they fail DIFFERENT cases: with H2
+only, `midbody_lost` renders its `if` and stops (the fall-through sends control
+*past* the instructions inside the empty block's own span); with H1 only,
+`midbody_empty` is still a dead end.
+
+**(H3) the fall-through must go FORWARD** (`end_byte > start_byte`). A leader
+equal to `insns_byte_size` makes a block whose span is empty in both directions,
+and `FindBlockIdForByteOff(blocks, blk.end_byte)` then finds **ITSELF** — an
+unguarded self-edge, which the writer renders as a **`while(true) { }` the
+bytecode does not contain**. Reachable under `lenient=True` (strict `VerifyInsns`
+bounds a target below `insns_size`, but `ComputeLeaders` inserts it with no bound
+of its own), i.e. in the packer-dump mode.
+
+**(H4) an empty block that is an exception-HANDLER entry does NOT fall
+through.** Control reaches a handler on a THROW; the fall-through models LINEAR
+flow, and a handler address landing in a payload would otherwise "continue" into
+the region it protects, whose catch edge leads straight back to it. That cycle
+is one the structured emit walk cannot terminate on — see the CONFIRMED HIGH
+below.
+
+**UNREACHED on a well-formed dex, structurally rather than by measurement:**
+every leader `ComputeLeaders` seeds is either `pass.ins[i].byte_off` (the
+fall-through / terminator-successor / switch-successor rules) or a target a
+compiler emitted at a boundary, so the START lookup hits and H1's branch is
+never entered. A correctness review re-derived that from the source — exactly
+nine `leader_byte_offs.insert` call sites, no missed leader source — which is
+what makes the corpus a/b byte-identical by construction rather than merely
+measured so.
+
+## The marker says only what happened, and getting there took two corrections
+
+Reinterpret-and-mark is dexllm#75's answer to the same three options, for the
+same reasons: rejecting at the gate refuses the whole dex over one method, and
+refusing (`// DECOMPILE ERROR`) throws away a body the smali view renders
+correctly, leaving the two views in disagreement with only the direction
+reversed. No VM enters at a non-instruction offset, so both emitters say so:
+
+```java
+public Object pickValue(java.util.Collection p5)  // control enters at a non-instruction offset
+```
+
+**The first cut said `// control falls through a payload`, which is a FALSE
+STATEMENT on a method with no payload in it.** The `mid_insn` craft — an
+`if-eqz` whose target is code unit 2 **of the if-eqz itself** — reaches the
+identical shape with no payload anywhere, and carried the payload wording. Found
+by building the craft, not by reading the code.
+
+**And the second cut claimed a reinterpretation that never happened.** An
+adversarial review CONFIRMED that an off-boundary leader in DEAD code set the
+flag while `Construct`'s bfs never builds that block, so the rendering is
+byte-identical to a boundary-aligned control and the marker is the only
+difference. The flag is therefore **qualified by bfs reachability**: the
+snapshot carries the raw per-block fact `RawBlock::starts_off_instruction`, and
+`Graph::control_enters_non_instruction` — set only for a block the bfs actually
+BUILDS — is what both emitters read.
+
+That qualification immediately corrected an INHERITED expectation: dexllm#75's
+`try` craft (a try-range start at byte 0, inside the leading payload) had been
+updated to expect BOTH markers, and it earns only #75's — nothing branches to
+byte 0 and no handler names it, so the block is never built. `branch`, whose
+`if-eqz` targets code unit 0, earns both. **That contrast is the sharper one**:
+it separates "a leader exists off a boundary" from "control actually enters
+there".
+
+## What the two reviewers found — 1 CONFIRMED HIGH the change itself created
+
+**An adversarial review built a STRICT-`verify()`-valid dex that HEAD renders
+and the first cut turned into `// DECOMPILE ERROR: structured emit recursion too
+deep`, with `ast = None`.** The fall-through CLOSES a cycle that was previously
+open — an empty block that is a catch handler falls into the region it protects
+— and `Writer::VisitNode`'s `visited_` guard exempts return nodes, so a cycle
+through one does not stop the recursion. The `depth_ > 2000` cap contains it (no
+crash on the shipped configuration); with the cap raised to 200000 the same
+input **SIGSEGVs**, while HEAD renders it at either cap. Reproduced here on the
+shipped binary, then bisected by building H1-only and H2-only: **H2 is the
+cause**, and H4 closes it.
+
+**A correctness review then built the mutant that survived everything.** H1 has
+two independent halves — WHICH instruction and the span bound — and only the
+second was pinned: taking the **LAST** instruction in the span instead of the
+first passed all 54 cases of both guard files while silently dropping every
+instruction between, which is the defect class this issue exists to close,
+reached through its own fix. `midbody_lost` cannot see it (the one instruction
+it would lose is a dead `const/4` that DCE removes either way). The
+`midbody_pair` craft makes it observable — the first recovered instruction
+defines what the second returns, so the correct reading renders `return 3` and
+the mutant returns an undefined register.
+
+Both reviews independently confirmed the change is otherwise sound, each with
+its own instruments: **2,000+ crafted inputs judged by SUBPROCESS EXIT STATUS —
+0 signals, 0 hangs**; span inversion structurally impossible (`lower_bound` is
+indexed only after `it != end()`, and `last_idx >= first_idx`); no instruction
+in two blocks or in none (leaders are a sorted set and block spans are
+half-open and disjoint); dexllm#75's entry promise unbreakable (the first
+instruction's offset is itself a leader, and the `< end` bound stops a lower
+block from claiming it); `ins_storage` sortedness proven from `DecodeAllInsns`;
+and an **independent leader oracle that never asks the code under test** —
+instruction offsets from `render_class_smali`, branch targets from its text,
+switch/try/handler addresses from raw bytes — reporting **0 off-boundary leaders
+across 227,166 methods / 550,827 leader sources**, with a non-vacuity check that
+it does find the crafted ones.
+
+Two further findings are accepted rather than fixed, both crafted-only and both
+now stated in the source: **`AttachExceptionHandlers` keys try coverage on
+`blk.start_byte`**, so a block that begins off a boundary can hold instructions
+outside the try range its start falls in — over-attachment only (the try start
+is always a leader, so coverage cannot be LOST), and strictly better than those
+instructions not existing at all; and the residual below.
+
+## The residual dissolved under inspection — 0 regressions
+
+Over **800 random gate-legal crafts** (the adversarial reviewer's generator,
+fixed seed), OFF vs the shipped ON, with each craft's error classified by
+MESSAGE rather than counted: **NEW = 1, GONE = 0, and the 1 is not a
+regression.**
+
+It is `malformed bytecode: null operand to MoveExpression` — the PRE-EXISTING,
+documented null-guard at [instruction.cpp:274](native/dad_cpp/instruction.cpp#L274)
+— and that message class **already occurs on the OFF half** (1 -> 2), so it is
+not a new failure MODE but one more instance of a guard that already fires. The
+craft has a `move-result` following a fill-array PAYLOAD with no invoke before
+it, which is why it is strict-INVALID and loads only under `lenient=True`. On
+OFF that method rendered **6 body lines for 20 smali instructions** — HEAD had
+SILENTLY DROPPED the whole tail from `0x3c` on, which is the exact defect this
+issue closes. The fix includes those instructions, and the guard then reports
+that they are malformed. **HEAD was quiet because it was hiding them.**
+
+It was 7 of 761 (two of them STRICT) before H4, and every one of those was the
+emit-recursion class the HIGH describes.
+
+**The population also measures the fix working in the intended direction:** of
+the 777 crafts that render on both halves, the body **GREW on 394** and shrank
+on 9 — and all 9 were diffed by hand and **lose no statement**. Each is an
+empty-arm collapse (`if (X) { } else { Y }` -> `if (!X) { Y }`, because the
+empty block the then-arm pointed at now falls through and merges) or a
+short-circuit merge of two real conditions; three render a `while (X) { }` where
+the reinterpreted control flow genuinely loops back. `body_lines` is a POOR
+proxy and saying so is part of the record: fewer lines here means a tighter
+rendering, not less content, which is why the 9 were resolved by reading the
+diffs rather than by the counter.
+
+Marker false positives fell 743 -> 583 over the same population, which is the
+reachability qualification removing them.
+
+## Measured
+
+**a/b OFF=`08104afea5da1252dfe91168d274e3fa` vs
+ON=`b3219432ae8318f2ba1e8fd8a66fd06c`, SAME script, both `.so` md5-verified
+BEFORE and AFTER each capture — and the OFF build BIT-REPRODUCES the recorded
+HEAD md5.** **98 sources** — the whole bundled corpus, every committed fixture,
+every `art/test/dexdump/*.dex`, every `tools/dexter/testdata/*.dex`, all four
+ART fuzzer corpora and **6 crafted** — x up to 14 axes (both verify verdicts +
+reasons, load, `dex_count`, class list, a smali digest, a whole-decompile
+digest, decompiled line count, `// DECOMPILE ERROR` count, BOTH marker counts,
+an AST digest over every method, `warm_analysis_caches`, and the subprocess EXIT
+STATUS) = **1182 axis records, 20 changed on 5 sources, ALL CRAFTED, 0 REAL**,
+over 3,046,176 decompiled lines. The 1182 is re-derivable rather than a harness
+number: 79 sources load and carry all 14 axes, 19 are rejected and carry 4 —
+14x79 + 4x19 [[published-counts-need-the-repos-own-predicate]]. Every source
+runs in a SUBPROCESS whose axes are FLUSHED one per line; all 98 exit 0 on both
+halves.
+
+**`smali`, `verify`, `load`, `dex_count` and the class lists are identical on
+every source** — the "two views disagree" point stated as a measurement: only
+the Java view moves. The five crafts that move do so on exactly `java` /
+`java_lines` / `ast` / `markers_77`, and the **`control` craft — the same
+instructions and the same branch, landing on a real boundary — is unchanged on
+both halves**, which separates this fix from "every block got a fall-through
+edge".
+
+**The census is the a/b's own axis, measured with the product's own predicate:
+`markers_77` over the 92 REAL sources is 0 on BOTH halves**, so a corpus-only
+a/b is byte-identical BY CONSTRUCTION and the crafts are the only thing that can
+show the mechanism firing [[ab-must-prove-the-mechanism-fires]].
+**Cross-checked on a DIFFERENT surface**, because a census taken with the flag
+under test is the same claim twice: a parser reading instruction offsets and
+relative branch operands out of `render_method_smali` — the smali view, which
+this change leaves byte-identical — finds **0 off-boundary targets out of
+244,977** across 71 loadable sources / 239,179 methods, and the correctness
+reviewer's independent oracle (which also resolves switch, try and handler
+addresses from raw bytes) reports 0 out of 550,827 leader sources over 227,166
+methods. **My first version of that parser reported 201,105 off-boundary
+targets**, a confident false answer from a regex that required the line to END
+at the operand and so matched almost no instruction, leaving the offset set
+nearly empty — killed by reading ONE real smali listing against it
+[[ab-harness-must-itself-be-deterministic]].
+
+parity **29/29** (the count is unchanged — the new cases went into the existing
+`construct_parity_test`, which grows from **51** checks to **74**), pytest
+**1199 passed / 24 skipped**, TRUE corpus-less (`test_apk` MOVED aside) **795
+passed / 428 skipped / 0 failed** — +40 over HEAD, i.e. every one of the new
+Python cases runs in the CI leg — narrowed to `tests/data/multidex.apk` **1099
+passed**, the three touched guard files green narrowed to **each of the 34
+bundled samples one at a time** plus the committed one, determinism 3 processes
+x 3 `PYTHONHASHSEED`s -> one digest, lint trio clean (CI scope), doc fences
+**81**, `scripts/check_dad_boundary.sh` clean.
+
+**Sweep: 21,374-class / 180,879 method-block, 0-crash 0-timeout 0-error, GATE:
+PASS** — published with its predicate rather than against the earlier entries':
+`/tmp/full_sweep.py` does not survive a reboot, so the harness was RECREATED
+from `.claude/skills/dexkit-sweep/SKILL.md` and enumerates classes through
+`list_classes()` instead of androguard. Its 0/0/0 is comparable to every earlier
+run; its absolute counts are not
+[[published-counts-need-the-repos-own-predicate]].
+
+## Guards, in TWO layers, and the matrix is what proves they are complementary
+
+**40 cases** in [tests/test_payload_leader.py](tests/test_payload_leader.py),
+ALL corpus-independent — every craft rewrites code units INSIDE one code item's
+`insns` of the committed `tests/data/method_handles.dex` (and
+`tests/data/invoke-custom.dex` for the one shape that needs try blocks),
+length-preserving to the byte, with each craft's verify verdict ASSERTED in
+**both** modes (`check_insns_` gates `VerifyInsns` and nothing else, and a leader
+off a boundary is exactly what `VerifyInsns` is asked about, so a craft that
+only verified leniently would prove a weaker claim than the issue makes). **No
+decompile of a crafted dex runs in the pytest process** — this file sorts early
+and a regression that faulted in the IR builder would abort the whole session
+here rather than report.
+
+Six shapes, each earning its place: `midbody_empty` (the dead end),
+`midbody_lost` (instructions inside the empty span), **`midbody_pair`** (the
+span read from its FIRST instruction), `mid_insn` (**no payload at all** — the
+shape that refutes a payload-worded predicate), `steal_cond` (below) and
+`control` (unmarked, body renders).
+
+**23 checks in
+[tests/parity/construct_parity_test.cpp](tests/parity/construct_parity_test.cpp)**
+pin what no Python assertion can see, which is where two of the fix's four rules
+live: the off-boundary span holds BOTH its instructions and is read from the
+first; a wholly-empty block gets EXACTLY ONE forward fall-through; a
+handler-entry empty block gets NONE; a block at `insns_byte_size` gets no
+self-edge; the graph flag is set for a REACHED off-boundary block and NOT for a
+dead-code one; and the control has neither. dexllm#73 and dexllm#75 both added
+cases here for the same reason.
+
+## 13 mutants, each BUILT and RUN with a distinct `.so` md5
+
+The harness restores from a pristine snapshot, `touch`es it (`cp` preserves
+mtime and ninja would SKIP), rebuilds to the control before every mutant and
+ASSERTS the control md5 there and again when it ends; an anchor that does not
+match exactly once is reported as **NOT A MUTANT**.
+
+| mutant | pytest | construct |
+|---|---:|---|
+| M0 pre-fix — all six files at HEAD | — | **cannot BUILD** |
+| M1 forward scan removed (H1) | 4 | FAIL |
+| M2 fall-through removed (H2) | 7 | FAIL |
+| **M3 scan takes the LAST instruction** | **1** | FAIL |
+| M4 scan ignores the span END | 1 | FAIL |
+| M5 per-block flag never set | 18 | FAIL |
+| M6 flag set even with no instructions | **0** | **PASS — EQUIVALENT** |
+| M7 marker not qualified by bfs reachability | 2 | FAIL |
+| **M8 handler-entry blocks fall through too** | **0** | **FAIL** |
+| **M9 the forward-only guard removed** | **0** | **FAIL** |
+| M10 Writer marker dropped | 17 | PASS |
+| M11 AST marker dropped | 6 | PASS |
+| M12 graph flag DEFAULT true | 15 | FAIL |
+
+**M8 and M9 are invisible to every Python case** — they are H4 and H3, whose
+whole effect is an edge that is or is not in the snapshot — so the C++ layer is
+not decoration, it is the only thing holding two of the four rules. **M0 cannot
+be built at all** with the new C++ cases in the tree (they reference a member
+the pre-fix ABI lacks), so that compile failure is its own kill, exactly as
+dexllm#75 records for its own M0. **M6 is a PROVEN EQUIVALENT rather than an
+escape**: with the marker qualified by reachability, a method with no
+instruction builds no graph and cannot be marked whatever the per-block flag
+says — the `ins_storage` condition survives only so that
+`starts_off_instruction` is not VACUOUSLY true on every block of such a method,
+and the source says so.
+
+## Two process lessons, both paid for here
+
+**A `cd` into a reviewer's private copy silently redirected five source edits.**
+After `cd /tmp/adv77` the relative-path edits landed in the REVIEWER's tree, the
+`(cd build/... && ninja)` that followed built a tree whose `CMAKE_HOME_DIRECTORY`
+still pointed at the original, and the guards then passed against a binary that
+did not contain the change. Caught only by `git status` showing the files
+unmodified while the build had succeeded. **Isolating the reviewers is not
+enough — every command has to state its own directory**
+[[reviewer-agents-swap-the-worktree]].
+
+**And a reviewer's `pip install -e .` in a `cp -a` copy repointed the ORIGINAL
+venv** at `/tmp/cor77/src`, because the copied `pip` shebang and `.pth` still
+addressed the original. It restored it and said so; the durable form is that a
+copy is not isolated until its `pyvenv.cfg` and shebangs are rewritten too.
 
 ### A static float/double initializer is zero-extended to the RIGHT (dexllm#70, 2026-08-22)
 

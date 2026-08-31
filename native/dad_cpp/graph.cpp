@@ -673,6 +673,13 @@ std::unique_ptr<Graph> Construct(const MethodSnapshot& snap,
             g->owned_nodes_.push_back(std::move(block_node));
             g->add_node(raw);
             nodes[bid] = raw;
+            // Only a block the bfs REACHES counts (dexllm#77): the marker says
+            // control ENTERED at a non-instruction offset, so a block in dead
+            // code — which is never built here — must not make the method
+            // claim it.
+            if (rb.starts_off_instruction) {
+                g->control_enters_non_instruction = true;
+            }
             if (catch_seed[bid]) raw->in_catch = true;
             // Exception handlers first (DAD make_node processes exceptions
             // before childs); mark catch_seed on the FIRST enqueue only.

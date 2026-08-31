@@ -134,6 +134,13 @@ public:
     // loc_to_ins / loc_to_node: None in DAD until number_ins() is called.
     // We use a presence-flag + map to mirror that.
     bool has_loc_indexes = false;
+
+    // A block this graph actually BUILT starts at an offset that is not a
+    // decoded instruction (dexllm#77). Construct's bfs builds only REACHABLE
+    // blocks, so unlike the snapshot's per-block `starts_off_instruction` this
+    // says the reinterpretation was REACHED — which is what both emitters
+    // report, and why a leader off a boundary in dead code marks nothing.
+    bool control_enters_non_instruction = false;
     std::unordered_map<int, IRFormPtr> loc_to_ins;
     // Owned synthetic nodes (allocated via MakeNode). Pointer-stable.
     std::vector<std::unique_ptr<NodeBase>> owned_nodes_;

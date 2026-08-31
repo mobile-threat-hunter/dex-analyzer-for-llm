@@ -142,7 +142,12 @@ struct ChildEdge {
 
 struct RawBlock {
     std::string name;               // "B@0x0042"
-    uint32_t start_byte = 0;        // first ins byte offset (inclusive)
+    // The block's LEADER. Usually, but NOT always, the offset of its first
+    // instruction: a leader only has to be an in-range byte offset (dexllm#77),
+    // so it can sit inside a payload or in the tail of a multi-unit
+    // instruction, and the block then holds the first instruction AT OR AFTER
+    // it that is still inside the span.
+    uint32_t start_byte = 0;        // block leader (inclusive)
     uint32_t end_byte = 0;          // one-past-last byte offset (exclusive)
     uint32_t last_length_bytes = 0; // length of last ins in bytes
     std::span<const RawIns> ins;    // view into MethodSnapshot.ins_storage
@@ -150,6 +155,13 @@ struct RawBlock {
     std::vector<CatchInfo> exception_handlers;
     // Payload lookup: fill-array-data / *-switch insn → its payload data.
     std::unordered_map<uint32_t, PayloadVariant> payloads;
+    // `start_byte` is not the offset of a decoded instruction (dexllm#77). The
+    // RAW structural fact; what the emitters report is
+    // `Graph::control_enters_non_instruction`, which additionally requires the
+    // block to have been BUILT — reachability is not known until Construct's
+    // bfs, so a leader off a boundary sitting in DEAD CODE sets this and marks
+    // nothing.
+    bool starts_off_instruction = false;
 };
 
 // ============================================================================
@@ -200,6 +212,7 @@ struct MethodSnapshot {
     // the entry is chosen by CONTENT (the block holding the first instruction)
     // rather than by position; the two coincide on every well-formed input.
     bool entry_not_at_offset_zero = false;
+
 
     // ★ POINTER-STABLE after Build() returns. RawBlock.ins spans into this.
     std::vector<RawIns> ins_storage;

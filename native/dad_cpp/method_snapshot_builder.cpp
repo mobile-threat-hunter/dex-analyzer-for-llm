@@ -537,6 +537,53 @@ void SplitIntoBlocks(MethodSnapshot& snap, const DecodePass& pass) {
         // Locate ins range in ins_storage.
         size_t first_idx = (start < ins_idx_by_byte.size())
                              ? ins_idx_by_byte[start] : SIZE_MAX;
+        if (first_idx == SIZE_MAX) {
+            // `start` is not the offset of a decoded instruction (dexllm#77).
+            // A leader only has to be an in-range BYTE OFFSET — `VerifyInsns`
+            // bounds a branch/switch target and a try-range start without
+            // requiring an instruction boundary, and ART's structural verifier
+            // does not either — so it may point INTO a payload (which
+            // DecodeAllInsns skips) or into the TAIL of a multi-unit
+            // instruction. Looking the span up at the START ALONE then yielded
+            // an empty block EVEN WHEN instructions lie inside [start, end),
+            // and those instructions belonged to no block at all: the body was
+            // SILENTLY DROPPED while `render_method_smali` still listed it, the
+            // two views of one method disagreeing with the Java one wrong.
+            // So take the first instruction AT OR AFTER `start` that is still
+            // inside the span. `ins_storage` is filled by a linear decode, so
+            // it is sorted by `byte_off` and a binary search is exact.
+            //
+            // UNREACHED on a well-formed dex: every leader is either
+            // `pass.ins[i].byte_off` (the fall-through / terminator-successor
+            // rules) or a target a compiler emitted at a boundary, so the
+            // lookup above hits and this branch is skipped. That is what makes
+            // the corpus a/b byte-identical rather than merely measured so.
+            auto it = std::lower_bound(
+                snap.ins_storage.begin(), snap.ins_storage.end(), start,
+                [](const RawIns& ri, uint32_t off) {
+                    return ri.byte_off < off;
+                });
+            if (it != snap.ins_storage.end() && it->byte_off < end) {
+                first_idx = static_cast<size_t>(it - snap.ins_storage.begin());
+            }
+            // Recorded whether or not the scan found one, and PER BLOCK:
+            // which blocks are ever REACHED is decided by Construct's bfs, and
+            // a block in dead code must not make the method claim a
+            // reinterpretation that never happened.
+            //
+            // The `ins_storage` condition is OBSERVABLY REDUNDANT and is kept
+            // for the field's own meaning: with no decodable instruction
+            // `ins_idx_by_byte` is empty so EVERY start misses, and a try-range
+            // leader alone makes `blocks` non-empty (dexllm#73) — but no graph
+            // is built for such a method, so the marker cannot fire either way
+            // and a mutant dropping this condition is a PROVEN EQUIVALENT.
+            // What it buys is that `starts_off_instruction` is not VACUOUSLY
+            // true on every block of a method with no instruction to be off the
+            // boundary of.
+            if (!snap.ins_storage.empty()) {
+                blk.starts_off_instruction = true;
+            }
+        }
         size_t last_idx = first_idx;
         // Find last instruction with byte_off < end
         if (first_idx != SIZE_MAX) {
@@ -556,9 +603,29 @@ void SplitIntoBlocks(MethodSnapshot& snap, const DecodePass& pass) {
 }
 
 void ComputeChildEdges(MethodSnapshot& snap, const DecodePass& pass,
-                       const dex::Code* code) {
+                       const dex::Code* code,
+                       const std::set<uint32_t>& handler_offs) {
     for (RawBlock& blk : snap.blocks) {
-        if (blk.ins.empty()) continue;
+        if (blk.ins.empty()) {
+            // The block's WHOLE span is non-instruction bytes — payload data,
+            // or the tail of an instruction that starts before it. (A span that
+            // merely BEGINS off a boundary keeps its instructions: see the
+            // forward scan in SplitIntoBlocks.) Skipping such a block outright
+            // left it with no successor, so everything after it became
+            // unreachable and the body was silently dropped. Control that
+            // reaches these bytes continues at the next instruction, so the
+            // block falls through. The method is already marked by
+            // `control_enters_non_instruction`, which SplitIntoBlocks set when
+            // it saw the same start miss.
+            uint32_t nxt = (blk.end_byte > blk.start_byte
+                            && !handler_offs.count(blk.start_byte))
+                             ? FindBlockIdForByteOff(snap.blocks, blk.end_byte)
+                             : UINT32_MAX;
+            if (nxt != UINT32_MAX) {
+                blk.childs.push_back({ChildEdge::Kind::Fallthrough, nxt});
+            }
+            continue;
+        }
         const RawIns& last = blk.ins.back();
 
         if (IsReturn(last.opcode) || IsThrow(last.opcode)) {
@@ -786,8 +853,13 @@ MethodSnapshotBuilder::Build(IDexCodeSource& source,
     // 5. Split into blocks (uses ins_storage; spans become pointer-stable).
     SplitIntoBlocks(*snap, pass);
 
+    std::set<uint32_t> handler_offs;
+    for (const auto& pt : tries)
+        for (const auto& ph : pt.handlers)
+            handler_offs.insert(ph.handler_byte_off);
+
     // 6. Compute CFG edges and attach payloads.
-    ComputeChildEdges(*snap, pass, code);
+    ComputeChildEdges(*snap, pass, code, handler_offs);
 
     // 7. Attach exception handlers per block + aggregate method-level.
     AttachExceptionHandlers(*snap, tries);

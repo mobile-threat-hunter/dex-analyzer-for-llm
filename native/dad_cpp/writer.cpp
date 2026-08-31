@@ -912,6 +912,16 @@ void Writer::WriteMethod() {
     if (snap_ && snap_->entry_not_at_offset_zero) {
         Write("  // entry is not at offset 0");
     }
+    // beyond-DAD (dexllm#77): a block is ENTERED at an offset that is not an
+    // instruction — a target pointing into payload data or into the tail of a
+    // multi-unit instruction — so the block is read from the first instruction
+    // at or after it, and falls through when it holds none. Same "say what you
+    // could not do straight" rule as the marker above, and the AST carries the
+    // identical string. The two are independent, so a method can carry both;
+    // each ends the DECLARATION line, never a body statement.
+    if (graph_ && graph_->control_enters_non_instruction) {
+        Write("  // control enters at a non-instruction offset");
+    }
     Write("\n");
     Write(Space());
     Write("{\n");

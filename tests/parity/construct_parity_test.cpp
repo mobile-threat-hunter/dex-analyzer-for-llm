@@ -396,6 +396,197 @@ int main() {
               static_cast<int>(snap->blocks[0].ins.size()) > 0, true);
     }
 
+
+    // ============================================================
+    // Test 8 (dexllm#77): a block whose LEADER is not an instruction boundary
+    // ============================================================
+    // A leader only has to be an in-range BYTE OFFSET, so it can point into a
+    // payload (which DecodeAllInsns skips) or into the tail of a multi-unit
+    // instruction. `SplitIntoBlocks` looked the span up at the START ALONE, so
+    // such a block came back EMPTY even when instructions lie inside it — they
+    // belonged to no block at all — and `ComputeChildEdges` skipped every empty
+    // block, leaving it with no successor. These properties live on the
+    // snapshot ABI and NO Python assertion can see them: the surviving mutant a
+    // correctness review built (take the LAST instruction in the span rather
+    // than the first) is exactly this layer.
+    {
+        // 8a — the span BEGINS off a boundary and carries TWO instructions.
+        //   0 if-eqz v0,+7 -> 14 (inside the payload at 8..16)
+        //   4 const/4 v0 | 6 nop | 8..16 payload | 16 const/4 v1 | 18 return
+        // The block starting at 14 must hold BOTH 16 and 18, and must be read
+        // from the FIRST of them.
+        mck::MockCodeSource src;
+        std::vector<dex::u2> insns = {0x0038, 0x0007, 0x1012, 0x0000,
+                                      0x0100, 0x0000, 0x0000, 0x0000,
+                                      0x3112, 0x0111};
+        auto code = mck::FakeCodeItem::Make(2, 0, 0, insns);
+        src.RegisterMethod(0, 24, 1, "Lcom/X;", "pair", "()V", std::move(code));
+        auto snap = MethodSnapshotBuilder::Build(src, 0, 24);
+        const RawBlock* b = nullptr;
+        for (const auto& blk : snap->blocks)
+            if (blk.start_byte == 14) b = &blk;
+        check("[leader pair] a block starts at 14", b != nullptr, true);
+        if (b) {
+            check("[leader pair] it is marked off-boundary",
+                  b->starts_off_instruction, true);
+            check("[leader pair] it holds TWO instructions",
+                  static_cast<int>(b->ins.size()), 2);
+            check("[leader pair] read from the FIRST one",
+                  static_cast<int>(b->ins.front().byte_off), 16);
+            check("[leader pair] and not past the span",
+                  static_cast<int>(b->ins.back().byte_off), 18);
+        }
+    }
+    {
+        // 8b — a span that is payload bytes END TO END stays empty and gets
+        // EXACTLY ONE fall-through edge to the block after it.
+        //   0 const/4 | 2 if-eqz v0,+3 -> 8 (inside the payload at 6..14)
+        //   6..14 payload | 14 const/4 | 16 return-void
+        mck::MockCodeSource src;
+        std::vector<dex::u2> insns = {0x1012, 0x0038, 0x0003,
+                                      0x0100, 0x0000, 0x0000, 0x0000,
+                                      0x1012, 0x000e};
+        auto code = mck::FakeCodeItem::Make(2, 0, 0, insns);
+        src.RegisterMethod(0, 25, 1, "Lcom/X;", "empty", "()V", std::move(code));
+        auto snap = MethodSnapshotBuilder::Build(src, 0, 25);
+        const RawBlock* b = nullptr;
+        uint32_t at14 = UINT32_MAX;
+        for (uint32_t i = 0; i < snap->blocks.size(); ++i) {
+            if (snap->blocks[i].start_byte == 8) b = &snap->blocks[i];
+            if (snap->blocks[i].start_byte == 14) at14 = i;
+        }
+        check("[leader empty] a block starts at 8", b != nullptr, true);
+        check("[leader empty] a block starts at 14", at14 != UINT32_MAX, true);
+        if (b) {
+            check("[leader empty] it holds NO instruction",
+                  static_cast<int>(b->ins.size()), 0);
+            check("[leader empty] it is marked off-boundary",
+                  b->starts_off_instruction, true);
+            check("[leader empty] exactly one successor",
+                  static_cast<int>(b->childs.size()), 1);
+            if (b->childs.size() == 1) {
+                check("[leader empty] and it falls FORWARD to 14",
+                      static_cast<int>(b->childs[0].target_block_id),
+                      static_cast<int>(at14));
+                check("[leader empty] as a fall-through",
+                      b->childs[0].kind == ChildEdge::Kind::Fallthrough, true);
+            }
+        }
+        // The marker is qualified by bfs REACHABILITY: this block IS reached
+        // (both arms of the if enter it), so the graph carries the flag.
+        Vmap vm; GenInvokeRetName ret;
+        auto g = Construct(*snap, vm, ret);
+        check("[leader empty] the built graph is marked",
+              g->control_enters_non_instruction, true);
+    }
+    {
+        // 8c — the CONTROL: the same body with the branch landing on a real
+        // boundary. Nothing off-boundary, nothing marked, no synthetic edge.
+        mck::MockCodeSource src;
+        std::vector<dex::u2> insns = {0x1012, 0x0038, 0x0006,
+                                      0x0000, 0x0000, 0x0000, 0x0000,
+                                      0x1012, 0x000e};
+        auto code = mck::FakeCodeItem::Make(2, 0, 0, insns);
+        src.RegisterMethod(0, 26, 1, "Lcom/X;", "ctl", "()V", std::move(code));
+        auto snap = MethodSnapshotBuilder::Build(src, 0, 26);
+        bool any_off = false;
+        for (const auto& blk : snap->blocks)
+            if (blk.starts_off_instruction) any_off = true;
+        check("[leader control] no block is off-boundary", any_off, false);
+        Vmap vm; GenInvokeRetName ret;
+        auto g = Construct(*snap, vm, ret);
+        check("[leader control] the graph is unmarked",
+              g->control_enters_non_instruction, false);
+    }
+    {
+        // 8d — an off-boundary leader in DEAD code marks NOTHING. The flag is
+        // the raw structural fact on the block; the GRAPH's flag additionally
+        // requires the bfs to have built it, so a block no control reaches
+        // cannot make the method claim a reinterpretation that never happened.
+        //   0 const/4 | 2 return-void | 4 if-eqz v0,+3 -> 10 (in the payload)
+        //   8..16 payload | 16 return-void          (everything after 2 is dead)
+        mck::MockCodeSource src;
+        std::vector<dex::u2> insns = {0x1012, 0x000e, 0x0038, 0x0003,
+                                      0x0100, 0x0000, 0x0000, 0x0000,
+                                      0x000e};
+        auto code = mck::FakeCodeItem::Make(2, 0, 0, insns);
+        src.RegisterMethod(0, 27, 1, "Lcom/X;", "dead", "()V", std::move(code));
+        auto snap = MethodSnapshotBuilder::Build(src, 0, 27);
+        bool any_off = false;
+        for (const auto& blk : snap->blocks)
+            if (blk.starts_off_instruction) any_off = true;
+        check("[leader dead] the block IS off-boundary in the snapshot",
+              any_off, true);
+        Vmap vm; GenInvokeRetName ret;
+        auto g = Construct(*snap, vm, ret);
+        check("[leader dead] but the built graph is NOT marked",
+              g->control_enters_non_instruction, false);
+    }
+
+    {
+        // 8e — an empty block that is an EXCEPTION-HANDLER entry gets NO
+        // successor. Control reaches a handler on a THROW, and the fall-through
+        // models LINEAR flow; a handler address landing in a payload would
+        // otherwise "continue" into the region it protects, whose catch edge
+        // leads straight back to it — a cycle the structured emit walk cannot
+        // terminate on, which turns a method HEAD renders into
+        // `// DECOMPILE ERROR: structured emit recursion too deep`
+        // (found by an adversarial review on a STRICT-verify-valid dex).
+        //   0 const/4 | 2 if-eqz v0,+6 -> 14 | 6..14 payload | 14 const/4
+        //   | 16 return-void ; try[0..2) with a catch-all handler at unit 5
+        //   (byte 10) — INSIDE the payload, and nothing branches there.
+        mck::MockCodeSource src;
+        std::vector<dex::u2> insns = {0x1012, 0x0038, 0x0006,
+                                      0x0100, 0x0000, 0x0000, 0x0000,
+                                      0x1012, 0x000e};
+        std::vector<dex::TryBlock> tries(1);
+        tries[0].start_addr = 0;
+        tries[0].insn_count = 1;
+        tries[0].handler_off = 1;
+        std::vector<uint8_t> handlers = {0x01, 0x00, 0x05};
+        auto code = mck::FakeCodeItem::Make(2, 0, 0, insns, tries, handlers);
+        src.RegisterMethod(0, 28, 1, "Lcom/X;", "hdl", "()V", std::move(code));
+        auto snap = MethodSnapshotBuilder::Build(src, 0, 28);
+        const RawBlock* b = nullptr;
+        for (const auto& blk : snap->blocks)
+            if (blk.start_byte == 10) b = &blk;
+        check("[leader handler] a block starts at the handler addr",
+              b != nullptr, true);
+        if (b) {
+            check("[leader handler] it holds NO instruction",
+                  static_cast<int>(b->ins.size()), 0);
+            check("[leader handler] and gets NO successor",
+                  static_cast<int>(b->childs.size()), 0);
+        }
+    }
+    {
+        // 8f — a leader EQUAL to insns_byte_size makes a block whose span is
+        // empty in both directions (`start == end`). `FindBlockIdForByteOff`
+        // looks its own `end_byte` up and finds ITSELF, so an unguarded
+        // fall-through is a SELF-EDGE and the writer fabricates a
+        // `while(true) { }` the bytecode does not contain. Reachable under
+        // `lenient=True` (strict VerifyInsns bounds a branch target below
+        // insns_size, but ComputeLeaders inserts the target with no bound of
+        // its own), which is the packer-dump mode.
+        //   0 const/4 | 2 if-eqz v0,+3 -> 8 == insns_byte_size | 6 return-void
+        mck::MockCodeSource src;
+        std::vector<dex::u2> insns = {0x1012, 0x0038, 0x0003, 0x000e};
+        auto code = mck::FakeCodeItem::Make(2, 0, 0, insns);
+        src.RegisterMethod(0, 29, 1, "Lcom/X;", "selfedge", "()V", std::move(code));
+        auto snap = MethodSnapshotBuilder::Build(src, 0, 29);
+        const RawBlock* b = nullptr;
+        for (const auto& blk : snap->blocks)
+            if (blk.start_byte == 8) b = &blk;
+        check("[leader selfedge] a block starts at insns_byte_size",
+              b != nullptr, true);
+        if (b) {
+            check("[leader selfedge] its span is empty",
+                  static_cast<int>(b->end_byte), 8);
+            check("[leader selfedge] and it gets NO successor",
+                  static_cast<int>(b->childs.size()), 0);
+        }
+    }
+
     std::printf("\n%s — %d failure(s)\n", g_fail ? "FAIL" : "PASS", g_fail);
     return g_fail ? 1 : 0;
 }

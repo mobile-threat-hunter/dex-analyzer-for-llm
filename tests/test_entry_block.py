@@ -69,6 +69,28 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 FIXTURE = REPO_ROOT / "tests" / "data" / "method_handles.dex"
 
 MARKER = "// entry is not at offset 0"
+# dexllm#77 marks a SECOND, independent reinterpretation: control ENTERING a
+# block whose leader is not at an instruction boundary.  Only `branch` earns it
+# here — its `if-eqz` targets code unit 0, so control genuinely reaches the block
+# that starts inside the leading payload.  `try` does NOT, and the contrast is
+# the sharp one: a try-range START at byte 0 makes that offset a LEADER, but
+# nothing branches there and no handler names it, so `Construct`'s bfs never
+# builds the block and nothing is reinterpreted.  dexllm#77's flag is qualified
+# by that bfs reachability precisely so the marker cannot claim a
+# reinterpretation that did not happen.  `payload_only` and `clinit` have no
+# off-boundary leader at all.  Pinned per shape rather than relaxed to a
+# membership test: WHICH marker each craft earns is the property, and `in` would
+# lose it.
+PAYLOAD_MARKER = "// control enters at a non-instruction offset"
+_EXPECTED_COMMENTS = {
+    "try": ["entry is not at offset 0"],
+    "branch": [
+        "entry is not at offset 0",
+        "control enters at a non-instruction offset",
+    ],
+    "payload_only": ["entry is not at offset 0"],
+    "clinit": ["entry is not at offset 0"],
+}
 
 # A size-0 packed-switch payload is exactly 4 code units: ident, size, first_key
 # (u4).  It is the shortest thing that makes DecodeAllInsns skip the start of the
@@ -312,13 +334,13 @@ def test_the_reinterpretation_is_marked(probed, shape):
     """
     got, _desc = probed[shape]
     assert MARKER in got["text"], f"{shape}: unmarked\n{got['text']}"
-    assert got["ast_comments"] == [
-        "entry is not at offset 0"
-    ], f"{shape}: AST comments {got['ast_comments']!r}"
+    assert (
+        got["ast_comments"] == _EXPECTED_COMMENTS[shape]
+    ), f"{shape}: AST comments {got['ast_comments']!r}"
     assert (
         got["ast_source"] == got["text"]
     ), f"{shape}: ast['source'] is not byte-identical to decompile_method"
-    assert got["ast_comments_no_source"] == ["entry is not at offset 0"], (
+    assert got["ast_comments_no_source"] == _EXPECTED_COMMENTS[shape], (
         f"{shape}: include_source=False loses the marker — "
         f"{got['ast_comments_no_source']!r}"
     )
@@ -345,9 +367,14 @@ def test_the_marker_ends_the_declaration_line(probed, shape):
     """
     got, _desc = probed[shape]
     lines, i = _marked_line(got["text"], shape)
+    # With dexllm#77 a craft can carry TWO markers; the LAST one must end the
+    # line, and the first must still be on it.  Asserting only "a marker is
+    # somewhere in the text" is what this test exists to be stronger than.
+    last = MARKER if len(_EXPECTED_COMMENTS[shape]) == 1 else PAYLOAD_MARKER
     assert (
-        lines[i].rstrip().endswith(MARKER)
+        lines[i].rstrip().endswith(last)
     ), f"{shape}: the marker does not end its line — {lines[i]!r}"
+    assert MARKER in lines[i], f"{shape}: {MARKER!r} left its line — {lines[i]!r}"
     assert (
         lines[i + 1].strip() == "{"
     ), f"{shape}: the line after the marker is {lines[i + 1]!r}, not the body's `{{`"

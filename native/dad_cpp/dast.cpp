@@ -431,6 +431,14 @@ AstValue JSONWriter::get_ast() {
     if (snap_ && snap_->entry_not_at_offset_zero) {
         commentv.push_back(AstValue::Str("entry is not at offset 0"));
     }
+    // beyond-DAD (dexllm#77) — the AST counterpart of the Writer's
+    // `// control enters at a non-instruction offset`, for the same reason: an
+    // `include_source=False` consumer would otherwise have no way to see the
+    // reinterpretation. Same string in both.
+    if (graph_ && graph_->control_enters_non_instruction) {
+        commentv.push_back(
+            AstValue::Str("control enters at a non-instruction offset"));
+    }
     out.set("comments", AstValue::Arr(std::move(commentv)));
     out.set("body", std::move(body));
     return out;
