@@ -66,6 +66,7 @@ _SUFFIX_TO_RECORDS: dict[str, frozenset[str]] = {
     "Usage": frozenset({"ApiUsage"}),
     "Callers": frozenset({"ApiCallers", "PermissionCallers"}),
     "Use": frozenset({"ContentProviderUse"}),
+    "Component": frozenset({"TlsTrustComponent"}),
     "Indicator": frozenset({"Indicator"}),
     "References": frozenset({"TypeReferences"}),
     # head nouns, not suffixes — the word IS the thing

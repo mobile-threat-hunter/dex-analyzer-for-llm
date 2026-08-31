@@ -875,3 +875,34 @@ class ContentProviderUse:
     uri: str
     family: str
     methods: tuple[str, ...]
+
+
+# ── permissive TLS ───────────────────────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class TlsTrustComponent:
+    """A ``javax.net.ssl`` trust component the app declares, and what it decides.
+
+    ``verdict`` is ``"permissive"`` only when the body was PROVEN to accept
+    everything; ``"not_proven"`` is the absence of that proof, never a clean bill
+    of health — see :mod:`dexllm.tls_trust`.
+
+    Example (shape; the interface is a framework name, the class illustrative)::
+
+        TlsTrustComponent(class_descriptor='Lcom/example/app/TrustAll;',
+                          interface_descriptor='Ljavax/net/ssl/X509TrustManager;',
+                          kind='trust_manager',
+                          method_descriptor='Lcom/example/app/TrustAll;->checkServerTrusted(...)V',
+                          verdict='permissive',
+                          reason='checkServerTrusted body is empty, so it cannot throw',
+                          constructed_in=('Lcom/example/app/Net;->client()V',))
+    """
+
+    class_descriptor: str
+    interface_descriptor: str
+    kind: str
+    method_descriptor: str
+    verdict: str
+    reason: str
+    constructed_in: tuple[str, ...]

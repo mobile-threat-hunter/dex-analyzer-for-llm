@@ -73,6 +73,7 @@ from .safe import (
     safe_decompile_class,
     safe_decompile_method,
 )
+from .tls_trust import classify_tls_method, detect_permissive_tls
 
 __all__ = [
     "ApiUsage",
@@ -97,7 +98,9 @@ __all__ = [
     "dangerous_permission_apis",
     "dangerous_permission_api_callers",
     "permission_api_callers",
+    "classify_tls_method",
     "detect_content_providers",
+    "detect_permissive_tls",
     "extract_iocs",
     "find_call_sites_to_ref",
     "format_class",

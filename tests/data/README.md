@@ -16,6 +16,7 @@ narrowed to the sample here.
 | `invoke-polymorphic.dex` | 1,160 B | 1 `invoke-polymorphic/range` (7 registers) + 2 `invoke-polymorphic` |
 | `const-method-handle.dex` | 2,524 B | the only `const-method-type` anywhere in reach |
 | `multidex-container.dex` | 1,468 B | the only **v41 CONTAINER** in reach — 2 slices sharing one data section |
+| `permissive-tls.dex` | 4,872 B | 13 classes: 4 provably permissive TLS components, 2 that check, 3 duck-typing traps, a sub-interface and its invisible implementor, 2 installers |
 
 `multidex.apk` is deliberately the WORST case, not a convenient one: it is the
 sample that produced 17 of the failures in dexllm#46 (no `switch` header, no
@@ -100,6 +101,43 @@ inlines the result straight into a `StringBuilder.append(Object)` argument, so t
 type never reaches a declaration and both return types render identically. The gap
 stands.
 
+`permissive-tls.dex` is here because the gitignored corpus carries **0** classes
+implementing `javax.net.ssl.HostnameVerifier` — dexllm#53's whole subject — so the
+half of the detector that reads a `verify` body could not be exercised on any real
+input, and neither could the thing that separates a detector from a lister: the
+NEGATIVE controls. **Every class in it earns its place, and eight of the thirteen were added because
+a mutant walked through the first cut of the guards.** `PermissiveVerifier` and
+`PermissiveTrust` are the positives; `CheckingVerifier` and `CheckingTrust` the
+negatives; `PermissiveBoth` implements BOTH interfaces and is the only class
+yielding two rows, without which the documented row sort's second component is
+unobservable; `PermissiveVerifier` also carries a non-constructor method and TWO
+constructors whose callers arrive UNSORTED, without which the `<init>` filter, the
+caller dedupe and the caller sort in `_constructed_in` are each a no-op;
+`DuckTrust`, `ExtTrust` and `InheritTrust` are the three Conscrypt duck-typing
+traps an adversarial review built — an empty 2-argument `checkServerTrusted`
+beside a 3-argument sibling that pins or throws, the last of them reachable ONLY
+through the superclass test; and `SubVerifier` / `SubAllowAll` are a sub-interface
+and its implementor, which pins both that an interface is not reported as a
+component and that its implementor is the documented bound (dexllm#78).
+
+Two installers construct the permissive ones through the PLATFORM APIs, so the
+same file also carries `CUSTOM_TLS_TRUST == 4` and a `constructed_in`
+cross-reference — which is what lets one test state the issue:
+`summarize_capabilities` reports the app supplies its own trust decision, and only
+the detector says which decisions accept everything.
+
+It is the first fixture here that was AUTHORED rather than copied, so its source
+is committed beside it (`permissive-tls.java`) and it is re-derivable:
+
+```
+javac -source 8 -target 8 -d cls permissive-tls.java     # javac 17.0.17
+d8 --min-api 26 --release --output out cls/*.class       # D8 8.6.2-dev, build-tools 35.0.0
+```
+
+d8 is not byte-reproducible across versions, so the committed bytes are the
+artefact and the source is the statement of intent — which is why every guard
+pins the exact rendering it depends on rather than trusting a rebuild.
+
 ## Provenance
 
 `multidex.apk` is byte-identical (md5 `627622df6a7557fd0b85fdde6fccb7ad`) to
@@ -130,3 +168,8 @@ byte-identical (md5 `8d5213617dd2b2a0f746be290312bc99`) to AOSP's
 **Apache-2.0**. Note that dexter ships a file
 of the same name which is NOT usable here — it fails this repo's verifier with
 `code: outs_size > registers_size`. See [LICENSE](../../LICENSE).
+
+`permissive-tls.dex` (md5 `6bfd1b0eab88387fe832f244e373efe2`) is the one file here
+NOT copied from anywhere: it was written for dexllm#53 and compiled from the
+committed `permissive-tls.java` with the toolchain named above. It is part of this
+project and carries this project's licence.

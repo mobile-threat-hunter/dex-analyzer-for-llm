@@ -16,7 +16,7 @@ Adds capabilities that upstream DexKit doesn't expose, oriented for **security a
 > with its exact return type and a real example output. This page is the
 > task-oriented walkthrough.
 
-**`L` = capability level** — a numbered grouping of analysis capabilities, not a strict abstraction hierarchy: `L7` (the find/match engine) is the bottom-layer search primitive that `L1`–`L4` build on, and `L5`/`L6` are the smali/Java decompile paths. All of L1–L7 below are operational. The decompiler is a strict function-by-function port of androguard's DAD (`decompiler/*.py`: graph → dataflow → control_flow → writer/dast); see [CLAUDE.md](../CLAUDE.md#dad-aligned-development-policy) for the port roadmap.
+**`L` = capability level** — a numbered grouping of analysis capabilities, not a strict abstraction hierarchy: `L7` (the find/match engine) is the bottom-layer search primitive that `L1`–`L4` build on, and `L5`/`L6` are the smali/Java decompile paths. All of L1–L7 below are operational. The decompiler is a strict function-by-function port of androguard's DAD (`decompiler/*.py`: graph → dataflow → control_flow → writer/dast); see [CLAUDE.md](../CLAUDE.md#development-policy--dad-as-reference-correctness-first-relaxed-2026-07-04) for the port roadmap.
 
 ## Install
 
@@ -751,6 +751,37 @@ for hit in dexllm.detect_content_providers(dk):
 # content://sms sms <- ['Lb/g/a/m/f;->run()V']
 ```
 
+### Permissive TLS — the trust decision, not the call that installs it
+
+An app that disables certificate or hostname validation does it by handing the
+platform an OBJECT, and the interesting fact is what that object DECIDES.
+`summarize_capabilities`' `CUSTOM_TLS_TRUST` reports that the app supplies its own
+trust decision; it cannot say the decision accepts everything, and through OkHttp
+it cannot see the hostname half at all — the install call is
+`okhttp3.OkHttpClient$Builder`, bundled app code with no framework spelling.
+
+`detect_permissive_tls` names the **interface the object implements**, which is
+always `javax.net.ssl`'s own, so it is library-agnostic and ships no third-party
+surface:
+
+```python
+components = dexllm.detect_permissive_tls(dk)
+proven = [c for c in components if c["verdict"] == "permissive"]
+print(len(components), "declared,", len(proven), "proven permissive")
+# a row: {'class_descriptor': 'Lcom/example/app/TrustAll;', 'kind': 'trust_manager',
+#         'verdict': 'permissive', 'reason': 'checkServerTrusted body is empty, ...',
+#         'constructed_in': ['Lcom/example/app/Net;->client()V'], ...}
+```
+
+`verdict == "not_proven"` means the body was not PROVEN to accept everything —
+never that it validates, and never that the app is clean: a trust-all written
+`extends X509ExtendedTrustManager` declares no interface and is not reported at
+all (dexllm#78). A verifier that logs and then returns true is permissive
+and lands there, because proving it needs real dataflow; every implementor is
+reported whatever its verdict, so "this app carries a custom TLS trust component"
+stays legible either way. See [api.md](api.md#8-ioc-extraction-python) for the
+two proven shapes and the bounds.
+
 ### Overriding the bundled data
 
 Two of the four data files carry **hand judgement** rather than mechanical AOSP
@@ -1036,6 +1067,7 @@ for g in session.permission_callers(app_only=True):       # -> tuple[PermissionC
 ioc = session.extract_iocs()                              # -> IocReport; ioc.domains: tuple[Indicator(value, methods, declared_in)]
 cap = session.summarize_capabilities()                   # -> CapabilityReport(...); app_only=True by default
 prov = session.detect_content_providers()                # -> tuple[ContentProviderUse(uri, family, methods)]
+tls = session.detect_permissive_tls()                     # -> tuple[TlsTrustComponent(..., verdict, reason)]
 
 session.raw       # the underlying dexllm.DexKit (escape hatch for L7 search etc.)
 ```

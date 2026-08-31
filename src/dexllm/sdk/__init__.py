@@ -50,6 +50,7 @@ from .model import (
     ResolvedCallSite,
     SourceLocation,
     StatementLocation,
+    TlsTrustComponent,
     TypeReferences,
 )
 from .ports import (
@@ -67,6 +68,7 @@ from .ports import (
     MatchType,
     PermissionAnalysisPort,
     SearchPort,
+    TlsTrustPort,
 )
 
 __all__ = [
@@ -89,6 +91,7 @@ __all__ = [
     "IndicatorExtractionPort",
     "CapabilityPort",
     "ContentProviderPort",
+    "TlsTrustPort",
     "CacheControlPort",
     # search
     "MatchType",
@@ -121,4 +124,5 @@ __all__ = [
     "ApiUsage",
     "CapabilityReport",
     "ContentProviderUse",
+    "TlsTrustComponent",
 ]

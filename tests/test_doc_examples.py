@@ -300,7 +300,7 @@ def test_the_runner_is_not_vacuous():
     pinned.
     """
     cases = _cases()
-    assert len(cases) >= 77, f"only {len(cases)} runnable fences collected"
+    assert len(cases) >= 78, f"only {len(cases)} runnable fences collected"
 
     per_doc = {}
     for case in cases:
@@ -469,6 +469,45 @@ def test_no_in_page_doc_link_is_dangling():
         bad += [f"{f.name}#{a}" for a in sorted(links - anchors)]
     assert total >= 10, f"only {total} in-page links found — the scan broke"
     assert not bad, f"dangling in-page links: {bad}"
+
+
+def test_no_cross_file_doc_anchor_is_dangling():
+    """The other half of the same defect, and the one the in-page guard cannot see.
+
+    Its regex matches a same-page target only — so a link into another
+    document's heading is unchecked, and the dexllm#53 audit found three dangling
+    ones that way: two pre-existing (`api.md` -> a `usage.md` heading whose slug
+    drops a backticked `<init>`, and `usage.md` -> a CLAUDE.md heading that had
+    been retitled) plus one this change had just introduced. Same slug rule and
+    same anchor set as the sibling above, so the two cannot disagree about what a
+    heading is called.
+    """
+    import re
+
+    def slug(h):
+        h = re.sub(r"<[^>]+>", "", h)
+        h = re.sub(r"[^\w\s-]", "", h.lower())
+        return h.strip().replace(" ", "-")
+
+    docs = sorted(REPO_ROOT.glob("*.md")) + sorted((REPO_ROOT / "docs").glob("*.md"))
+    anchors = {}
+    for f in docs:
+        t = f.read_text(encoding="utf-8")
+        a = {slug(h) for h in re.findall(r"^#{1,6} (.+)$", t, re.M)}
+        a |= set(re.findall(r'<a name="([\w-]+)"', t))
+        anchors[f.resolve()] = a
+
+    total, bad = 0, []
+    for f in docs:
+        for m in re.finditer(r"\]\((?!#)([\w./-]+\.md)#([\w-]+)\)", f.read_text()):
+            total += 1
+            tgt = (f.parent / m.group(1)).resolve()
+            if tgt not in anchors:
+                bad.append(f"{f.name}: {m.group(0)} — target not scanned")
+            elif m.group(2) not in anchors[tgt]:
+                bad.append(f"{f.name}: {m.group(0)}")
+    assert total >= 9, f"only {total} cross-file anchored links found — the scan broke"
+    assert not bad, f"dangling cross-file links: {bad}"
 
 
 def test_the_documented_arg_kinds_are_the_ones_the_binding_emits():

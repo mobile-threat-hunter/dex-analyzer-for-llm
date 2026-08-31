@@ -37,6 +37,7 @@ from .model import (
     MethodRef,
     PermissionCallers,
     ResolvedCallSite,
+    TlsTrustComponent,
     TypeReferences,
 )
 
@@ -565,6 +566,17 @@ class ContentProviderPort(Protocol):
 
 
 @runtime_checkable
+class TlsTrustPort(Protocol):
+    """Permissive-TLS component detection — the trust decision, not the install call."""
+
+    def detect_permissive_tls(
+        self, *, with_xref: bool = True
+    ) -> tuple[TlsTrustComponent, ...]:
+        """Return the app's TLS trust components, each with a proven verdict."""
+        ...
+
+
+@runtime_checkable
 class CacheControlPort(Protocol):
     """Session cache / lifecycle control — the operational (non-analysis) knobs.
 
@@ -606,6 +618,7 @@ class DexAnalysisUseCase(
     IndicatorExtractionPort,
     CapabilityPort,
     ContentProviderPort,
+    TlsTrustPort,
     CacheControlPort,
     Protocol,
 ):

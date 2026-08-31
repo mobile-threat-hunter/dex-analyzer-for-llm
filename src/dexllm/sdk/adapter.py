@@ -46,6 +46,7 @@ from .model import (
     ResolvedCallSite,
     SourceLocation,
     StatementLocation,
+    TlsTrustComponent,
     TypeReferences,
 )
 from .ports import MatchType
@@ -799,6 +800,25 @@ class DexKitAdapter:
                 uri=p["uri"], family=p["family"], methods=tuple(p["methods"])
             )
             for p in dexllm.detect_content_providers(self._dk, with_xref=with_xref)
+        )
+
+    # -- TlsTrustPort --
+
+    def detect_permissive_tls(
+        self, *, with_xref: bool = True
+    ) -> tuple[TlsTrustComponent, ...]:
+        """Return the app's TLS trust components, each with a proven verdict."""
+        return tuple(
+            TlsTrustComponent(
+                class_descriptor=t["class_descriptor"],
+                interface_descriptor=t["interface_descriptor"],
+                kind=t["kind"],
+                method_descriptor=t["method_descriptor"],
+                verdict=t["verdict"],
+                reason=t["reason"],
+                constructed_in=tuple(t["constructed_in"]),
+            )
+            for t in dexllm.detect_permissive_tls(self._dk, with_xref=with_xref)
         )
 
     # -- CacheControlPort --

@@ -914,7 +914,7 @@ subclasses (`AccessibilityService`, `InputMethodService`,
 **declares such a service** — the members are invoked on the app's own subclass or
 are callbacks the system calls, and only `super()` is spelled under the framework
 class. They aggregate exactly like any other method key. See
-[usage](usage.md#reading-an-init-key-on-a-framework-service) for the three limits
+[usage](usage.md#reading-an--key-on-a-framework-service) for the three limits
 (no manifest check, no ctor-less subclass, one key per ctor overload), for why the
 implication is exact only for the two classes AOSP declares `abstract`, and for
 why an **interface** needs no key form of its own — for a capability-shaped one
@@ -1030,6 +1030,68 @@ consumer's own triage vocabulary. The `provider` catch-all is GONE (dexllm#31): 
 made a tenth of the dataset group under a label that told a consumer nothing
 while the entry read as though classification had succeeded. `data_dir=` (else `$DEXLLM_DATA_DIR`) points
 at a replacement `content_uris.json` — see [§14](#14-overriding-the-bundled-data).
+
+### `dexllm.detect_permissive_tls(dk, *, with_xref=True) -> list`
+The TLS trust components the app DECLARES, and which of them provably accept
+everything. Returns `[{'class_descriptor', 'interface_descriptor', 'kind',
+'method_descriptor', 'verdict', 'reason', 'constructed_in'}]` sorted by
+`(class_descriptor, method_descriptor)`, one row per implementing CLASS — a
+descriptor declared in several loaded dexes (an ordinary multidex app, and the norm
+for a packer session) yields one row, not one per declaration.
+
+Two components, both **platform** interfaces, so nothing third-party is shipped:
+
+| `kind` | interface | `permissive` iff |
+|---|---|---|
+| `hostname_verifier` | `javax.net.ssl.HostnameVerifier` | `verify` is exactly a constant 1 loaded into a register and returned |
+| `trust_manager` | `javax.net.ssl.X509TrustManager` | `checkServerTrusted` is exactly `return-void` **and is the method the platform would call** — it signals rejection by THROWING, so a body that cannot throw accepts every chain |
+
+`verdict` is `'permissive'` or `'not_proven'`, and **`not_proven` is the absence
+of a proof, never "proven safe"**: a verifier that logs and then returns true is
+permissive and reported `not_proven`, because proving it needs real dataflow. It
+is a string rather than a bool for that reason (`permissive=False` reads as a
+clean bill of health, and this analysis cannot issue one). Every implementor is
+reported whatever its verdict, so "this app carries a custom TLS trust component"
+stays legible.
+
+The second clause is what keeps the tool from ACCUSING a correct app. Conscrypt's
+`Platform.checkServerTrusted` casts to `X509ExtendedTrustManager` when it can and
+otherwise DUCK-TYPES a 3-argument overload (`…, Socket)` / `…, String)`), reaching
+the 2-argument method only when neither exists — so an empty 2-argument body
+beside a 3-argument sibling that pins a hostname is a CORRECT trust manager. A
+row is therefore declined when the class declares another `checkServerTrusted`,
+or when its superclass is not `java.lang.Object` (the overload may be INHERITED,
+and `Class#getMethod` searches the whole hierarchy). `HostnameVerifier` needs no
+such clause: it declares one method and nothing duck-types it.
+
+Complements `summarize_capabilities`' `CUSTOM_TLS_TRUST` (dexllm#52) rather than
+replacing it, and it is a DIFFERENT question rather than a strictly stronger one:
+that tag reports the app SUPPLIES its own trust decision (via curated platform
+keys like `SSLContext#init`) and cannot say the decision accepts everything, which
+is what this says — but a manager written `extends X509ExtendedTrustManager`
+declares no interface, so on that shape #52 answers and this does not. Read them
+together. What this reaches that no call-site key can is the OkHttp / Volley /
+Retrofit install, which is bundled library code with no framework spelling
+(dexllm#53).
+
+Bounds, stated rather than discovered: `checkClientTrusted` is deliberately NOT
+checked (an empty one is what a CLIENT is supposed to have, so checking it would
+report every well-behaved app); `find_classes_implementing` matches a class that
+DECLARES the interface, so a trust-all that declares neither — `extends
+X509ExtendedTrustManager`, an implementor of a SUB-interface such as the legacy
+Apache `X509HostnameVerifier`, or a subclass of the app's own permissive base — is
+invisible (all three conservative, all three dexllm#78); a class that is itself an
+INTERFACE is skipped, since it would stand in for the implementor that was never
+examined; and a class is a dex fact — `constructed_in` (the methods calling one of
+its constructors, `[]` when `with_xref=False`) is what separates a live component
+from dead code, and an empty one is proof of neither (a component reached only
+through reflection has no constructor call site).
+
+### `dexllm.classify_tls_method(kind, smali) -> (verdict, reason)`
+The predicate above, pure — takes the `render_method_smali` TEXT, not a `DexKit` —
+so the decision that an app disables TLS validation is testable on crafted bodies.
+Raises `ValueError` for a `kind` outside the table above; a silent `not_proven`
+there would read as "this app does not do this".
 
 ---
 

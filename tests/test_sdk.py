@@ -42,6 +42,7 @@ from dexllm.sdk import (
     SearchPort,
     SourceLocation,
     StatementLocation,
+    TlsTrustPort,
     identify,
     open_apk,
 )
@@ -58,6 +59,7 @@ _PORTS = [
     IndicatorExtractionPort,
     CapabilityPort,
     ContentProviderPort,
+    TlsTrustPort,
     CacheControlPort,
 ]
 
@@ -118,6 +120,7 @@ _SDK_ONLY_MODELS = {
     "IocReport",
     "Indicator",
     "ContentProviderUse",
+    "TlsTrustComponent",
     "CapabilityReport",
     "ApiUsage",
     "PermissionCallers",
@@ -137,6 +140,7 @@ _PORT_FROM_MODULE_FUNCTION = {
     "verify",
     "extract_iocs",
     "detect_content_providers",
+    "detect_permissive_tls",
     "summarize_capabilities",
 }
 

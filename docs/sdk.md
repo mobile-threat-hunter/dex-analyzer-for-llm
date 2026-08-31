@@ -266,9 +266,10 @@ so a consumer depends on just what it needs:
 | **`IndicatorExtractionPort`** | `extract_iocs` |
 | **`CapabilityPort`** | `summarize_capabilities` (`app_only=True` by default — the app's own callers, not the bundled libraries it ships; `dropped_touches` / `dropped_apis` say what that removed, so an empty report is not mistaken for an inert APK; dexllm#49) |
 | **`ContentProviderPort`** | `detect_content_providers` |
+| **`TlsTrustPort`** | `detect_permissive_tls` |
 | **`CacheControlPort`** | `decompiler_cache_capacity` / `set_decompiler_cache_capacity` / `decompiler_cache_size` / `clear_decompiler_cache`, `warm_analysis_caches` (operational cache/lifecycle knobs, not analysis — a long-lived embedder bounds/frees/warms caches without dropping to `.raw`) |
 
-**`DexAnalysisUseCase`** composes the eleven session-bound ports (every port except
+**`DexAnalysisUseCase`** composes the twelve session-bound ports (every port except
 `ContainerProbePort`, which is load-free) and adds `sources` / `apk_path` (=
 `sources[0]`) / `dex_count()`. It is
 the single interface a consumer annotates against — the analogue of a top-level

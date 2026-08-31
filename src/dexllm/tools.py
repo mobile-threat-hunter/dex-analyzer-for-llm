@@ -703,6 +703,23 @@ def _t_detect_content_providers(
     return {"providers": provs, "count": len(provs)}
 
 
+def _t_detect_permissive_tls(dk: DexKit, with_xref: bool = True) -> dict:
+    """TLS trust components, and which of them were PROVEN to accept everything.
+
+    ``permissive_count`` is the headline; ``count`` is every implementor, so a
+    zero headline beside a nonzero count says "custom TLS trust exists, none of
+    it proven permissive" rather than "nothing here".
+    """
+    from .tls_trust import PERMISSIVE, detect_permissive_tls
+
+    rows = detect_permissive_tls(dk, with_xref=bool(with_xref))
+    return {
+        "components": rows,
+        "count": len(rows),
+        "permissive_count": sum(1 for r in rows if r["verdict"] == PERMISSIVE),
+    }
+
+
 # ─── container / verification / AST / batch ───────────────────────────────
 
 
@@ -828,6 +845,7 @@ TOOL_IMPLS: dict[str, Callable] = {
     "decompile_class": _t_decompile_class,
     "render_class_smali": _t_render_class_smali,
     "detect_content_providers": _t_detect_content_providers,
+    "detect_permissive_tls": _t_detect_permissive_tls,
     "batch_find_methods_using_strings": _t_batch_find_methods_using_strings,
     "find_classes_by_name": _t_find_classes_by_name,
     "find_classes_by_super": _t_find_classes_by_super,
@@ -1461,6 +1479,30 @@ TOOL_DEFINITIONS: list[dict] = [
                 "max_chars": {"type": "integer", "default": DEFAULT_CLASS_CHARS},
             },
             "required": ["class_descriptor"],
+        },
+    },
+    {
+        "name": "detect_permissive_tls",
+        "description": (
+            "TLS trust components the app DECLARES (javax.net.ssl HostnameVerifier / "
+            "X509TrustManager implementors), each with a proven verdict: `permissive` "
+            "means the body was proven to accept every hostname or every certificate "
+            "chain. Catches the OkHttp / Volley / Retrofit paths that `summarize_"
+            "capabilities` CUSTOM_TLS_TRUST cannot name, because they install the "
+            "component through library code with no framework spelling. `not_proven` "
+            "is the absence of a proof, NOT a clean bill of health — and neither is an "
+            "empty result: a trust-all written `extends X509ExtendedTrustManager` "
+            "declares no interface and is not reported at all."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "with_xref": {
+                    "type": "boolean",
+                    "default": True,
+                    "description": "attach the methods constructing each component",
+                },
+            },
         },
     },
     {
