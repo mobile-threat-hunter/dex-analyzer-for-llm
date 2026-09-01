@@ -4,7 +4,10 @@
 
 This file catalogs every point where dexllm's behavior diverges from its AOSP/ART
 (or slicer) reference **specifically to prevent an out-of-bounds read** on
-malformed or truncated input. None of these change output on a *valid* dex — they
+malformed or truncated input. Its sibling
+[dexkit-vendor-divergences.md](dexkit-vendor-divergences.md) catalogs the other
+axis — where the *vendored* DexKit tree diverges from the upstream it was copied
+from, for any reason. None of these change output on a *valid* dex — they
 only differ on input the reference would over-read on.
 
 The recurring question for each: now that the load-time structural verifier

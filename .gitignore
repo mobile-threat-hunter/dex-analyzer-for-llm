@@ -32,3 +32,9 @@ __pycache__/
 .claude/settings.local.json
 .claude/scheduled_tasks.lock
 build-ci/
+
+# Rebase / patch leftovers. Ignored so tests/test_vendor_baseline.py can treat
+# an UNTRACKED file under vendor/ as an uncatalogued divergence (dexllm#65)
+# without a rebase in progress reporting itself as one.
+*.orig
+*.rej

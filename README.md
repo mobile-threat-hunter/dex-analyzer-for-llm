@@ -268,7 +268,9 @@ androguard's multi-second whole-program analysis.
 ├── examples/               runnable usage examples
 ├── bench/                  reproducible androguard benchmark
 ├── docs/                   detailed API walkthrough (usage.md)
-├── vendor/dexkit_core/     vendored LuckyPray DexKit Core (its own LICENSE)
+├── vendor/dexkit_core/     vendored LuckyPray DexKit Core (its own LICENSE;
+│                           UPSTREAM records the fork point, and
+│                           docs/dexkit-vendor-divergences.md every local change)
 ├── test_apk/               APK corpus for regression (fetched separately; gitignored)
 ├── CLAUDE.md               decompiler port internals / dev notes
 └── LICENSE                 Apache-2.0

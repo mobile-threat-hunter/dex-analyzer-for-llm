@@ -223,7 +223,7 @@ public:
     }
 
     [[nodiscard]] MemMap GetUncompressData(const Entry& e) const {
-        // Bound the stored data region against the file: parse_cd_block only
+        // dexllm: bound the stored data region against the file. parse_cd_block only
         // validated lfh_offset+header+name+extra, NOT data_offset+comp_size, so a
         // crafted central-directory comp_size overreads the mmap here (STORE
         // memcpy / DEFLATE avail_in) → OOB → SIGSEGV/SIGBUS. Mirror the

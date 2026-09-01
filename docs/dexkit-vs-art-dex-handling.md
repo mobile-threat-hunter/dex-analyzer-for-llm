@@ -31,7 +31,7 @@ implementations with different purposes, not shared code.
 | Purpose | dex **instrumentation / rewriting** — read → IR → transform → **write** | **runtime loader** — load, verify, then execute |
 | Parse model | materializes a **mutable heap IR** (`ir::DexFile` graph; `Reader::GetClass`/`ParseClass`, lazy per-index via placeholder) | **lazy zero-copy accessors** (`ClassAccessor`/`CodeItemDataAccessor` = `DexFile& + const uint8_t* ptr_pos_`, a cursor over the mmap'd bytes) |
 | Mutability | mutable objects (built to round-trip and re-emit) | immutable views (no materialization) |
-| Verification | **none** — only `SLICER_CHECK_*` assertions (index/pointer sanity; upstream aborts, DexKit patches to `throw`) | full structural `dex_file_verifier.cc` + runtime method verifier |
+| Verification | **none** — only `SLICER_CHECK_*` assertions (index/pointer sanity; upstream aborts, dexllm's vendored fork patches to `throw` — divergence D1 in [dexkit-vendor-divergences.md](dexkit-vendor-divergences.md)) | full structural `dex_file_verifier.cc` + runtime method verifier |
 | Writes dex? | **yes** (`writer.cc`, `instrumentation.cc`) | no (read-only loader) |
 | Malformed input | assertion → abort / throw (no reason) | verifier rejects with a byte-level reason |
 | Versions | `kMinVersion=35 … kMaxVersion=41` (035–041, incl. v041 container) | `StandardDexFile::kDexMagicVersions` (same range) |

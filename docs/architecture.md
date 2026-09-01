@@ -114,7 +114,9 @@ the end of the image it lives in, both reachable through the public `GetMethodCo
 / `GetImage()`. The rule this records — **a dexllm analysis belongs in `core_ext`
 unless it genuinely needs DexKit's privates** — is the outward-facing counterpart of
 the `dad_cpp` boundary below, and it is why the vendored tree now carries ~860 fewer
-dexllm lines.
+dexllm lines. What remains is catalogued, with its fork point, in
+[dexkit-vendor-divergences.md](dexkit-vendor-divergences.md) — 136 vendored files,
+125 byte-identical to upstream, 11 modified, 0 added.
 
 Note this is a *different* boundary from the hexagonal one: `core_ext` may freely
 include DexKit headers (that is its job), and `invoke_args.cpp` does — two decode

@@ -74,7 +74,8 @@ inline ThreadPool::ThreadPool(size_t threads, std::function<bool()> should_skip_
         : state_(std::make_shared<State>()) {
     state_->should_skip_task = std::move(should_skip_task);
 #if defined(__EMSCRIPTEN__) && !defined(__EMSCRIPTEN_PTHREADS__)
-    // Non-pthread WASM (GitHub Pages can't ship COOP/COEP for SharedArrayBuffer).
+    // dexllm: non-pthread WASM (GitHub Pages can't ship COOP/COEP for
+    // SharedArrayBuffer).
     // std::thread's ctor throws "Not supported" here, which kills every APK load
     // path that uses multi-image AddImage. Run tasks inline instead — `enqueue`
     // drains the queue from the calling thread, so the future resolves before
@@ -174,7 +175,7 @@ auto ThreadPool::enqueue(F &&f, Args &&... args)
     }
     state_->condition.notify_one();
 #if defined(__EMSCRIPTEN__) && !defined(__EMSCRIPTEN_PTHREADS__)
-    // No workers exist — drain the queue inline so the future resolves before
+    // dexllm: no workers exist — drain the queue inline so the future resolves before
     // the caller blocks on it.
     {
         std::unique_lock lock(state_->queue_mutex);

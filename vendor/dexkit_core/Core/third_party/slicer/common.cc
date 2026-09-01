@@ -40,9 +40,11 @@ void set_logger(logger_type new_logger) {
   log = new_logger;
 }
 
-// Helper for the default SLICER_CHECK() policy. Throws std::runtime_error
+// Helper for the default SLICER_CHECK() policy.
+// dexllm: throws std::runtime_error where upstream does log() + std::abort(),
 // so callers (library users decompiling untrusted dex bytecode) can recover
-// from one bad method without taking down the entire process.
+// from one bad method without taking down the entire process. This one
+// PREDATES the vendoring - see vendor/dexkit_core/UPSTREAM.
 void _checkFailed(const char* expr, int line, const char* file) {
   char buf[512];
   std::snprintf(buf, sizeof(buf),

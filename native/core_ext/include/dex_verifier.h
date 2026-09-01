@@ -20,6 +20,11 @@
 //     bounded primitive (CheckListSize / ReadUleb / OffsetToPtr+bounds / SafeWidth),
 //     and the one slicer-logic call (the VerifyInsns decoder, which throws
 //     SLICER_CHECK on malformed bytecode) is wrapped: any throw becomes a rejection.
+//     That last clause RESTS ON A VENDOR DIVERGENCE: upstream slicer's
+//     _checkFailed does log() + std::abort(), which no wrapper can contain. The
+//     throw is dexllm's (divergence D1 in docs/dexkit-vendor-divergences.md),
+//     and it predates the vendoring, so this totality guarantee is only as
+//     durable as that patch surviving a rebase.
 //   * A dex that PASSES has valid structure for every section the core and the
 //     decompile path dereference (see "covered" below) → no OOB in InitBaseCache
 //     or the dad_cpp pipeline from structural malformation.

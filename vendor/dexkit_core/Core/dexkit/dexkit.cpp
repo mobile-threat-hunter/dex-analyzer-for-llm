@@ -1432,7 +1432,8 @@ DexItem *DexKit::GetDexItem(uint16_t dex_id) {
 
 void DexKit::PutDeclaredClass(std::string_view class_name, uint16_t dex_id, uint32_t type_idx) {
     std::lock_guard lock(this->_put_class_mutex);
-    // First-wins by load order: when the same class descriptor is declared in
+    // dexllm: first-wins by load order. Upstream overwrites unconditionally.
+    // When the same class descriptor is declared in
     // multiple dex (packer / merged dex), keep the lowest dex_id — classes.dex
     // before classes2.dex — matching ART/AOSP (DexPathList.findClass returns the
     // first dex that defines the class). The map is mutex-guarded but parallel

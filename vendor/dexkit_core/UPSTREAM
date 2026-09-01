@@ -1,0 +1,127 @@
+Vendored upstream: DexKit Core
+==============================
+
+repo      https://github.com/LuckyPray/DexKit
+commit    dff66e8eff15512ac9a2d03cf3ef23de338bd167
+describe  2.2.0-2-gdff66e8
+date      2026-05-22T15:05:09+08:00
+subject   fix(android): normalize unaligned cookie dex before parsing
+license   Apache-2.0 (Core/LICENSE, unmodified)
+
+vendored subset   Core/  LICENSE  README.md  README_zh.md  schema/   (136 files)
+divergences       11 files modified, 0 added  ->  docs/dexkit-vendor-divergences.md
+baseline manifest ./UPSTREAM.blobs (the fork-point blob SHA of each of the 136)
+guard             tests/test_vendor_baseline.py
+
+
+How the baseline was determined (dexllm#65)
+-------------------------------------------
+
+The import a6f8c3c recorded no version, no revision hash and no provenance file,
+so the fork point was recovered by BLOB MATCHING rather than read off the
+history: for each of upstream's 573 revisions, count how many of the import
+snapshot's 385 files have a byte-identical blob.
+
+    git ls-tree -r a6f8c3c dexkit_git/ | sed 's|\tdexkit_git/|\t|' | sort > snap.txt
+    for c in $(git -C <upstream> rev-list HEAD); do
+        echo "$(comm -12 <(git -C <upstream> ls-tree -r "$c" | sort) snap.txt | wc -l) $c"
+    done | sort -rn | head
+
+dff66e8 is the unique maximum at 382/385, and the identification is EXACT rather
+than nearest because all three misses are explained -- each is a blob that
+exists in NO upstream revision, so no revision can score higher than 382:
+
+  Core/dexkit/dex_item.cpp            pre-vendoring local change (see below)
+  Core/dexkit/include/dex_item.h      pre-vendoring local change (see below)
+  Core/third_party/slicer/common.cc   pre-vendoring local change (see below)
+
+The runner-up 7415df9 (381) differs from dff66e8 in exactly one file,
+Core/CMakeLists.txt, and the snapshot carries dff66e8's version of it.  A
+reviewer re-ran the scan over `rev-list --all` (606 revisions, adding the dev /
+cache / docs / 1.1.x branches) and reached the same conclusion.
+
+Five files upstream has at dff66e8 that the import did not carry: the root
+.gitignore and three .github/workflows/*.yml (root-level hidden paths a
+non-dotglob copy skips) and main/src/main/java/Main.kt (no such explanation --
+simply absent).  All five are outside today's vendored subset anyway.
+
+
+The import was already a fork
+-----------------------------
+
+a6f8c3c is titled "vendor DexKit Core fork ..." and its message says "the only
+local patch is a parallel raw access-flag vector".  Measured against dff66e8 the
+import already carried 689 added lines in dex_item.cpp alone -- the whole L1 /
+L1.5 / L2 / L2.5 / L4 / L5 / L8 extension-hook surface, the baksmali-style smali
+renderer, AnalyzeMethodInvokes, and the SLICER_CHECK -> std::runtime_error
+change in slicer/common.cc.  Those hooks were marked `dexkit-py` (the project's
+earlier name); every marker in the tree reads `dexllm` today.
+
+That gap between the message and the delta is why the baseline had to be
+recovered by matching bytes.  Measured at the HEAD this file was written against,
+it also shows up as a file the import could not reveal: import->HEAD over the
+vendored subset finds 10 changed files, UPSTREAM->HEAD finds 11, and the extra
+one is common.cc, whose blob is identical at the import and at HEAD.  The change
+that adds this file also adds D1's marker there, so from now on both counts are
+11 -- the divergence stopped being invisible because the baseline exists.
+(The figure dexllm#65 quotes for the first of those, "5 files changed, 546/469",
+was path-scoped to Core/dexkit and is now 5 files / 691/508.)
+
+
+Upstream drift since the fork point
+-----------------------------------
+
+Six revisions.  Over Core/ that is 4 files, +20/-29; over the whole vendored
+subset it is 6 files, +73/-29, because 42b30c4 also rewrites the vendored
+README.md (+28) and README_zh.md (+25) to document the behaviour it changes.
+
+  42b30c4  feat(core)!: expose raw DEX access flags      CONVERGED with D7
+  7415df9  fix: wrong CMAKE_CXX_FLAGS used in CMAKE_C_FLAGS   not carried, inert
+  6ca92c3  fix: searchInMethods and searchInClasses          not carried, unreachable
+  47f7324  fix: endWith opcode matching                      not carried, unreachable
+
+Three upstream fixes land in files dexllm vendors UNMODIFIED and does not have.
+Each was checked rather than assumed, and none is an outstanding product bug:
+
+  6ca92c3  an INVERTED condition in BatchFind{Class,Method}UsingStrings.
+           UNREACHABLE: DexKitExt passes 0 for in_classes / in_methods, so
+           query->in_classes() is null and the branch never runs.  The Python
+           surface exposes no scoping argument at all.
+  47f7324  EndWith opcode matching anchored to the first kmp hit.
+           UNREACHABLE: all five CreateMethodMatcher call sites pass 0 for
+           op_codes, and IsOpCodesMatched returns true on a null matcher.
+           Nothing in the repo builds an OpCodesMatcher.
+  7415df9  Core/CMakeLists.txt sets CMAKE_C_FLAGS from CMAKE_CXX_FLAGS.
+           INERT: no .c source exists anywhere in the tree, so CMAKE_C_FLAGS
+           is never consulted.  (The vendored project(dexkit) names no
+           LANGUAGES and therefore DOES enable C -- a first draft claimed the
+           opposite, reading the top-level project(dexllm LANGUAGES CXX)
+           instead.  The verdict survives on the second premise alone.)
+
+They are free pickups on the next rebase.  D7 / D13 are entries in
+docs/dexkit-vendor-divergences.md.
+
+
+Line counts
+-----------
+
+Every diffstat quoted here and in the catalogue is `git diff --numstat` against
+the fork-point tree.  An earlier draft used `diff -u | grep -c '^+[^+]'`, which
+drops added BLANK lines and so reported +1215/-130 where numstat reports
++1271/-131.  Both are re-derivable; only one matches what the rest of this repo
+prints, and a count without its predicate is not a measurement.
+
+
+Refreshing this file
+--------------------
+
+Changing the baseline means re-running the match above against the new upstream
+revision and regenerating the manifest from it:
+
+    git -C <upstream> ls-tree -r <new-revision> > fork.txt
+    # keep only the 136 vendored paths, emit "<sha>  <path>" sorted by path
+
+tests/test_vendor_baseline.py pins the manifest's own hash, so regenerating it
+is a deliberate two-place edit; that is what stops a single line being
+regenerated to silence a divergence.  The guard reads only ./UPSTREAM.blobs, so
+it stays offline -- nothing in the test suite clones upstream.

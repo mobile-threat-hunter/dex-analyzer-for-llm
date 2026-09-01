@@ -302,8 +302,8 @@ answer with no error anywhere, and nothing in the issue predicted it.
 piece was `Reader::CallSiteIds()` in the vendored slicer. It is not — the section is
 a `u4` array found through the map, and `core_ext/dexitem_code_source.cpp` already
 reads raw sections that way (`BuildProto`'s `type_list`, the `static_values` walk).
-`GetCallSite` is implemented there, so the pile dexllm#65 records as uncataloguable
-gains nothing. What it DOES gain is a reader of UNVERIFIED bytes: `VerifyDex` bounds
+`GetCallSite` is implemented there, so the vendor-side pile dexllm#65 was filed
+about gains nothing. What it DOES gain is a reader of UNVERIFIED bytes: `VerifyDex` bounds
 the `call_site_id` section's EXTENT (dexllm#57's `CheckMap`) and nothing else — ART's
 `CheckInterCallSiteIdItem` is not ported — so `data_off`, every element type code and
 every index inside are bounded at the reader, which is the tier the safety contract
@@ -2499,6 +2499,8 @@ Upstream DexKit's `InitBaseCache` ([dex_item.cpp](vendor/dexkit_core/Core/dexkit
 **Measured (a/b, same script, both halves' `.so` md5-verified and bit-reproducible):** 354,757 summary records → **447 differ, all methods, all exactly `(new ^ 0x20000) | 0x20 == old` with 0x20000 set in new** — 0 class records, 0 field records, 0 unexplained. Decompiler output **byte-identical** (814 classes = every class holding a synchronized-or-declared-synchronized method plus a deterministic control slice; sha256 equal both halves), as expected since DAD already read the raw copy. Smali render **byte-identical** (117 classes). 0 methods in the corpus carry both bits, so the lossiness is structural, not corpus-manifest. parity 28/28, sweep 25,309-class / 188,065-method 0-crash 0-timeout, pytest 233 passed.
 
 **Guard:** [tests/test_access_flags.py](tests/test_access_flags.py) — 4 access-flag tests (the file later gained a 5th, unrelated: the field-xref per-instruction contract, and then 6 more for the SECOND contract it now carries, dexllm#41's UNKNOWN ≠ 0). Two **fail against the pre-removal build** (verified by rebuilding it): the corpus-wide check that a method the DAD path calls `declared_synchronized` reports 0x20000, and a cross-layer oracle decoding the summary bits with the AST's own name table. A third pins the DAD path on its own (`LruCache.size()`) so the oracle can't stay green if BOTH routes regress together; a fourth guards the `| 0x20` half. **Corpus dependency is a SKIP, never a failure** — "this APK has a synchronized method" is a property of the sample, and `$DEXLLM_TEST_APK` (documented in conftest) can narrow the fixtures to one of the 8 bundled APKs that have none; the first cut asserted on it and reported "the rewrite is back" for an environment change (BOTH reviewers confirmed this independently). The discriminator used instead is `decompile_method_ast`, which reported the raw form under both behaviours. The oracle asserts `sync_checked` separately from the aggregate count (the broad slice alone satisfies the aggregate, so it would not prove the sync stratum was reached — ADV-3) and filters `unkn_<flag>` entries, which `GetAccessImpl` emits for the three ACCESS_ORDER bits absent from the name table and which a crafted dex can set on a method (method access flags are not verifier-validated — ADV-4).
+
+**Upstream reached the same behaviour INDEPENDENTLY, and four days earlier** — `42b30c4` "feat(core)!: expose raw DEX access flags", 2026-08-02, deletes the identical rewrite from both method loops. Invisible until dexllm#65 recovered the fork point; catalogued as the **converged** entry D7 in [docs/dexkit-vendor-divergences.md](docs/dexkit-vendor-divergences.md), so on the next rebase this divergence disappears rather than being carried. The issue that catalogued it had classified this bucket **permanent** on the premise that upstream wants `Modifier` compatibility.
 
 **Accepted, not fixed:** this changes the VALUE of a released public attribute with no alias mechanism (unlike the dexllm#21 renames), so an out-of-repo consumer masking `& 0x20` silently stops matching rather than erroring. Both reviewers raised it; it belongs in the release notes and in the still-open deprecation-policy decision (issue #24).
 
@@ -6145,9 +6147,11 @@ implementation of a question two live functions already answer
 it cannot be guarded because no test can call it. Deleting upstream code from the
 vendored fork has precedent (the access-flags `Modifier` rewrite), and the
 tombstone convention is the one `dex_item.h:169` already uses for the dexllm#32
-move. **dexllm#65 was filed off this**: the fork records no upstream baseline, so
-its 54 divergences cannot be catalogued, rebased, or upstreamed — a removal is the
-least visible kind, and the convention that records it is not itself checked.
+move. **dexllm#65 was filed off this** — the fork recorded no upstream baseline, so its
+divergences could not be catalogued, rebased, or upstreamed, and a removal is the
+least visible kind. **CLOSED**: the fork point is recorded, this removal is entry
+D11 in [docs/dexkit-vendor-divergences.md](docs/dexkit-vendor-divergences.md), and
+the convention is now a checked invariant rather than a convention.
 
 **Guard: the invariant, not the instance** ([tests/test_invoke_opcode_gates.py](tests/test_invoke_opcode_gates.py),
 16 cases). The truth set is DERIVED from slicer's table — the opcodes whose index
@@ -6745,6 +6749,349 @@ corpus-independent, so all 34 of its cases run in the CI leg —
 sweep 25,350-class 0-crash 0-timeout,
 determinism (3 processes x 3 `PYTHONHASHSEED`s -> one digest), lint trio clean,
 doc fences 78.
+
+### The vendored fork has a baseline, and the divergences are catalogued (dexllm#65, 2026-09-01)
+
+The fork recorded no upstream version, no revision hash and no provenance file,
+so `git log` and CLAUDE.md prose were the only account of what had been changed —
+and a **deletion** left no account at all. The issue's three consequences were a
+rebase of unbounded size, nothing that can be upstreamed, and a marker convention
+that is followed but not checked.
+
+**The fork point was RECOVERED EXACTLY, not approximated.** The issue anticipated
+a fallback ("if the fork point cannot be identified, pin the NEAREST upstream
+release"); it was not needed. Blob-matching the import snapshot's 385 files
+against all 573 upstream revisions gives a **unique maximum of 382/385** at
+`dff66e8` (`2.2.0-2-gdff66e8`, 2026-05-22, six days before the import), and the
+identification is exact rather than nearest because **all three misses are blobs
+that exist in NO upstream revision**, so no revision can score higher than 382.
+The runner-up `7415df9` (381) differs from `dff66e8` in exactly one file and the
+snapshot carries `dff66e8`'s version of it. Recorded in
+[vendor/dexkit_core/UPSTREAM](vendor/dexkit_core/UPSTREAM) with the command that
+re-derives it; a reviewer re-ran it over `rev-list --all` (606 revisions) and got
+the same answer.
+
+**The import commit's own message was wrong by two orders of magnitude**, which is
+why the bytes had to be matched rather than the history read. `a6f8c3c` says *"the
+only local patch is a parallel raw access-flag vector"*; measured against
+`dff66e8` it already carried **689 added lines in `dex_item.cpp` alone** — the
+whole L1 / L1.5 / L2 / L2.5 / L4 / L5 / L8 extension-hook surface, the
+baksmali-style smali renderer, `AnalyzeMethodInvokes`, and the
+`SLICER_CHECK` → `std::runtime_error` change. Those hooks were marked `dexkit-py`
+(the project's earlier name); every marker in the tree reads `dexllm` today.
+
+**The sharpest form of that is a file the import could not show.** Measured at
+HEAD, over the vendored subset, import→HEAD changes **10** files and
+upstream→HEAD changes **11** — and the extra one is
+`Core/third_party/slicer/common.cc`, whose blob is *identical* at the import and
+at HEAD, so no import-anchored diff contained it. **This change is what ends
+that**: adding D1's marker moves the file, so after it lands the contrast is 11
+against 11. That is the finding working rather than an exception to it — the
+marker exists *because* the baseline surfaced a divergence nothing anchored at
+the import could see. (dexllm#65 quotes "5 files changed, 546/469" for the first
+of those; that command was path-scoped to `Core/dexkit` and today gives 5 files
+/ 691/508. An earlier draft compared the scoped 5 with the unscoped 11, and a
+later one claimed no import-anchored measurement could *ever* show common.cc —
+reviewers caught both.)
+
+**The real delta, which no in-source census could produce: 136 vendored files,
+125 byte-identical to upstream, 11 modified, 0 added, +1271/-131.** Those line
+counts are `git diff --numstat`, the predicate the rest of this repo uses; an
+earlier draft published +1215/-130 from a `diff -u | grep -c '^+[^+]'` pipeline,
+which silently drops 56 added blank lines [[published-counts-need-the-repos-own-predicate]].
+
+The issue's figure was 54 markers in **four** files (`dex_item.cpp`,
+`dexkit.cpp`, `dex_item.h`, `dexkit.h`); the census is **82 marker lines across
+eleven** today, and the gap is not only later work landing — **three files
+carried a full rationale comment and no marker token at all**
+(`Core/CMakeLists.txt`, `Core/dexkit/include/zip_archive.h`,
+`Core/third_party/slicer/common.cc`), so a `grep dexllm` saw 8 files where there
+are 11, and **two further hunks inside an already-marked file** were unmarked too
+(`ThreadPool.h`'s Emscripten blocks — so one divergence was marked in
+`CMakeLists.txt` and not in the file carrying the rest of it). Six markers were
+added here, counting D13's below.
+
+## The classification the baseline immediately refuted
+
+The issue put "raw access flags" (7 markers) in the **permanent** bucket, reasoning
+that *"upstream wants `java.lang.reflect.Modifier` compatibility, which is exactly
+what this removed"*. **That premise had already stopped being true.** Upstream
+removed the identical `declared_synchronized` → `synchronized` rewrite in
+`42b30c4` ("feat(core)!: expose raw DEX access flags", **2026-08-02**) — four days
+*before* dexllm did the same thing on 2026-08-06, independently. On the next
+rebase that entry disappears and the two trees agree. It is catalogued as **C —
+converged**, a treatment the issue did not have, and it is the single clearest
+argument for recording a baseline: without one there is no way to notice that a
+divergence has stopped being one.
+
+Upstream has moved **6 revisions** since the fork point — **4 `Core/` files,
++20/-29**, or **6 files / +73/-29 over the whole vendored subset**, because
+`42b30c4` also rewrites the vendored `README.md` and `README_zh.md` to document
+the behaviour it changes (so a rebase taking only its `Core/` half would leave
+those READMEs describing behaviour neither tree has). Either way the rebase the
+issue calls "unbounded work" is small.
+
+**Three** of those revisions are fixes in files dexllm vendors **unmodified** and
+does not have, and each verdict was checked by construction rather than assumed:
+`6ca92c3` (an INVERTED `in_class_set.contains` in
+`BatchFind{Class,Method}UsingStrings`) is **unreachable** — `DexKitExt` passes 0
+for `in_classes` / `in_methods`, so `query->in_classes()` is null and the branch
+never runs; `47f7324` (EndWith opcode matching) is **unreachable** — all five
+`CreateMethodMatcher` call sites pass 0 for `op_codes` and nothing here builds an
+`OpCodesMatcher`; and `7415df9` (`CMAKE_C_FLAGS` set from `CMAKE_CXX_FLAGS`) is
+**inert** — the tree contains no `.c` source at all, so the variable is never
+consulted. An earlier draft named only the first two and left the third with an
+empty verdict column; a later one justified "inert" with `LANGUAGES CXX`, which
+is the TOP-LEVEL project — the vendored `project(dexkit)` names no languages and
+therefore does enable C, so only the second premise carries the verdict.
+
+## The catalogue, and the guard that makes it a checked invariant
+
+[docs/dexkit-vendor-divergences.md](docs/dexkit-vendor-divergences.md) is the
+DexKit-side sibling of [docs/aosp-oob-divergences.md](docs/aosp-oob-divergences.md)
+— **14 entries in four treatments**: **U** upstreamable (D1 `SLICER_CHECK`→throw,
+D2 zip `GetUncompressData` bounds, D3 the dexllm#50 pool, D4 the dexllm#55
+cache-init pair, D5 lenient operand bounds, D6 the dexllm#57 `encoded_value`
+types, D11 the `GetInvokeMethodsFromCode` removal, D13 and D14 below), **C**
+converged
+(D7), **P** permanent (D8 extension hooks, D9 declared-vs-referenced, D10 the
+Emscripten shim), **R** reduction candidate (D12 — the smali renderer and
+`EnumerateInvokeSites`, **560 lines, about 44% of everything this fork adds**,
+none of whose functions exists upstream under any name).
+
+The issue estimated "roughly 29 of 54 upstreamable, 17 permanent". At this
+granularity the direction holds (9 of 14 entries are U) but the **largest single
+item by volume is neither** — D12 is a *reduction* candidate, code that should
+leave the vendored tree rather than be sent upstream. An entry-weighted count and
+a line-weighted one point at different work, which is worth saying since step 3
+is where this goes next. A treatment is a classification of KIND; **nothing here
+has been proposed upstream**, and step 3 is deliberately not attempted.
+
+**The convention is now checked, offline.**
+[vendor/dexkit_core/UPSTREAM.blobs](vendor/dexkit_core/UPSTREAM.blobs) records the
+FORK-POINT git blob SHA of each of the 136 files — the fork point, not the current
+content, which is what makes the divergent set derivable — and
+[tests/test_vendor_baseline.py](tests/test_vendor_baseline.py) (35 cases) hashes
+every file, requires the divergent set to EQUAL a pinned literal, requires each
+divergent path to be named in the **`Where:` of the specific entries pinned for
+it** (and no PRISTINE path to be claimed by any), requires every entry to carry a
+`Where:` **and** a `Why:` and to sit under one of the four treatment headings
+with the treatment pinned per entry **and cross-checked against the summary
+table**, pins the manifest's own hash so it cannot be regenerated to silence a
+divergence, recomputes the per-file census table's path set and marker-line
+column and requires its other three columns to sum to the totals the prose
+publishes, checks the published census in **all three** documents that state it,
+and pins the baseline in three mirrors so a rebase must move all three. Nothing
+clones upstream; the manifest is data.
+
+That closes the consequence the issue ranked hardest: **an addition leaves a
+marker, a deletion leaves nothing.** `GetInvokeMethodsFromCode` (D11) and
+upstream's `Modifier` rewrite (D7) are both invisible to any census of the
+current tree and both visible to a manifest comparison. **Both of D11's hunks are
+pure deletions with no added line that could carry a marker** — of 41 divergent
+hunks, 34 are marked and 7 are not: those 2, plus 5 continuations of a divergence
+marked elsewhere in the same file.
+
+## What the two reviewers found — 1 counter-example to the headline claim, 2 HIGHs in the guard, and 8 in the numbers
+
+Neither could move the facts. Both independently re-derived the fork point (one
+widening the scan to `rev-list --all`), verified the manifest **136/136 against a
+fresh clone**, reproduced the delta, confirmed every "still so at upstream HEAD"
+claim, confirmed D7's convergence and its four-day gap, confirmed both
+unreachability arguments from the schema field order and the call sites, and
+reproduced pytest 1273/24, corpus-less 867/430 and narrowed 1172 exactly. One
+compiled `common.cc` from both revisions to the **same object file hash**, which
+is a stronger statement of the binary identity than the `.so` md5.
+
+**The finding that matters is a counter-example to this change's own headline
+claim, and it was in the tree the whole time.** `DexKit::PutDeclaredClass`
+(`dexkit.cpp`) replaces upstream's unconditional overwrite with **first-wins by
+lowest dex_id**, and it carried **no marker and no entry** while the change that
+created the registry said every divergence was recorded. It is not cosmetic:
+CLAUDE.md documents multi-source loading as "earlier sources get lower dex_ids,
+so first-wins prefers them", `add_dumped_dexes(prefer=True)` is built on it, and
+dexllm#53's TLS detector resolves bodies by it — and its own commit
+(`1b7b38d`) is about **determinism**, a gate this project markets. It is entry
+**D13** now, treatment U, and the guard's file-granularity limit is no longer a
+hypothetical: `dexkit.cpp` was already divergent for D4, so the manifest saw the
+file and could not see the second divergence inside it. The test says so.
+
+**Two HIGHs, both in the guard, both demonstrated with a built mutant that passed
+all 26 cases:**
+
+* **the entry bodies could be deleted entirely.** Scoping the catalogue check to
+  the entries section — the fix this change made for its own M6 — still judged by
+  substring, so gutting all twelve entries to bare headings and dumping the
+  eleven paths as a bullet list under the first heading passed. The registry
+  reduced to a size census, which is exactly the failure M6 was supposed to have
+  closed. Now each path must appear in the `Where:` of the **specific entries
+  pinned for it**, and every entry must have a `Where:`.
+* **the treatment was not checked at all.** `test_the_catalogue_treats_every_divergence`
+  asserted ≥12 entries, unique ids and four heading strings — never which section
+  an entry is under. Moving all twelve under `## U` (leaving `## C` an empty
+  heading) passed, i.e. **D7 could be silently reclassified out of "converged"**,
+  un-saying the change's own headline finding. The entry→treatment map is a
+  pinned literal now.
+
+**Four more guard escapes, each built and run:** the manifest was a
+**self-referential oracle** — editing a pristine file and regenerating only its
+line kept the divergent set at eleven and passed (and the file the reviewer chose
+was `dex_item_batch_find.cpp`, precisely where `6ca92c3` would land); a dexllm
+file could be added and an upstream one deleted with the manifest lines swapped
+to keep 136; the `UPSTREAM`/`UPSTREAM.blobs` exclusion was by **basename**, so a
+`Core/dexkit/UPSTREAM` was invisible; and the catalogue's own published census
+could be changed to `999 files … 7 added` with nothing noticing. All four are
+closed.
+
+**And the guard turned RED on an environment fact**, which is this repo's own
+dexllm#46 rule: `_on_disk()` walked the filesystem, so a `.orig`/`.rej` from a
+rebase — or a git-ignored `__pycache__` next to the vendored `schema/gen_code.py`
+— was reported as an uncatalogued divergence. It failed during exactly the
+operation the catalogue exists to enable. Enumeration is `git ls-files` now:
+untracked means "not part of the committed tree", so it is not a divergence yet.
+
+**Eight findings in the numbers and cross-references**, all corrected above and
+in the two documents: the `+1215/-130` predicate; `UPSTREAM` pointing the
+converged revision at **D6** (the `encoded_value` entry, classified U and
+documented as *still diverging* — the opposite classification) instead of D7,
+twice; the third un-carried upstream fix with no verdict; the drift figure scoped
+to `Core/` without saying so; the stale `546/469` and the scoped-vs-unscoped
+5-against-11 comparison; **D5's `Where:` naming two functions that do not exist
+anywhere in the repository** (`GetClassStrings` / `GetMethodStrings` — the real
+accessors are in `core_ext`, not the vendored tree, so a rebaser was being sent
+nowhere); D4's `Where:` filing `AbortPutCrossRef` under the wrong file; and the
+catalogue claiming "every divergence carries a marker" while the guard's own
+docstring said the granularity is the file — 8 of 41 hunks did not, and the test
+was the honest mirror.
+
+**One classification was wrong by the registry's own definition.** D11 was filed
+**P**, which means "an extension hook or a product decision incompatible with
+upstream's goals"; deleting a dead and wrong upstream function is neither, and
+the entry had no "why permanent" line — it was P only by where it sat, which is
+the same gap the treatment check now closes. It is **U**.
+
+## The DELTA review of those responses — a SECOND missing entry, and two HIGHs only half closed
+
+Because the response was this large, a third reviewer was pointed only at it.
+This repo's record says that is where defects concentrate
+[[review-responses-are-the-weak-spot]], and it was right again — 14 findings, all
+fixed here.
+
+**A second uncatalogued divergence, the same family as D13.** `InitCache`'s
+invoke-collector opcode test carries `|| op == 0xfa || op == 0xfb` — the LIVE
+half of dexllm#61, which is what makes `find_call_sites_to` answer for a
+`MethodHandle.invoke` target at all. It sits **one line above** a bound marked
+for D5, inside that same hunk, so the file was divergent, the hunk was marked,
+and the divergence had no entry. It is **D14**, and it is why the completeness
+claim now reads as a stated limit rather than a guarantee: two divergences in one
+hunk is file-granularity at its smallest.
+
+**Both HIGHs the first review raised were only half closed, and the reviewer
+built the other half of each.** The treatment fix pinned the section HEADINGS —
+but the catalogue states each treatment TWICE, and editing only the **summary
+table** (D7 moved to U, C left "(none)") passed all 30 cases, so the headline
+finding could still be un-said in the summary a reader meets first. And the
+"entry bodies can be deleted" fix required a `Where:` line — so reducing all 13
+entries to a heading plus that one line (352 lines → 169, taking every
+`Upstream:`, `Divergence:` and `Why:` with it) passed too. Both are closed by
+checking the table against the sections and requiring a `Why:` as well.
+
+**And the response CREATED a hole of its own.** Switching enumeration to
+`git ls-files` — the fix for the `.orig`-turns-the-guard-RED finding — justified
+itself with "untracked means not part of the committed tree". **The build does
+not ask git**: `Core/CMakeLists.txt` compiles the core from
+`file(GLOB_RECURSE ... dexkit/*.cpp)`, so an untracked `.cpp` dropped there
+**ships** while `git ls-files` cannot see it, and the reviewer demonstrated it
+with a `cmake -P` glob probe. Enumeration is tracked **∪** untracked-not-ignored
+now, and the `.orig`/`.rej` half moved to `.gitignore` where it belongs.
+
+**A claim of mine was falsified by this very change.** I wrote that `common.cc`
+is a file "no import-anchored measurement can *ever* show" — true of HEAD, and
+this change's own D1 marker moves the blob, so once it lands the contrast is 11
+against 11. That is the finding working (the marker exists *because* the baseline
+surfaced the divergence) but the word "ever" was wrong, and the corrected wording
+says which measurement it was true of.
+
+**The `647` was the retired predicate's own number.** The response fixed the
+total to numstat's `+1271/-131` and left `647` — a `grep -c '^+[^+]'` figure that
+drops 42 added blank lines — standing in three mirrors, inside a document whose
+new "Line counts" section says *every* diffstat here is numstat. It is **689**.
+[[published-counts-need-the-repos-own-predicate]], one commit after paying for it.
+
+Six more: **"Not proposed" cited D7** as something upstream has no reason to
+want, 250 lines under the entry whose whole content is that upstream made the
+same change itself; **D5's `Where:` still named the wrong function** (the operand
+bounds are in `InitCache`, not `InitBaseCache` — the second wrong-function
+finding in the same entry); **D11's `Where:`** said the tombstone sits where the
+declaration was, when the declaration was in `private:` and the tombstone is in
+`public:` beside the two functions that answer the same question; the **per-file
+census table and the marker/hunk counts were unguarded** and a reviewer rewrote a
+row and flipped "7 not marked" to "0 not" with the file green; the **census check
+was first-match**, so a wrong one below a correct one passed, and two of the three
+mirrors that publish it were unchecked; and the `7415df9` **"inert" verdict's
+first premise was false** — the vendored `project(dexkit)` names no `LANGUAGES`
+and *does* enable C; the verdict survives on "no `.c` source exists" alone.
+
+**A harness lesson, and a new variant of one already recorded.** The mutation
+harness restores from a pristine snapshot — and I kept editing the same files
+after taking it, so a later run's `restore()` silently reverted three files past
+every delta fix [[mutation-harness-restore-pitfalls]]. Nothing was lost (the
+edits were re-applied from the transcript) but the run was worthless. The harness
+now hashes the tree BEFORE restoring and refuses to start if restoring changes
+anything: **a stale snapshot is a harness failure, not a silent rollback.**
+
+## Measured
+
+**The six C++ edits are comments, and the binary proves it: the rebuilt `.so`
+md5 is `b3219432ae8318f2ba1e8fd8a66fd06c`, BYTE-IDENTICAL to HEAD's.** A
+byte-identical binary cannot behave differently, so that is a stronger statement
+than any corpus a/b and it is why none was run
+[[verify-build-identity-before-measuring]]. A reviewer strengthened it one level:
+compiling `common.cc` alone from the HEAD and the edited source under the same
+basename gives a **byte-identical object file**.
+
+parity **29/29**, pytest **1282 passed / 24 skipped** (+35, exactly the new file),
+TRUE corpus-less (`test_apk` MOVED aside) **876 passed / 430 skipped / 0 failed**
+— all 35 new cases run in the CI leg, since the guard reads only committed bytes —
+narrowed to `tests/data/multidex.apk` **1181 passed**, sweep **21,374-class /
+180,879 method-block 0-crash 0-timeout 0-error, GATE: PASS** (identical to the
+pre-change figures, as a byte-identical binary requires), determinism 3
+processes x 3 `PYTHONHASHSEED`s -> one digest, lint trio clean, doc fences 78,
+`scripts/check_dad_boundary.sh` clean. The guard is corpus-INDEPENDENT by
+construction, so narrowing it to a bundled sample is a no-op rather than a
+coverage claim.
+
+**22 mutants, each applied and run, each killed**, with a control hash asserted
+before the matrix starts and after it ends — and the control covers the vendored
+FILE LIST and `git ls-files` as well as file contents, without which a deletion
+is not a mutation at all (M3 was reported as NOT A MUTANT until it did). Nine
+from the first cut: a marker removed, a pristine vendored file edited, a vendored
+file deleted, a file added under `vendor/`, the manifest "updated" instead of the
+catalogue, a path dropped from an entry, the baseline drifting in one mirror
+only, a treatment section removed, and a GUARD mutant deriving the pinned set
+from the manifest. Seven the first two reviewers constructed: the gutted entry
+bodies, every entry moved under one treatment, an entry placed under no treatment
+section, a pristine file edited *with its manifest line regenerated*, a
+`Core/dexkit/UPSTREAM` added, the catalogue's census falsified, and a divergent
+path documented only in trailing prose. Six more from the delta review: the
+summary table contradicting the sections, every entry reduced to a heading plus
+its `Where:`, an untracked `.cpp` the core's `GLOB_RECURSE` compiles, a per-file
+table row falsified, a wrong census placed *after* a correct one, and a pristine
+file claimed by an entry.
+
+**M6 SURVIVED the first cut** and is the finding I recorded before the reviews:
+the check was `path in catalogue`, which the summary TABLE satisfies on its own.
+Scoping it to the entries section immediately failed on a real gap of my own
+(`Core/dexkit/include/dexkit.h` abbreviated inside D4) — and then a reviewer
+showed the scoped version was still substring-judged, which is the shape this
+whole file keeps recording [[review-responses-are-the-weak-spot]].
+
+**M9 is worth recording as a partial equivalent.** The derived pin is
+byte-equivalent on a clean tree and, under M2, is caught by the identical-count
+pin and the parametrised catalogue cases rather than by the set equality — so the
+literal pin is defence in depth and a better error message, not the sole thing
+holding the property. Saying that is more useful than claiming the pin is
+load-bearing.
 
 ### Skills
 
