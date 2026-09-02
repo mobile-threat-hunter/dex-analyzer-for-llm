@@ -358,8 +358,20 @@ no way to see that the premise had already stopped being true.
 - Moving it out is the dexllm#32 pattern exactly: that change took 858 lines of
   `AnalyzeMethodInvokes` out to `native/core_ext/invoke_args.cpp` and found the
   whole input was two already-public accessors (`GetMethodCode()`,
-  `GetImage()`). The renderer's inputs look similar. Not attempted here — it is a
-  refactor with its own a/b, not part of recording a baseline.
+  `GetImage()`). **This entry read "the renderer's inputs look similar" until the
+  intersection was actually taken, and the hedge was weaker than the evidence:**
+  of `DexItem`'s 70 private members, the span touches **9** — `reader` (27 uses),
+  `type_names` (26), `strings` (15), `method_codes` (6),
+  `field_access_flags_declared` (3), `class_field_ids` (2), `type_def_idx`,
+  `type_def_flag`, `class_method_ids` — and **every one already has a public
+  accessor** (`GetReader` / `GetTypeNames` / `GetStrings` / `GetMethodCode`,
+  which bounds the index exactly as the span does / `GetFieldAccessFlagsDeclared`
+  / `GetClassFieldIds` / `GetTypeDefIdx` / `GetTypeDefFlags` /
+  `GetClassMethodIds`). Nine accessors instead of dexllm#32's two; nothing
+  private is reached. Not attempted here — it is a refactor with its own a/b, not
+  part of recording a baseline — and it is filed as **dexllm#80**, which also
+  states what the move does NOT buy: several of those accessors are themselves
+  D8 hooks, so moving the renderer out shrinks D12, not D8.
 
 ---
 
@@ -377,3 +389,9 @@ does not upstream anything, and it does not pick up the three upstream fixes the
 baseline revealed dexllm is missing (`6ca92c3`, `47f7324`, `7415df9` — see
 `UPSTREAM` for each one's reachability verdict). Those are step 3 of dexllm#65
 and need their own change with its own a/b.
+
+Step 3 is now filed rather than merely deferred, one issue per bucket:
+**dexllm#79** proposes the nine **U** entries upstream, **dexllm#80** moves
+**D12** (**R**) out of the vendored tree, and **dexllm#81** picks up the three
+fixes above — in which **D7** (**C**) disappears, the one entry a rebase must
+*drop* rather than carry.

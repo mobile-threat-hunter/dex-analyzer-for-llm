@@ -6865,7 +6865,10 @@ item by volume is neither** — D12 is a *reduction* candidate, code that should
 leave the vendored tree rather than be sent upstream. An entry-weighted count and
 a line-weighted one point at different work, which is worth saying since step 3
 is where this goes next. A treatment is a classification of KIND; **nothing here
-has been proposed upstream**, and step 3 is deliberately not attempted.
+has been proposed upstream**, and step 3 is deliberately not attempted *in this
+change* — it is filed one issue per bucket: **dexllm#79** (the nine **U**),
+**dexllm#80** (**D12**, **R**) and **dexllm#81** (the three upstream fixes, in
+which **D7** — **C** — disappears).
 
 **The convention is now checked, offline.**
 [vendor/dexkit_core/UPSTREAM.blobs](vendor/dexkit_core/UPSTREAM.blobs) records the
