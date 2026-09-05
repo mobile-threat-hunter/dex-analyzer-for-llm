@@ -17,6 +17,7 @@ narrowed to the sample here.
 | `const-method-handle.dex` | 2,524 B | the only `const-method-type` anywhere in reach |
 | `multidex-container.dex` | 1,468 B | the only **v41 CONTAINER** in reach — 2 slices sharing one data section |
 | `permissive-tls.dex` | 4,872 B | 13 classes: 4 provably permissive TLS components, 2 that check, 3 duck-typing traps, a sub-interface and its invisible implementor, 2 installers |
+| `literal-escapes.dex` | 1,448 B | 16 string constants, one per branch of the Java literal-escaping rule, each rendered BOTH as a `static_values` initializer and as a `const-string` |
 
 `multidex.apk` is deliberately the WORST case, not a convenient one: it is the
 sample that produced 17 of the failures in dexllm#46 (no `switch` header, no
@@ -55,6 +56,31 @@ properties can only be tested with one:
 Both guards craft it IN PLACE and length-preservingly, so the committed bytes are
 never the thing under test — the file is the only available *carrier* of a
 method_handle section.
+
+`literal-escapes.dex` is the second fixture in this repo that was WRITTEN rather
+than copied (`permissive-tls.dex` was the first), so its source is committed beside
+it and the toolchain is named below. dexllm#83's defect was that `decompile_class`
+carried TWO string-literal escapers which disagreed, and no corpus sample can pin
+the fix: a value where the two escapers AGREE proves nothing, and which characters
+a given APK happens to carry is an environment fact. Its eleven values are one per
+branch of the rule - the controls Java has no short escape for, the C1 and
+separator characters one escaper rendered raw and the other escaped, a quote and a
+backslash (dexllm#22's property), a readable-BMP character and a surrogate pair.
+
+Each is a compile-time constant, so javac stores it in a `ConstantValue` attribute
+(d8 -> `static_values`, the `0x17 STRING` encoded_value arm) AND inlines every READ
+of it as a `const-string` (the method-body arm). `all()` returns an ARRAY rather
+than a concatenation precisely so javac cannot fold the values into one literal.
+So the class carries BOTH renderings of every value, which is what lets a test
+compare them - the issue's own evidence, in a committed file.
+
+It began with ELEVEN values and that was not enough. An adversarial review built two
+mutants that passed the entire suite: one that emits NO initializer for an empty
+value (the dexllm#64 shape - and the corpus oracle cannot see it, because it
+validates only the declarations that are PRESENT), and one that re-escapes DEL in
+the declaration alone (dexllm#83's own defect, and DEL and non-U+0085 C1 occur **0
+times in all 6,426 corpus declarations**, so nothing but a fixture reaches them).
+TAB, DEL, C1, APOS and EMPTY were added for exactly those two holes.
 
 `method_handles.dex` is here for the third variant of the same reason, and it is
 used UNMODIFIED rather than crafted. dexllm#61 taught four separate gates that
@@ -126,12 +152,22 @@ cross-reference — which is what lets one test state the issue:
 `summarize_capabilities` reports the app supplies its own trust decision, and only
 the detector says which decisions accept everything.
 
-It is the first fixture here that was AUTHORED rather than copied, so its source
-is committed beside it (`permissive-tls.java`) and it is re-derivable:
+It was the first fixture here that was AUTHORED rather than copied (`literal-escapes.dex`
+is the second), so its source is committed beside it (`permissive-tls.java`) and it is
+re-derivable:
 
 ```
 javac -source 8 -target 8 -d cls permissive-tls.java     # javac 17.0.17
 d8 --min-api 26 --release --output out cls/*.class       # D8 8.6.2-dev, build-tools 35.0.0
+```
+
+`literal-escapes.dex` is re-derivable the same way (the class is `public`, so the
+source has to be copied to `LiteralEscapes.java` first):
+
+```
+cp literal-escapes.java LiteralEscapes.java
+javac -encoding UTF-8 -d cls LiteralEscapes.java      # javac 17.0.17
+d8 --release --min-api 26 --output out cls/LiteralEscapes.class
 ```
 
 d8 is not byte-reproducible across versions, so the committed bytes are the

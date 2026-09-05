@@ -382,8 +382,9 @@ std::string Decompiler::DecompileClass(std::string_view class_descriptor) {
         if (!init.empty()) {
             out += " = ";
             // Sanitised like every other component: an initializer is NOT always
-            // pre-escaped text. Only the STRING arm (0x17) goes through
-            // PythonUnicodeEscape; the TYPE (0x18) and FIELD/ENUM (0x19/0x1b)
+            // pre-escaped text. Only the STRING arm (0x17) goes through an
+            // escaper — `EscapeJavaString`, the method body's own, since
+            // dexllm#83; the TYPE (0x18) and FIELD/ENUM (0x19/0x1b)
             // arms of DecodeEncodedValueText emit RAW pool identifiers, so a
             // `static final Class F = Astral.class;` re-raised at the pybind
             // boundary. Found by the delta review — the earlier whole-text pass

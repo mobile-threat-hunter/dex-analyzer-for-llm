@@ -2423,7 +2423,7 @@ An IDENTIFIER — a class descriptor, a member name, a proto — is dex string-p
 **Two further fixes the mandatory review gate forced — both CONFIRMED by BOTH reviewers independently, each having constructed and RUN the input:**
 
 - **The overlong round-trip break (the reason ART's canonicality check is now ported).** `VerifyMutf8` checked lead/continuation SHAPE only, documented in three places as "ART does the same". **ART does not**: `CheckIntraStringDataItem` rejects a non-NUL OVERLONG as an "Illegal representation" (dex_file_verifier.cc **:1897** 2-byte `value != 0 && value < 0x80`, **:1922** 3-byte `value < 0x800`) — verified against the AOSP checkout, not inferred. Consequence with the identifier pair in place: a 3-byte in-place patch (`nal` → `E0 83 A9`, the overlong for U+00E9) yields a `verify valid` dex where `list_classes()` returns `LAéysisTest;` and then `locate_class_dex` → **-1**, `list_class_methods` → **[]**, `render_class_smali` → **''**, `get_class_summary().is_internal` → **False** — an app class reported as external, with **no exception anywhere**. HEAD raised loudly on the same input, so decoding alone would have turned a crash into a silent **3-byte class-hiding primitive** — precisely the "strictly worse" outcome the pair exists to prevent. **Both checks are now ported** ([dex_verifier.cpp](native/core_ext/dex_verifier.cpp) `VerifyMutf8`): the pair becomes a genuine bijection over every dex that can LOAD, the "1:1 ART DexFileVerifier port" claim becomes true where it was not, and the smali decode-without-escaping argument becomes **structural** — no multibyte sequence can decode to a structural character any more, so it no longer leans on the member-name validator's `>= 0x00A0` arm. **This inverted an existing guard**: `test_smali_literals_cannot_be_broken_by_overlong_mutf8` asserted "the crafted dex must still verify"; it is now `test_overlong_mutf8_is_rejected_at_the_verifier` and asserts the load-time rejection (plus a canonical-3-byte control so it cannot pass on an unrelated rejection). Corpus overlong incidence: **0 across 316,407 string_data entries / 36 dexes**, so 0 false-reject. **Deciding to break the documented claim was escalated to the user (CLAUDE.md rule 5) with this evidence, and approved.**
-- **`PythonUnicodeEscape` did not escape the DOUBLE quote** ([dexitem_code_source.cpp](native/core_ext/dexitem_code_source.cpp)) — it mimics Python's `unicode-escape`, whose repr is SINGLE-quoted, but the caller wraps the result in double quotes to build a **Java** literal. So a `"` in a `static final String` initializer ended the literal early: **9 lines of real corpus output are invalid Java** (`= "<?xml version="1.0" encoding="utf-8"?>";`), and a crafted value appends a fabricated field declaration to the class body `decompile_class` hands an analyst or an LLM. Pre-existing and outside #22/#23; **escalated to the user and approved for this commit** because it is the same family (hostile input writing into the analysis view) and one line. The method-body (`EscapeJavaString`) and smali (`EscapeSmaliString`) emitters already escaped it; this path was the outlier.
+- **`PythonUnicodeEscape` did not escape the DOUBLE quote** ([dexitem_code_source.cpp](native/core_ext/dexitem_code_source.cpp) — the function was DELETED in dexllm#83, which put that arm on the method body's own escaper; the tenses below are as of dexllm#22) — it mimicked Python's `unicode-escape`, whose repr is SINGLE-quoted, but the caller wrapped the result in double quotes to build a **Java** literal. So a `"` in a `static final String` initializer ended the literal early: **9 lines of real corpus output are invalid Java** (`= "<?xml version="1.0" encoding="utf-8"?>";`), and a crafted value appends a fabricated field declaration to the class body `decompile_class` hands an analyst or an LLM. Pre-existing and outside #22/#23; **escalated to the user and approved for this commit** because it is the same family (hostile input writing into the analysis view) and one line. The method-body (`EscapeJavaString`) and smali (`EscapeSmaliString`) emitters already escaped it; this path was the outlier.
 
 **A third pass (delta review of the fixes) then caught a HIGH the refactor itself introduced:** replacing the whole-text `SanitizeUtf8` with per-component sanitising missed the **field INITIALIZER** append. Only the STRING arm (0x17) of `DecodeEncodedValueText` is pre-escaped; its **TYPE (0x18)** and **FIELD/ENUM (0x19/0x1b)** arms emit RAW pool identifiers, so a crafted `static final X F = Astral.class;` still made `decompile_class` raise on a `verify valid`, `list_classes`-clean dex — the exact failure this change claims to eliminate. Invisible to every measurement: the corpus has 0 non-ASCII identifiers AND 0 `0x18/0x19/0x1b` static values, and the astral fixture only renames a CLASS, so it never produces such an initializer. Fixed (`out += SanitizeUtf8(init);` — the seventh append site) and **verified discriminating by toggling that one line**: OFF raises at the reviewer's exact byte position, ON decompiles all 340 classes with the type rendering as `𐀀`. Guard: `test_astral_type_in_a_field_initializer_decompiles` (crafts the 0x17→0x18 retype in place). **Lesson: a whole-text safety net that is removed for a structurally-better per-component discipline must be replaced at EVERY append, and the append that carries "already-escaped" text may not always be escaped.** The same pass also flagged that the 2-byte overlong arm had zero coverage (the 3-byte one had all the payloads) — a `C1 A9` case was added — and that the non-vacuity control lacked the LCP guard its sibling fixtures compute.
 
@@ -2673,10 +2673,11 @@ from a craft: every value the gate can vouch for resolves, and those are exactly
 the ones that now always render.
 
 **A `//` comment, and `/* … */` would have been a hole.** A string element
-inside a rendered array is `PythonUnicodeEscape`d, which escapes quotes,
-backslashes and every control character — but NOT `*` or `/`, so a literal
-containing `*/` closes a block comment early and the rest of the line becomes
-code. A line comment has no such terminator. The remaining channel is a
+inside a rendered array is escaped (by `PythonUnicodeEscape` then, by
+`EscapeJavaString` since dexllm#83 — the argument is unchanged, only the function
+moved), which covers quotes, backslashes and the C0 controls — but NOT `*` or
+`/`, so a literal containing `*/` closes a block comment early and the rest of
+the line becomes code. A line comment has no such terminator. The remaining channel is a
 NEWLINE, and it is real rather than theoretical: an annotation element **name**
 is bounded by `VerifyEncodedAnnotation` as a string INDEX and never validated as
 a member name, so it can point at any pool string — and `invoke-custom.dex`
@@ -2735,8 +2736,11 @@ before the fix), lint trio clean, doc fences 77,
   reviewer refuted that from the ported predicate**: `case 0x2028: return
   leading == 0x202f;` REJECTS U+2028/U+2029, and `case 0x00: return leading >=
   0x00a0;` rejects NEL and every C1 — and a field TYPE goes through
-  `IsValidDescriptor` to the same predicate while a String initializer is
-  `PythonUnicodeEscape`d. So EVERY component of a declaration line excluded
+  `IsValidDescriptor` to the same predicate while a String initializer was
+  `PythonUnicodeEscape`d (dexllm#83 has since put it on `EscapeJavaString`, which
+  renders those three RAW — so a declaration line can carry one now, in a quoted
+  literal that cannot forge anything, and this sentence is scoped to what was
+  true at the time). So EVERY component of a declaration line excluded
   these before dexllm#64, the annotation element name is the only channel, and
   the honest conclusion is the opposite of the draft's: widen. `CommentSafe`
   escapes C0, DEL, the whole C1 range, the three separators and the backslash.
@@ -7084,6 +7088,454 @@ its import shim are too** [[reviewer-agents-swap-the-worktree]].
 layers (raw, `.pyi`, SDK port+adapter, MCP), the MCP tool names move with them, and
 `CrossReferencePort` declares the new pair. A consumer on the old spelling gets
 `AttributeError` / `unknown tool` — loud, which is the point. Release-notes material.
+
+### One string, one rendering - the class had two escapers (dexllm#83, 2026-09-05)
+
+`decompile_class` carried TWO string-literal escapers and they disagreed, so one
+pool string read two ways inside one class:
+
+| position | `Landroid/support/v4/text/util/FindAddress;->NL` |
+|---|---|
+| static declaration | `"\n\x0b\x0c\r\u0085\u2028\u2029"` |
+| method body, two lines down | `"\n\u000b\u000c\r"` then U+0085 / U+2028 / U+2029 **as themselves** |
+
+**`\xNN` is not a Java escape at all.** Java's set is `\b \t \n \f \r \" \' \\`,
+octal `\nnn` and `\uXXXX`; there is no `\x`, so the declaration line does not
+compile. The body line does - U+0085 / U+2028 / U+2029 are ordinary characters to
+javac, whose LineTerminator is LF / CR / CRLF only.
+
+`EscapeJavaString` ([writer.cpp](native/dad_cpp/writer.cpp)) reaches every literal
+in a method body and decodes through the shared ART-parity `mutf8` decoder.
+`PythonUnicodeEscape` ([dexitem_code_source.cpp](native/core_ext/dexitem_code_source.cpp))
+reached the `0x17 STRING` arm of `DecodeEncodedValueText`, i.e. every
+`static final String` initializer, and was a port of Python's `unicode-escape`
+inherited from androguard, where `DvClass.get_source` renders an `EncodedValue`
+through `repr`. That path had already been corrected away from its heritage
+piecemeal - IEEE754 float/double (dexllm#70), `null` / `true` / `false` instead of
+`None` / `True` / `False`, dexllm#22's `"` - but was never aligned with the Java
+writer that renders every other literal in the same file.
+
+**It was also a SECOND hand-rolled MUTF-8 decoder**, and it worked by coincidence:
+a hand-rolled UTF-8 reader applied to MUTF-8 bytes, correct only because MUTF-8's
+1/2/3-byte forms coincide with UTF-8's shape - a CESU-8 pair fell out as two
+surrogate escapes and `C0 80` as `\u0000` by accident of overlap, not by rule. The
+consolidation this file records - *"the three hand-rolled MUTF-8 decoders ... now
+share one decoder"* - covered `dad_cpp`'s three and never reached this one. It is
+the drift dexllm#63 and dexllm#70 each paid for: a rule read a second time
+diverges.
+
+**Fix - route the arm through the method body's own escaper and DELETE the second
+one.** Both take raw MUTF-8 pool bytes, `EscapeJavaString` is public in
+[writer.h](native/dad_cpp/include/writer.h), and `dexitem_code_source.cpp` already
+includes `dad_cpp` headers (`dad::GetType` serves the neighbouring `0x18` arm), so
+the hexagonal boundary is untouched - only `dad_cpp` is forbidden from including
+DexKit, not the reverse, and `scripts/check_dad_boundary.sh` checks exactly that
+direction. `PythonUnicodeEscape` had ONE caller, so it goes with the change; the
+call site's wrapping quotes and its `raw.empty()` special case go too, since
+`EscapeJavaString` emits its own quotes and already renders an empty value as `""`.
+
+**What it preserves:** dexllm#22's `"` escaping, which is why that arm was last
+touched - without it a crafted initializer ends the literal early and appends a
+fabricated field declaration to the class body an analyst or an LLM is reading.
+`EscapeJavaString` escapes `"`, `\\` and `'`, so the property survives; nothing in
+the repository said so until this change's guard.
+
+**What it WIDENS, stated rather than discovered:** a field declaration can now
+carry a raw DEL, a C1 character or U+0085 / U+2028 / U+2029 inside a quoted
+literal - exactly what a method body has always carried, and what makes the two
+agree. None of them is a Java LineTerminator, so neither the literal nor the
+statement can be forged by one; the cost is that Python's `str.splitlines()` sees
+a break where the emitter wrote none. **Split `decompile_class` output on `\n`**,
+which is the contract the D-3 `pc_map` and the smali listing already carry, now
+stated for this surface too in [docs/api.md](docs/api.md).
+
+**The residual this leaves, stated rather than discovered.** The fix makes the
+ADAPTER call the EMITTER: `dexitem_code_source.cpp` implements `IDexCodeSource`
+and now calls `dad::EscapeJavaString`, a helper of the Java WRITER. That direction
+is legal (`scripts/check_dad_boundary.sh` constrains only `dad_cpp`) and it is not
+new - `dad::GetType`, `MethodTypeText`, `MethodHandleText` and `MethodRefText` are
+already reached the same way, so this is the fifth such symbol, not a new
+dependency. But the reason it is reachable at all is the real debt: **the static
+initializer is rendered as Java TEXT on the adapter side of the port**, where a
+cleaner arrangement would carry the value across as structured data and let the
+Writer spell it. That predates this change (dexllm#64 built the whole
+expression-vs-comment split there) and moving it is a port-signature change with
+its own blast radius; what this fix does is remove the DUPLICATION that
+arrangement had grown, which is strictly the right direction even though it does
+not repay the debt. Moving `EscapeJavaString` itself to a neutral header was
+considered and declined: it is DAD `writer.py:757`'s port and its `// DAD:`
+traceability anchor lives with it.
+
+**Cost is structural rather than measured, and says so.** `EscapeJavaString`
+decodes through `mutf8::Mutf8ToUtf16`, which allocates, where the deleted function
+was a single pass. It runs once per static String initializer - **6,426 across
+27,077 classes** - against the same function already being called for every
+`const-string` in every method body, so the added work is a fraction of a percent
+of the calls that path already makes. The sweep is unchanged (21,374 classes,
+0-crash) and no timing regression was looked for beyond that, which is the honest
+statement of what was and was not measured.
+
+**Adjacent, deliberately unchanged:** the `0x18` TYPE and `0x19` / `0x1b`
+FIELD/ENUM arms use no escaper at all (they emit identifiers, sanitised at the
+append site), and `ParseCallSiteArg`'s own `case 0x17:` hands the IR a RAW pool
+string rather than a Java literal - which is why the source guard locates the arm
+inside `DecodeEncodedValueText` specifically.
+
+## Measured
+
+**a/b OFF=`3c68d8649e9430f5a47f69a5da14dbd1` vs
+ON=`516f5a18ab097a45f3c478c986d6794e`, SAME script, both `.so` md5-verified
+before AND after each capture - and the OFF build BIT-REPRODUCES the recorded HEAD
+md5**, which is the diff's functional content stated as a measurement (the
+mutation matrix's M0 reproduces it from the other direction, so the
+`decompiler.cpp` edit is provably comment-only). 46 sources - the whole bundled
+corpus (38 entries) plus every committed fixture (8); **45 of the 46 are files** -
+one `test_apk/APK` entry is a DIRECTORY - and **40 load** - x up to 15 axes
+(`identify`, load, `dex_count`, `verify_report`, the class list and its count,
+`list_value_strings`, a whole-decompile digest, its line count, the string field
+declarations as a set and as three counts, a whole-corpus smali digest, and an AST
+digest over a bounded slice) = **612 axis records present, 36 changed on exactly
+FOUR axes and ELEVEN sources**, over **2,335,069 decompiled lines** — counted as
+`len(decompile_class(c).split("\n"))` summed over all 27,077 classes, which is the
+`\n`-only convention this section's own advice names, and every count below uses
+the guard file's `FIELD` regex as its one predicate
+[[published-counts-need-the-repos-own-predicate]].
+
+**`identify`, load, `dex_count`, `verify_report`, the class lists, the class
+counts, `list_value_strings`, the smali digest, the AST digest, the decompiled
+LINE COUNT and the declaration COUNT are identical on every source.** Only the
+Java text moves, and only inside a declaration:
+
+| | OFF | ON |
+|---|---:|---:|
+| string field declaration lines | 6,426 | 6,426 |
+| ...carrying a `\xNN`, which is not Java | **18** (3 classes / 3 sources) | **0** |
+| ...carrying a `\uXXXX` | 169 | 143 |
+
+The residual 143 are not a shortfall: they are **exclusively** units below 0x20 and
+surrogates, i.e. exactly the escapes `EscapeJavaString` is supposed to emit and Java
+has no shorter form for. OFF escaped **266** distinct code points (268 counting the
+two `\xNN` codes) including **13,530** escapes of ordinary readable characters; ON
+escapes **35** — `\u0000`, `\u000b`, `\u000c` and 32 surrogates — and **0** of a
+readable character.
+
+A POSITIONAL line diff over the eleven moved sources (**2,180,749 lines** across
+24,988 classes, and the counts are equal per source so positions cannot drift)
+resolves the change
+exactly: **156 differing lines, 0 added, 0 removed, and all 156 are field
+declarations on BOTH halves.** No method-body line moves - which is the claim,
+since the method body is the reference the declaration was brought into line with.
+
+**One qualification, and it is the change's own headline that needs it** (a
+correctness reviewer's finding): "one rendering everywhere" is true of the
+DECLARATION and the BODY, which is the pair the issue is about, and NOT of the
+`// = ...` comment path. A string nested in a value with no Java expression form
+goes through `CommentSafe(SanitizeUtf8(...))`, which folds every backslash and
+separator to `<U+XXXX>` so a comment cannot be terminated (dexllm#64) - a third
+rendering, deliberate, and **0-incidence**: there are 0 comment-path initializers
+anywhere in the 46 sources, so no comment line can move here. The claim is narrowed
+in the C++ comment and in [docs/api.md](docs/api.md) rather than left absolute.
+
+**And the compiler settles it at CORPUS SCALE, with no model anywhere.** Every
+distinct String initializer either half renders - **2,051 of them** - was taken
+from the a/b captures (so both sides are what the two real builds emitted, not a
+reconstruction), wrapped in a class and handed to **javac 17**: the OFF half fails
+with **17 errors, every one `illegal escape character`**; the ON half **compiles,
+0 errors**. So "`\xNN` does not compile" and "a raw U+0085 / U+2028 / U+2029 inside
+a quoted literal does" are measured over the whole population rather than argued
+from the JLS. (An earlier version of this check reconstructed the OFF half from a
+MODEL of the deleted escaper and reported 26 errors - the model renders a NUL
+`\x00` where the real one renders `\u0000`, because the pool stores a NUL as the
+two bytes `C0 80` and the multibyte branch took it. A model can only overstate the
+half it stands in for, which is why the captures replaced it.)
+
+**And what actually MOVED, by direction, because "every difference is an
+improvement" is not true and should not be published as if it were.** Classifying
+all 156 changed lines by the code points that stopped being escaped:
+
+| direction | occurrences | code points |
+|---|---:|---|
+| A. `\xNN` -> a real Java escape (INVALID -> valid) | 33 | 3 - VT, FF, DEL |
+| B. `\uXXXX` -> the character itself, READABLE | 7,451 | 229 - Greek, Cyrillic, CJK, NBSP, ... |
+| C. `\uXXXX` -> the character itself, INVISIBLE | **269** | **4 - U+0085, U+009B, U+2028, U+2029** |
+
+A is unambiguous and B is the point. **C is the price**, and it is worth naming
+rather than folding into "improvement": an escape that SHOWED the character
+becomes a character that shows as nothing. It is accepted for three reasons, in
+order of weight - the method body has always rendered those four raw, so a
+consumer of `decompile_class` already had to cope and no NEW class of problem
+appears; they cannot forge Java (the 2,051-initializer javac run is over exactly
+this output); and the only way to avoid C while keeping the two positions in
+agreement is to escape them in the SHARED escaper, for the body too, which is a
+display-policy decision with its own blast radius rather than part of this fix.
+Escaping them in the DECLARATION alone is precisely mutant M7, which re-creates
+dexllm#83. The source pin forbids that and deliberately does NOT forbid the
+shared-escaper option.
+
+**Independent oracle, and it is what makes 156 a fact rather than a diff count**
+[[published-counts-need-the-repos-own-predicate]]: `java_literal()` applies the
+DOCUMENTED rule to the value returned by `list_class_strings` - the string
+ACCESSOR, a different code path from either renderer - and every string field
+declaration must equal it. Over the same 46 sources that is **6,426 / 6,426, 0
+mismatches**, 171 of them carrying a character on which the two escapers could
+disagree at all.
+
+One removal is PROVEN equivalent rather than argued: the call site's
+`raw.empty()` special case, which `EscapeJavaString` subsumes by emitting `""`
+itself. The population carries **257** empty-string initializers (`BuildConfig.FLAVOR`
+and friends) and they are byte-identical on both halves, so the branch was measured
+out rather than reasoned out. A correctness reviewer went one better and proved it
+UNREACHABLE-EQUIVALENT rather than merely unmoved: `PythonUnicodeEscape` on an empty
+input already returned an empty string, so the branch and the general path agreed by
+construction.
+
+parity **29/29**, pytest **1366 passed / 24 skipped** (+63: the 61-case new file
+plus two in dexllm#64's), TRUE corpus-less (`test_apk` MOVED aside) **956 passed /
+433 skipped / 0 failed** - **60 of the 61** new cases run in the CI leg, since every
+behavioural craft is on a committed fixture and only the corpus sweep skips -
+narrowed to `tests/data/multidex.apk` **1262 passed**, the two touched guard files
+green narrowed to **each of the 34 bundled samples one at a time**, sweep
+**21,374-class / 180,879 method-block 0-crash 0-timeout 0-error, GATE: PASS**,
+determinism 3 processes x 3 `PYTHONHASHSEED`s -> one digest, lint trio clean, doc
+fences 83, `scripts/check_dad_boundary.sh` clean.
+
+**The a/b harness lied once, in the way this repo already records.** It keyed each
+source on the BASENAME, and `multidex.apk` exists in BOTH populations
+(byte-identically - md5 `627622df6a7557fd0b85fdde6fccb7ad`), so one silently
+overwrote the other and the first run reported **44** sources where 45 were
+enumerated. Nothing was lost to it - the two files are the same bytes - but a
+published count has to be re-derivable, so the key became the relative path and
+BOTH halves were re-captured from scratch
+[[ab-harness-must-itself-be-deterministic]]. The first run also under-counted the
+invalid lines at 8 by inheriting the ISSUE's own predicate, `= "([^"]*)";`, which a
+value holding an escaped quote does not match; with one predicate throughout it is
+17.
+
+## Guards
+
+61 cases in
+[tests/test_string_literal_escaping.py](tests/test_string_literal_escaping.py), ALL
+corpus-INDEPENDENT except one corpus-gated sweep - every behavioural case runs on
+the COMMITTED `tests/data/literal-escapes.dex`, so they hold in the CI leg and
+under any `$DEXLLM_TEST_APK` narrowing - plus ONE in
+[tests/test_static_initializer_rendering.py](tests/test_static_initializer_rendering.py),
+where dexllm#64's comment path lives.
+
+**That fixture is the second in this repo that was AUTHORED rather than copied**
+(`permissive-tls.dex` was the first), and it exists because
+[[a-fixture-where-predicates-agree-proves-nothing]]: on a value both escapers
+render alike, every assertion here passes against the defect. Its **SIXTEEN** values
+are one per branch of the rule - VT / FF / NUL / DEL (the controls that produced a
+`\xNN`), TAB and the quote / apostrophe / backslash (the SHORT-escape arms), U+0085
+and a second C1 and the two separators (raw in one renderer, escaped in the other),
+a readable-BMP CJK pair, an emoji (the surrogate-pair case), and the EMPTY string
+(the branch this change deletes). Eleven of them was not enough, and two mutants
+that passed the whole suite are what said so - see the review section below. Each is a compile-time constant, so javac stores it in a
+`ConstantValue` attribute AND inlines every READ of it, and `all()` returns an
+ARRAY rather than a concatenation precisely so javac cannot fold the values into
+one literal - so the class carries BOTH renderings of every value and a test can
+compare them. The issue's own evidence, in a committed file.
+
+Three layers, and the matrix says they are complementary. **The two renderings
+must AGREE** (the property the issue is about). **Each must equal a PINNED
+literal** (agreement alone is satisfied by a build that is wrong in both places -
+M4 below is exactly that). **And each must equal the rule-derived ORACLE**, which
+is what the corpus sweep runs at scale. Plus dexllm#22's quote property, the
+`\xNN` ban, a raw-C0 ban (the Java sibling of
+`test_smali_never_contains_raw_control_chars`, which had no counterpart on this
+side and is exactly the property the change now leans on), the SHORT-escape
+ordering, the value accessor (dexllm#29's axis, which a rendering change must not
+move), and a SOURCE pin.
+
+**The short-escape ordering earns its own case** because it is the one part of
+`EscapeJavaString` that is load-bearing for COMPILABILITY rather than for looks:
+`\n` / `\r` / `\t` are units below 0x20 and must NOT take the `\uXXXX` branch,
+since a Java compiler translates a unicode escape before it tokenizes (JLS 3.3)
+and `\u000a` would leave the literal unterminated. The pinned MIXED literal covers
+it implicitly; a correctness reviewer asked for it to be said.
+
+**And TWO cases live with dexllm#64's craft machinery instead**, both of them the
+`0x1c` ARRAY recursion into `0x17` - the composition this change alters and that
+nothing exercised in EITHER direction:
+
+* the COMMENT direction (an array holding a string AND a method handle), which is
+  where the "one rendering" claim stops, since `CommentSafe` folds on top. Its
+  sibling uses an array of ONE handle, so no string element had ever reached
+  `CommentSafe`.
+* the EXPRESSION direction (an array of two strings). The corpus carries **0**
+  string-bearing array initializers, and every pre-existing `0x1C` craft is an int
+  array, an empty array, a nested array or a handle array - so the path had no
+  coverage at all.
+
+**The second one was found by the user asking "are there exceptions?", and its
+first cut was VACUOUS** - it used `"Hello"` and `string_ids[3]`, which are ASCII
+plus a raw 0x0A, i.e. exactly the subset on which the two escapers AGREE, so it
+passed against the pre-fix build. [[a-fixture-where-predicates-agree-proves-nothing]]
+one message after this file explains that trap. Pool string 3 is now re-laid with
+a VT and a U+00E9 - the two places the rules genuinely differ - and the guard fails
+against pre-fix and passes after, verified by rebuilding both.
+
+**The source pin is not decoration**: a correct but DUPLICATED escaper passes every
+behavioural case and drifts on the first edit, which is the entire history of this
+defect - and M1 below is killed by that pin ALONE. It strips comments before
+scanning, with the scanner `tests/test_arg_opcode_coverage.py` already owns rather
+than a fourth reading of the rule, because this change's own prose NAMES the
+deleted escaper [[source-text-guards-must-strip-comments]]; and it locates the arm
+inside `DecodeEncodedValueText`, since `ParseCallSiteArg` has a `case 0x17:` of its
+own that must NOT change.
+
+## 8 mutants, each BUILT and RUN with a distinct `.so` md5, each killed
+
+The harness restores from a pristine snapshot, `touch`es it (`copy2` preserves
+mtime and ninja would SKIP), rebuilds to the control before every mutant and
+ASSERTS the control md5 there and again when it ends; an anchor that does not match
+exactly once is reported as NOT A MUTANT.
+
+| mutant | fails |
+|---|---:|
+| **M0 pre-fix - the arm and the deleted escaper restored** (md5 = the OFF build's, exactly) | **31** |
+| M1 a correct but DUPLICATED escaper in core_ext | **1 - the source pin ALONE** |
+| M2 the arm re-wraps the literal in a second pair of quotes | 52 |
+| M3 the arm does not escape at all | 3 + 59 errors |
+| **M4 BOTH renderers move together** (escape every unit below 0x80) | **15 - and NOT one AGREE case** |
+| M5 the shared escaper stops escaping the double quote | 5 |
+| **M6 REVIEW: an empty value renders NO initializer at all** | **59 errors** - the fixture premise |
+| **M7 REVIEW: the shared call KEPT but wrapped for the declaration only** | **15** |
+
+**M4 is the one worth reading twice.** It changes the SHARED escaper, so the
+declaration and the body still agree - every one of the sixteen
+`..._the_way_the_method_body_does` cases PASSES - and it is killed only by the
+pinned literals, the oracle and dexllm#22's quote case. That is the argument for
+having three layers, stated as a measurement rather than as prose.
+
+**M6 and M7 are the reviewers', and each passed the WHOLE suite before the fixture
+was rebuilt.** M6 kills by ERRORING rather than failing: with no `EMPTY` initializer
+emitted the fixture's own premise assertion (`len(decls) == len(EXPECTED)`) fires and
+every case in the file errors at setup, which is the right shape - a fixture that
+stopped carrying what it claims to carry must not let anything downstream pass. M7
+is killed behaviourally AND by the source pin, but only because the pin now demands
+the exact RETURN statement; the containment check it replaced let M7 through.
+
+**M0 is the pre-fix control and its `.so` md5 IS the OFF build's**, which says the
+diff's whole functional content is one call site plus a deleted function. It kills
+7 of the 11 AGREE cases and 7 of the 11 PINNED ones - not all eleven, because on
+four values (the quote, the backslash, NUL and the emoji) the two escapers already
+coincided. That is the fixture's eleven values earning their place: a smaller one
+would have measured agreement it already had.
+
+**M1 did not COMPILE on its first attempt** (the duplicated body needs `mutf8.h`,
+which core_ext did not include), and a build failure is not a kill
+[[mutation-harness-restore-pitfalls]] - the harness's own `md5 UNCHANGED` /
+`DID NOT COMPILE` branches are what said so, and it was rebuilt and re-run.
+
+
+## What the two reviewers found - 0 in the production change, 2 holes in the GUARDS, 5 in the record
+
+Both worked in isolated private copies with their own build, and both re-derived
+the headline numbers from their own instruments rather than agreeing.
+
+**Neither could break the swap, and they attacked it hard.** A correctness
+reviewer built a byte-exact model of `EscapeJavaString` (validated against the
+SHIPPED function over 126,573 inputs, all 1- and 2-byte inputs exhaustive, 0
+mismatches) AND of the DELETED escaper (compiled VERBATIM out of `git show HEAD:`,
+125,793 inputs, 0 mismatches), then enumerated the difference over all 65,536
+UTF-16 code units the pool can carry: **2,147 render identically** (NUL, TAB/LF/CR,
+printable ASCII and ALL 2,048 surrogates) and **63,389 differ, every one an
+improvement** - 28 C0 controls `\xNN`->`\uXXXX`, DEL and 32 C1 to raw, and 63,328
+BMP characters to readable UTF-8. It then proved `SanitizeUtf8(EscapeJavaString(x))`
+is IDENTITY over 146,097 inputs including 3,000+ valid surrogate pairs, and
+round-tripped 44 rendered declarations through **javac 17 plus the running class**
+- every one compiles and every one yields back the exact UTF-16 units, including
+raw U+2028 (len 1, `[2028]`).
+
+An adversarial reviewer authored its own hostile fixture (14 constants, each in
+BOTH positions) and got **14/14 identical renderings**, including
+`a"; public static final String PWNED = "b` -> fully escaped, a literal `\u0041`
+-> `\\u0041` so the pre-lexer cannot translate it, and a lone surrogate -> valid
+UTF-8 with no pybind raise. It probed the decoder swap through the LOADER rather
+than by argument: a 4-byte UTF-8 body, an `F8` lead, a truncated 3-byte and an
+overlong are all REJECTED by `VerifyMutf8`, and the three that load (`C0 80`, a
+lone surrogate, a CESU-8 pair) render identically on both halves - so **no
+loadable input distinguishes the two decoders**. It also crafted a comment-path
+array holding a string of DEL / C1 / both separators / `*/` / a quote / a
+backslash and confirmed **no backslash survives and it is one line under
+`splitlines()`**, and verified `json.dumps(..., ensure_ascii=True)` on both the
+MCP and the SSE path, so no raw separator reaches a wire format.
+
+### The two findings, and they are the same shape
+
+**Both are mutants that pass the ENTIRE suite - 1341 tests, the source pin
+included - and each re-creates a defect this repo has an issue number for.** The
+common root: the fixture pinned eleven values and the corpus oracle can only see
+characters the corpus happens to carry, so what neither covered was covered by
+nothing at all [[a-guard-can-pass-having-exercised-nothing]].
+
+* **The EMPTY value.** `if (strings[idx].empty()) return {};` makes
+  `decompile_class` emit `public static final String EMPTY;` - exactly the
+  dexllm#64 shape this file states it removed, where a bare declaration means both
+  "no initializer" and "one we could not spell". It was invisible twice over: the
+  fixture had no empty value, AND the corpus oracle validates only the
+  declarations that are PRESENT (`assert d in want` over matched lines), so a
+  declaration that stops being emitted is structurally outside it. The a/b's
+  "256 empty initializers, unchanged" measured the property and did not GUARD it.
+* **DEL and the C1 range.** `return {DeclarationSafe(EscapeJavaString(...))};` -
+  a plausible make-a-declaration-terminal-safe tweak - re-creates dexllm#83's
+  defect for DEL (`"a\u007fb"` in the declaration beside `"a<DEL>b"` in the body
+  two lines down) while KEEPING the shared call, so the source pin's containment
+  check passed too. DEL and non-U+0085 C1 occur **0 times in all 6,421 corpus
+  declarations**, so nothing but a fixture can reach them - and `\t` and `'` had no
+  CI coverage either, since the corpus sweep is the one case that SKIPS there.
+
+Both are closed by the same two moves: the fixture is **REBUILT with sixteen
+values** (adding TAB, DEL, C1, APOS and EMPTY, each named in the source with why),
+and the source pin now requires the arm to RETURN the bare call rather than
+mention it [[pinned-literals-guard-only-the-constant-half]]. The rebuild also
+corrects a premise the correctness reviewer disproved by compiling the deleted
+escaper: FOUR values reached the `\xNN` arm, not the ones the first guard named -
+only a RAW byte below 0x20 or DEL reached it, so **NUL and NEL never did** (a dex
+NUL is stored `C0 80` and U+0085 is two bytes, so both took the multibyte branch),
+while MIXED, which the guard omitted, did.
+
+### Five in the record, every one fixed here
+
+* **The encoding rule was stated WRONGLY in two mirrors, each wrong in the half
+  the other got right.** `docs/api.md` said *"a unit below 0x20 and a surrogate
+  become `\uXXXX`, and everything else is written as itself"* - false for `\n` /
+  `\r` / `\t`, which take short escapes, and silent about `"` / `\\` / `'`, which
+  contradicts its OWN table two lines above; `README.md` said *"a `\uXXXX` escape
+  for a surrogate or control unit"* - false for DEL and C1, which are written raw,
+  in the very sentence this change extends to cover the initializer path. The
+  ordering is load-bearing rather than cosmetic (a Java compiler translates a
+  unicode escape before it tokenizes, JLS 3.3, so `\u000a` would unterminate the
+  literal), so the rule is now stated in FULL and in ORDER in both.
+* **Two published counts did not re-derive**, both from the first (basename-
+  collided, issue-regex) capture: 200 empty initializers is **256**, and 261
+  distinct escaped code points / 13,407 readable escapes are **265** (267 counting
+  the two `\xNN` codes) / **13,529**. Both reviewers measured the same values
+  independently. The claims they support are sound; only the numbers were wrong.
+* **One commit published two answers to one question**: `docs/api.md` said 147
+  lines / 14 `\xNN` where CLAUDE.md said 154 / 17, and the difference is exactly
+  the committed fixture (154-7, 17-3) - a SCOPE difference neither stated.
+* **The line totals were under a different convention.** 2,362,096 and 2,205,727
+  came from the capture harness's own concatenation; counted the way this section
+  tells consumers to count, `len(text.split("\\n"))` per class, they are
+  **2,335,059** and **2,180,739** - and publishing a line count under another
+  convention undercuts the sentence it sits beside.
+* **A tense and a scope.** The dexllm#22 bullet still described
+  `PythonUnicodeEscape` in the PRESENT tense for a function this commit deletes,
+  while two neighbouring historical mentions WERE updated - the
+  [[a-rule-you-wrote-binds-your-next-commit]] pattern, inconsistent inside one
+  commit. And the new consumer contract (*split on `\n`*) lived in ONE mirror
+  while `tests/test_static_initializer_rendering.py`, a file this diff EDITS,
+  parsed declaration lines with `splitlines()` in ten places. The contract is now
+  in `docs/api.md`, the `.pyi` docstring (what `help()` shows) and `docs/sdk.md`,
+  and the helper obeys it.
+
+### One precision the adversarial reviewer added to the a/b's own population
+
+"46 sources" is 46 ENUMERATED entries, of which **45 are files** - `test_apk/APK/
+apksig` is a DIRECTORY - and **40 load**. The 6 non-loaders are that directory,
+two certificates, a `.jar`, a resources-only APK and a `.apksig`.
 
 ### The vendored fork has a baseline, and the divergences are catalogued (dexllm#65, 2026-09-01)
 

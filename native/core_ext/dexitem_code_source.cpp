@@ -15,7 +15,8 @@
 #include "mmap.h"  // dexkit::MemMap (GetDexImageRange bounds)
 #include "slicer/dex_format.h"
 #include "slicer/reader.h"
-#include "util.h"  // dad::GetType — for TYPE/ENUM EncodedValue rendering
+#include "util.h"    // dad::GetType — TYPE/ENUM EncodedValue rendering
+#include "writer.h"  // dad::EscapeJavaString — STRING EncodedValue (dexllm#83)
 
 namespace dexkit::ext {
 
@@ -106,71 +107,6 @@ uint64_t ReadIntLE(const U1*& p, const U1* end, size_t nbytes) {
         v |= static_cast<uint64_t>(*p++) << (8 * i);
     }
     return v;
-}
-
-// String escape mimicking Python `str.encode("unicode-escape")` for the
-// subset of characters DAD actually emits in field initializers. Printable
-// ASCII passes through except the standard backslash escapes; everything
-// else becomes \\xNN or \\uNNNN.
-//
-// dexllm#22 — with ONE deliberate divergence from `unicode-escape`: the DOUBLE
-// quote is escaped as well. Python's codec escapes `'` and not `"` because its
-// repr is single-quoted; the caller here wraps the result in DOUBLE quotes to
-// build a JAVA literal, so a `"` in the value TERMINATED that literal early —
-// 9 lines of real corpus output are invalid Java (`= "<?xml version="1.0" …>";`)
-// and a crafted value could append a whole fabricated field declaration to the
-// class body that `decompile_class` hands an analyst or an LLM. The method-body
-// emitter (`EscapeJavaString`) and the smali emitter (`EscapeSmaliString`) both
-// already escape it; this path was the outlier.
-std::string PythonUnicodeEscape(std::string_view s) {
-    std::string out;
-    out.reserve(s.size() + 2);
-    auto append_hex2 = [&](uint8_t v) {
-        char buf[5];
-        std::snprintf(buf, sizeof(buf), "\\x%02x", v);
-        out += buf;
-    };
-    auto append_hex4 = [&](uint32_t cp) {
-        char buf[8];
-        std::snprintf(buf, sizeof(buf), "\\u%04x", cp);
-        out += buf;
-    };
-    const uint8_t* p = reinterpret_cast<const uint8_t*>(s.data());
-    const uint8_t* end = p + s.size();
-    while (p < end) {
-        uint8_t c = *p;
-        if (c == '\\') { out += "\\\\"; ++p; continue; }
-        if (c == '\'') { out += "\\'";  ++p; continue; }
-        if (c == '"')  { out += "\\\""; ++p; continue; }  // dexllm#22 — see above
-        if (c == '\n') { out += "\\n";  ++p; continue; }
-        if (c == '\r') { out += "\\r";  ++p; continue; }
-        if (c == '\t') { out += "\\t";  ++p; continue; }
-        if (c >= 0x20 && c < 0x7F) { out += static_cast<char>(c); ++p; continue; }
-        if (c < 0x80) { append_hex2(c); ++p; continue; }
-        // Decode UTF-8 to a codepoint, then emit \\uXXXX.
-        uint32_t cp = 0; size_t n = 0;
-        if      ((c & 0xE0) == 0xC0) { cp = c & 0x1F; n = 2; }
-        else if ((c & 0xF0) == 0xE0) { cp = c & 0x0F; n = 3; }
-        else if ((c & 0xF8) == 0xF0) { cp = c & 0x07; n = 4; }
-        else { append_hex2(c); ++p; continue; }
-        if (p + n > end) { append_hex2(c); ++p; continue; }
-        bool ok = true;
-        ++p;
-        for (size_t i = 1; i < n; ++i, ++p) {
-            uint8_t cc = *p;
-            if ((cc & 0xC0) != 0x80) { ok = false; break; }
-            cp = (cp << 6) | (cc & 0x3F);
-        }
-        if (!ok) { append_hex2(c); continue; }
-        if (cp <= 0xFFFF) append_hex4(cp);
-        else {
-            // Surrogate pair (DAD's Python repr does the same)
-            uint32_t v = cp - 0x10000;
-            append_hex4(0xD800 | (v >> 10));
-            append_hex4(0xDC00 | (v & 0x3FF));
-        }
-    }
-    return out;
 }
 
 // A float/double payload is "zero-extended to the RIGHT" (dex spec): the stored
@@ -342,9 +278,36 @@ EncodedValueText DecodeEncodedValueText(const U1*& p,
             uint64_t idx = ReadIntLE(p, end, nbytes);
             const auto& strings = item.GetStrings();
             if (idx >= strings.size()) return {};
-            std::string_view raw = strings[idx];
-            if (raw.empty()) return {std::string("\"\"")};
-            return {std::string("\"") + PythonUnicodeEscape(raw) + "\""};
+            // dexllm#83 — the SAME escaper the method-body path uses, so one
+            // pool string renders one way in a declaration and in a body. (NOT
+            // in the `// = ...` comment path: a string nested in a value with no
+            // Java expression form is additionally `CommentSafe`d, which folds
+            // every backslash and separator so a comment cannot be terminated —
+            // dexllm#64. Deliberate, and 0-incidence on the corpus.) It takes raw
+            // MUTF-8 and emits its own surrounding quotes, so the wrapping
+            // quotes and the empty-value special case both go away (it renders
+            // an empty string as `""` already).
+            //
+            // What it replaced, `PythonUnicodeEscape`, mimicked Python's
+            // `unicode-escape` because DAD renders an EncodedValue through
+            // `repr`, and that heritage cost two things: `\xNN`, which is NOT a
+            // Java escape at all (18 declaration lines that do not compile - of
+            // the 2,051 distinct String initializers the corpus renders, javac
+            // rejects 17 under the old spelling and 0 under this one), and a
+            // `\uXXXX` for every non-ASCII BMP char where the method body two
+            // lines down shows the character. 156 lines move, all of them
+            // declarations. It was also a SECOND hand-rolled MUTF-8 decoder that
+            // worked only because MUTF-8's 1/2/3-byte forms coincide with
+            // UTF-8's shape — the consolidation onto `dad::mutf8` never reached
+            // it, which is the drift dexllm#63 and dexllm#70 each paid for.
+            //
+            // dexllm#22's `"` escaping is PRESERVED: EscapeJavaString escapes
+            // `"`, `\` and `'`, so a crafted initializer still cannot end the
+            // literal early and append a fabricated field declaration.
+            // tests/test_string_literal_escaping.py holds all of this, including
+            // a SOURCE pin that this arm must CALL the shared escaper rather
+            // than grow a correct copy of it.
+            return {dexkit::dad::EscapeJavaString(strings[idx])};
         }
         case 0x18: {  // TYPE — class literal "pkg.Cls.class" or "int[].class"
             uint64_t idx = ReadIntLE(p, end, nbytes);

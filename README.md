@@ -201,9 +201,12 @@ androguard gets wrong:
 
 - **Unicode strings/identifiers** — dexllm decodes dex MUTF-8 to the exact UTF-16 code units
   ART builds in a `mirror::String` (decoder ported 1:1 from `art/libdexfile/dex/utf-inl.h`). In a
-  **string literal** it then renders those units one by one — readable UTF-8 for BMP text
-  (한글/CJK), a `\uXXXX` escape for a surrogate or control unit — so a supplementary (astral) char
-  stays a **surrogate pair**, exactly like ART. androguard DAD instead emits one `\u` followed by
+  **string literal** — in a method body and in a `static final` initializer alike, by one shared
+  escaper since dexllm#83 — it then renders those units one by one: the Java metacharacters and
+  `\n` `\r` `\t` take their short escapes, any OTHER unit below 0x20 and every surrogate become
+  `\uXXXX` (so a supplementary (astral) char stays a **surrogate pair**, exactly like ART), and
+  everything else is written as itself — readable UTF-8 for BMP text (한글/CJK), and raw for DEL,
+  the C1 range and U+0085 / U+2028 / U+2029. androguard DAD instead emits one `\u` followed by
   the full codepoint hex — e.g. a real-corpus `U+DFFFD` comes out as `"\udfffd"` (**5 hex digits →
   invalid Java**: the lexer reads `\udfff` + a literal `d`, silently corrupting the string), where
   dexllm emits the valid `"\udb3f\udffd"`. (Verified against the actual AOSP source — see

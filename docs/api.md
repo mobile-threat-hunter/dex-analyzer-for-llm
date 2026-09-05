@@ -424,6 +424,41 @@ widening to float).
 | `VALUE_METHOD` | a Python list — `['LMain;', '<init>', ['()', 'V']]` | a trailing `// = Main::new` comment (dexllm#64) |
 | `VALUE_ARRAY` / `VALUE_ANNOTATION` | a **memory address** — different every run | `{a, b}` / a trailing `// = @Foo(…)` comment (dexllm#64) |
 | a `"` inside a `String` | ends the literal early | escaped as `\"` (dexllm#22) |
+| every other character in a `String` | ASCII-escaped through `repr` — including `\xNN`, which is not a Java escape | the SAME rendering a method-body literal gets (dexllm#83) |
+
+A `String` initializer is escaped by the **same function that renders every
+literal in a method body**, so one pool string reads the same way in a declaration
+and in a body (dexllm#83). It had its own escaper until then, a port of Python's
+`unicode-escape` inherited from androguard's `repr`, and the two disagreed on **156
+declaration lines** across the bundled corpus and the committed fixtures — 18 of
+them carrying a `\xNN`, which Java has no such escape for, and the rest escaping a
+character the body two lines down showed readably. Of the 2,051 distinct `String`
+initializers the corpus renders, the old spelling gives javac **17 `illegal escape
+character` errors** and the new one **compiles clean**.
+
+What follows from sharing the escaper is the **method-body encoding rule**, in this
+order:
+
+1. `\` `"` `'` and `\n` `\r` `\t` take their short Java escapes. The ordering is
+   load-bearing rather than cosmetic — a Java compiler translates a `\uXXXX` before
+   it tokenizes (JLS 3.3), so rendering LF as `\u000a` would leave the literal
+   unterminated.
+2. Any OTHER unit below 0x20, and any surrogate, becomes `\uXXXX` (so a
+   supplementary character stays the surrogate PAIR ART holds in memory).
+3. Everything else is written as itself — including DEL, the C1 range and
+   U+0085 / U+2028 / U+2029.
+
+So a field declaration can now carry a character Python's `str.splitlines()` treats
+as a line break, exactly as a method body always could: **split `decompile_class`
+output on `\n`, never `str.splitlines()`**, the same contract the D-3 `pc_map` and
+the smali listing carry.
+
+One qualification, because it is the only place the "same rendering" claim stops: a
+string nested inside a value that has **no Java expression form** (an array holding
+a method handle, say) rides in the trailing `// = …` comment, where `CommentSafe`
+folds every backslash and separator to `<U+XXXX>` so the comment cannot be
+terminated (dexllm#64). That is a third rendering, it is deliberate, and it has 0
+incidence in the bundled corpus.
 
 A value with **no Java expression form at all** — a method handle, a method
 reference, an annotation, or an array containing one — is rendered as a trailing

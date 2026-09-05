@@ -183,7 +183,11 @@ def _decl(tmp_path, value_type: int, payload: bytes, stem: str) -> str:
     report = dexllm.verify(str(out))
     assert report and all(r["valid"] for r in report), report
     src = dexllm.DexKit(str(out)).decompile_class(_FIXTURE_CLASS)
-    hits = [ln.strip() for ln in src.splitlines() if _FIELD0 in ln]
+    # `split("\n")`, not `splitlines()`: since dexllm#83 a declaration can carry a
+    # raw U+0085 / U+2028 / U+2029 inside its literal, and `splitlines()` breaks on
+    # all three where the emitter does not. That is the contract docs/api.md states
+    # for this output; a helper that parses it must not be the counterexample.
+    hits = [ln.strip() for ln in src.split("\n") if _FIELD0 in ln]
     assert len(hits) == 1, hits
     return hits[0]
 
@@ -298,7 +302,7 @@ def test_an_unrenderable_value_is_distinguishable_from_no_value(tmp_path):
     src = dexllm.DexKit(str(out)).decompile_class(_FIXTURE_CLASS)
     bare = [
         ln.strip()
-        for ln in src.splitlines()
+        for ln in src.split("\n")
         if ln.strip().startswith("static final") and ln.strip().endswith(";")
     ]
     assert bare, src
@@ -457,7 +461,7 @@ def test_the_static_value_route_dispatches_on_the_handle_kind(
     assert all(r["valid"] for r in dexllm.verify(str(out))), "the craft must load"
     hits = [
         ln.strip()
-        for ln in dexllm.DexKit(str(out)).decompile_class(_FIXTURE_CLASS).splitlines()
+        for ln in dexllm.DexKit(str(out)).decompile_class(_FIXTURE_CLASS).split("\n")
         if _FIELD0 in ln
     ]
     assert hits == [f"static final int {_FIELD0};  // = {want}"], hits
@@ -521,7 +525,7 @@ def test_no_field_carries_both_an_expression_and_a_comment(tmp_path):
     dexllm = pytest.importorskip("dexllm")
     out = _craft(tmp_path, 0x16, bytes([_HANDLE_0]), "disjoint")
     src = dexllm.DexKit(str(out)).decompile_class(_FIXTURE_CLASS)
-    for line in src.splitlines():
+    for line in src.split("\n"):
         stripped = line.strip()
         if not stripped.startswith(("static ", "public ", "private ", "protected ")):
             continue
@@ -548,7 +552,7 @@ def test_the_fixture_itself_carries_a_newline_the_comment_must_escape(tmp_path):
     out = _craft(tmp_path, 0x1D, payload, "newline")
     assert all(r["valid"] for r in dexllm.verify(str(out)))
     src = dexllm.DexKit(str(out)).decompile_class(_FIXTURE_CLASS)
-    hits = [ln for ln in src.splitlines() if _FIELD0 in ln]
+    hits = [ln for ln in src.split("\n") if _FIELD0 in ln]
     assert len(hits) == 1, hits
     assert "<U+000A>" in hits[0], hits[0]  # escaped, and therefore still one line
     # And the line it sits on is a whole declaration, not a fragment.
@@ -557,7 +561,7 @@ def test_the_fixture_itself_carries_a_newline_the_comment_must_escape(tmp_path):
 
 
 # Every byte a consumer may treat as a line break, plus the ones that reach a
-# terminal as an escape.  Python's `str.splitlines()` breaks on ALL of these;
+# terminal as an escape.  Python's `str.split("\n")` breaks on ALL of these;
 # `\n` alone is the smallest part of the problem, and an earlier version of the
 # fix folded only `\n` and `\r`.
 _SEPARATORS = [
@@ -620,7 +624,7 @@ def test_no_byte_in_a_comment_can_forge_a_line_of_java(tmp_path, tag, sep, want)
     src = dexllm.DexKit(str(out)).decompile_class(_FIXTURE_CLASS)
 
     # 1. The forged text never starts a line under ANY line-splitting rule.
-    for line in src.splitlines():
+    for line in src.split("\n"):
         if "PWNED" in line:
             assert "//" in line.split("PWNED")[0], line
 
@@ -640,7 +644,7 @@ def test_no_byte_in_a_comment_can_forge_a_line_of_java(tmp_path, tag, sep, want)
 
     # 4. THE invariant: no backslash reaches a comment, so no `\uXXXX` can exist
     #    for javac to translate into a line break ahead of comment recognition.
-    for line in src.splitlines():
+    for line in src.split("\n"):
         if "// = " in line:
             assert "\\" not in line.split("// = ", 1)[1], line
 
@@ -691,7 +695,7 @@ def test_a_non_ascii_annotation_name_survives_the_boundary(tmp_path, tag, body, 
     )
     assert all(r["valid"] for r in dexllm.verify(str(out))), "the gate lets it in"
     src = dexllm.DexKit(str(out)).decompile_class(_FIXTURE_CLASS)  # must not raise
-    hits = [ln for ln in src.splitlines() if _FIELD0 in ln]
+    hits = [ln for ln in src.split("\n") if _FIELD0 in ln]
     assert len(hits) == 1, hits
     if want is not None:
         assert want in hits[0], (want, hits[0])
@@ -704,14 +708,93 @@ def test_a_non_ascii_annotation_name_survives_the_boundary(tmp_path, tag, body, 
 def test_a_string_element_cannot_close_a_block_comment(tmp_path):
     """Why the marker is `//` and not `/* ... */`.
 
-    A string element inside a rendered array is `PythonUnicodeEscape`d, which
-    escapes quotes, backslashes and every control character - but NOT `*` or
-    `/`.  So a literal containing `*/` would end a block comment early and turn
-    the rest of the line into code.  A line comment has no such terminator.
+    A string element inside a rendered array is escaped by `EscapeJavaString`
+    (`PythonUnicodeEscape` until dexllm#83 — the argument is unchanged, only the
+    function name moved), which escapes quotes, backslashes and control
+    characters - but NOT `*` or `/`.  So a literal containing `*/` would end a
+    block comment early and turn the rest of the line into code.  A line comment
+    has no such terminator.
     """
     decl = _decl(tmp_path, 0x1C, bytes([1, 0x16, _HANDLE_0]), "no_block_comment")
     assert "/*" not in decl and "*/" not in decl, decl
     assert "// = " in decl, decl
+
+
+def test_a_string_element_in_an_ARRAY_uses_the_shared_escaper(tmp_path):
+    r"""The EXPRESSION direction of the same recursion, which nothing exercised.
+
+    `0x1c` recurses into `0x17`, so an array of STRINGS renders each element
+    through the escaper dexllm#83 changed. The corpus has **0** string-bearing
+    array initializers and every pre-existing `0x1C` craft here is an int array,
+    an empty array, a nested array or a method-handle array (the COMMENT
+    direction) - so this path had no coverage at all on either side.
+
+    The element CONTENT is what makes it discriminate, and the first cut of this
+    guard got that wrong: `"Hello"` and `string_ids[3]` are pure ASCII plus a raw
+    0x0A, which BOTH escapers render identically, so it PASSED against the
+    pre-fix build. Pool string 3 is re-laid with a VT and a U+00E9 - the two
+    places the rules genuinely differ (`\x0b` vs `\u000b`, and `\u00e9` vs the
+    readable character). `"Hello"` stays as the agreeing control.
+    """
+    dexllm = pytest.importorskip("dexllm")
+    out = _craft(
+        tmp_path,
+        0x1C,
+        bytes([2, 0x17, _STRING_NAME, 0x17, _STRING_WITH_NEWLINE]),
+        "arr_of_strings",
+        # The ` C` prefix is the shape the separator crafts above already use:
+        # `string_ids` must stay in ART UTF-16 sort order, and a body that starts
+        # elsewhere reorders string 3 past a neighbour and the dex stops verifying.
+        string3=b" C\x0b\xc3\xa9",
+    )
+    assert all(r["valid"] for r in dexllm.verify(str(out))), "the craft must load"
+    hits = [
+        ln.strip()
+        for ln in dexllm.DexKit(str(out)).decompile_class(_FIXTURE_CLASS).split("\n")
+        if _FIELD0 in ln
+    ]
+    assert len(hits) == 1, hits
+    decl = hits[0]
+    # An EXPRESSION, not the `// = ` comment: both elements have a Java form.
+    assert " = {" in decl and "// = " not in decl, decl
+    assert '"Hello"' in decl, decl
+    # The shared rule: a control below 0x20 escapes as Java, a BMP char is read.
+    assert "\\u000b" in decl, decl
+    assert chr(0xE9) in decl, decl
+    # ...and NOT the rules the deleted escaper had.
+    assert "\\x0b" not in decl, decl
+    assert "\\u00e9" not in decl, decl
+
+
+def test_a_string_element_in_a_comment_is_folded_not_escaped(tmp_path):
+    r"""The one place dexllm#83's "one rendering" does NOT hold, pinned as such.
+
+    An array holding a STRING and a method handle has no Java expression form, so
+    the whole value rides in the `// = ...` comment - and the string element goes
+    through `CommentSafe` on top of the escaper, which folds every backslash to
+    `<U+005C>` so the comment cannot be terminated by a `\uXXXX` the Java lexer
+    would translate first (JLS 3.3).
+
+    Until dexllm#83 no test could reach this: its sibling above uses an array of
+    ONE method handle, so no string element had ever met `CommentSafe`, and 0
+    comment-path initializers exist anywhere in the corpus. It matters now
+    because the escaper that feeds it changed - `string_ids[3]` ends in a RAW
+    0x0A, which the old escaper and the new one both render `\n`, and it is the
+    FOLDING that keeps that safe rather than the escaping.
+    """
+    decl = _decl(
+        tmp_path,
+        0x1C,
+        bytes([2, 0x17, _STRING_WITH_NEWLINE, 0x16, _HANDLE_0]),
+        "comment_string_element",
+    )
+    assert "// = " in decl, decl
+    comment = decl.split("// = ", 1)[1]
+    assert "TestBadBootstrapArguments::bsm" in comment, decl  # the handle element
+    assert "<U+005C>n" in comment, decl  # the string element's escape, FOLDED
+    # The invariant CommentSafe exists for: no backslash survives, so nothing in
+    # the comment can be a unicode escape and nothing can end the line.
+    assert "\\" not in comment, decl
 
 
 # -- cross-layer agreement ----------------------------------------------------
@@ -737,7 +820,7 @@ def test_the_two_layers_spell_a_method_type_identically(tmp_path):
     out = _craft(tmp_path, 0x15, bytes([_PROTO_MIXED]), "agree")
     dk = dexllm.DexKit(str(out))
     decl = [
-        ln for ln in dk.decompile_class(_FIXTURE_CLASS).splitlines() if _FIELD0 in ln
+        ln for ln in dk.decompile_class(_FIXTURE_CLASS).split("\n") if _FIELD0 in ln
     ][0]
     rendered = decl.split(" = ", 1)[1].rstrip(";")
     # Not merely "some methodType text": the parameters must be in this order.

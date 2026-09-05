@@ -1009,6 +1009,13 @@ class DexKit:
     def decompile_class(self, class_descriptor: str) -> str:
         r"""Decompile a whole class: package, header, fields, method bodies.
 
+        **Split the result on ``"\\n"``, never ``str.splitlines()``** - a string
+        literal may carry a raw U+0085 / U+2028 / U+2029, which ``splitlines()``
+        treats as a line break and the emitter does not. True of a method body
+        since dexllm#28, and of a ``static final String`` initializer since
+        dexllm#83 put both on one escaper. Same contract as
+        ``decompile_method_with_pc_map`` and the smali listing.
+
         Example::
 
             >>> dk.decompile_class(
