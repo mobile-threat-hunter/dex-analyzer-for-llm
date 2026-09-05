@@ -361,7 +361,7 @@ def test_the_catalogue_publishes_the_numbers_it_measures() -> None:
     assert added == 0
     # The line totals come from the fork-point tree, which is not in this repo,
     # so they are pinned rather than recomputed -- with the predicate stated.
-    assert "**+1271 / -131 lines**" in text
+    assert "**+1288 / -131 lines**" in text
     assert "git diff --numstat" in text
 
 

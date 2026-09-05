@@ -29,6 +29,7 @@ from .model import (
     ExternalMethodRef,
     ExternalTypeRef,
     ExtractedDex,
+    FieldAccessSite,
     FieldInfo,
     FieldRef,
     IocReport,
@@ -274,23 +275,29 @@ class CrossReferencePort(Protocol):
         """
         ...
 
-    def find_methods_reading_field(self, field_descriptor: str) -> tuple[str, ...]:
-        """Descriptors of methods that READ (iget*/sget*) the given field.
+    def find_field_read_sites(
+        self, field_descriptor: str
+    ) -> tuple[FieldAccessSite, ...]:
+        """Every site that READS (iget*/sget*) the given field.
 
-        ``field_descriptor`` is the ``Lcls;->name:Type`` form; empty if the field
-        isn't declared in a loaded dex.
+        ``field_descriptor`` is the ``Lcls;->name:Type`` form; empty if no loaded
+        dex references the field.
 
-        One entry per access INSTRUCTION, not per method (the same semantics as
-        :class:`CallSite`), so a method with two ``iget``s of the field appears
-        twice. Wrap in ``set()`` when you want distinct methods.
+        One row per access INSTRUCTION, not per method (the same semantics as
+        :class:`CallSite`) — and, unlike the descriptors these returned before
+        dexllm#84, the duplicates are DISTINCT records that differ in
+        ``bytecode_offset``. For distinct methods use
+        ``{s.method_descriptor for s in ...}``.
         """
         ...
 
-    def find_methods_writing_field(self, field_descriptor: str) -> tuple[str, ...]:
-        """Descriptors of methods that WRITE (iput*/sput*) the given field.
+    def find_field_write_sites(
+        self, field_descriptor: str
+    ) -> tuple[FieldAccessSite, ...]:
+        """Every site that WRITES (iput*/sput*) the given field.
 
-        Same per-instruction (undeduplicated) semantics as
-        :meth:`find_methods_reading_field`.
+        Same per-instruction rows as :meth:`find_field_read_sites`, with an
+        ``iput*``/``sput*`` opcode.
         """
         ...
 

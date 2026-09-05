@@ -217,8 +217,8 @@ def test_new_xref_tools_execute_without_error(dk):
         ("find_type_references", {"type_descriptor": "Ljava/lang/String;", "limit": 5}),
         ("find_methods_using_int_literals", {"values": [2, 255], "limit": 5}),
         ("find_methods_using_double_literals", {"values": [1.0], "limit": 5}),
-        ("find_methods_reading_field", {"field_descriptor": "Lno/such/C;->x:I"}),
-        ("find_methods_writing_field", {"field_descriptor": "Lno/such/C;->x:I"}),
+        ("find_field_read_sites", {"field_descriptor": "Lno/such/C;->x:I"}),
+        ("find_field_write_sites", {"field_descriptor": "Lno/such/C;->x:I"}),
     ]
     for call in filter(None, calls):
         out = tools.execute(*call, dk)
@@ -227,7 +227,7 @@ def test_new_xref_tools_execute_without_error(dk):
     # an unknown field is a clean empty page, not a crash
     assert (
         tools.execute(
-            "find_methods_reading_field", {"field_descriptor": "Lno/such/C;->x:I"}, dk
+            "find_field_read_sites", {"field_descriptor": "Lno/such/C;->x:I"}, dk
         )["items"]
         == []
     )
@@ -237,7 +237,7 @@ def test_new_xref_tools_execute_without_error(dk):
         (
             x
             for x in dk.list_fields()
-            if tools.execute("find_methods_reading_field", {"field_descriptor": x}, dk)[
+            if tools.execute("find_field_read_sites", {"field_descriptor": x}, dk)[
                 "items"
             ]
         ),
@@ -245,9 +245,15 @@ def test_new_xref_tools_execute_without_error(dk):
     )
     if fd is None:
         pytest.skip("no read field in the fixture")
-    rd = tools.execute("find_methods_reading_field", {"field_descriptor": fd}, dk)
-    wr = tools.execute("find_methods_writing_field", {"field_descriptor": fd}, dk)
-    reader_only = [m for m in rd["items"] if m not in wr["items"]]
+    rd = tools.execute("find_field_read_sites", {"field_descriptor": fd}, dk)
+    wr = tools.execute("find_field_write_sites", {"field_descriptor": fd}, dk)
+    # Every row names the queried field and carries a real offset (dexllm#84 —
+    # before it, the rows were bare strings and a repeat carried no information).
+    for row in rd["items"] + wr["items"]:
+        assert row["field"] == fd and row["bytecode_offset"] >= 0
+    readers = {r["method"] for r in rd["items"]}
+    writers = {w["method"] for w in wr["items"]}
+    reader_only = sorted(readers - writers)
     if reader_only:
         sm = dk.render_method_smali(reader_only[0])
         assert "iget" in sm or "sget" in sm
@@ -1038,7 +1044,7 @@ class _KeyStubDk:
             return [_KeySite("Lcom/example/App;->onCreate()V")]
         return []
 
-    def find_methods_reading_field(self, descriptor):
+    def find_field_read_sites(self, descriptor):
         return []
 
 

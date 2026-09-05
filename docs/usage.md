@@ -208,13 +208,15 @@ from dexkit's exact `field_get_method_ids` / `field_put_method_ids` reverse inde
 
 ```python
 fd = "La2dp/Vol/StoreLoc;->MAX_ACC:F"          # Lcls;->name:Type
-dk.find_methods_reading_field(fd)                  # -> [method descriptors that read it]
-dk.find_methods_writing_field(fd)                 # -> [method descriptors that write it]
+len(dk.find_field_read_sites(fd))              # -> 1  (FieldAccessSite per iget*/sget*)
+len(dk.find_field_write_sites(fd))             # -> 3  (…per iput*/sput*)
 ```
 
-Both return **one entry per access instruction, not per method** (like `CallSite`),
-so a method touching the field twice appears twice — `set()` the result when you
-want distinct methods.
+Both return **one row per access instruction, not per method** (like `CallSite`) —
+and since dexllm#84 the duplicates are DISTINCT records, differing in
+`bytecode_offset`. `{s.method_descriptor for s in ...}` gives the distinct methods,
+which is what the pair returned before (as a list, where a repeat carried no
+information at all).
 
 Type xref (signature positions) — where a `Lpkg/Cls;` type appears as a field type,
 a method return type, or a method parameter:
@@ -450,7 +452,7 @@ and declare your own `category_vocabulary` / `flag_vocabulary` — `only_categor
 validates against **your** catalog's, so a custom taxonomy stays filterable.
 A key is either a **method** descriptor (`Lcls;->name(proto)ret`, resolved through
 `find_call_sites_to`) or a **field** descriptor (`Lcls;->NAME:Ltype;`, resolved
-through `find_methods_reading_field` — how an app reaches contacts/SMS/calendar,
+through `find_field_read_sites` — how an app reaches contacts/SMS/calendar,
 by reading a framework `CONTENT_URI` constant). The two are told apart by shape,
 so no schema key says which; any other shape resolves nothing, silently.
 
@@ -631,7 +633,7 @@ name query and is lenient — all operations here auto-normalise their inputs, s
 pass a descriptor (`Landroid/app/Activity;`), a smali path (`android/app/Activity`), or a
 Java dotted name (`android.app.Activity`). By contrast the IDENTITY APIs (decompile,
 `find_call_sites_to` / `resolve_call_args`, `find_type_references`,
-`find_methods_reading_field` / `find_methods_writing_field`,
+`find_field_read_sites` / `find_field_write_sites`,
 `render_*_smali`, `get_class_summary`, `list_class_methods`, `list_class_strings` /
 `list_method_strings`, `locate_class_dex`) address one
 EXACT entity and require the canonical Dalvik descriptor (the L-form emitted by `list_*` /
@@ -1050,8 +1052,8 @@ sites = session.find_call_sites_to("Landroid/util/Log;->d(...)I")     # -> tuple
 callees = session.find_call_sites_from("Lcom/x/Y;->m(I)V")              # -> tuple[CallSite, ...] (caller fixed)
 for rc in session.resolve_call_args("...->getInstance(Ljava/lang/String;)..."):
     for arg in rc.args: arg.kind, arg.string_value          # -> ResolvedArg (only the kind's field set)
-session.find_methods_reading_field("Lcom/x/Y;->token:Ljava/lang/String;")  # -> methods that iget/sget it
-session.find_methods_writing_field("Lcom/x/Y;->token:Ljava/lang/String;")  # -> methods that iput/sput it
+session.find_field_read_sites("Lcom/x/Y;->token:Ljava/lang/String;")   # -> FieldAccessSite per iget/sget
+session.find_field_write_sites("Lcom/x/Y;->token:Ljava/lang/String;")  # -> FieldAccessSite per iput/sput
 session.find_type_references("Lcom/x/Y;")                 # -> TypeReferences(fields, methods_returning, methods_with_param)
 
 info = session.class_info("Lcom/x/Y;")                    # -> ClassInfo(superclass_descriptor, interface_descriptors, ...)

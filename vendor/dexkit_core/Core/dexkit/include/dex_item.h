@@ -91,6 +91,23 @@ public:
     [[nodiscard]] const std::vector<std::vector<std::pair<uint16_t, uint32_t>>> &
     GetMethodCallerIds() const { return method_caller_ids; }
 
+    // dexllm#84 extension hook — the field->accessors reverse index, in the SAME
+    // raw form and for the SAME reason as GetMethodCallerIds above: FieldGetMethods
+    // / FieldPutMethods wrap these as MethodBeans, which keeps only the accessor's
+    // DESCRIPTOR, and a caller that wants the per-INSTRUCTION site has to walk the
+    // accessor's body — for which it needs the (origin_dex_id, method_idx) pair the
+    // bean discards. Indexed by this dex's field_idx; valid after
+    // InitCache(kFieldRwMethod) / InitFullCache().
+    //
+    // Cross-dex aggregation applies exactly as it does to method_caller_ids: an
+    // accessor living in another dex is MOVED into the declaring dex's list and
+    // tagged with its ORIGIN dex_id, so a consumer must re-resolve the field to
+    // that origin dex's own field_idx before matching instruction operands.
+    [[nodiscard]] const std::vector<std::vector<std::pair<uint16_t, uint32_t>>> &
+    GetFieldGetMethodIds() const { return field_get_method_ids; }
+    [[nodiscard]] const std::vector<std::vector<std::pair<uint16_t, uint32_t>>> &
+    GetFieldPutMethodIds() const { return field_put_method_ids; }
+
     // dexllm#20 extension hook — upstream's own string comparison (kmp + ignore_case
     // + SimilarRegex ^prefix / suffix$), hoisted from private so a dexllm-side matcher
     // (DexKitExt::FindClassesDeclaringStrings, which searches class-level EncodedValue

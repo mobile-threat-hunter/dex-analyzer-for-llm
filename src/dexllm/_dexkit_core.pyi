@@ -355,6 +355,42 @@ class CallSite:
     @property
     def invoke_opcode(self) -> int: ...
 
+class FieldAccessSite:
+    """One field-access INSTRUCTION — an ``iget*``/``iput*``/``sget*``/``sput*``.
+
+    The field cross-reference's row, and the sibling of :class:`CallSite`. It does
+    NOT reuse that record's ``caller_*`` prefix: an ``iget`` calls nothing, so
+    spelling the accessor a "caller" would give one word two grammars.
+
+    ``dex_id`` is the dex of the ACCESSING METHOD — which is what makes
+    ``method_idx`` meaningful — and may DIFFER from the dex that declares the
+    field, since a field is referenced across dexes.
+    """
+
+    @property
+    def method_descriptor(self) -> str:
+        """The method performing the access."""
+
+    @property
+    def dex_id(self) -> int:
+        """The ACCESSING method's dex; the field's own dex may differ."""
+
+    @property
+    def method_idx(self) -> int:
+        """Dex-LOCAL method_ids index — meaningful only with dex_id."""
+
+    @property
+    def field_descriptor(self) -> str:
+        """The accessed field; constant across one query's rows."""
+
+    @property
+    def bytecode_offset(self) -> int:
+        """Offset into the method's ``insns`` — the base render_method_smali prints."""
+
+    @property
+    def opcode(self) -> int:
+        """0x52..0x6D. Says the direction AND whether the access is static."""
+
 class ResolvedCallSite:
     """A CallSite plus a resolved origin per argument.
 
@@ -696,28 +732,28 @@ class DexKit:
             [('MethodReturn', '', False), ('ConstString', 'accessibility', False)]
         """
 
-    def find_methods_reading_field(self, field_descriptor: str) -> list[str]:
-        """Methods that READ the field. Returns method descriptors, not the field.
+    def find_field_read_sites(self, field_descriptor: str) -> list[FieldAccessSite]:
+        """Every site that READS the field — one row per ``iget*``/``sget*``.
 
-        NOT deduplicated: one entry per READ INSTRUCTION, like ``CallSite``, so a
-        method with two ``iget``s of the field appears twice. Wrap in ``set()``
-        (or ``dict.fromkeys()`` to keep order) for distinct methods.
+        NOT deduplicated: one row per READ INSTRUCTION, like ``CallSite``. Unlike
+        the ``list[str]`` these returned before dexllm#84, the duplicates are now
+        DISTINCT records — they differ in ``bytecode_offset``. For the old value,
+        deduplicated, use ``{s.method_descriptor for s in ...}``.
 
         Example — the method below holds two ``iget-object`` of the field::
 
-            >>> dk.find_methods_reading_field(
+            >>> [s.bytecode_offset for s in dk.find_field_read_sites(
             ...     "Lcom/google/android/exoplayer2/ui/DefaultTimeBar;"
-            ...     "->touchPosition:Landroid/graphics/Point;")
-            ['Lcom/google/android/exoplayer2/ui/DefaultTimeBar;->resolveRelativeTouchPosition(Landroid/view/MotionEvent;)Landroid/graphics/Point;',
-             'Lcom/google/android/exoplayer2/ui/DefaultTimeBar;->resolveRelativeTouchPosition(Landroid/view/MotionEvent;)Landroid/graphics/Point;']
+            ...     "->touchPosition:Landroid/graphics/Point;")]
+            [42, 96]
         """
 
-    def find_methods_writing_field(self, field_descriptor: str) -> list[str]:
-        """Methods that WRITE the field — the taint-source half of the pair.
+    def find_field_write_sites(self, field_descriptor: str) -> list[FieldAccessSite]:
+        """Every site that WRITES the field — the taint-source half of the pair.
 
-        Same per-INSTRUCTION (undeduplicated) semantics as
-        ``find_methods_reading_field``. The field above has a single ``iput``, so
-        its writer list holds one entry against the reader list's two.
+        Same per-INSTRUCTION rows as ``find_field_read_sites``, with an
+        ``iput*``/``sput*`` opcode. The field above has a single ``iput``, so its
+        write list holds one row against the read list's two.
         """
 
     def find_type_references(self, type_descriptor: str) -> TypeReferences:

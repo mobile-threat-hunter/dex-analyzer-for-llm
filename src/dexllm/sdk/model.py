@@ -576,6 +576,51 @@ class CallSite:
 
 
 @dataclass(frozen=True)
+class FieldAccessSite:
+    """One field-access INSTRUCTION — an ``iget*``/``iput*``/``sget*``/``sput*``.
+
+    The row of the field cross-reference, and the sibling of :class:`CallSite`
+    for a field. ``field_descriptor`` is constant across one query's rows (it is
+    the queried field); everything else varies per access.
+
+    It deliberately does NOT reuse ``CallSite``'s ``caller_*`` prefix: an ``iget``
+    calls nothing, so spelling the accessing method a "caller" would give one word
+    two grammars. ``method_descriptor`` and ``field_descriptor`` are the spellings
+    :class:`ResolvedArg` already uses for exactly these values.
+
+    ``dex_id`` is the dex of the ACCESSING METHOD — which is what makes
+    ``method_idx``, a dex-LOCAL ``method_ids`` index, meaningful. It may DIFFER
+    from the dex that declares the field: a field is referenced across dexes, and
+    the core aggregates a field's accessors into the declaring dex tagged with
+    their origin.
+
+    ``bytecode_offset`` is an offset into the ACCESSING method's ``insns`` — the
+    same base ``render_method_smali`` prints, NOT relative to the ``code_item``
+    struct. ``opcode`` is one of 0x52..0x6D, which says both the direction
+    (``iget*``/``sget*`` read, ``iput*``/``sput*`` write) and whether the access is
+    static, without resolving the field.
+
+    Rows are ordered by (accessing dex, ``method_idx``, ``bytecode_offset``).
+
+    Example (real, a2dp.Vol reading ``Notification.flags``)::
+
+        FieldAccessSite(
+            method_descriptor='Landroid/support/v4/app/NotificationCompat$Builder;'
+                              '->setFlag(IZ)V',
+            dex_id=0, method_idx=3326,
+            field_descriptor='Landroid/app/Notification;->flags:I',
+            bytecode_offset=8, opcode=82)
+    """
+
+    method_descriptor: str
+    dex_id: int
+    method_idx: int
+    field_descriptor: str
+    bytecode_offset: int
+    opcode: int
+
+
+@dataclass(frozen=True)
 class ResolvedCallSite:
     """A call site plus a resolved :class:`ResolvedArg` per argument register.
 

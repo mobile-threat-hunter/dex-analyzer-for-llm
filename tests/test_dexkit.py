@@ -656,20 +656,20 @@ def test_field_read_write_xref(dk):
     The DIRECTION is verified against the method's smali, so a reader/writer swap
     (FieldGetMethods vs FieldPutMethods wired backwards) is caught, not just the
     membership. An unknown field returns []."""
-    assert dk.find_methods_reading_field("Lno/such/Class;->x:I") == []
+    assert dk.find_field_read_sites("Lno/such/Class;->x:I") == []
     saw_xref = False
     for cls in dk.list_classes():
         for f in getattr(dk.get_class_summary(cls), "fields", []):
             fd = f"{cls}->{f.name}:{f.type}"
-            rd = dk.find_methods_reading_field(fd)
-            wr = dk.find_methods_writing_field(fd)
+            rd = {s.method_descriptor for s in dk.find_field_read_sites(fd)}
+            wr = {s.method_descriptor for s in dk.find_field_write_sites(fd)}
             saw_xref = saw_xref or bool(rd or wr)
-            assert all(isinstance(m, str) and "->" in m for m in rd + wr)
+            assert all(isinstance(m, str) and "->" in m for m in rd | wr)
             # a method that ONLY reads must contain an iget*/sget* of the field;
             # a method that ONLY writes must contain an iput*/sput* — verified via
             # smali so the two directions can't be silently swapped.
-            reader_only = [m for m in rd if m not in wr]
-            writer_only = [m for m in wr if m not in rd]
+            reader_only = sorted(rd - wr)
+            writer_only = sorted(wr - rd)
             if reader_only:
                 sm = dk.render_method_smali(reader_only[0])
                 assert f.name in sm and ("iget" in sm or "sget" in sm)
@@ -1029,6 +1029,10 @@ def test_deprecated_aliases_are_removed():
         "find_call_sites_from_method",
         "find_field_read_methods",
         "find_field_write_methods",
+        # dexllm#84 renamed the canonical pair with its return type; the previous
+        # canonical spellings take no alias either (dexllm#24).
+        "find_methods_reading_field",
+        "find_methods_writing_field",
         "decompiler_clear_cache",
         "decompiler_set_cache_capacity",
     ):
@@ -1041,6 +1045,8 @@ def test_deprecated_aliases_are_removed():
         "find_call_sites_from_method",
         "find_field_readers",
         "find_field_writers",
+        "find_methods_reading_field",
+        "find_methods_writing_field",
     ):
         assert not hasattr(DexKitAdapter, gone), f"{gone} is still on the adapter"
 
@@ -1052,8 +1058,8 @@ def test_deprecated_aliases_are_removed():
         "decompile_method_with_pc_map",
         "find_call_sites_to",
         "find_call_sites_from",
-        "find_methods_reading_field",
-        "find_methods_writing_field",
+        "find_field_read_sites",
+        "find_field_write_sites",
         "clear_decompiler_cache",
         "set_decompiler_cache_capacity",
     ):
@@ -1128,18 +1134,19 @@ def test_canonical_field_xref_and_cache_actions_work(dk):
 
     The find_* family names what it RETURNS right after `find_` (find_classes_*,
     find_methods_*, find_call_sites_*); the field pair returned METHOD descriptors
-    while naming the queried FIELD — the only inversion in the family. Cache
-    control uses verb-first for ACTIONS and nouns for read-only accessors, which
-    `warm_analysis_caches` already did.
+    while naming the queried FIELD — the only inversion in the family. dexllm#84
+    then made it return FieldAccessSite rows, so the name moved a second time, to
+    what it now returns. Cache control uses verb-first for ACTIONS and nouns for
+    read-only accessors, which `warm_analysis_caches` already did.
     """
     fd = next(
-        (f for f in dk.list_fields() if dk.find_methods_reading_field(f)),
+        (f for f in dk.list_fields() if dk.find_field_read_sites(f)),
         None,
     )
     if fd is None:
         pytest.skip("no read field in the fixture")
-    assert dk.find_methods_reading_field(fd) != []
-    dk.find_methods_writing_field(fd)
+    assert dk.find_field_read_sites(fd) != []
+    dk.find_field_write_sites(fd)
 
     m = next(
         (

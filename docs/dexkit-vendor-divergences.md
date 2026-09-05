@@ -11,7 +11,7 @@ dexllm's own code diverges from an AOSP/ART reference it re-implements; this one
 catalogs where the *vendored* tree diverges from the upstream it was copied from.
 
 Measured against the baseline, the vendored subset is **136 files: 125
-byte-identical, 11 modified, 0 added**, **+1271 / -131 lines**.
+byte-identical, 11 modified, 0 added**, **+1288 / -131 lines**.
 
 The line counts are `git diff --numstat` against the fork-point tree — the same
 predicate the rest of this repo uses for a diffstat. (An earlier draft published
@@ -22,7 +22,7 @@ predicate printed next to it.)
 | file | + | - | hunks | marked | marker lines |
 |---|---:|---:|---:|---:|---:|
 | `Core/dexkit/dex_item.cpp` | 723 | 56 | 16 | 14 | 33 |
-| `Core/dexkit/include/dex_item.h` | 155 | 2 | 5 | 4 | 21 |
+| `Core/dexkit/include/dex_item.h` | 172 | 2 | 5 | 4 | 22 |
 | `Core/third_party/thread_helper/ThreadPool.h` | 149 | 40 | 3 | 3 | 9 |
 | `Core/dexkit/dexkit.cpp` | 168 | 22 | 8 | 6 | 9 |
 | `Core/third_party/slicer/reader.cc` | 24 | 0 | 1 | 1 | 4 |
@@ -62,7 +62,7 @@ An entry-weighted count and a line-weighted one point at different work.
 
 ## The marker convention, and exactly what it does not cover
 
-Every divergence is marked in-source with a `dexllm` comment — **82 marker lines
+Every divergence is marked in-source with a `dexllm` comment — **83 marker lines
 across all 11 files**, and the marker set and the divergent set are now equal in
 both directions (no pristine file carries one). The convention is **checked**
 rather than merely followed:
@@ -301,13 +301,18 @@ no way to see that the premise had already stopped being true.
   `GetTypeNames`, `GetStrings`, `GetTypeDefFlags`), L1.5 (`GetClassMethodIds`,
   `GetClassFieldIds`, `GetTypeDefIdx`, `GetMethodAccessFlags`,
   `GetFieldAccessFlags`), L2 (`GetMethodInvokingIds`), L2.5
-  (`GetMethodCallerIds`, `EnumerateInvokeSites`), L5 (`RenderMethodSmali`,
+  (`GetMethodCallerIds`, `GetFieldGetMethodIds`, `GetFieldPutMethodIds`,
+  `EnumerateInvokeSites`), L5 (`RenderMethodSmali`,
   `RenderClassSmali`) and L8 (`GetMethodCode`) accessors, plus dexllm#20's
   hoisting of `IsStringMatched` from private.
 - **Why permanent:** `native/core_ext/` is an adapter over private core state.
   Upstream is a query library whose C++ core is an implementation detail behind
   a FlatBuffers/JNI boundary; it has no reason to expose these.
-- **Present at import** — they are the bulk of the 689 pre-vendoring lines.
+- **Present at import** — they are the bulk of the 689 pre-vendoring lines. The
+  two field reverse-index accessors are the exception, added by dexllm#84 for the
+  same reason `GetMethodCallerIds` exists: the bean wrapper keeps only the
+  accessor's descriptor, and a per-INSTRUCTION site needs the
+  (origin_dex, method_idx) pair it discards.
 - The two L5 accessors are the declaration half of D12, so if that reduction is
   ever done they leave with it.
 

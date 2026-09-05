@@ -33,7 +33,7 @@ alone selects the lookup and no schema key is needed to say which it is:
 
 * a method key resolves through ``find_call_sites_to`` and counts INVOKE
   INSTRUCTIONS, one per call site, into ``call_site_count``;
-* a field key resolves through ``find_methods_reading_field`` and counts READ
+* a field key resolves through ``find_field_read_sites`` and counts READ
   INSTRUCTIONS into the separate ``field_access_count`` (that lookup is not
   deduplicated, so a method reading the field twice contributes 2).
 
@@ -45,8 +45,8 @@ change to warn a consumer. A field entry leaves it 0.
 ``total_call_sites`` / ``total_field_accesses`` mirror the split.
 
 **Reads only, and that is a bound on the claim.** The lookup is
-``find_methods_reading_field``, and a framework ``static final Uri`` can only be
-read — so there is nothing for ``find_methods_writing_field`` to find. But that
+``find_field_read_sites``, and a framework ``static final Uri`` can only be
+read — so there is nothing for ``find_field_write_sites`` to find. But that
 answers the wrong sense of "write": ``resolver.insert(Events.CONTENT_URI, …)``
 and ``resolver.query(Events.CONTENT_URI, …)`` emit the SAME ``sget-object``, so a
 field entry cannot tell a reader from a writer of the PROVIDER and a pure writer
@@ -409,7 +409,7 @@ def summarize_capabilities(
         # (dexllm#36). A field entry resolves to the METHODS that read it.
         is_field = _is_field_key(api_desc)
         if is_field:
-            touches = list(dk.find_methods_reading_field(api_desc))
+            touches = [s.method_descriptor for s in dk.find_field_read_sites(api_desc)]
         else:
             touches = [s.caller_descriptor for s in dk.find_call_sites_to(api_desc)]
         # Per TOUCH, not per API: a register of callers mixes both kinds (18 of

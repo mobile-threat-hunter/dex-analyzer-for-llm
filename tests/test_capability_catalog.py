@@ -294,14 +294,26 @@ class _Site:
         self.caller_descriptor = caller
 
 
+class _FieldSite:
+    """Minimal stand-in for a FieldAccessSite: the aggregation reads one attribute.
+
+    dexllm#84 turned the field lookup's rows from bare descriptors into records,
+    so a duck-typed `dk` must now yield objects with `.method_descriptor` — one
+    per access INSTRUCTION, exactly as the real binding does.
+    """
+
+    def __init__(self, method):
+        self.method_descriptor = method
+
+
 class _StubDk:
     """A dk answering from {descriptor: [callers]} maps — one per key FORM.
 
-    A FIELD key resolves through `find_methods_reading_field`, which returns
-    method descriptors rather than call sites (dexllm#36), so the stub needs both
-    lookups: `summarize_capabilities` picks one by the key's shape. That is also
-    the contract note for any duck-typed `dk` stand-in — a catalog carrying field
-    keys now requires the field lookup too.
+    A FIELD key resolves through `find_field_read_sites`, which returns
+    FieldAccessSite rows rather than call sites (dexllm#36, dexllm#84), so the stub
+    needs both lookups: `summarize_capabilities` picks one by the key's shape. That
+    is also the contract note for any duck-typed `dk` stand-in — a catalog carrying
+    field keys now requires the field lookup too.
     """
 
     def __init__(self, sites, reads=None):
@@ -311,8 +323,8 @@ class _StubDk:
     def find_call_sites_to(self, descriptor):
         return [_Site(c) for c in self._sites.get(descriptor, ())]
 
-    def find_methods_reading_field(self, descriptor):
-        return list(self._reads.get(descriptor, ()))
+    def find_field_read_sites(self, descriptor):
+        return [_FieldSite(m) for m in self._reads.get(descriptor, ())]
 
 
 _GET_DEVICE_ID = "Landroid/telephony/TelephonyManager;->getDeviceId()Ljava/lang/String;"
@@ -755,8 +767,9 @@ def test_a_field_key_resolves_through_the_field_lookup(write_catalog):
         def find_call_sites_to(self, descriptor):
             raise AssertionError(f"a FIELD key went to the method lookup: {descriptor}")
 
-        def find_methods_reading_field(self, descriptor):
-            return ["La/B;->m()V", "La/C;->n()V"] if descriptor == field_key else []
+        def find_field_read_sites(self, descriptor):
+            names = ["La/B;->m()V", "La/C;->n()V"] if descriptor == field_key else []
+            return [_FieldSite(m) for m in names]
 
     rep = capability.summarize_capabilities(_Dk(), data_dir=write_catalog(catalog))
     assert rep.matched_apis == 1
@@ -790,8 +803,9 @@ def test_the_two_counters_are_never_summed_into_one(write_catalog):
         def find_call_sites_to(self, descriptor):
             return [_Site("La/B;->m()V")] if descriptor == _FOR_NAME else []
 
-        def find_methods_reading_field(self, descriptor):
-            return ["La/C;->n()V", "La/D;->o()V"] if descriptor == field_key else []
+        def find_field_read_sites(self, descriptor):
+            names = ["La/C;->n()V", "La/D;->o()V"] if descriptor == field_key else []
+            return [_FieldSite(m) for m in names]
 
     rep = capability.summarize_capabilities(_Dk(), data_dir=write_catalog(catalog))
     by_sig = {h.api_descriptor: h for h in rep.api_usages}
@@ -819,8 +833,9 @@ def test_field_counts_reach_the_sdk_and_mcp_layers(write_catalog, monkeypatch):
         def find_call_sites_to(self, descriptor):
             return []
 
-        def find_methods_reading_field(self, descriptor):
-            return ["La/B;->m()V"] if descriptor == field_key else []
+        def find_field_read_sites(self, descriptor):
+            names = ["La/B;->m()V"] if descriptor == field_key else []
+            return [_FieldSite(m) for m in names]
 
     from dexllm import datadir, tools
     from dexllm.sdk.adapter import DexKitAdapter
@@ -913,8 +928,9 @@ def test_the_documented_counter_inequality_holds_with_both_key_forms(write_catal
         def find_call_sites_to(self, descriptor):
             return [_Site("La/B;->m()V")] if descriptor == _FOR_NAME else []
 
-        def find_methods_reading_field(self, descriptor):
-            return ["La/C;->n()V", "La/D;->o()V"] if descriptor == field_key else []
+        def find_field_read_sites(self, descriptor):
+            names = ["La/C;->n()V", "La/D;->o()V"] if descriptor == field_key else []
+            return [_FieldSite(m) for m in names]
 
     rep = capability.summarize_capabilities(_Dk(), data_dir=write_catalog(catalog))
     total = rep.total_call_sites + rep.total_field_accesses
@@ -930,7 +946,7 @@ def test_a_field_entry_matches_on_a_REAL_dex(dk):
     """The gap that let the 15-month bug ship again, one layer down.
 
     Every other field test drives a stub, so none of them could see that
-    `find_methods_reading_field` resolved nothing for a FRAMEWORK class: it began
+    `find_field_read_sites` resolved nothing for a FRAMEWORK class: it began
     with `LocateClassDex`, which answers only for a class DECLARED in a loaded
     dex. So dexllm#36's first cut swapped one always-empty lookup for another and
     the four `CONTENT_URI` entries were inert on every possible input — the very
@@ -952,15 +968,15 @@ def test_a_field_entry_matches_on_a_REAL_dex(dk):
         "premise: the declaring class is NOT in the app, which is exactly what "
         "the old lookup required"
     )
-    readers = dk.find_methods_reading_field(sdk_int)
-    assert readers, "a framework field the app reads must resolve to its readers"
-    assert all(";->" in r for r in readers)
+    reads = dk.find_field_read_sites(sdk_int)
+    assert reads, "a framework field the app reads must resolve to its read sites"
+    assert all(";->" in s.method_descriptor for s in reads)
 
 
 def test_field_access_count_is_per_instruction_not_per_method(write_catalog):
     """Pins the UNIT, which the stubs cannot (dexllm#36).
 
-    `find_methods_reading_field` is documented as NOT deduplicated — one entry per
+    `find_field_read_sites` is documented as NOT deduplicated — one entry per
     read instruction — but every field stub returned DISTINCT method descriptors,
     so a mutant applying `dict.fromkeys` (i.e. making the code match an earlier,
     wrong docstring that said "reading methods") survived the entire suite. Both
@@ -979,9 +995,10 @@ def test_field_access_count_is_per_instruction_not_per_method(write_catalog):
         def find_call_sites_to(self, descriptor):
             return []
 
-        def find_methods_reading_field(self, descriptor):
+        def find_field_read_sites(self, descriptor):
             # ONE method, TWO read instructions — what the real binding returns
-            return ["La/B;->m()V", "La/B;->m()V"] if descriptor == field_key else []
+            names = ["La/B;->m()V", "La/B;->m()V"] if descriptor == field_key else []
+            return [_FieldSite(m) for m in names]
 
     rep = capability.summarize_capabilities(_Dk(), data_dir=write_catalog(catalog))
     hit = rep.api_usages[0]
@@ -1013,8 +1030,9 @@ def test_the_mcp_ranking_counts_field_accesses(write_catalog, monkeypatch):
         def find_call_sites_to(self, descriptor):
             return [_Site("La/B;->m()V")] if descriptor == _FOR_NAME else []
 
-        def find_methods_reading_field(self, descriptor):
-            return ["La/C;->n()V"] * 5 if descriptor == field_key else []
+        def find_field_read_sites(self, descriptor):
+            names = ["La/C;->n()V"] * 5 if descriptor == field_key else []
+            return [_FieldSite(m) for m in names]
 
     from dexllm import datadir, tools
 
@@ -1049,7 +1067,7 @@ def test_the_ranking_is_a_total_order(write_catalog, monkeypatch):
         def find_call_sites_to(self, descriptor):
             return [_Site("La/B;->m()V")] if descriptor in meta else []
 
-        def find_methods_reading_field(self, descriptor):
+        def find_field_read_sites(self, descriptor):
             return []
 
     from dexllm import datadir, tools
@@ -1346,7 +1364,7 @@ def test_the_field_lookup_is_filtered_too():
     # an explanation) the day the catalog carries no field key. `_StubDk` answers
     # from whatever key it is handed, so the key need not be IN the catalog for
     # the lookup to be exercised; it only has to be one the shape dispatch routes
-    # to `find_methods_reading_field`, and this file asserts that separately.
+    # to `find_field_read_sites`, and this file asserts that separately.
     field_key = sorted(_FIELD_KEYS)[0]
     assert "(" not in field_key.partition(";->")[2], "not a field-shaped key"
     dk = _StubDk({}, {field_key: [_LIB_CALLER, _APP_CALLER]})
@@ -1544,7 +1562,7 @@ def test_every_declared_library_prefix_actually_filters(prefix):
     ), f"a caller under {prefix!r} survived the method-key filter"
     assert summarize_capabilities(method, app_only=False).matched_apis == 1
 
-    # …and the FIELD branch (find_methods_reading_field), a different lookup
+    # …and the FIELD branch (find_field_read_sites), a different lookup
     field_key = sorted(_FIELD_KEYS)[0]
     field = _StubDk({}, {field_key: [caller]})
     assert (
@@ -1706,7 +1724,7 @@ def test_a_service_constructor_key_routes_to_the_method_lookup():
     """`<init>()V` must route as a METHOD key, not a field one.
 
     A constructor descriptor is the shape closest to the field/method boundary
-    `_is_field_key` decides on, and routing it to `find_methods_reading_field`
+    `_is_field_key` decides on, and routing it to `find_field_read_sites`
     would answer nothing for every entry above while raising nothing.
     """
     for key in _SERVICE_CTOR_KEYS:

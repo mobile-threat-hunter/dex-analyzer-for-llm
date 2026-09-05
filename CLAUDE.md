@@ -6750,6 +6750,341 @@ sweep 25,350-class 0-crash 0-timeout,
 determinism (3 processes x 3 `PYTHONHASHSEED`s -> one digest), lint trio clean,
 doc fences 78.
 
+### A field xref row says WHICH instruction it is (dexllm#84, 2026-09-05)
+
+`find_methods_reading_field` / `find_methods_writing_field` returned `list[str]`
+under a per-INSTRUCTION contract their own docstring stated — *"one entry per READ
+INSTRUCTION, **like `CallSite`**"*. `CallSite` honours that with
+`caller_dex_id` / `caller_method_idx` / `bytecode_offset` / `invoke_opcode`, so its
+duplicates are DISTINCT records. The field xref's duplicates were **the same string
+repeated**, so they carried no information at all: **the contract held in the COUNT
+and was lost in the VALUE**, and the instructions were unobtainable at any price.
+
+Measured at HEAD, reproducing the issue exactly: over the first four bundled
+sources, **526 fields have a read, 255 of them (48%) return duplicate rows, and
+1,363 of those rows are indistinguishable from their siblings** — worst case
+`Landroid/app/Notification;->flags:I`, four identical entries for
+`NotificationCompatHoneycomb.add`.
+
+## The three decisions, all escalated (CLAUDE.md rule 5) — this breaks two released APIs
+
+**Return type: records replace the string list.** The alternative — a sibling
+`find_field_access_sites` leaving the pair alone — was declined for the reason the
+issue itself gives: it leaves the RELEASED pair returning rows that cannot be told
+apart, and leaves that docstring's *"like `CallSite`"* false in the value. A record
+subsumes both questions (`{s.method_descriptor for s in ...}` is the old value,
+deduplicated), so it is one API rather than two overlapping ones. No aliases
+(dexllm#24).
+
+**The record's NAME was reworked rather than picked**, at the user's request, and
+against the vocabulary this repo already audits three ways (dexllm#37 types,
+dexllm#68 `descriptor`, dexllm#69 suffix/attribute). Enumerating all 45 public
+records with dexllm#69's own walker settles it without inventing a word: `Site` is
+the established suffix for "one bytecode edge at one instruction"
+(`CallSite`, `ResolvedCallSite`), and **"field access" is the noun this project
+already uses for one of these** — `CapabilityReport.total_field_accesses`,
+`ApiUsage.field_access_count`. Hence **`FieldAccessSite`**.
+
+**It deliberately does NOT mirror `CallSite`'s attribute names.** An `iget` calls
+nothing, so `caller_descriptor` would give one word two grammars — exactly the
+defect dexllm#68/#69 exist to prevent — while `method_descriptor` and
+`field_descriptor` are EXISTING spellings with these very meanings (`ResolvedArg`,
+`TlsTrustComponent`). `access_opcode` was declined for the same reason one level
+down: `access_flags` already uses "access" for Java modifiers on five records, and
+the type name carries the instruction family, so the attribute is plain `opcode`
+(the shape `DexItem::InvokeSite.opcode` already uses).
+
+| | |
+|---|---|
+| `method_descriptor` | the method performing the access |
+| `dex_id` | that METHOD's dex — the field's own dex may differ |
+| `method_idx` | dex-LOCAL `method_ids` index |
+| `field_descriptor` | the accessed field (constant across a query's rows) |
+| `bytecode_offset` | offset into `insns`, the base `render_method_smali` prints |
+| `opcode` | 0x52..0x6D — says the direction AND whether the access is static |
+
+**And the FUNCTION names moved with the return type**: `find_field_read_sites` /
+`find_field_write_sites`. Keeping `find_methods_reading_field` while it returns
+sites would re-create the same name-lies-about-the-value defect one layer up, and
+the repo's own precedent (`find_call_sites_to` -> `CallSite`) is to name for what is
+returned. Since the type breaks anyway the rename costs nothing extra.
+
+## Two steps, and the second one is where the information was
+
+The reverse index gives the CANDIDATE accessors (O(accessors), not a scan of every
+method); each candidate's body is then walked for the offset and opcode the index
+does not keep. **That is the shape `FindCallSitesToApi` already uses**
+(`method_caller_ids` -> `EnumerateInvokeSites`), and the issue said so.
+
+**The enumerator is in `core_ext`, NOT beside `EnumerateInvokeSites`.** That
+function sits inside the 560-line dexllm block **dexllm#80** tracks for removal from
+the vendored file, and this needs nothing private — `GetMethodCode()` is the whole
+input — so a sibling there would grow exactly the pile that issue exists to shrink.
+
+**One vendored addition was unavoidable and it is the D8 shape exactly:**
+`GetFieldGetMethodIds()` / `GetFieldPutMethodIds()`, two accessors mirroring
+`GetMethodCallerIds()` line for line — whose own comment already states the reason,
+one sibling over: *"GetCallMethods wraps this as MethodBeans; this raw form is for
+callers that need the caller method_idx, e.g. to walk its invoke sites."*
+`FieldGetMethods` is the bean wrapper and keeps only the DESCRIPTOR, discarding the
+`(origin_dex_id, method_idx)` pair a body walk needs. Catalogued under **D8**; the
+census moves +1271/-131 -> **+1288/-131** and 82 -> **83 marker lines**.
+
+**Cross-dex aggregation is real here and is what the second step has to get right.**
+`dexkit.cpp:1595` MOVES a field's accessors into the DECLARING dex tagged with their
+origin, so an accessor in another dex references the field through ITS OWN dex's
+`field_ids` entry: the instruction operand must be matched against the LOCAL index,
+the same re-resolution `CollectApiCallers` performs. Not hypothetical — counting rows
+whose `dex_id` differs from `locate_class_dex` of the field's class, over the
+DEDUPLICATED field descriptors: **1,001 on `app-prod-debug.apk` and 2,910 on
+`multiple_locale_appname_test.apk`** (exactly half the figure over the raw
+`list_fields()`, which repeats a descriptor once per dex — dexllm#45). An earlier
+draft published 775 / 1,364 from a `list_fields()[:6000]` CAPPED scan; BOTH reviewers
+independently failed to re-derive them under any predicate, and the correctness one
+tried eight [[published-counts-need-the-repos-own-predicate]].
+
+**The gate is derived, not hand-written.** `kIndexFieldRef` in slicer's own table is
+exactly 0x52..0x6D — 28 contiguous opcodes, formats k21c and k22c, both carrying the
+index in code unit 1 — which is the gate `InitCache`'s own collector uses. The quick
+family 0xE3..0xF2 is `kIndexFieldOffset` and stays OUT: its operand is a
+vtable/field OFFSET, the confusion dexllm#61 removed from the invoke gates.
+
+## Measured
+
+**a/b OFF=`b3219432ae8318f2ba1e8fd8a66fd06c` vs ON=`3c68d8649e9430f5a47f69a5da14dbd1`,
+SAME script, both `.so` md5-verified — and the OFF build BIT-REPRODUCES the recorded
+HEAD md5**, which is the diff's functional content stated as a measurement. The ON
+half was RE-CAPTURED on the shipped binary after every review fix and is IDENTICAL on
+all 561 records to the capture taken before them, so the record covers what is
+committed and not a predecessor [[verify-build-identity-before-measuring]] — an
+earlier draft named the PRE-fix binary, which a correctness reviewer caught. 44
+sources — the whole bundled corpus and every committed fixture; 39 load — x up to 14
+axes (strict verify, load, `dex_count`, class list, field count, the read/write
+accessing-method MULTISETS, their ORDER, the read/write row COUNTS, the offsets, the
+whole capability report, and the subprocess EXIT STATUS) = **561 axis records
+(14x39 + 3x5), 65 changed on exactly THREE axes**, over **157,439 fields and 463,954
+access rows**.
+
+Every axis is read through a shim that accepts EITHER API spelling, so the two
+halves compare VALUES rather than names. What moved:
+
+| axis | changed | what it is |
+|---|---:|---|
+| `offsets` | **33/39** | `ABSENT` -> a digest. The mechanism: an offset exists now where none could. The other 6 loaded sources carry no field access at all |
+| `read_methods_order` | 17/39 | the deliberate order change — rows are now (dex, `method_idx`, offset) where the raw index was class_defs insertion order |
+| `write_methods_order` | 15/39 | ditto |
+
+And what did NOT: **`read_methods_multiset` and `write_methods_multiset` are
+identical on every source, and so are `read_row_count` and `write_row_count`** — the
+same accessors, the same per-instruction count, now identified. `capability`,
+`verify`, `load`, `dex_count`, `classes`, `field_count` and every exit status are
+unchanged too.
+
+A corpus a/b here CANNOT be byte-identical and must not be: `offsets` going
+`ABSENT` -> present on 33 sources IS the mechanism firing, and the multiset/count
+axes going 0 is the equivalence [[ab-must-prove-the-mechanism-fires]].
+
+parity **29/29**, pytest **1303 passed / 24 skipped**, TRUE corpus-less (`test_apk`
+MOVED aside) **895 passed / 432 skipped / 0 failed** — 19 of the 21 new cases run in
+the CI leg, since every craft but the two corpus-gated ones is on a committed
+fixture — narrowed to `tests/data/multidex.apk` **1200 passed**, the two touched guard files green narrowed
+to **each of the 37 bundled samples one at a time**, sweep **21,374-class / 180,879
+method-block 0-crash 0-timeout 0-error, GATE: PASS**, determinism 3 processes x 3
+`PYTHONHASHSEED`s -> one digest, lint trio clean, doc fences 83,
+`scripts/check_dad_boundary.sh` clean.
+
+## Guards
+
+21 cases in [tests/test_field_access_sites.py](tests/test_field_access_sites.py),
+19 of them corpus-INDEPENDENT — every behavioural case runs on a COMMITTED fixture,
+so they hold in the CI leg and under any `$DEXLLM_TEST_APK` narrowing. Ground truth
+is `render_method_smali`, a genuinely different code path: it decodes the
+instruction stream itself and prints each access at its own offset.
+
+Two layers, and the matrix says they are complementary. **Source-derived**: the gate
+must select exactly what slicer's table calls `kIndexFieldRef`, pinned as a literal
+beside the derivation (a guard parametrised over the production rule cannot catch an
+EDIT of it), and reads/writes must PARTITION that set. **Behavioural**: seven
+distinct offsets for `Jazzer.<clinit>`'s seven reads of `Integer.TYPE` (pinned as
+literals — "the offsets differ" alone passes against a fabricated counter); every
+offset a REAL access in the smali; COMPLETENESS against the smali, without which a
+build emitting the FIRST access per method passes everything else; `dex_id` +
+`method_idx` resolving to the row's own descriptor through `list_methods_in_dex`;
+the direction; static-vs-instance both exercised; no two rows sharing a
+`(dex_id, method_idx, bytecode_offset)` identity (0 such over 463,954 corpus rows,
+and a build that repeated one would be the old defect with more fields attached);
+the row order, including a session that loads a fixture TWICE so the multi-location
+path is exercised rather than assumed; and the typed layers (SDK model, MCP row)
+carrying the same VALUES, since each conversion is a hand-written field list and a
+defaulted `bytecode_offset` satisfies a `>= 0` check.
+
+**The quick-opcode crafts are TWO, because the first one is decided by the core's
+INDEX and not by this change's gate.** An adversarial reviewer proved it: when the
+retyped instruction is a method's ONLY access of the field, the vendored core's own
+collector (`op >= 0x52 && op <= 0x6d`, untouched here) stops listing the method, so
+the row disappears whatever the ext-side gate does — the guard PASSED under a mutant
+that admitted the whole quick family, and the reviewer demonstrated a **fabricated
+write built from a vtable/field OFFSET** on a `verify()`-valid dex
+(`iput-object-quick` at `field_off@4476` reported as a write of `mProcess`). The
+second craft retypes ONE of TWO writes in the SAME method
+(`LTestInvocationKinds;->testInstanceFieldAccessors()V`, offsets 28 and 68), so the
+method REMAINS a candidate, the enumerator IS consulted, and the GATE decides.
+
+**And the source guard read only the helper's body**, so a widening expressed at the
+CALL SITE (`if (IsFieldAccessOpcode(op) || (op >= 0xe3 && op <= 0xf2))`) was invisible
+to BOTH layers at once — the reviewer's M4 passed the whole suite. The parser now
+also requires the enumerator's condition to be the BARE call.
+
+Both crafts are same-FORMAT retypes (`iget-wide`/`iput-wide` 0x53/0x5A ->
+`iget-wide-quick`/`iput-wide-quick` 0xE4/0xE7, all k22c), so neither the width nor the
+operand layout moves and only the operand's index KIND does. A first draft justified
+that by width — *"EVERY quick form is k22c, so the fixture's 161 k21c `sget-object`
+accesses have no same-width counterpart"* — **false twice over**: 0xE9/0xEA are
+k35c/k3rc `kIndexVtableOffset`, and k21c and k22c are BOTH 2 code units (a reviewer
+built 163 verifying k21c->k22c retypes). Same-FORMAT is the real and stronger reason.
+
+**One inherited guard was INVERTED rather than deleted** (the dexllm#22 / dexllm#29 /
+dexllm#45 precedent): `test_field_xref_is_per_instruction_not_per_method` pinned the
+contract on the `list[str]`, where the repeats were identical by construction, and
+is now `test_field_xref_is_per_instruction_in_the_value_too` — the repeats must be
+DISTINCT records whose offsets are real smali reads, which is the half no assertion
+could make before. It carries a `require_corpus_shape` floor, verified to BITE.
+
+**18 mutants, each BUILT and RUN with a distinct `.so` md5, 17 killed and one PROVEN
+EQUIVALENT**, with the control md5 asserted before the matrix starts and after it
+ends. THREE of them are the adversarial reviewer's, and two of those passed the
+ENTIRE suite as it then stood:
+
+| mutant | fails |
+|---|---:|
+| M1 direction filter removed | 5 |
+| M2 gate admits the quick family | 1 |
+| M3 gate narrowed to `iget` only | 11 |
+| M4 accessor dedup removed | 3 |
+| M5 cross-dex re-resolution removed | 1 |
+| M6 offset in code units, not bytes | 5 |
+| M7 origin dex ignored | 1 |
+| M8 opcode not recorded | 11 |
+| M9 `sget` dropped from the read set | 10 |
+| **M11 accessors not sorted** | **0 — EQUIVALENT, see below** |
+| M10 only the FIRST site per method | 7 |
+| M12 the adapter defaults the offset | 1 |
+| M13 the MCP row drops the offset | 2 |
+| M14 the MCP row drops the field | 1 |
+| **M15 the final global sort removed** | **2** (was 1 — source pin ONLY — until the three-source craft) |
+| **M4 gate widened at the CALL SITE** (reviewer) | **2** (was 0 — passed the whole suite) |
+| **M2b gate widened inside the helper, re-checked** | 2 (was 1 — source pin only) |
+
+**M11 is a genuine equivalent mutant and was decided by measurement plus an
+argument, not waved away.** Dropping the inner `std::sort` leaves `std::unique`
+collapsing only ADJACENT duplicates — which is output-identical today because
+`InitCache` appends a field's entries per (class_def, method) and aggregation
+appends whole source lists, so one method's entries are contiguous by construction
+(measured: 0 interleaved runs corpus-wide). That is an INCIDENTAL guarantee of how
+the core builds the index, not a contract, so the sort stays and the source says
+why.
+
+M13's first anchor matched **4x** and the harness reported **NOT A MUTANT** rather
+than skipping it — a replacement that does not apply is not a kill
+[[mutation-harness-restore-pitfalls]]. The restore hit that memory's own traps
+three times: `tar` preserves mtimes so ninja said *"no work to do"* and left the OFF
+binary in place; an unqualified `git checkout` on a guard file reverted every edit
+in it; and a snapshot taken BEFORE a later source edit silently rolled that edit
+back, which is why the matrix was re-run from a refreshed snapshot on the shipped
+binary.
+
+## What the reviewers found — 0 in the product logic, 2 real holes in the GUARDS, 6 in the record
+
+A correctness review built an **independent raw-dex oracle** — `field_ids` /
+`method_ids` / `class_data` / `code_item` parsed by hand, widths taken from the
+vendored slicer table and never from the code under test — and compared the FULL
+row tuple in RETURNED ORDER over **77,376 fields / 457,627 rows**, including both
+multidex APKs: **0 mismatches.** So membership, count, offsets, direction,
+cross-dex re-resolution and the documented order are all independently verified,
+and it found no input where a real access is LOST or an unreal one INVENTED. Every
+other published value re-derived exactly (the 526/255/1,363 measurement, the
+44 sources / 39 loading / 157,439 fields / 463,954 rows, 561 = 14x39 + 3x5, the
+`kIndexFieldRef` set, the vendor census, every pinned doc example, the fixture
+composition, and four spot-checked mutant rows).
+
+What it DID find, all fixed here:
+
+* **`docs/sdk.md` still stated the RETIRED contract** — the diff updated the names
+  on that bullet and left *"returns plain method descriptors `tuple[str, ...]` …
+  `set()` it for distinct methods"*. Measured: `set()` on the rows now deduplicates
+  **nothing** (35 rows -> 35, against 13 distinct methods), so the documented recipe
+  gives a 2.7x wrong answer on the SDK's own reference page. The one-mirror-updated
+  pattern this file keeps recording.
+* **775 / 1,364 did not re-derive under any of eight predicates** — a capped
+  `list_fields()[:6000]` scan. Corrected to 2,002 / 5,820 with the predicate stated.
+* **the quick-form claims** and **the craft's reach** (above).
+* **the published a/b named the PRE-fix binary** (above).
+* **`std::sort` -> `std::stable_sort`**: the key uniqueness that makes a plain sort
+  a total order is a measured property of upstream's clear()-after-move, decided in
+  a thread pool where a dex can be both source and target. A stable sort costs
+  nothing and does not lean on it.
+* **three different "corpus" totals** in one change (463,954 / 463,669 / 462,886).
+  One number with its predicate now: 463,954 = the bundled corpus PLUS every
+  committed fixture, the same population the a/b counts.
+
+**The order fix is the one I found by reading my own diff — and my claim about it
+was WRONG, which the adversarial review settled.** The outer loop iterates the
+field's LOCATIONS and sorted only within one, while every layer documents a global
+order; four multi-source configurations I built all came back ordered with the sort
+REMOVED, so I published it as unreachable and pinned it at SOURCE level only. The
+reviewer constructed it: `PutCrossRef` aggregates only for a type the dex does NOT
+declare, into the LOWEST declaring dex, so the break needs declaring dexes
+**L1 < L2 PLUS a NON-declaring referencing dex R > L2** — and `[A, A]` supplies no R,
+which is exactly why every configuration I tried was ordered. `[A, A, B]`, with B a
+length-preserving copy of A whose declaring `class_def` is overwritten by the last
+one and the count decremented in the header AND the map item, is that shape:
+`(0,m,o) (1,m,o) (2,m,o)` on the shipped build, `(0,m,o) (2,m,o) (1,m,o)` with the
+sort removed. Reproduced here before believing it, and it is now a corpus-gated
+BEHAVIOURAL guard beside the source pin, which is narrowed to the two properties a
+behavioural test cannot see (that the sort is STABLE, and that it is last).
+
+The adversarial review's own instruments found NOTHING in the product either, and
+they were substantial: **two independent oracles** — one derived from
+`render_class_smali` (422,900 rows / 30 sources) and one from RAW BYTES with its own
+header parsing and its own width table (46,615 rows / 6 dexes, sharing no algorithm
+with the code under test) — **0 mismatches on both**; a name-agnostic a/b over 434
+axis records / 458,410 rows with **0 changed**, independently confirming the multiset
+and count equivalence AND that the capability report is unmoved; and **1,462 crafted
+dexes judged by SUBPROCESS EXIT STATUS** (strict and lenient, including 12 bodies
+truncated so `ReadShort` reads one code unit past `insns`) — **0 signals, 0 hangs, 0
+phantom rows**. It also established that `EnumerateFieldAccessSites` walks a strict
+SUBSET of the bodies `InitCache` already walks with the identical idiom, so it opens
+no new reachability; and that the perf cost is 1.7x aggregate, 1.01 s for a
+32,787-field sweep of the largest corpus APK.
+
+**Known and disclosed:** the cross-dex branch and the three-source order craft both
+have NO coverage in the corpus-less CI leg — no committed fixture carries either
+shape (`tests/data/multidex.apk` and `multidex-container.dex` are multi-dex but have
+0 cross-dex accesses, and no fixture declares a field in one class and accesses it
+from another), which a reviewer confirmed independently, so the corpus gating is
+honest rather than convenient. And the MCP row drops `dex_id`/`method_idx`, so two
+same-descriptor methods in different dexes are indistinguishable over the wire — a
+faithful mirror of `_t_find_call_sites_to`'s own omission, stated in the helper's
+docstring.
+
+**Both reviewers' harnesses lied, and both disclosed it** — which is the reason their
+readings are usable. The adversarial one's first private copy carried a
+`CMakeCache.txt` still pointing `CMAKE_HOME_DIRECTORY` at the ORIGINAL tree, so two
+"control" builds compiled the original sources (the tell: two different source trees
+producing one md5); and its `sys.meta_path` shim intercepted only `dexllm` and
+`dexllm._dexkit_core`, so the editable install served `dexllm.capability` /
+`dexllm.tools` / `dexllm.sdk.*` from the ORIGINAL tree and produced a spurious
+39-record a/b diff. Both were caught, re-measured from scratch, and the affected
+readings retracted. The correctness one's first raw-dex oracle had a hand-built width
+table and a `return` that aborted its generator, and undercounted until it was rebuilt
+from slicer's own table. **A copied tree is not isolated until its CMake cache and
+its import shim are too** [[reviewer-agents-swap-the-worktree]].
+
+**BREAKING**, deliberately: two released APIs change NAME and RETURN TYPE on all four
+layers (raw, `.pyi`, SDK port+adapter, MCP), the MCP tool names move with them, and
+`CrossReferencePort` declares the new pair. A consumer on the old spelling gets
+`AttributeError` / `unknown tool` — loud, which is the point. Release-notes material.
+
 ### The vendored fork has a baseline, and the divergences are catalogued (dexllm#65, 2026-09-01)
 
 The fork recorded no upstream version, no revision hash and no provenance file,
@@ -6795,14 +7130,16 @@ later one claimed no import-anchored measurement could *ever* show common.cc —
 reviewers caught both.)
 
 **The real delta, which no in-source census could produce: 136 vendored files,
-125 byte-identical to upstream, 11 modified, 0 added, +1271/-131.** Those line
+125 byte-identical to upstream, 11 modified, 0 added, +1271/-131.** That was
+measured at `4eff18b`; dexllm#84 later added the two field reverse-index accessors
+of D8, so the registry publishes **+1288/-131** today. Those line
 counts are `git diff --numstat`, the predicate the rest of this repo uses; an
 earlier draft published +1215/-130 from a `diff -u | grep -c '^+[^+]'` pipeline,
 which silently drops 56 added blank lines [[published-counts-need-the-repos-own-predicate]].
 
 The issue's figure was 54 markers in **four** files (`dex_item.cpp`,
-`dexkit.cpp`, `dex_item.h`, `dexkit.h`); the census is **82 marker lines across
-eleven** today, and the gap is not only later work landing — **three files
+`dexkit.cpp`, `dex_item.h`, `dexkit.h`); the census was **82 marker lines across
+eleven** at `4eff18b` (83 since dexllm#84), and the gap is not only later work landing — **three files
 carried a full rationale comment and no marker token at all**
 (`Core/CMakeLists.txt`, `Core/dexkit/include/zip_archive.h`,
 `Core/third_party/slicer/common.cc`), so a `grep dexllm` saw 8 files where there

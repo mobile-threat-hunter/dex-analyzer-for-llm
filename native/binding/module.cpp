@@ -407,11 +407,13 @@ public:
     find_call_sites_from_method(const std::string& method_descriptor) {
         return ext_.FindCallSitesFromMethod(ident_in(method_descriptor));
     }
-    py::list find_field_read_methods(const std::string& field_descriptor) {
-        return ident_out(ext_.FindFieldReadMethods(ident_in(field_descriptor)));
+    std::vector<dexkit::ext::FieldAccessSite>
+    find_field_read_sites(const std::string& field_descriptor) {
+        return ext_.FindFieldReadSites(ident_in(field_descriptor));
     }
-    py::list find_field_write_methods(const std::string& field_descriptor) {
-        return ident_out(ext_.FindFieldWriteMethods(ident_in(field_descriptor)));
+    std::vector<dexkit::ext::FieldAccessSite>
+    find_field_write_sites(const std::string& field_descriptor) {
+        return ext_.FindFieldWriteSites(ident_in(field_descriptor));
     }
     dexkit::ext::TypeReferences
     find_type_references(const std::string& type_descriptor) {
@@ -966,6 +968,29 @@ PYBIND11_MODULE(_dexkit_core, m) {
                    DecodeMutf8ForPy(c.callee_descriptor) + ")";
         });
 
+    // dexllm#84 — the field cross-reference's per-instruction row. `dex_id` /
+    // `method_idx` identify the ACCESSING method (the field's own dex may differ);
+    // `opcode` is 0x52..0x6D, which says both the direction and whether the access
+    // is static. See api_ref.h for why it does not reuse CallSite's `caller_*`.
+    py::class_<dexkit::ext::FieldAccessSite>(m, "FieldAccessSite")
+        .def_property_readonly("method_descriptor",
+            [](const dexkit::ext::FieldAccessSite& f) {
+                return ident_out(f.method_descriptor);
+            })
+        .def_readonly("dex_id", &dexkit::ext::FieldAccessSite::dex_id)
+        .def_readonly("method_idx", &dexkit::ext::FieldAccessSite::method_idx)
+        .def_property_readonly("field_descriptor",
+            [](const dexkit::ext::FieldAccessSite& f) {
+                return ident_out(f.field_descriptor);
+            })
+        .def_readonly("bytecode_offset", &dexkit::ext::FieldAccessSite::bytecode_offset)
+        .def_readonly("opcode", &dexkit::ext::FieldAccessSite::opcode)
+        .def("__repr__", [](const dexkit::ext::FieldAccessSite& f) {
+            return "FieldAccessSite(" + DecodeMutf8ForPy(f.method_descriptor) +
+                   " @" + std::to_string(f.bytecode_offset) + " -> " +
+                   DecodeMutf8ForPy(f.field_descriptor) + ")";
+        });
+
     py::class_<dexkit::ext::TypeReferences>(m, "TypeReferences")
         .def_property_readonly("fields",
             [](const dexkit::ext::TypeReferences& t) {
@@ -1246,17 +1271,23 @@ PYBIND11_MODULE(_dexkit_core, m) {
              "methods it invokes (callees). Each CallSite fixes the caller_* fields "
              "(the queried method) and varies callee_descriptor. Empty for an "
              "external / bodyless / unresolved method.")
-        .def("find_methods_reading_field", &PyDexKit::find_field_read_methods,
+        // dexllm#84: named for what they RETURN, as find_call_sites_* is. They were
+        // find_methods_reading_field / find_methods_writing_field and gave bare
+        // method descriptors, one per access INSTRUCTION — so a method reading the
+        // field four times produced four IDENTICAL strings and the instructions
+        // were unobtainable. `{s.method_descriptor for s in ...}` is the old value.
+        .def("find_field_read_sites", &PyDexKit::find_field_read_sites,
              py::arg("field_descriptor"),
-             "L2.5: descriptors of every method that READS (iget*/sget*) the given "
-             "field (\"Lpkg/Cls;->name:Type\"), from the core's field_get_method_ids "
-             "reverse index. Empty if the field isn't declared in a loaded dex. "
-             "Warms the analysis caches on first use.")
-        .def("find_methods_writing_field", &PyDexKit::find_field_write_methods,
+             "L2.5: every site that READS (iget*/sget*) the given field "
+             "(\"Lpkg/Cls;->name:Type\") — a FieldAccessSite per access "
+             "INSTRUCTION, carrying the accessing method, its dex-local identity, "
+             "the bytecode offset and the opcode. Empty if the field is not "
+             "referenced by any loaded dex. Warms the analysis caches on first use.")
+        .def("find_field_write_sites", &PyDexKit::find_field_write_sites,
              py::arg("field_descriptor"),
-             "L2.5: descriptors of every method that WRITES (iput*/sput*) the given "
-             "field (\"Lpkg/Cls;->name:Type\"). Companion to "
-             "find_methods_reading_field.")
+             "L2.5: every site that WRITES (iput*/sput*) the given field "
+             "(\"Lpkg/Cls;->name:Type\"). Companion to find_field_read_sites; the "
+             "same FieldAccessSite rows, with a write opcode.")
         .def("find_type_references", &PyDexKit::find_type_references,
              py::arg("type_descriptor"),
              "L2.5: signature-position type xref for \"Lpkg/Cls;\" — a TypeReferences "

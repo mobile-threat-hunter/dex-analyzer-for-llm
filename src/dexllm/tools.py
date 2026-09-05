@@ -572,18 +572,38 @@ def _t_find_call_sites_from(
     return _paginate(items, offset, limit)
 
 
-def _t_find_methods_reading_field(
+def _field_site_rows(sites: object) -> list[dict]:
+    """Compact one FieldAccessSite per row, the way _t_find_call_sites_to does.
+
+    Same shape as that sibling — both descriptors plus the offset — and the same
+    omission: `opcode` is dropped for context size, exactly as `invoke_opcode` is
+    there. The offset is what dexllm#84 added; without it these rows repeated one
+    identical string per access.
+    """
+    return [
+        {
+            "method": s.method_descriptor,
+            "field": s.field_descriptor,
+            "bytecode_offset": s.bytecode_offset,
+        }
+        for s in sites  # type: ignore[attr-defined]
+    ]
+
+
+def _t_find_field_read_sites(
     dk: DexKit, field_descriptor: str, limit: int = 50, offset: int = 0
 ) -> dict:
     require_member_descriptor(field_descriptor)
-    return _paginate(dk.find_methods_reading_field(field_descriptor), offset, limit)
+    rows = _field_site_rows(dk.find_field_read_sites(field_descriptor))
+    return _paginate(rows, offset, limit)
 
 
-def _t_find_methods_writing_field(
+def _t_find_field_write_sites(
     dk: DexKit, field_descriptor: str, limit: int = 50, offset: int = 0
 ) -> dict:
     require_member_descriptor(field_descriptor)
-    return _paginate(dk.find_methods_writing_field(field_descriptor), offset, limit)
+    rows = _field_site_rows(dk.find_field_write_sites(field_descriptor))
+    return _paginate(rows, offset, limit)
 
 
 def _t_find_type_references(
@@ -859,8 +879,8 @@ TOOL_IMPLS: dict[str, Callable] = {
     "find_call_sites_to": _t_find_call_sites_to,
     "resolve_call_args": _t_resolve_call_args,
     "find_call_sites_from": _t_find_call_sites_from,
-    "find_methods_reading_field": _t_find_methods_reading_field,
-    "find_methods_writing_field": _t_find_methods_writing_field,
+    "find_field_read_sites": _t_find_field_read_sites,
+    "find_field_write_sites": _t_find_field_write_sites,
     "find_type_references": _t_find_type_references,
     "find_methods_using_int_literals": _t_find_methods_using_int_literals,
     "find_methods_using_double_literals": _t_find_methods_using_double_literals,
@@ -1168,11 +1188,12 @@ TOOL_DEFINITIONS: list[dict] = [
         },
     },
     {
-        "name": "find_methods_reading_field",
+        "name": "find_field_read_sites",
         "description": (
-            "Methods that READ a field (iget/sget). Pass the field descriptor "
-            "'Lcom/foo/Bar;->f:I'. Returns caller method descriptors, one "
-            "entry per read INSTRUCTION - a method reading it twice appears twice."
+            "Sites that READ a field (iget/sget). Pass the field descriptor "
+            "'Lcom/foo/Bar;->f:I'. One row per read INSTRUCTION, each with the "
+            "accessing method and its bytecode offset - a method reading it "
+            "twice yields two rows with DIFFERENT offsets."
         ),
         "input_schema": {
             "type": "object",
@@ -1185,11 +1206,12 @@ TOOL_DEFINITIONS: list[dict] = [
         },
     },
     {
-        "name": "find_methods_writing_field",
+        "name": "find_field_write_sites",
         "description": (
-            "Methods that WRITE a field (iput/sput). Pass the field descriptor "
-            "'Lcom/foo/Bar;->f:I'. Returns caller method descriptors, one "
-            "entry per write INSTRUCTION - a method writing it twice appears twice."
+            "Sites that WRITE a field (iput/sput). Pass the field descriptor "
+            "'Lcom/foo/Bar;->f:I'. One row per write INSTRUCTION, each with the "
+            "accessing method and its bytecode offset - a method writing it "
+            "twice yields two rows with DIFFERENT offsets."
         ),
         "input_schema": {
             "type": "object",

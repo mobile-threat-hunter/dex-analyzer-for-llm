@@ -381,15 +381,21 @@ public:
     ResolveCallArgs(std::string_view api_descriptor,
                     uint32_t depth = dexkit::ext::kDefaultArgDepth);
 
-    // L2.5 — field access-site xref. Which methods READ (iget*/sget*) or WRITE
-    // (iput*/sput*) the given field, from the core's field_get/put_method_ids
-    // reverse index (exact, instruction-faithful — distinguishes readers from
-    // writers). ``field_descriptor`` is the ``Lcls;->name:Type`` form; returns the
-    // accessing methods' full descriptors (empty if the field isn't located).
-    [[nodiscard]] std::vector<std::string>
-    FindFieldReadMethods(std::string_view field_descriptor);
-    [[nodiscard]] std::vector<std::string>
-    FindFieldWriteMethods(std::string_view field_descriptor);
+    // L2.5 — field access-site xref. Every site that READS (iget*/sget*) or WRITES
+    // (iput*/sput*) the given field: the core's field_get/put_method_ids reverse
+    // index supplies the candidate accessors, and each one's body is then walked
+    // for the per-INSTRUCTION offset + opcode — the same two-step shape
+    // FindCallSitesToApi uses (reverse index -> EnumerateInvokeSites).
+    // ``field_descriptor`` is the ``Lcls;->name:Type`` form; empty if the field is
+    // not located in any loaded dex.
+    //
+    // dexllm#84: these returned bare method descriptors until v0.21, so the
+    // per-instruction contract their own docs stated produced repeated IDENTICAL
+    // strings. `{s.method_descriptor for s in ...}` is the old value, deduplicated.
+    [[nodiscard]] std::vector<FieldAccessSite>
+    FindFieldReadSites(std::string_view field_descriptor);
+    [[nodiscard]] std::vector<FieldAccessSite>
+    FindFieldWriteSites(std::string_view field_descriptor);
 
     // L2.5 — type-reference xref (signature positions): fields typed as the type +
     // methods that return it + methods that take it as a parameter. Scans every dex

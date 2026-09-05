@@ -56,7 +56,7 @@ _SUFFIX_TO_RECORDS: dict[str, frozenset[str]] = {
     ),
     "Info": frozenset({"ClassInfo", "ContainerInfo", "FieldInfo", "MethodInfo"}),
     "Summary": frozenset({"ClassSummary"}),
-    "Site": frozenset({"CallSite", "ResolvedCallSite"}),
+    "Site": frozenset({"CallSite", "FieldAccessSite", "ResolvedCallSite"}),
     "Location": frozenset({"SourceLocation", "StatementLocation"}),
     "Ast": frozenset({"MethodAst"}),
     "Status": frozenset({"DexVerifyStatus"}),

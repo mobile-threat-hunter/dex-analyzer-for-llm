@@ -27,6 +27,7 @@ method exists whose AST says ``declared_synchronized``, the summary must agree.
 from __future__ import annotations
 
 import pytest
+from conftest import require_corpus_shape
 
 ACC_SYNCHRONIZED = 0x20
 ACC_DECLARED_SYNCHRONIZED = 0x20000
@@ -227,14 +228,18 @@ def test_dad_path_still_reports_declared_synchronized(loadable_apks):
     pytest.skip(f"{target_cls} not present in the available APK(s)")
 
 
-def test_field_xref_is_per_instruction_not_per_method(loadable_apks):
-    """Pin the undeduplicated contract the docs now state across all four layers.
+def test_field_xref_is_per_instruction_in_the_value_too(loadable_apks):
+    """Pin the per-instruction contract in the VALUE, not only in the count.
 
-    ``find_methods_reading_field`` / ``_writing_field`` return one entry per
-    ACCESS INSTRUCTION (like ``CallSite``), so a method with two ``iget``s of the
-    field appears twice. This was undocumented until 2026-08-06 and is easy to
-    "fix" into a dedup by accident, which would silently change the meaning of
-    every count built on it.
+    INVERTED from `test_field_xref_is_per_instruction_not_per_method` (dexllm#84).
+    That guard pinned the same contract on `find_methods_reading_field`'s
+    `list[str]`, where a method reading the field four times produced four
+    IDENTICAL strings: the contract held in the COUNT and was lost in the VALUE,
+    and 48% of the fields with a read in the bundled corpus returned such rows.
+    The rows are `FieldAccessSite` now, so the repeats must be DISTINCT records —
+    which is the half no assertion could make before.
+
+    Still corpus-ground-truthed against the smali, so a fabricated offset fails.
     """
     import dexllm
 
@@ -244,23 +249,38 @@ def test_field_xref_is_per_instruction_not_per_method(loadable_apks):
         except Exception:
             continue
         for fd in dk.list_fields()[:4000]:
-            readers = dk.find_methods_reading_field(fd)
-            if len(readers) > len(set(readers)):
-                # the repeat must be a genuine multi-access method, and the
-                # smali must show at least as many reads as the repeat count
-                dup = max(set(readers), key=readers.count)
-                smali = dk.render_method_smali(dup)
-                reads = sum(
-                    1
-                    for line in smali.splitlines()
-                    if fd in line and "get" in line.split(",")[0].split(":")[-1]
+            by_method: dict[str, list[int]] = {}
+            for site in dk.find_field_read_sites(fd):
+                by_method.setdefault(site.method_descriptor, []).append(
+                    site.bytecode_offset
                 )
-                assert reads >= readers.count(dup), (
-                    f"{dup} appears {readers.count(dup)}x in the reader list but "
-                    f"the smali shows only {reads} read(s) of {fd}"
-                )
-                return
-    pytest.skip("no field with a repeated reader in the available APK(s)")
+            dup = next((m for m, offs in by_method.items() if len(offs) > 1), None)
+            if dup is None:
+                continue
+            offs = by_method[dup]
+            assert len(set(offs)) == len(offs), (
+                f"{dup} accesses {fd} {len(offs)}x but the rows repeat an offset: "
+                f"{offs} — the per-instruction contract is lost in the value again"
+            )
+            # the offsets must be REAL read instructions of that field, not
+            # fabricated: the smali lists each one at its own offset.
+            smali = dk.render_method_smali(dup)
+            reads = {
+                int(line.split(":", 1)[0].strip(), 16)
+                for line in smali.splitlines()
+                if fd in line and "get" in line.split(",")[0].split(":")[-1]
+            }
+            assert set(offs) <= reads, (
+                f"{dup} reports read offsets {sorted(offs)} for {fd} but the smali "
+                f"shows reads only at {sorted(reads)}"
+            )
+            return
+    require_corpus_shape(
+        False,
+        "field read twice by one method",
+        "the field xref stopped reporting per-instruction rows, so this guard "
+        "verified nothing",
+    )
 
 
 # --- UNKNOWN is not 0 (dexllm#41) ---------------------------------------------

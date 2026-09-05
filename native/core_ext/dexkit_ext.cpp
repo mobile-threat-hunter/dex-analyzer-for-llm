@@ -10,6 +10,8 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <tuple>
+#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 
@@ -20,6 +22,8 @@
 #include "slicer/dex_format.h"  // dex::Header (logical-dex split mirror)
 #include "schema/querys_generated.h"
 #include "zip_archive.h"  // dexkit::ZipArchive (PK/central-dir container probe)
+#include "utils/byte_code_util.h"  // ReadShort — dexllm#84 field-site walk
+#include "utils/opcode_util.h"  // GetBytecodeWidth — ditto
 #include "schema/matchers_generated.h"
 #include "schema/results_generated.h"
 #include "schema/encode_value_generated.h"
@@ -2243,42 +2247,176 @@ std::vector<std::pair<int, uint32_t>> LocateFields(DexKitExt& ext,
     return out;
 }
 
-// Readers (FieldGetMethods, writers=false) / writers (FieldPutMethods) of a field.
-// THREAD-SAFETY PRECONDITION (same as the caller-analysis path): the exposed
-// entry points (find_methods_reading_field / find_methods_writing_field, and
-// their deprecated find_field_*_methods aliases) are bound
-// WITHOUT py::gil_scoped_release, so the GIL serializes this lazy WarmAnalysisCaches
-// warmup and the lazy GetMethodDescriptor population it feeds. Do NOT add
+// One field-access site inside a method body: the operand's field_ids index, the
+// byte offset within `insns`, and the opcode. The field analogue of
+// DexItem::EnumerateInvokeSites, written HERE rather than beside it — that
+// function sits inside the 560-line dexllm block dexllm#80 tracks for removal
+// from the vendored file, and this needs nothing private (GetMethodCode() is the
+// whole input), so a sibling there would grow exactly the pile that issue exists
+// to shrink.
+struct FieldSite {
+    uint32_t field_idx;
+    uint32_t bytecode_offset;
+    uint8_t opcode;
+};
+
+// 0x52..0x6D is EXACTLY slicer's `kIndexFieldRef` set — 28 contiguous opcodes,
+// formats k21c and k22c, both carrying the field index in code unit 1 — and is the
+// same gate InitCache's own collector uses (dex_item.cpp, `need_method_using_field`).
+// The quick forms stay OUT: 0xE3-0xE8 / 0xEB-0xF2 are `kIndexFieldOffset` and
+// 0xE9/0xEA are `kIndexVtableOffset` (the two are NOT one range — a correctness
+// reviewer caught this comment claiming they were), so their operand is an OFFSET
+// rather than a field_ids index, which is precisely the confusion dexllm#61 removed
+// from the invoke gates. tests/test_field_access_sites.py derives the set from the
+// table and pins it.
+constexpr bool IsFieldAccessOpcode(uint8_t op) { return op >= 0x52 && op <= 0x6d; }
+constexpr bool IsFieldReadOpcode(uint8_t op) {
+    return (op >= 0x52 && op <= 0x58) || (op >= 0x60 && op <= 0x66);
+}
+
+std::vector<FieldSite> EnumerateFieldAccessSites(const dexkit::DexItem& item,
+                                                 uint32_t method_idx) {
+    std::vector<FieldSite> out;
+    const auto* code = item.GetMethodCode(method_idx);
+    if (code == nullptr) return out;  // native / abstract
+    const dex::u2* base = code->insns;
+    const dex::u2* p = base;
+    const dex::u2* end_p = base + code->insns_size;
+    while (p < end_p) {
+        const auto op = static_cast<uint8_t>(*p);
+        const dex::u2* ptr = p;
+        const size_t width = GetBytecodeWidth(ptr++);
+        if (width == 0) break;  // malformed / payload
+        if (IsFieldAccessOpcode(op)) {
+            FieldSite site;
+            site.field_idx = ReadShort(ptr);
+            site.bytecode_offset = static_cast<uint32_t>((p - base) * 2);
+            site.opcode = op;
+            out.push_back(site);
+        }
+        p += width;
+    }
+    return out;
+}
+
+// Every READ (writers=false) or WRITE site of a field, as per-INSTRUCTION rows.
+//
+// Two steps, the same shape FindCallSitesToApi uses: the core's field->accessors
+// reverse index supplies the CANDIDATE methods (O(accessors), not a scan of every
+// method), then each candidate's body is walked for the offset and opcode the
+// index does not keep. Before dexllm#84 only the first step ran and the result was
+// the accessor's descriptor repeated once per instruction.
+//
+// THREAD-SAFETY PRECONDITION (same as the caller-analysis path): the exposed entry
+// points (find_field_read_sites / find_field_write_sites) are bound WITHOUT
+// py::gil_scoped_release, so the GIL serializes this lazy WarmAnalysisCaches warmup
+// and the lazy GetMethodDescriptor population it feeds. Do NOT add
 // gil_scoped_release to those bindings without adding a std::once_flag / mutex here.
-std::vector<std::string> FieldAccessMethods(DexKitExt& ext, std::string_view fd,
-                                            bool writers) {
+std::vector<FieldAccessSite> FieldAccessSites(DexKitExt& ext, std::string_view fd,
+                                              bool writers) {
     const auto locs = LocateFields(ext, fd);
     if (locs.empty()) return {};
     ext.WarmAnalysisCaches();  // field_get/put_method_ids need the full cache
-    std::vector<std::string> out;
-    // UNION over every dex that carries a field_id for this descriptor, in
-    // dex_id order: one field can be referenced from several dexes, and each
-    // dex's index only knows its own references.
+
+    // dex_id -> that dex's OWN field_idx for this descriptor. A cross-dex accessor
+    // references the field through ITS dex's field_ids entry, so the instruction
+    // operand has to be matched against the LOCAL index rather than the declaring
+    // dex's — the same re-resolution CollectApiCallers performs for a cross-dex
+    // caller. (The core aggregates a field's accessors into the declaring dex,
+    // tagged with their origin dex; the source list is cleared, so iterating every
+    // location below unions without double-counting.)
+    std::unordered_map<uint16_t, uint32_t> local_field;
+    for (const auto& [dex_id, fid] : locs)
+        local_field.emplace(static_cast<uint16_t>(dex_id), fid);
+
+    std::vector<FieldAccessSite> out;
     for (const auto& [dex_id, fid] : locs) {
         auto* item = ext.core().GetDexItem(static_cast<uint16_t>(dex_id));
         if (item == nullptr) continue;
-        const auto beans = writers ? item->FieldPutMethods(fid)
-                                   : item->FieldGetMethods(fid);
-        for (const auto& bean : beans) out.emplace_back(bean.dex_descriptor);
+        const auto& index = writers ? item->GetFieldPutMethodIds()
+                                    : item->GetFieldGetMethodIds();
+        if (fid >= index.size()) continue;
+
+        // Dedup by (origin_dex, method_idx): the raw index lists an accessor once
+        // per ACCESS INSTRUCTION, and the body walk below re-derives every one of
+        // those instructions — so without this each site would be emitted as many
+        // times as the method accesses the field.
+        //
+        // The sort is what makes `std::unique` correct, and it is NOT redundant
+        // with the final one below: `unique` collapses only ADJACENT equal
+        // elements. Dropping it happens to be output-identical today, because
+        // InitCache appends a field's entries per (class_def, method) and
+        // aggregation appends whole source lists, so one method's entries are
+        // contiguous by construction (measured: 0 interleaved runs corpus-wide) —
+        // but that is an INCIDENTAL guarantee of how the core builds the index,
+        // not a contract, so the dedup does not lean on it.
+        std::vector<std::pair<uint16_t, uint32_t>> accessors(index[fid].begin(),
+                                                             index[fid].end());
+        std::sort(accessors.begin(), accessors.end());
+        accessors.erase(std::unique(accessors.begin(), accessors.end()),
+                        accessors.end());
+
+        for (const auto& [origin_dex, m_idx] : accessors) {
+            auto* owner = (origin_dex == item->GetDexId())
+                              ? item
+                              : ext.core().GetDexItem(origin_dex);
+            if (owner == nullptr) continue;
+            const auto local = local_field.find(origin_dex);
+            if (local == local_field.end()) continue;  // no field_id there to match
+            std::string method_desc = BuildMethodDescriptor(*owner, m_idx);
+            for (const auto& s : EnumerateFieldAccessSites(*owner, m_idx)) {
+                if (s.field_idx != local->second) continue;
+                // The index only says the method reads (or writes) the field; the
+                // SAME method may do both, so the direction is decided per site.
+                if (IsFieldReadOpcode(s.opcode) == writers) continue;
+                FieldAccessSite fs;
+                fs.method_descriptor = method_desc;
+                fs.dex_id = static_cast<uint16_t>(owner->GetDexId());
+                fs.method_idx = m_idx;
+                fs.field_descriptor = std::string(fd);
+                fs.bytecode_offset = static_cast<int32_t>(s.bytecode_offset);
+                fs.opcode = s.opcode;
+                out.push_back(std::move(fs));
+            }
+        }
     }
+    // Final global order = (accessor's dex, its method_idx, the offset), which is
+    // what every layer documents. The loop above emits in that order WITHIN one
+    // location, and the shape that could break it ACROSS locations — a class
+    // declared with a body in TWO+ dexes (multi-source / add_dumped_dexes(prefer) /
+    // packer dump) so that reference-only accessors aggregate into the LOWEST
+    // declaring dex while a higher one keeps its own — was NOT reproducible: two
+    // independent sweeps (mine over 4 constructed multi-source sessions, a
+    // reviewer's over 314,878 queries with this sort REMOVED) found 0 out-of-order
+    // results. So this is a defence for a case neither of us could construct, kept
+    // for the same reason and in the same position as CollectApiCallers' own final
+    // sort, and it is pinned at SOURCE level only (see
+    // test_the_row_order_is_a_final_global_sort, which says so).
+    //
+    // `stable_sort`, not `sort`: the keys are unique on every input measured (0
+    // repeated row identities over 463,954 rows across the bundled corpus AND the
+    // committed fixtures), but that uniqueness is a consequence of upstream
+    // clear()ing a source list after moving it — decided in a thread pool where a
+    // dex can be both source and target — so it is a measured property rather than
+    // a contract. A stable sort costs nothing and does not lean on it.
+    std::stable_sort(out.begin(), out.end(), [](const FieldAccessSite& a,
+                                                const FieldAccessSite& b) {
+        return std::tie(a.dex_id, a.method_idx, a.bytecode_offset)
+             < std::tie(b.dex_id, b.method_idx, b.bytecode_offset);
+    });
     return out;
 }
 
 }  // namespace
 
-std::vector<std::string>
-DexKitExt::FindFieldReadMethods(std::string_view field_descriptor) {
-    return FieldAccessMethods(*this, field_descriptor, /*writers=*/false);
+std::vector<FieldAccessSite>
+DexKitExt::FindFieldReadSites(std::string_view field_descriptor) {
+    return FieldAccessSites(*this, field_descriptor, /*writers=*/false);
 }
 
-std::vector<std::string>
-DexKitExt::FindFieldWriteMethods(std::string_view field_descriptor) {
-    return FieldAccessMethods(*this, field_descriptor, /*writers=*/true);
+std::vector<FieldAccessSite>
+DexKitExt::FindFieldWriteSites(std::string_view field_descriptor) {
+    return FieldAccessSites(*this, field_descriptor, /*writers=*/true);
 }
 
 TypeReferences DexKitExt::FindTypeReferences(std::string_view type_descriptor) {

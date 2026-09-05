@@ -40,6 +40,46 @@ struct CallSite {
     uint8_t invoke_opcode = 0;             // L2.5: 0x6E~0x72, 0x74~0x78, 0xFA/0xFB
 };
 
+// dexllm#84 — a single FIELD ACCESS site: one `iget*`/`iput*`/`sget*`/`sput*`
+// instruction, in the method that executes it.
+//
+// The sibling of `CallSite` for the field cross-reference. That pair
+// (find_field_read_sites / find_field_write_sites) used to return bare method
+// descriptors with a documented per-INSTRUCTION contract, so a method reading the
+// field four times produced FOUR IDENTICAL STRINGS: the contract was honoured in
+// the count and lost in the value, and the instructions were unobtainable at any
+// price (48% of the fields with a read in the bundled corpus returned such rows).
+//
+// Named for what it IS, not for how it was obtained (dexllm#69): `Site` is the
+// established suffix for "one bytecode edge at one instruction" (CallSite,
+// ResolvedCallSite) and "field access" is the noun this project already uses for
+// one of these (`CapabilityReport.total_field_accesses`,
+// `ApiUsage.field_access_count`).
+//
+// It deliberately does NOT reuse CallSite's `caller_*` role prefix: an `iget`
+// calls nothing, so spelling the accessor a "caller" would give one word two
+// grammars — the defect dexllm#68/#69 exist to prevent. `method_descriptor` and
+// `field_descriptor` are existing spellings with exactly these meanings
+// (`ResolvedArg`, `TlsTrustComponent`).
+struct FieldAccessSite {
+    // The method that performs the access, and its dex-local identity. `dex_id` is
+    // the dex of THAT METHOD — which is what makes `method_idx` meaningful, and
+    // which may DIFFER from the dex declaring the field (a cross-dex reference;
+    // the core aggregates a field's accessors into the declaring dex tagged with
+    // their origin).
+    std::string method_descriptor;         // "Lcom/x/Y;->foo(I)V"
+    uint16_t dex_id = 0;
+    uint32_t method_idx = 0;               // index into that dex's MethodIds
+    std::string field_descriptor;          // "Lcom/x/Y;->name:Ltype;"
+    // Byte offset within the method's `insns`, i.e. the same base
+    // render_method_smali prints — NOT relative to the code_item struct.
+    int32_t bytecode_offset = -1;
+    // 0x52~0x6D — the whole `kIndexFieldRef` family. Says both the direction
+    // (iget*/sget* read, iput*/sput* write) and whether the access is static,
+    // without resolving the field.
+    uint8_t opcode = 0;
+};
+
 // L1.5 — convenience summary of a single class, suitable for source-style
 // rendering. Works for both internal and external classes:
 //   - internal: declared in at least one loaded dex; full member list from

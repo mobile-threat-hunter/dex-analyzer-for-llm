@@ -747,28 +747,39 @@ for s in dk.resolve_call_args(API):
 ```
 
 ### Field read/write xref → `list[str]`
-Which methods READ (`iget*`/`sget*`) vs WRITE (`iput*`/`sput*`) a specific field
+Every site that READS (`iget*`/`sget*`) vs WRITES (`iput*`/`sput*`) a specific field
 (L2.5 reverse index). `field_descriptor` is the `Lcls;->name:Type` form; each returns
-plain method descriptors (`[]` if the field isn't declared in a loaded dex). The
-pre-rename spellings `find_field_read_methods` / `find_field_write_methods` (and the
-SDK's `find_field_readers` / `find_field_writers`) are **removed** — every other
-`find_*` names what it RETURNS right after `find_`, and those named the queried
-field instead.
+`FieldAccessSite` rows (`[]` if no loaded dex references the field). Several earlier
+spellings are **removed** and take no alias: `find_field_read_methods` /
+`find_field_write_methods`, the SDK's `find_field_readers` / `find_field_writers`, and
+— since dexllm#84, together with the return type — `find_methods_reading_field` /
+`find_methods_writing_field`. Every `find_*` names what it RETURNS right after
+`find_`, and each of those named something else.
 ```python
 fd = 'La2dp/Vol/AppChooser$1;->this$0:La2dp/Vol/AppChooser;'
-dk.find_methods_reading_field(fd)   # ['La2dp/Vol/AppChooser$1;->onClick(Landroid/view/View;)V']   (readers)
-dk.find_methods_writing_field(fd)  # ['La2dp/Vol/AppChooser$1;-><init>(La2dp/Vol/AppChooser;)V']  (writers)
+[s.method_descriptor for s in dk.find_field_read_sites(fd)]
+# ['La2dp/Vol/AppChooser$1;->onClick(Landroid/view/View;)V']
+[s.method_descriptor for s in dk.find_field_write_sites(fd)]
+# ['La2dp/Vol/AppChooser$1;-><init>(La2dp/Vol/AppChooser;)V']
 ```
-**One entry per ACCESS INSTRUCTION, not per method** — the same semantics as
-`CallSite`. A method with two `iget`s of the field appears twice, so the list is
-not deduplicated; wrap in `set()` (or `dict.fromkeys()` to keep order) when you
-want distinct methods. Measured on the bundled corpus: of 634 fields with at
-least one reader, 164 have a reader that repeats.
+**One row per ACCESS INSTRUCTION, not per method** — the same semantics as
+`CallSite`, and since dexllm#84 the same in the VALUE too: a method with two
+`iget`s of the field yields two rows with DIFFERENT `bytecode_offset`. Until then
+these returned bare descriptors, so the repeats were the identical string and the
+instructions were unobtainable at any price (measured on the bundled corpus: of
+526 fields with a read, 255 — 48% — returned such rows, 1,363 of them
+indistinguishable). For the old value, deduplicated, use
+`{s.method_descriptor for s in ...}`.
 ```python
 tp = 'Lcom/google/android/exoplayer2/ui/DefaultTimeBar;->touchPosition:Landroid/graphics/Point;'
-len(dk.find_methods_reading_field(tp))   # 2 — one method, two iget-object
-len(dk.find_methods_writing_field(tp))   # 1 — the same method, one iput-object
+[s.bytecode_offset for s in dk.find_field_read_sites(tp)]    # [42, 96] — one method, two iget-object
+[s.bytecode_offset for s in dk.find_field_write_sites(tp)]   # [28] — the same method, one iput-object
 ```
+A row's `dex_id` / `method_idx` identify the ACCESSING method (a dex-local pair, so
+`method_idx` is meaningful only with `dex_id`); the FIELD's own dex may differ,
+because a field is referenced across dexes. `opcode` is one of `0x52`–`0x6D`, which
+says both the direction and whether the access is static without resolving the
+field. Rows are ordered by (accessing dex, `method_idx`, `bytecode_offset`).
 **The argument is a field REFERENCE, not a field.** One inherited field is
 addressed by as many `field_ids` entries as there are classes referencing it —
 `Sub;->f:I` and `Base;->f:I` are different descriptors and each answers only for
@@ -1313,7 +1324,7 @@ descriptor → the catalog API descriptors it invokes — dexllm#35; it was
 `matched_apis: int`, `dropped_touches: int` / `dropped_apis: int` (what
 `app_only=True` filtered out — 0 under `app_only=False`; see above),
 `total_field_accesses: int` (READ INSTRUCTIONS against a
-field-descriptor entry — dexllm#36; `find_methods_reading_field` is not
+field-descriptor entry — dexllm#36; `find_field_read_sites` is not
 deduplicated, so this is the same unit as the line above and summing them is
 meaningful. The two are kept apart only so `total_call_sites`' released meaning
 is untouched).

@@ -656,21 +656,31 @@ def test_enumeration_companions_multidex():
     assert f_concat == f_agg
 
 
-def test_field_xref_readers_writers(apk_path):
-    """CrossReferencePort exposes field read/write xref (L2.5): the descriptors of
-    methods that iget*/sget* (read) or iput*/sput* (write) a field. The direction is
-    verified against the smali (via session.raw) so readers/writers can't be swapped.
+def test_field_xref_read_write_sites(apk_path):
+    """CrossReferencePort exposes field read/write xref (L2.5) as FieldAccessSite.
+
+    The direction is verified against the smali (via session.raw) so reads and
+    writes can't be swapped. Since dexllm#84 the rows are records rather than bare
+    descriptors, so the typed shape is asserted here too.
     """
+    from dexllm.sdk import FieldAccessSite
+
     session = open_apk(apk_path)
     for cls in session.list_classes():
         summary = session.raw.get_class_summary(cls)
         for f in getattr(summary, "fields", []):
             fd = f"{cls}->{f.name}:{f.type}"
-            readers = session.find_methods_reading_field(fd)
-            writers = session.find_methods_writing_field(fd)
-            assert all(isinstance(m, str) and "->" in m for m in readers + writers)
-            reader_only = [m for m in readers if m not in writers]
-            writer_only = [m for m in writers if m not in readers]
+            reads = session.find_field_read_sites(fd)
+            writes = session.find_field_write_sites(fd)
+            for site in reads + writes:
+                assert isinstance(site, FieldAccessSite)
+                assert "->" in site.method_descriptor
+                assert site.field_descriptor == fd
+                assert site.bytecode_offset >= 0
+            readers = {s.method_descriptor for s in reads}
+            writers = {s.method_descriptor for s in writes}
+            reader_only = sorted(readers - writers)
+            writer_only = sorted(writers - readers)
             if reader_only:
                 sm = session.raw.render_method_smali(reader_only[0])
                 assert f.name in sm and ("iget" in sm or "sget" in sm)
@@ -1366,7 +1376,7 @@ class _CapStubDk:
             else []
         )
 
-    def find_methods_reading_field(self, descriptor):
+    def find_field_read_sites(self, descriptor):
         return []
 
 
@@ -1501,6 +1511,9 @@ def test_no_adapter_alias_survives(apk_path):
         "find_call_sites_from_method",
         "find_field_readers",
         "find_field_writers",
+        # dexllm#84 renamed these two with their return type; no alias is kept.
+        "find_methods_reading_field",
+        "find_methods_writing_field",
     ):
         assert not hasattr(DexKitAdapter, gone), f"{gone} is still on the adapter"
 
@@ -1509,12 +1522,12 @@ def test_no_adapter_alias_survives(apk_path):
     session.find_call_sites_to(api)  # canonical spellings still resolve
     session.resolve_call_args(api)
     fd = next(
-        (f for f in session.raw.list_fields() if session.find_methods_reading_field(f)),
+        (f for f in session.raw.list_fields() if session.find_field_read_sites(f)),
         None,
     )
     if fd is not None:
-        assert session.find_methods_reading_field(fd)
-        session.find_methods_writing_field(fd)
+        assert session.find_field_read_sites(fd)
+        session.find_field_write_sites(fd)
 
 
 def test_typed_analysis_surface(apk_path):

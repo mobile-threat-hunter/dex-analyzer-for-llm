@@ -178,13 +178,22 @@ other spelling, and the reason `MethodInfo` exposes the bits instead.
   paired with `caller_dex_id` (not a stable global id).
 - **`ResolvedCallSite`** — a `CallSite` plus `args: tuple[ResolvedArg, ...]`. Only the
   reverse direction produces it (`resolve_call_args`), so callee is the fixed half.
-- Field read/write xref (`find_methods_reading_field` / `find_methods_writing_field`
-  — named for what they RETURN, like every other `find_*`; the former
-  `find_field_readers`/`_writers` inverted that and have been removed) returns plain
-  method descriptors `tuple[str, ...]` — the methods that iget*/sget* (read) or
-  iput*/sput* (write) a `Lcls;->name:Type` field (from dexkit's L2.5 reverse index).
-  **One entry per access INSTRUCTION, not per method** (like `CallSite`), so a
-  method accessing the field twice appears twice; `set()` it for distinct methods.
+- **`FieldAccessSite`** `(method_descriptor, dex_id, method_idx, field_descriptor,
+  bytecode_offset, opcode)` — one `iget*`/`iput*`/`sget*`/`sput*` INSTRUCTION.
+  `find_field_read_sites` / `find_field_write_sites` return
+  `tuple[FieldAccessSite, ...]` for a `Lcls;->name:Type` field, from dexkit's L2.5
+  reverse index. **One row per access INSTRUCTION, not per method** (like
+  `CallSite`) — and, since dexllm#84, the same in the VALUE: a method accessing the
+  field twice yields two rows with different `bytecode_offset`. For distinct methods
+  use `{s.method_descriptor for s in ...}`; **`set()` on the rows deduplicates
+  nothing**, because each is already a distinct record. `dex_id` is the ACCESSING
+  method's dex (the field's own may differ) and `method_idx` is dex-LOCAL, so it is
+  meaningful only paired with it. `opcode` (0x52–0x6D) says the direction AND
+  whether the access is static without resolving the field.
+  All four spellings these once had — `find_field_readers`/`_writers`,
+  `find_field_read_methods`/`_write_methods`, and
+  `find_methods_reading_field`/`_writing_field` — are removed and take no alias:
+  every `find_*` names what it RETURNS.
 - **`TypeReferences`** `(fields, methods_returning, methods_with_param)` —
   `find_type_references(Lpkg/Cls;)` signature-position xref: where a type appears as
   a field type, a method return type, or a method parameter (each a `tuple[str]`).
@@ -213,7 +222,7 @@ other spelling, and the reason `MethodInfo` exposes the bits instead.
   counter is filled follows the catalog key's form: a METHOD key fills
   `call_site_count` (invoke instructions), a FIELD key — how an app reaches
   contacts / call log / calendar, by reading a `CONTENT_URI` constant — fills
-  `field_access_count` (read instructions — `find_methods_reading_field` is not
+  `field_access_count` (read instructions — `find_field_read_sites` is not
   deduplicated) and leaves the other 0. Both count instructions, so summing them
   is meaningful; they are kept apart only so `call_site_count`'s released meaning
   is untouched.
@@ -260,7 +269,7 @@ so a consumer depends on just what it needs:
 | **`EnumerationPort`** | `list_classes` / `list_classes_in_dex`, `list_class_methods`, `list_fields` / `list_fields_in_dex`, `list_methods` / `list_methods_in_dex`, `list_value_strings` / `list_class_strings` / `list_method_strings` (app-wide, class-scoped, method-scoped — the forward direction of `find_*_using_strings`), `list_external_method_refs` / `list_external_field_refs` / `list_external_type_refs`, `verify_report`, `source_info` (what each source WAS, probed at load — a session fact that survives the file) (uniform scope axis: bare = all dexes, `…_in_dex(dex_id)` = one dex) |
 | **`DexExtractionPort`** | `extract_dex` → `ExtractedDex` / `extract_dexes` → all of them in `dex_id` order (bytes + provenance: `source` / `entry` / `offset`; the packer/dump primitive). Provenance is not derivable elsewhere — the verify report's `name` is only the entry name for a zip member, so two sources both report `classes.dex`, and only `offset` says where in a concatenated container a dex starts |
 | **`ClassInspectionPort`** | `class_info`, `class_fields`, `class_methods`, `locate_class_dex` (the ISP split of raw's `get_class_summary`; `class_methods` is the structured twin of `class_fields` — `EnumerationPort.list_class_methods` returns descriptors, which carry no access flags, so before dexllm#37 a method modifier was reachable only by dropping to `.raw`; `locate_class_dex` = cheap declaring-dex lookup, vs the heavy `class_info().dex_id`) |
-| **`CrossReferencePort`** | `find_call_sites_to` (a target's callers — the reverse edge) / `find_call_sites_from` (a method's callees — the forward edge), `resolve_call_args`, `find_methods_reading_field`, `find_methods_writing_field`, `find_type_references`. `find_call_sites_to` / `find_call_sites_from` is the same pair the raw `DexKit` and the MCP catalog use — one spelling across all three layers, and the only one: the pre-unification adapter aliases (`find_call_sites`, `find_call_sites_to_api`, `find_call_sites_from_method`, `find_field_readers`, `find_field_writers`) were removed. Both call-site directions and `resolve_call_args` take `method_descriptor` |
+| **`CrossReferencePort`** | `find_call_sites_to` (a target's callers — the reverse edge) / `find_call_sites_from` (a method's callees — the forward edge), `resolve_call_args`, `find_field_read_sites`, `find_field_write_sites`, `find_type_references`. `find_call_sites_to` / `find_call_sites_from` is the same pair the raw `DexKit` and the MCP catalog use — one spelling across all three layers, and the only one: the pre-unification adapter aliases (`find_call_sites`, `find_call_sites_to_api`, `find_call_sites_from_method`, `find_field_readers`, `find_field_writers`) were removed, as were `find_methods_reading_field` / `find_methods_writing_field` when dexllm#84 gave the pair its return type. Both call-site directions and `resolve_call_args` take `method_descriptor` |
 | **`SearchPort`** | `find_classes_by_name` / `by_super` / `implementing` / `by_annotation` / `using_strings` / `declaring_strings` (the declaration side — static-field constants the `using` index cannot see), `find_methods_by_name` / `by_annotation` / `using_strings` / `using_int_literals` / `using_double_literals`, `find_fields_by_name` (the field arm, dexllm#37 — `FieldRef` was a public type nothing could produce), `batch_find_{classes,methods}_using_strings` (DexKit's L1–L7 search; `match_type` ∈ `MatchType`) |
 | **`PermissionAnalysisPort`** | `permission_callers` (all protection levels) |
 | **`IndicatorExtractionPort`** | `extract_iocs` |

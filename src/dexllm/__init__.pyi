@@ -25,6 +25,9 @@ from ._dexkit_core import (
     ExternalTypeRef as ExternalTypeRef,
 )
 from ._dexkit_core import (
+    FieldAccessSite as FieldAccessSite,
+)
+from ._dexkit_core import (
     ResolvedArg as ResolvedArg,
 )
 from ._dexkit_core import (
@@ -134,6 +137,7 @@ __all__ = [
     "ExternalFieldRef",
     "ExternalMethodRef",
     "ExternalTypeRef",
+    "FieldAccessSite",
     "ResolvedCallSite",
     "add_dumped_dexes",
     "clear_data_caches",

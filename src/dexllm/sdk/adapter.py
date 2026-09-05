@@ -34,6 +34,7 @@ from .model import (
     ExternalMethodRef,
     ExternalTypeRef,
     ExtractedDex,
+    FieldAccessSite,
     FieldInfo,
     FieldRef,
     Indicator,
@@ -68,6 +69,18 @@ def _to_arg(a: object) -> ResolvedArg:
         register_index=a.register_index,  # type: ignore[attr-defined]
         crossed_branch=a.crossed_branch,  # type: ignore[attr-defined]
         **kw,
+    )
+
+
+def _to_field_access_site(s: object) -> FieldAccessSite:
+    """Convert a pybind FieldAccessSite to the typed model."""
+    return FieldAccessSite(
+        method_descriptor=s.method_descriptor,  # type: ignore[attr-defined]
+        dex_id=s.dex_id,  # type: ignore[attr-defined]
+        method_idx=s.method_idx,  # type: ignore[attr-defined]
+        field_descriptor=s.field_descriptor,  # type: ignore[attr-defined]
+        bytecode_offset=s.bytecode_offset,  # type: ignore[attr-defined]
+        opcode=s.opcode,  # type: ignore[attr-defined]
     )
 
 
@@ -462,15 +475,25 @@ class DexKitAdapter:
             for s in self._dk.resolve_call_args(method_descriptor, depth)
         )
 
-    def find_methods_reading_field(self, field_descriptor: str) -> tuple[str, ...]:
-        """Return descriptors of methods that READ (iget*/sget*) the given field."""
+    def find_field_read_sites(
+        self, field_descriptor: str
+    ) -> tuple[FieldAccessSite, ...]:
+        """Return every site that READS (iget*/sget*) the given field."""
         require_member_descriptor(field_descriptor)
-        return tuple(self._dk.find_methods_reading_field(field_descriptor))
+        return tuple(
+            _to_field_access_site(s)
+            for s in self._dk.find_field_read_sites(field_descriptor)
+        )
 
-    def find_methods_writing_field(self, field_descriptor: str) -> tuple[str, ...]:
-        """Return descriptors of methods that WRITE (iput*/sput*) the given field."""
+    def find_field_write_sites(
+        self, field_descriptor: str
+    ) -> tuple[FieldAccessSite, ...]:
+        """Return every site that WRITES (iput*/sput*) the given field."""
         require_member_descriptor(field_descriptor)
-        return tuple(self._dk.find_methods_writing_field(field_descriptor))
+        return tuple(
+            _to_field_access_site(s)
+            for s in self._dk.find_field_write_sites(field_descriptor)
+        )
 
     def find_type_references(self, type_descriptor: str) -> TypeReferences:
         """Return signature-position references to the given type."""
