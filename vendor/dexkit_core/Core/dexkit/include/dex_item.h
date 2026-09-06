@@ -134,11 +134,18 @@ public:
     // java.lang.reflect.Modifier normalization. In particular a method
     // declared `synchronized` in Java keeps `kAccDeclaredSynchronized`
     // (0x20000); it is NOT rewritten to `kAccSynchronized` (0x20), which in
-    // dex means something else entirely (JNI synchronized-native). Upstream
-    // DexKit did that rewrite here; dexllm removed it (it is lossy, and both
-    // callers of THIS accessor — the DAD decompiler's `declared_synchronized`
-    // modifier via dexitem_code_source.cpp, and the `get_class_summary` API via
-    // dexkit_ext.cpp `FillInternalClassSummary` — want the dex's own bits).
+    // dex means something else entirely (JNI synchronized-native). The rewrite
+    // is lossy, and both callers of THIS accessor — the DAD decompiler's
+    // `declared_synchronized` modifier via dexitem_code_source.cpp, and the
+    // `get_class_summary` API via dexkit_ext.cpp `FillInternalClassSummary` —
+    // want the dex's own bits.
+    //
+    // Upstream USED to do the rewrite in InitBaseCache, which is why this
+    // comment once described a divergence.  It does not any more: upstream
+    // removed it in 42b30c4 (2026-08-02), dexllm removed it independently four
+    // days later, and dexllm#81 advanced the baseline onto that revision, so
+    // the two trees now agree.  What is still dexllm's here is the ACCESSOR
+    // (D8), not the values it returns.
     //
     // NOTE for anyone changing this: `method_access_flags` has two further
     // readers that bypass this accessor — `GetMethodBean` (whose access_flags

@@ -2500,7 +2500,7 @@ Upstream DexKit's `InitBaseCache` ([dex_item.cpp](vendor/dexkit_core/Core/dexkit
 
 **Guard:** [tests/test_access_flags.py](tests/test_access_flags.py) — 4 access-flag tests (the file later gained a 5th, unrelated: the field-xref per-instruction contract, and then 6 more for the SECOND contract it now carries, dexllm#41's UNKNOWN ≠ 0). Two **fail against the pre-removal build** (verified by rebuilding it): the corpus-wide check that a method the DAD path calls `declared_synchronized` reports 0x20000, and a cross-layer oracle decoding the summary bits with the AST's own name table. A third pins the DAD path on its own (`LruCache.size()`) so the oracle can't stay green if BOTH routes regress together; a fourth guards the `| 0x20` half. **Corpus dependency is a SKIP, never a failure** — "this APK has a synchronized method" is a property of the sample, and `$DEXLLM_TEST_APK` (documented in conftest) can narrow the fixtures to one of the 8 bundled APKs that have none; the first cut asserted on it and reported "the rewrite is back" for an environment change (BOTH reviewers confirmed this independently). The discriminator used instead is `decompile_method_ast`, which reported the raw form under both behaviours. The oracle asserts `sync_checked` separately from the aggregate count (the broad slice alone satisfies the aggregate, so it would not prove the sync stratum was reached — ADV-3) and filters `unkn_<flag>` entries, which `GetAccessImpl` emits for the three ACCESS_ORDER bits absent from the name table and which a crafted dex can set on a method (method access flags are not verifier-validated — ADV-4).
 
-**Upstream reached the same behaviour INDEPENDENTLY, and four days earlier** — `42b30c4` "feat(core)!: expose raw DEX access flags", 2026-08-02, deletes the identical rewrite from both method loops. Invisible until dexllm#65 recovered the fork point; catalogued as the **converged** entry D7 in [docs/dexkit-vendor-divergences.md](docs/dexkit-vendor-divergences.md), so on the next rebase this divergence disappears rather than being carried. The issue that catalogued it had classified this bucket **permanent** on the premise that upstream wants `Modifier` compatibility.
+**Upstream reached the same behaviour INDEPENDENTLY, and four days earlier** — `42b30c4` "feat(core)!: expose raw DEX access flags", 2026-08-02, deletes the identical rewrite from both method loops. Invisible until dexllm#65 recovered the fork point; catalogued as the **converged** entry D7 in [docs/dexkit-vendor-divergences.md](docs/dexkit-vendor-divergences.md). **dexllm#81 has since taken it**: the baseline advanced onto `42b30c4`, dexllm adopted upstream's exact text, and D7 is RETIRED — the divergence is gone rather than carried, and adopting upstream's form is bit-identical (the same `.so` md5). The issue that catalogued it had classified this bucket **permanent** on the premise that upstream wants `Modifier` compatibility.
 
 **Accepted, not fixed:** this changes the VALUE of a released public attribute with no alias mechanism (unlike the dexllm#21 renames), so an out-of-repo consumer masking `& 0x20` silently stops matching rather than erroring. Both reviewers raised it; it belongs in the release notes and in the still-open deprecation-policy decision (issue #24).
 
@@ -6832,7 +6832,9 @@ one sibling over: *"GetCallMethods wraps this as MethodBeans; this raw form is f
 callers that need the caller method_idx, e.g. to walk its invoke sites."*
 `FieldGetMethods` is the bean wrapper and keeps only the DESCRIPTOR, discarding the
 `(origin_dex_id, method_idx)` pair a body walk needs. Catalogued under **D8**; the
-census moves +1271/-131 -> **+1288/-131** and 82 -> **83 marker lines**.
+census moves +1271/-131 -> **+1288/-131** and 82 -> **83 marker lines** (both
+against the FORK POINT, which was the baseline then; dexllm#81 advanced it, and
+the registry publishes +1290/-119 against the new one).
 
 **Cross-dex aggregation is real here and is what the second step has to get right.**
 `dexkit.cpp:1595` MOVES a field's accessors into the DECLARING dex tagged with their
@@ -7584,7 +7586,8 @@ reviewers caught both.)
 **The real delta, which no in-source census could produce: 136 vendored files,
 125 byte-identical to upstream, 11 modified, 0 added, +1271/-131.** That was
 measured at `4eff18b`; dexllm#84 later added the two field reverse-index accessors
-of D8, so the registry publishes **+1288/-131** today. Those line
+of D8 and dexllm#81 advanced the BASELINE off the fork point, so the registry
+publishes **+1290/-119** today. Those line
 counts are `git diff --numstat`, the predicate the rest of this repo uses; an
 earlier draft published +1215/-130 from a `diff -u | grep -c '^+[^+]'` pipeline,
 which silently drops 56 added blank lines [[published-counts-need-the-repos-own-predicate]].
@@ -7607,9 +7610,13 @@ that *"upstream wants `java.lang.reflect.Modifier` compatibility, which is exact
 what this removed"*. **That premise had already stopped being true.** Upstream
 removed the identical `declared_synchronized` → `synchronized` rewrite in
 `42b30c4` ("feat(core)!: expose raw DEX access flags", **2026-08-02**) — four days
-*before* dexllm did the same thing on 2026-08-06, independently. On the next
-rebase that entry disappears and the two trees agree. It is catalogued as **C —
-converged**, a treatment the issue did not have, and it is the single clearest
+*before* dexllm did the same thing on 2026-08-06, independently. It is
+catalogued as **C — converged**, a treatment the issue did not have,
+and **dexllm#81 has since taken it** — the local change was DROPPED, the two
+trees agree, and the entry is RETIRED rather than deleted (a deletion would
+leave a gap in `D1..D14` with no answer, which is this registry's own lesson).
+This sentence used to predict the entry would *disappear* on the next rebase; it
+did not, and keeping it is a decision dexllm#81 records. It is and it is the single clearest
 argument for recording a baseline: without one there is no way to notice that a
 divergence has stopped being one.
 
@@ -7620,8 +7627,12 @@ the behaviour it changes (so a rebase taking only its `Core/` half would leave
 those READMEs describing behaviour neither tree has). Either way the rebase the
 issue calls "unbounded work" is small.
 
-**Three** of those revisions are fixes in files dexllm vendors **unmodified** and
-does not have, and each verdict was checked by construction rather than assumed:
+**Three** of those revisions were fixes dexllm did not have (**carried as of
+dexllm#81**), and each verdict was checked by construction rather than assumed.
+Two of the three land in files dexllm vendors **unmodified**; `7415df9` does not
+— `Core/CMakeLists.txt` has been divergent since the import for D10's Emscripten
+guard, which is why dexllm#81 had to apply that one by hand, and an earlier
+draft of this sentence (and its twin in `UPSTREAM`) said all three:
 `6ca92c3` (an INVERTED `in_class_set.contains` in
 `BatchFind{Class,Method}UsingStrings`) is **unreachable** — `DexKitExt` passes 0
 for `in_classes` / `in_methods`, so `query->in_classes()` is null and the branch
@@ -7657,12 +7668,14 @@ is where this goes next. A treatment is a classification of KIND; **nothing here
 has been proposed upstream**, and step 3 is deliberately not attempted *in this
 change* — it is filed one issue per bucket: **dexllm#79** (the nine **U**),
 **dexllm#80** (**D12**, **R**) and **dexllm#81** (the three upstream fixes, in
-which **D7** — **C** — disappears).
+which **D7** — **C** — disappears). **dexllm#81 is DONE** — see its section
+below; the other two are open.
 
 **The convention is now checked, offline.**
 [vendor/dexkit_core/UPSTREAM.blobs](vendor/dexkit_core/UPSTREAM.blobs) records the
-FORK-POINT git blob SHA of each of the 136 files — the fork point, not the current
-content, which is what makes the divergent set derivable — and
+BASELINE git blob SHA of each of the 136 files — upstream's bytes, not the current
+content, which is what makes the divergent set derivable (it recorded the FORK
+POINT's until dexllm#81 advanced the baseline; the two were equal until then) — and
 [tests/test_vendor_baseline.py](tests/test_vendor_baseline.py) (35 cases) hashes
 every file, requires the divergent set to EQUAL a pinned literal, requires each
 divergent path to be named in the **`Where:` of the specific entries pinned for
@@ -7682,7 +7695,9 @@ upstream's `Modifier` rewrite (D7) are both invisible to any census of the
 current tree and both visible to a manifest comparison. **Both of D11's hunks are
 pure deletions with no added line that could carry a marker** — of 41 divergent
 hunks, 34 are marked and 7 are not: those 2, plus 5 continuations of a divergence
-marked elsewhere in the same file.
+marked elsewhere in the same file. (41/34/7 is as of `4eff18b`, against the fork
+point. Against the baseline it is **40/33/7** since dexllm#81 retired D7 — the
+unmarked 7 are the same 7.)
 
 ## What the two reviewers found — 1 counter-example to the headline claim, 2 HIGHs in the guard, and 8 in the numbers
 
@@ -7802,7 +7817,10 @@ is a file "no import-anchored measurement can *ever* show" — true of HEAD, and
 this change's own D1 marker moves the blob, so once it lands the contrast is 11
 against 11. That is the finding working (the marker exists *because* the baseline
 surfaced the divergence) but the word "ever" was wrong, and the corrected wording
-says which measurement it was true of.
+says which measurement it was true of. (Both figures are as of dexllm#65.
+dexllm#81 advanced the baseline, so import→tree is **15** now — the two pristine
+pickups and both READMEs also differ from the import snapshot — while
+baseline→tree stays 11.)
 
 **The `647` was the retired predicate's own number.** The response fixed the
 total to numstat's `+1271/-131` and left `647` — a `grep -c '^+[^+]'` figure that
@@ -7884,6 +7902,376 @@ pin and the parametrised catalogue cases rather than by the set equality — so 
 literal pin is defence in depth and a better error message, not the sole thing
 holding the property. Saying that is more useful than claiming the pin is
 load-bearing.
+
+### The baseline is upstream HEAD, and it is not the fork point (dexllm#81, 2026-09-06)
+
+dexllm#65 recovered the fork point and catalogued the divergences; it declined
+its own step 3. This is that step for the **C** bucket and for the three upstream
+fixes the baseline revealed dexllm was missing. The other two buckets stay filed:
+**dexllm#79** (the nine **U**) and **dexllm#80** (**D12**, **R**).
+
+**The change is a REBASE, so its whole content is a claim about what did NOT move.**
+Upstream HEAD is `47f7324` (`2.2.0-8-g47f7324`, 2026-08-20) and it is unchanged
+since dexllm#65 measured it. Six revisions separate it from the fork point
+`dff66e8`; **four touch the vendored subset** (6 files, +73/-29 — the other two,
+`1e148f8` and `d0e0b98`, are Kotlin-only), and all four are now carried:
+
+| revision | lands in | verdict, RE-DERIVED at HEAD |
+|---|---|---|
+| `42b30c4` expose raw DEX access flags | `dex_item.cpp`, both READMEs | **converged with D7** — the local change is DROPPED, not carried |
+| `7415df9` `CMAKE_C_FLAGS` from `CMAKE_CXX_FLAGS` | `Core/CMakeLists.txt` | inert — 0 `.c` sources in the tree |
+| `6ca92c3` inverted `searchIn{Classes,Methods}` | `dex_item_batch_find.cpp` | unreachable — both call sites pass 0 for `in_classes` / `in_methods` |
+| `47f7324` `endWith` opcode matching | `dex_item_matcher.cpp` | unreachable — 0 `OpCodesMatcher` built anywhere |
+
+Each verdict was re-derived rather than carried over from the previous draft:
+the two batch call sites are `dexkit_ext.cpp:1398` / `:1445` and pass `0` at
+fields 4 and 5 of their query tables; all five `CreateMethodMatcher` call sites
+pass `0` at `MethodMatcher` field 7; `find -name '*.c'` is empty. **Two of the
+three are load-bearing the day a future dexllm change reaches them** — `6ca92c3`
+is wrong in the direction that returns results for the WRONG scope — which is
+the whole argument for taking a fix that changes nothing today.
+
+## The baseline is now a different thing from the fork point
+
+Before this, one revision was both: where the vendoring happened AND what the
+manifest compares against. A rebase separates them, and conflating them would
+make the provenance story false the moment it happened. So `UPSTREAM` records
+**both** and says which is which, `UPSTREAM.blobs` is a *baseline* manifest
+rather than a *fork-point* one, and the guard pins `_BASELINE` **and**
+`_FORK_POINT` — losing the latter would lose the only account of how the
+baseline is re-derivable at all, which dexllm#65 had to recover by matching
+bytes because nothing recorded it.
+
+## D7 is RETIRED, not deleted — and the retirement is what the registry is for
+
+`42b30c4` removes the same `declared_synchronized` -> `synchronized` rewrite
+dexllm removed four days later. Taking it means **dropping a local change**, the
+one direction a rebase has that a pickup does not: dexllm adopted upstream's
+exact text (which drops a local variable dexllm's version kept), so the two
+hunks are gone and `dex_item.cpp` no longer differs there.
+
+**The entry is kept.** A treatment of **C** now means *converged and retired*: it
+names no live divergence and is excluded from the path-ownership pin. Deleting
+it would leave a reader of `D1..D14` with a gap and no answer — which is the
+exact failure dexllm#65 exists to prevent (*"an addition leaves a marker, a
+deletion leaves nothing"*), applied to the registry's own ids.
+
+It also cost D7 a claim it should never have had: its `Where:` named
+`Core/dexkit/include/dex_item.h`, but what diverges there is the
+`GetMethodAccessFlags` accessor itself, which is a dexllm extension hook and
+belongs to **D8**. Only the accessor's *comment* was D7's — and that comment
+said *"Upstream DexKit did that rewrite here"*, which the rebase made **FALSE**.
+It now records the convergence instead [[a-rule-you-wrote-binds-your-next-commit]].
+
+## Measured
+
+**a/b OFF=`516f5a18ab097a45f3c478c986d6794e` (HEAD) vs
+ON=`a35512d367f851590ced50abac6693c4`, SAME script, both `.so` md5-verified
+BEFORE and AFTER each capture.** 66 sources — the whole bundled corpus, every
+committed fixture, every `art/test/dexdump/*.dex` and every
+`tools/dexter/testdata/*.dex` — x up to 14 axes (both verify verdicts + reasons,
+load, `dex_count`, `verify_report`, the class list, `list_value_strings`, a
+whole-corpus smali digest, a whole-decompile digest + line count,
+`warm_analysis_caches`, **both batch string searches**, `find_methods_using_strings`,
+and the subprocess EXIT STATUS) = **854 axis records, 0 changed**, over 33,828
+classes and 3,072,094 decompiled lines. The 854 is re-derivable rather than a
+harness number: 59 sources load and carry all 14 axes, 7 do not load and carry 4
+— 14x59 + 4x7 [[published-counts-need-the-repos-own-predicate]]. **Those 7 are
+not all "not containers"**, which an earlier draft said: 2 are certificates, 3
+are zips with no `classes*.dex`, and **2 are real dexes this verifier rejects**
+(`art/test/dexdump/all.dex`, `tools/dexter/testdata/invoke-polymorphic.dex`).
+
+The two batch axes are in there because they are the surface `6ca92c3` changes,
+and they are non-vacuous (45 distinct digests over 59 sources). **They are not
+the unreachability verdict stated as a measurement**, which an earlier draft
+claimed: the changed expression short-circuits at `query->in_classes()`, which
+is always null, so that axis is flat BY CONSTRUCTION and cannot separate
+"unreachable" from "reachable but a no-op here". An adversarial reviewer built
+the measurement that does state it — `std::abort()` on the two branches, 30
+loadable sources, both batch APIs, **0 aborts** — which is what establishes the
+verdict; the a/b establishes 0-regression and nothing more.
+
+**The `.so` md5 MOVED, and the issue's prediction about which revision moved it
+is FALSE both ways.** dexllm#81 predicted *"42b30c4's `Core/` half is the only
+candidate"*. Built one revision at a time, each with its own `.so`:
+
+| step | `.so` md5 |
+|---|---|
+| four files at the fork point | `516f5a18…` — **reproduces HEAD exactly** |
+| + D7 convergence (`dex_item.cpp`) | `516f5a18…` **BIT-IDENTICAL** |
+| + `7415df9` (`Core/CMakeLists.txt`) | `516f5a18…` **BIT-IDENTICAL** |
+| + `6ca92c3` (`dex_item_batch_find.cpp`) | `10903b8b…` |
+| + `47f7324` (`dex_item_matcher.cpp`) | `a35512d3…` (shipped) |
+
+So 42b30c4's half compiles to the same bytes — **the convergence claim stated at
+binary level rather than argued from optimisation** — the `CMAKE_C_FLAGS` fix is
+inert as a measurement rather than as an inference, and the two that DO move it
+are exactly the two whose C++ is compiled but unreachable at runtime. That is
+why 854 records can move the binary and change nothing.
+
+**Census:** 136 files / 125 byte-identical / 11 modified / 0 added — **unchanged**,
+which is the point: a rebase that added or removed a divergence would be a
+different change. What moves is **+1288/-131 -> +1290/-119**, **41 hunks -> 40**,
+**34 marked -> 33**, 7 unmarked unchanged, and marker lines **83 -> 83** by
+coincidence (D7 took 2 away and the corrected comment put 2 back).
+
+**The two line totals are measured against DIFFERENT trees**, and a reviewer had
+to point out that saying so is not optional: the left side is against the FORK
+POINT and the right against the BASELINE, so the arithmetic only works because
+both upstream-side changes to already-divergent files were themselves the
+converged ones. Resolved: `dex_item.cpp` 723/56 -> 718/44 (D7's divergence was
++5/-12 against the fork point and is 0/0 now) and `dex_item.h` 172/2 -> 179/2,
+i.e. -5 added, -12 removed, +7 added.
+
+parity **29/29**, pytest **1370 passed / 24 skipped**, TRUE corpus-less
+(`test_apk` MOVED aside) **961 passed / 433 skipped / 0 failed** — 961 + 433 =
+1394 = collected, so **every one of the four new cases runs in the CI leg**: the
+three guard cases read only committed bytes, and the fourth crafts the committed
+`tests/data/multidex.apk` — narrowed to `tests/data/multidex.apk` **1267 passed /
+127 skipped**, sweep **21,374-class / 180,879 method-block 0-crash 0-timeout
+0-error, GATE: PASS**, determinism 3 processes x 3 `PYTHONHASHSEED`s -> one
+digest (`b6b24bb8…`, unchanged from before the change), lint trio clean, doc
+fences 83, `scripts/check_dad_boundary.sh` clean. Every figure here was
+RE-MEASURED on the shipped tree after the review fixes rather than carried over
+from the pre-review capture [[verify-build-identity-before-measuring]].
+
+## Guards
+
+The guard grows **35 -> 38 cases**, and the three new ones are all for things a
+rebase can break that nothing else here can see. A fourth lives with its
+subject, in `tests/test_access_flags.py` — see the HIGH the reviewers found.
+
+**A pickup that lands in an ALREADY-DIVERGENT file is invisible to every other
+check.** The manifest sees the file as divergent either way, and the per-file
+table recomputes only its marker-line column — the `+`/`-`/hunk columns are
+pinned by having to sum to the prose totals, not measured against the tree. Two
+of the four carried revisions are in that position (`7415df9` in `CMakeLists.txt`,
+which carries D10; `42b30c4` in `dex_item.cpp`, which carries eight entries), so
+reverting either would be a **silent un-rebase**. The exact carried lines are
+pinned, with counts, together with the forms they REPLACED — presence alone is
+not enough, because a duplicated hunk carries both.
+
+**A retired entry can go on being described as live in the source.** D7's
+subject is still discussed where it belongs, inside the D8 accessor; reverting
+that comment changes no divergent set, no hash and no recomputed column. So each
+retired entry pins the file and the upstream revision that comment must name.
+
+**A reachability verdict goes stale in silence.** `UPSTREAM` says three carried
+fixes change nothing HERE, and two of those are claims about dexllm's own call
+sites. The expressions are pinned and the failure message says what to do: the
+fix IS carried, so the behaviour is upstream's — what changes is that it stops
+being dead code.
+
+Plus: the baseline pin now matches the catalogue's **baseline sentence** rather
+than the hash appearing anywhere (three upstream revision hashes are quoted in
+that doc as fixes, and one of them IS the baseline, so a bare `in` would pass on
+the wrong occurrence); `_RETIRED` is pinned equal to the set of **C** entries;
+and live-vs-retired is stated in the entry's own words (`Where:` vs
+`Where it was:`) rather than only by which section it sits under.
+
+**21 mutants, 20 killed and one a negative control** — rebuild-free, because the
+guard reads committed bytes; the harness restores from a pristine snapshot,
+REFUSES to start from a dirty tree, asserts a control digest before every mutant
+AND after the run, and reports a replacement that does not apply exactly once as
+**NOT A MUTANT**. Six were CONSTRUCTED BY THE REVIEWERS and each passed the file
+as it then stood:
+
+| mutant | fails |
+|---|---:|
+| M0 every vendored artifact + catalogue reverted to HEAD, guard kept | 8 |
+| M1 `42b30c4`'s `Core/` half only — the READMEs left behind | 3 |
+| M2 `47f7324` dropped | 3 |
+| M3 `6ca92c3` dropped | 3 |
+| **M4 `7415df9` dropped (file still divergent)** | **1** |
+| **M5 D7 not converged** | **2** |
+| M6 one manifest line regenerated to silence a divergence | 4 |
+| M7 `_RETIRED` emptied | 5 |
+| M8 D7's entry deleted | 2 |
+| M9 D7 says `Where:` as if it were live | 1 |
+| **M10 the converged comment reverted to the pre-rebase prose** | **2** |
+| M11 `UPSTREAM` loses the fork point | 1 |
+| M12 the catalogue's baseline sentence left at the fork point | 1 |
+| **M13 a scoping argument exposed — the verdict goes stale** | **1** |
+| M14 the per-file table row left at the pre-rebase numbers | 1 |
+| **R1 the retired comment keeps the token, asserts the opposite** | **2** |
+| **R2 NEGATIVE CONTROL: a retired `Where it was:` -> a now-pristine file** | **0 — must pass** |
+| **R3 the per-file table rewritten wholesale, prose sentence to match** | **1** |
+| **R4 `+`/`-` moved between two rows, sum preserved** | **1** |
+| **R5 a SECOND, scoped batch call site added beside the pinned one** | **1** |
+| **R6 an `OpCodesMatcher` built through the Builder spelling, in a header** | **1** |
+
+**R2 is the fix stated as a measurement**: before it, a retired entry naming a
+file the rebase made pristine turned the suite RED, which is the outcome a
+CORRECT rebase produces.
+
+**M4, M5, M10 and M13 are each killed by exactly ONE guard, and three of those
+four guards are the ones this change adds.** That is the argument for adding
+them, stated as a measurement rather than as prose.
+
+**One more mutant needed a BUILD, and it is the HIGH.** The reviewer's
+re-introduction of the lossy rewrite AFTER the assignment (`.so`
+`46ef76e8…`, control `a35512d3…` restored and asserted) is invisible to all 38
+of the rebuild-free cases — the pins hold by construction. It is killed by
+`test_the_rewrite_cannot_come_back_without_a_test_noticing`, and **in the
+corpus-less leg that guard is the ONLY failing test** while the other eleven
+access-flag cases skip.
+
+**The harness lied TWICE, both times in the same family**
+[[mutation-harness-restore-pitfalls]], and both times its own assertions are
+what caught it. First, **M0 SURVIVED**: `__main__` appends to `FILES` before the
+mutants run, so `FILES[:-1]` reverted the GUARD as well and the mutant passed by
+having nothing left to fail — a list mutated after the closures that slice it
+were written. Then, adding the reviewers' mutants, **R6 edited a file that was
+not in `FILES` at all**, so it was reported as NOT A MUTANT *and never restored*
+— and the next run snapshotted that leftover as its baseline, which silently
+shifted five other mutants' counts. Nothing was lost (the reading was discarded
+and re-taken from a clean tree) and the harness now REFUSES to start from a
+dirty tree: **a stale or contaminated snapshot is a harness failure, not a
+baseline.**
+
+## What the two reviewers found — 0 in the product, 5 in the guards, 8 in the prose
+
+Both worked in isolated private copies with their own build, and both **rebuilt
+the change from scratch rather than agreeing with it**. Neither could move a
+value: the a/b re-derives (66 sources / 854 records / 0 changed, and one
+reviewer's `off.json`/`on.json` compare EQUAL to mine as Python objects), the
+md5 step table reproduces in shape, the manifest equals upstream `47f7324` on
+all 136 blobs, every census number re-derives, and the pickup is byte-exact —
+one reviewer multiset-compared the added and removed lines of the old and new
+divergence patches for `dex_item.cpp` and found the new one is the old one
+**minus exactly the two D7 blocks and nothing else**, 0 lines only-in-new in
+either direction.
+
+**D7's convergence was proven one level below where I proved it.** I measured
+that the whole `.so` is bit-identical; a reviewer compiled the two variants
+alone and found the `.text` sections byte-identical (md5 `0b24253d…`, 89,986
+bytes), the objects differing in **exactly one byte** — the local symbol name
+`CSWTCH.1468` → `CSWTCH.1466`, a compiler-internal counter — and the shipped
+`.so` is stripped and contains 0 `CSWTCH` strings. It also added a row I had not
+published: the `dex_item.h` comment rewrite is bit-identical too.
+
+**And `47f7324`'s own `std::equal` is NOT UB**, which I had flagged as a thing
+we might be importing. Both reviewers derived it: reaching
+`opcodes.end() - matcher_opcodes.size()` implies `matcher_opcodes.size() >= 1`,
+hence `op_code_size >= 1`, hence `opt_opcodes` has a value AND
+`matcher_opcodes.size() <= opcodes.size()`. The guard is applied to the CACHED
+vector, so a stale cache entry cannot evade it either. (Adjacent and
+pre-existing: upstream's `std::nullopt` opcode WILDCARD never matches, in the
+new `std::equal` arm or in the old `kmp::FindIndex` one — `optional<T> == T` is
+false for `nullopt` in both. Broken upstream before and after; recorded so it is
+not later read as a regression the pickup introduced.)
+
+### The HIGH: this change's own headline pickup was revertible with CI green
+
+An adversarial reviewer re-introduced the lossy rewrite **after** the
+assignment rather than reverting it:
+
+```cpp
+method_access_flags[class_method_idx] = ReadULeb128(&class_data);
+if (method_access_flags[class_method_idx] & dex::kAccDeclaredSynchronized) { … }
+```
+
+Both pinned literals hold (the carried line is present twice, the replaced form
+absent), no `dexllm` token is added so the marker-line column is unchanged, and
+the file is divergent either way. Result: **38 passed**, and the whole
+corpus-less leg **960 / 433 / 0** — byte for byte the clean result this change
+publishes. With the corpus exactly ONE test catches it, and all 11 access-flag
+tests SKIP without one. So the lossy `declared_synchronized → synchronized`
+rewrite dexllm#41 removed could come back, in the very hunk this change
+converged, with CI green.
+
+**Closed with a craft, not a source pin**, because a behavioural guard is
+available and strictly better.
+`tests/test_access_flags.py::test_the_rewrite_cannot_come_back_without_a_test_noticing`
+walks `tests/data/multidex.apk`'s `class_data` for a method whose
+`access_flags` uleb128 is ALREADY 3 bytes — a constructor is (`0x10001` encodes
+`81 80 04`) — and `0x20001` encodes `81 80 08`, **the same three bytes with one
+bit moved**. So the craft rewrites ONE byte, no offset and no section size
+moves, the dex still verifies, and if the rewrite returns the value arrives as
+`0x20001 ^ 0x20000 | 0x20` = **0x21**. Both halves are asserted: the flag that
+must survive and the flag that must NOT appear. Verified: against the reviewer's
+mutant it is **the only failing test in the corpus-less leg**, where the other
+eleven skip. That also closes a gap that predates this change — dexllm#41's
+whole contract had no corpus-free coverage at all.
+
+### Four more in the guards, each demonstrated with a mutant that passed
+
+- **The retired-entry pin checked a TOKEN, not the claim.** It required
+  `42b30c4` to appear somewhere in `dex_item.h`; a reviewer kept the token and
+  wrote the exact falsehood the guard exists to catch (*"Upstream STILL does the
+  rewrite … so the two trees still differ"*) → 38 passed. It pins the CLAIM
+  verbatim now [[pinned-literals-guard-only-the-constant-half]].
+- **`_RETIRED` was excluded from one path-ownership guard and not its mirror.**
+  `test_no_pristine_file_is_catalogued_as_divergent` treated a retired entry's
+  `Where it was:` as a live claim — so the natural end state of a convergence
+  (the file becomes PRISTINE) makes a CORRECT rebase go red. Both reviewers
+  found it independently and both demonstrated it by repointing D7's
+  `Where it was:` at a file this rebase made pristine. Inert today only because
+  `dex_item.cpp` stays divergent for seven other entries.
+- **The hunk and marked columns were anchored to nothing.** `+`/`-` are held by
+  having to sum to the prose total and marker lines are recomputed from the
+  tree, but a reviewer rewrote every row's hunks/marked to 0 (with the prose
+  sentence rewritten to match) → 38 passed, and so did moving 717/43 of `+`/`-`
+  between two rows with the sum preserved. The table is a pinned LITERAL now —
+  it cannot be recomputed, because that needs the baseline TREE, which the guard
+  deliberately does not carry.
+- **Both reachability pins were evadable, in the same way.** They asserted the
+  two EXISTING call-site literals are unchanged, so ADDING a scoped
+  `CreateBatchFindClassUsingStrings` beside the pinned one passed — which is how
+  an argument actually gets exposed. And the `OpCodesMatcher` scan missed
+  flatbuffers' second spelling (`OpCodesMatcherBuilder`, which contains no
+  `CreateOpCodesMatcher` substring) and every header. Both now check EVERY
+  occurrence, over `.cpp/.cc/.h/.hpp` under `native/` and `src/`, with
+  whitespace normalised so a reformat is not a false positive.
+
+### Eight in the prose, and three of them were mine to un-say
+
+- **`UPSTREAM` and CLAUDE.md both said "three fixes in files dexllm vendored
+  UNMODIFIED".** False for `Core/CMakeLists.txt`, which has been divergent since
+  the import (D10) — and `UPSTREAM` refutes itself 75 lines down, in a sentence
+  this same commit wrote.
+- **"On the next rebase that entry disappears"** (dexllm#65 section) — the
+  rebase happened and the entry did NOT disappear; keeping it retired is one of
+  this change's decisions. The sibling mirror WAS updated; this one was missed.
+- **"41 divergent hunks, 34 marked, 7 not"** in the present tense, contradicted
+  by 40/33/7 in the catalogue and by this section 300 lines later. The
+  marker-line sentence 90 lines above had been kept honest with an as-of
+  qualifier; this one had not.
+- **"7 are not containers at all"** — 2 are. Three are zips with no
+  `classes*.dex` and two are real dexes the verifier rejects.
+- **"a flat result on the batch axes is the unreachability verdict stated as a
+  measurement"** — it is not, and a reviewer built the measurement that is.
+- **"+1271 → +1290 differ because of the tree"** — measured, the tree accounts
+  for −73/+29 and dexllm's own later content for +92/−17.
+- Four sentences the baseline/fork-point split made false: the catalogue's
+  *"hashes against the fork-point manifest"*, two guard docstrings, and
+  `README.md`'s only mention of `UPSTREAM`.
+- Two entries left describing a retired one: D5's `Where:` said `InitBaseCache`
+  *"holds D7 and D9"*, and D11's `Where:` carried a line number (`dex_item.h:169`)
+  that was already 17 lines stale from dexllm#84 and which this change pushed 7
+  further — the line reference is dropped rather than re-pinned, since nothing
+  guards it.
+
+**Not a finding, checked because a reviewer flagged it:** `ctest` registers 29
+suites while 30 binaries sit in the build dir. The 30th,
+`thread_pool_lifetime_parity_test`, is dated 2026-08-16 and **has no source** —
+it is a stale artefact of the rename to `thread_pool_selfdestruct_test.cpp`, not
+an unregistered test.
+
+## Not done, deliberately
+
+**Nothing has been proposed upstream, and dexllm#79 will not be pursued** (user
+decision, 2026-09-06) — which is the second half of that issue's own closing
+condition, *submitted or a recorded reason why not*. The catalogue carries the
+record, including the part a one-letter treatment hides: of the nine **U**
+entries only five are unambiguous bug fixes (D2, D3, D6, D13, D14); D4's fix is
+a redesign upstream might spell differently, **D1 is a contract change rather
+than a bug** (upstream is a runtime library behind JNI, so `abort()` vs `throw`
+is its callers' problem), **D5 is a no-op on strict-verified input** and matters
+only to a consumer of unverified dumps, and D11 is a deletion needing a
+"dead AND wrong" argument rather than a diff.
+
+And `Core/dexkit/dex_item.cpp` still carries D12's 560 lines — dexllm#80.
 
 ### Skills
 

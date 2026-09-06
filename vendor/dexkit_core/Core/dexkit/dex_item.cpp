@@ -213,12 +213,7 @@ void DexItem::InitBaseCache() {
 
         for (uint32_t i = 0, class_method_idx = 0; i < direct_methods_count; ++i) {
             class_method_idx += ReadULeb128(&class_data);
-            uint32_t access_flags = ReadULeb128(&class_data);
-            // dexllm: stored VERBATIM. Upstream rewrote declared_synchronized
-            // (0x20000) to synchronized (0x20) here for java.lang.reflect.Modifier
-            // compatibility; that is lossy (dex 0x20 means JNI synchronized-native,
-            // a different thing) and this is a dex analyzer, not a reflection shim.
-            method_access_flags[class_method_idx] = access_flags;
+            method_access_flags[class_method_idx] = ReadULeb128(&class_data);
             uint32_t code_off = ReadULeb128(&class_data);
             if (code_off) {
                 method_codes[class_method_idx] = reader.dataPtr<const dex::Code>(code_off);
@@ -227,9 +222,7 @@ void DexItem::InitBaseCache() {
         }
         for (uint32_t i = 0, class_method_idx = 0; i < virtual_methods_count; ++i) {
             class_method_idx += ReadULeb128(&class_data);
-            uint32_t access_flags = ReadULeb128(&class_data);
-            // dexllm: stored VERBATIM — see the direct-methods loop above.
-            method_access_flags[class_method_idx] = access_flags;
+            method_access_flags[class_method_idx] = ReadULeb128(&class_data);
             uint32_t code_off = ReadULeb128(&class_data);
             if (code_off) {
                 method_codes[class_method_idx] = reader.dataPtr<const dex::Code>(code_off);

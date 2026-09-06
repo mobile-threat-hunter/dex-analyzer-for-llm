@@ -1,8 +1,11 @@
 # Vendored DexKit Core — divergence registry
 
-**Baseline: LuckyPray/DexKit `dff66e8` (`2.2.0-2-gdff66e8`, 2026-05-22).**
+**Baseline: LuckyPray/DexKit `47f7324` (`2.2.0-8-g47f7324`, 2026-08-20) — upstream
+HEAD.** The *fork point* is `dff66e8`; the baseline started there and advanced in
+dexllm#81, which carried the four revisions since it that touch the vendored
+subset. `UPSTREAM` keeps both and explains why they are different things.
 Recorded in [`vendor/dexkit_core/UPSTREAM`](../vendor/dexkit_core/UPSTREAM);
-the fork-point blob SHA of every vendored file is in
+every vendored file's blob SHA **at the baseline** is in
 [`vendor/dexkit_core/UPSTREAM.blobs`](../vendor/dexkit_core/UPSTREAM.blobs).
 
 This is the DexKit-side sibling of
@@ -11,18 +14,23 @@ dexllm's own code diverges from an AOSP/ART reference it re-implements; this one
 catalogs where the *vendored* tree diverges from the upstream it was copied from.
 
 Measured against the baseline, the vendored subset is **136 files: 125
-byte-identical, 11 modified, 0 added**, **+1288 / -131 lines**.
+byte-identical, 11 modified, 0 added**, **+1290 / -119 lines**.
 
-The line counts are `git diff --numstat` against the fork-point tree — the same
-predicate the rest of this repo uses for a diffstat. (An earlier draft published
-+1215/-130 from a `diff -u | grep -c '^+[^+]'` pipeline, which silently drops
-*added blank lines*; the difference is 56 of them. A count is only as good as the
-predicate printed next to it.)
+The line counts are `git diff --numstat` against the **baseline** tree — the same
+predicate the rest of this repo uses for a diffstat. (Measured against the fork
+point they were +1271/-131 when dexllm#65 wrote this, and an earlier draft
+published +1215/-130 from a `diff -u | grep -c '^+[^+]'` pipeline, which silently
+drops *added blank lines* — 56 of them. So: two numbers that differ because of
+the PREDICATE, and two that differ for both reasons at once. An earlier draft
+attributed +1271→+1290 to the tree alone; measured, the tree accounts for
+−73/+29 (exactly upstream's `6 files, +73/-29`) and dexllm's own later content
+for +92/−17. A count is only as good as the predicate AND the baseline printed
+next to it.)
 
 | file | + | - | hunks | marked | marker lines |
 |---|---:|---:|---:|---:|---:|
-| `Core/dexkit/dex_item.cpp` | 723 | 56 | 16 | 14 | 33 |
-| `Core/dexkit/include/dex_item.h` | 172 | 2 | 5 | 4 | 22 |
+| `Core/dexkit/dex_item.cpp` | 718 | 44 | 15 | 13 | 31 |
+| `Core/dexkit/include/dex_item.h` | 179 | 2 | 5 | 4 | 24 |
 | `Core/third_party/thread_helper/ThreadPool.h` | 149 | 40 | 3 | 3 | 9 |
 | `Core/dexkit/dexkit.cpp` | 168 | 22 | 8 | 6 | 9 |
 | `Core/third_party/slicer/reader.cc` | 24 | 0 | 1 | 1 | 4 |
@@ -44,7 +52,7 @@ rebased without colliding with upstream.
 | | meaning | entries |
 |---|---|---|
 | **U** | upstreamable — upstream still has the defect and would plausibly take the fix | D1 D2 D3 D4 D5 D6 D11 D13 D14 |
-| **C** | converged — upstream reached the same behaviour independently; the entry disappears on the next rebase | D7 |
+| **C** | converged and RETIRED — upstream reached the same behaviour independently and the local change has been dropped; the entry is kept because a deletion leaves nothing to find | D7 |
 | **P** | permanent — an extension hook or a product decision incompatible with upstream's goals | D8 D9 D10 |
 | **R** | reduction candidate — dexllm code that happens to live in the vendored tree and could move out | D12 |
 
@@ -55,7 +63,7 @@ allocation order and stable; they are not ordered by section.
 dexllm#65 estimated "roughly 29 of 54 [markers] are upstreamable bug fixes and 17
 are permanent divergence", i.e. that over half the debt could be given away. At
 this granularity the direction holds — 9 of 14 entries are **U** — but the
-largest single item by volume is neither: **D12 is 560 of `dex_item.cpp`'s 2,018
+largest single item by volume is neither: **D12 is 560 of `dex_item.cpp`'s 2,011
 lines, about 44% of everything this fork adds**, and it is a *reduction*
 candidate, code that should leave the vendored tree rather than be sent upstream.
 An entry-weighted count and a line-weighted one point at different work.
@@ -67,7 +75,7 @@ across all 11 files**, and the marker set and the divergent set are now equal in
 both directions (no pristine file carries one). The convention is **checked**
 rather than merely followed:
 [`tests/test_vendor_baseline.py`](../tests/test_vendor_baseline.py) hashes every
-vendored file against the fork-point manifest and requires the divergent set to
+vendored file against the **baseline** manifest and requires the divergent set to
 equal the set catalogued here.
 
 It was not checked before, and it undercounted three ways. **Three files carried
@@ -82,7 +90,7 @@ built this registry; both missing entries were found by review, not by the
 census.
 
 **At hunk granularity the convention is still incomplete, and the guard is
-file-granular: 41 divergent hunks, 34 marked, 7 not.** Those 7 are honest rather
+file-granular: 40 divergent hunks, 33 marked, 7 not.** Those 7 are honest rather
 than sloppy: **2 are pure deletions with no added line that could carry a marker**
 (D11's declaration and definition), and 5 are continuations of a divergence marked
 elsewhere in the same file (an `#include <stdexcept>` for D1; the two `Abort*`
@@ -168,8 +176,8 @@ is the guard.
 - **Where:** `Core/dexkit/dex_item.cpp` — `InitCache` (the string, field and
   method operand bounds, all three inside its instruction walk) and
   `GetUsingStringsFromCode` (two `strings.size()` guards). Not
-  `InitBaseCache`, which an earlier draft named: it holds D7 and D9 and no
-  bound at all. The method-operand bound sits one line under D14's opcode
+  `InitBaseCache`, which an earlier draft named: it holds D9 and no bound at
+  all. (It held D7 too until dexllm#81 retired that entry.) The method-operand bound sits one line under D14's opcode
   test, in the same hunk — two divergences, one marker.
 - **Upstream:** indexes the string / field / method tables with the raw operand.
 - **Divergence:** each index is bounded and an out-of-range operand is dropped.
@@ -201,7 +209,7 @@ is the guard.
 
 ### D11. `GetInvokeMethodsFromCode` removed (dexllm#61)
 
-- **Where:** `Core/dexkit/include/dex_item.h:169` — a tombstone comment in the
+- **Where:** `Core/dexkit/include/dex_item.h` — a tombstone comment in the
   `public:` section beside `EnumerateInvokeSites`; the declaration it records
   was in `private:` (fork-point line 221) and the definition is gone from
   `Core/dexkit/dex_item.cpp`. The tombstone is deliberately next to the two
@@ -268,28 +276,48 @@ is the guard.
 
 ## C — converged with upstream
 
-### D7. Method access flags are the raw dex bits
+An entry lands here when upstream reaches the same behaviour independently. On
+the next rebase the local change is **dropped rather than carried**, and the
+entry is RETIRED: it names no live divergence and is excluded from the
+path-ownership pin in
+[`tests/test_vendor_baseline.py`](../tests/test_vendor_baseline.py). It is kept
+rather than deleted for the reason this whole registry exists — **a deletion
+leaves nothing to find**, so an id that simply vanished would leave a reader of
+`D1..D14` with a gap and no answer.
 
-- **Where:** `Core/dexkit/dex_item.cpp` `InitBaseCache` (both method loops),
-  `Core/dexkit/include/dex_item.h` `GetMethodAccessFlags`.
-- **Upstream at the baseline:** rewrote `ACC_DECLARED_SYNCHRONIZED` (0x20000) to
-  `ACC_SYNCHRONIZED` (0x20) for `java.lang.reflect.Modifier` compatibility.
-- **Divergence:** the rewrite is REMOVED; the dex's own bits are stored verbatim.
+### D7. Method access flags are the raw dex bits — RETIRED (dexllm#81)
+
+- **Where it was:** `Core/dexkit/dex_item.cpp` `InitBaseCache`, both method
+  loops. (The entry also used to claim `Core/dexkit/include/dex_item.h`; what
+  diverged there is the `GetMethodAccessFlags` accessor itself, which is a
+  dexllm extension hook and belongs to **D8**. Only the accessor's *comment*
+  was D7's, and it has been rewritten to describe what upstream does now.)
+- **Upstream at the fork point:** rewrote `ACC_DECLARED_SYNCHRONIZED` (0x20000)
+  to `ACC_SYNCHRONIZED` (0x20) for `java.lang.reflect.Modifier` compatibility.
+- **Divergence:** the rewrite was REMOVED; the dex's own bits are stored
+  verbatim.
 - **Why:** the rewrite is lossy (0x20 means `synchronized native` in dex, a
   different property) and it made one method describe itself two ways —
   `get_class_summary` said `synchronized` while `decompile_class` said
   `declared_synchronized`.
-- **Upstream status: CONVERGED.** Upstream removed the same rewrite in
-  `42b30c4` ("feat(core)!: expose raw DEX access flags", 2026-08-02) — four days
-  *before* dexllm did. On the next rebase this entry disappears and the two
-  trees agree. Note that `42b30c4` also rewrites the vendored `README.md` and
-  `README_zh.md` to document the new behaviour, so a rebase that takes only its
-  `Core/` half leaves those READMEs describing behaviour neither tree has.
+- **Upstream status: CONVERGED, and the convergence has been TAKEN.** Upstream
+  removed the same rewrite in `42b30c4` ("feat(core)!: expose raw DEX access
+  flags", 2026-08-02) — four days *before* dexllm did. dexllm#81 adopted
+  upstream's exact text (which drops a local variable dexllm's version kept), so
+  the two hunks are gone and `dex_item.cpp` no longer differs here. `42b30c4`
+  also rewrites the vendored `README.md` and `README_zh.md` to document the new
+  behaviour; both were taken in the same change, so no README describes
+  behaviour neither tree has.
+- **Measured:** adopting upstream's form is **bit-identical** — building it
+  alone reproduces the pre-rebase `.so` md5 `516f5a18…` exactly. The behaviour
+  claim is therefore not an argument about optimisation, it is a measurement.
 
-This is the entry that justifies the whole issue. dexllm#65 classified this
+This is the entry that justified the whole issue. dexllm#65 classified this
 bucket as **permanent**, reasoning that "upstream wants `Modifier`
 compatibility, which is exactly what this removed". Without a baseline there was
-no way to see that the premise had already stopped being true.
+no way to see that the premise had already stopped being true — and without one
+there would have been no way to *take* the convergence either, because
+"the diff against upstream" would not have existed.
 
 ---
 
@@ -346,7 +374,7 @@ no way to see that the premise had already stopped being true.
 
 ### D12. The smali renderer and `EnumerateInvokeSites` live in `dex_item.cpp`
 
-- **Where:** `Core/dexkit/dex_item.cpp`, lines 1459-2018 —
+- **Where:** `Core/dexkit/dex_item.cpp`, lines 1452-2011 —
   `EscapeSmaliString`, `SmaliIdent`, `FormatAccessFlags`,
   `FormatFieldAccessFlags`, `FormatMethodAccessFlags`, `FormatProto`,
   `FormatMethodRef`, `FormatFieldRef`, `EmitRegisterRange`, `FormatOperands`,
@@ -389,14 +417,29 @@ same change itself.)
 
 ## What this registry does not do
 
-It records **where** the trees differ and **what kind** of difference each is. It
-does not upstream anything, and it does not pick up the three upstream fixes the
-baseline revealed dexllm is missing (`6ca92c3`, `47f7324`, `7415df9` — see
-`UPSTREAM` for each one's reachability verdict). Those are step 3 of dexllm#65
-and need their own change with its own a/b.
+It records **where** the trees differ and **what kind** of difference each is.
+**It does not upstream anything** — nothing here has been proposed to
+LuckyPray/DexKit, and a treatment of **U** is a classification of kind, not a
+prediction that a patch would be accepted.
 
-Step 3 is now filed rather than merely deferred, one issue per bucket:
-**dexllm#79** proposes the nine **U** entries upstream, **dexllm#80** moves
-**D12** (**R**) out of the vendored tree, and **dexllm#81** picks up the three
-fixes above — in which **D7** (**C**) disappears, the one entry a rebase must
-*drop* rather than carry.
+Step 3 of dexllm#65 is filed one issue per bucket. **dexllm#81 is DONE**: the
+baseline advanced from the fork point to upstream HEAD, the three fixes dexllm
+was missing (`6ca92c3`, `47f7324`, `7415df9` — see `UPSTREAM` for each one's
+reachability verdict) are carried, and **D7** (**C**) was retired, the one entry
+a rebase must *drop* rather than carry. **dexllm#80** — moving **D12** (**R**)
+out of the vendored tree — is open.
+
+**dexllm#79, proposing the nine U entries upstream, is deliberately NOT being
+pursued** (user decision, 2026-09-06). That is the second half of its own
+closing condition — *submitted, or a recorded reason why not* — and this is the
+record. It also does not mean the nine are equivalent: **U** covers four
+different kinds of change, and only five of the nine are unambiguous bug fixes
+(D2, D3, D6, D13, D14). D4 is a real defect whose fix here is a redesign
+upstream might spell differently; **D1 is a contract change rather than a bug**
+(upstream is a runtime library behind JNI, where `abort()` vs `throw` is its
+callers' problem, and the "malformed dex is the input" argument is dexllm's, not
+upstream's); **D5 is a no-op on strict-verified input** and is meaningful only
+to a consumer that reads unverified dumps, which is dexllm's use case more than
+upstream's; and D11 is the deletion of dead code, which needs the "dead AND
+wrong" argument rather than a diff. A treatment of **U** was never a claim that
+all nine are the same kind of patch.

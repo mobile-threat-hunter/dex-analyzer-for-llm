@@ -1,25 +1,29 @@
-# Fork-point blob manifest for the vendored DexKit Core.
+# Baseline blob manifest for the vendored DexKit Core.
 #
-# One line per vendored file: the git blob SHA-1 that file had at the
-# UPSTREAM baseline recorded in ./UPSTREAM (LuckyPray/DexKit dff66e8), NOT
-# its current content.  A file whose on-disk bytes hash to the SHA below is
+# One line per vendored file: the git blob SHA-1 that file has at the UPSTREAM
+# BASELINE recorded in ./UPSTREAM (LuckyPray/DexKit 47f7324), NOT its current
+# content in this tree.  A file whose on-disk bytes hash to the SHA below is
 # byte-identical to upstream; every other file is a divergence and must have
 # an entry in docs/dexkit-vendor-divergences.md.
+#
+# The BASELINE is not the FORK POINT.  It started equal to it (dff66e8) and
+# advances whenever this tree is rebased onto a newer upstream; ./UPSTREAM
+# explains the difference and records both.
 #
 # The hash is git's own: sha1(b'blob %d\0' % len(bytes) + bytes).
 # Regenerate with the command recorded in ./UPSTREAM.
 #
 # 136 files.
 fb22f2ed34b4b1a29e2e720c1b7b4a606db2f6d3  Core/.gitignore
-200b9420bf2891b60a41985df512c003367ad465  Core/CMakeLists.txt
+3a9c5483a372228f03c4ba63746e41c4bde8b658  Core/CMakeLists.txt
 e3261747953349dd059d5f9db9ff651df87c77ce  Core/LICENSE
 d8fe542087b6b1297e65a98d7c5d5215ec6280e7  Core/dexkit/analyze.cpp
 dd24c5db749b8732fd7af6c1dc5ba71abb206d63  Core/dexkit/beans.cpp
 3e92465766f036988a374014ac1824c9942b4f10  Core/dexkit/common.cpp
-700f1a108a6900fc8f21809d2174b05b6212c326  Core/dexkit/dex_item.cpp
-15453325a8cfda380aa8fdd331f1876c783952ff  Core/dexkit/dex_item_batch_find.cpp
+37a4d0fe9df89edb7e3083d7b1b4fec0a57110bf  Core/dexkit/dex_item.cpp
+e3a7ffda7ec9b7cc32e2963f3098d6300d2f21b4  Core/dexkit/dex_item_batch_find.cpp
 a399c0f7ee4cebbd5589da42c89d9049bb486271  Core/dexkit/dex_item_find.cpp
-bb00262cda1bbdc398f19b40ed523a61d30d5698  Core/dexkit/dex_item_matcher.cpp
+deb503827eabd83ffd87b6a92af59443e6bfc921  Core/dexkit/dex_item_matcher.cpp
 69fff6ffe1cbb697929380f75fa9904b1a5da341  Core/dexkit/dexkit.cpp
 1c3048eaf29173141a26689fe58677a98f1be420  Core/dexkit/include/analyze.h
 d383e591aa2968f24205f569b7e64049be6f0560  Core/dexkit/include/beans.h
@@ -135,8 +139,8 @@ a944af8726340c485e40d189d23f0e4c5e9676e4  Core/third_party/slicer/export/slicer/
 34177699890d4e174ed983a424daa45b88571b55  Core/third_party/slicer/writer.cc
 88020d8a40ac576ea13cbeaee19a5f2443761fa7  Core/third_party/thread_helper/ThreadPool.h
 f49a4e16e68b128803cc2dcea614603632b04eac  LICENSE
-6a46404189a9c1964189e484d83bcb730adf3d2c  README.md
-acfa2f4d30a5e290ea61552179b9f9775abca6a6  README_zh.md
+b9da6f3ce20b5c33bb4bac783270583af1cdf54a  README.md
+6ac6e8ba89ca6f953828fc81e48f88bccd52bd47  README_zh.md
 7c5a9d9c4e54674a3a985ec69bf4804d01ae4baf  schema/.gitignore
 a4b2004caf685d4f45ca002236c44ac4feb8a1f7  schema/README.md
 b802b88fdfe99a42e208313f6806eaebf0871750  schema/fbs/encode_value.fbs

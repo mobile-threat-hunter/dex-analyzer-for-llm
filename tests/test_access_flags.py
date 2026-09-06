@@ -502,3 +502,152 @@ def test_unknown_flags_reach_the_sdk_and_the_tool_output(dk, apk_path):
     if with_fields is not None:
         fields = session.class_fields(with_fields.descriptor)
         assert fields and all(f.access_flags is None for f in fields)
+
+
+def _craft_declared_synchronized(dex: bytes) -> tuple[bytes, int, str, str]:
+    """Set ACC_DECLARED_SYNCHRONIZED on one method, LENGTH-PRESERVINGLY.
+
+    Walks ``class_defs`` -> ``class_data`` and looks for a method whose
+    ``access_flags`` uleb128 is already 3 bytes wide, which a constructor is
+    (``0x10001`` = public + constructor encodes as ``81 80 04``).  ``0x20001``
+    encodes as ``81 80 08`` -- the SAME three bytes with one bit moved -- so the
+    craft rewrites a single byte and no offset, no section size and no
+    neighbouring structure moves.
+
+    Returns ``(patched, flags, class_descriptor, method_name)``.
+    """
+    import struct
+
+    def uleb(b: bytes, o: int) -> tuple[int, int]:
+        r = s = n = 0
+        while True:
+            c = b[o + n]
+            r |= (c & 0x7F) << s
+            n += 1
+            s += 7
+            if not c & 0x80:
+                return r, n
+
+    def enc(v: int, width: int) -> bytes:
+        out = bytearray()
+        for i in range(width):
+            byte = v & 0x7F
+            v >>= 7
+            out.append(byte | (0x80 if i + 1 < width else 0))
+        assert v == 0, "value does not fit the pinned width"
+        return bytes(out)
+
+    n_defs, off_defs = struct.unpack_from("<II", dex, 96)
+    for i in range(n_defs):
+        base = off_defs + i * 32
+        cdo = struct.unpack_from("<I", dex, base + 24)[0]
+        if not cdo:
+            continue
+        o = cdo
+        counts = []
+        for _ in range(4):
+            v, n = uleb(dex, o)
+            o += n
+            counts.append(v)
+        sf, inf, dm, vm = counts
+        for _ in range(sf + inf):
+            for _ in range(2):
+                _, n = uleb(dex, o)
+                o += n
+        midx = 0
+        for _ in range(dm + vm):
+            d, n = uleb(dex, o)
+            o += n
+            midx += d
+            fo, (fv, fn) = o, uleb(dex, o)
+            o += fn
+            _, n = uleb(dex, o)
+            o += n
+            if fn == 3 and not fv & ACC_DECLARED_SYNCHRONIZED:
+                want = fv | ACC_DECLARED_SYNCHRONIZED
+                patched = bytearray(dex)
+                patched[fo : fo + fn] = enc(want, fn)
+                cls_idx = struct.unpack_from("<I", dex, base)[0]
+                return bytes(patched), want, _type_at(dex, cls_idx), _name_of(dex, midx)
+    return b"", 0, "", ""
+
+
+def _type_at(dex: bytes, type_idx: int) -> str:
+    import struct
+
+    _, off_t = struct.unpack_from("<II", dex, 64)
+    sidx = struct.unpack_from("<I", dex, off_t + type_idx * 4)[0]
+    return _string_at(dex, sidx)
+
+
+def _name_of(dex: bytes, method_idx: int) -> str:
+    import struct
+
+    _, off_m = struct.unpack_from("<II", dex, 88)
+    name_idx = struct.unpack_from("<I", dex, off_m + method_idx * 8 + 4)[0]
+    return _string_at(dex, name_idx)
+
+
+def _string_at(dex: bytes, idx: int) -> str:
+    import struct
+
+    _, off_s = struct.unpack_from("<II", dex, 56)
+    data = struct.unpack_from("<I", dex, off_s + idx * 4)[0]
+    n = 0
+    while dex[data + n] & 0x80:
+        n += 1
+    n += 1
+    end = dex.index(b"\0", data + n)
+    return dex[data + n : end].decode("utf-8", "replace")
+
+
+def test_the_rewrite_cannot_come_back_without_a_test_noticing(tmp_path):
+    """The one guard for this contract that needs no corpus.
+
+    Every other test in this file needs an APK that DECLARES a synchronized
+    method, and none of the committed fixtures has one -- so in the corpus-less
+    CI leg the whole contract rested on nothing.  An adversarial review of
+    dexllm#81 built the consequence: re-introducing the lossy rewrite AFTER the
+    assignment (rather than reverting the assignment) satisfies both source pins
+    in ``tests/test_vendor_baseline.py``, adds no ``dexllm`` marker line, leaves
+    the file divergent either way, and passes **960 / 433 / 0** -- byte for byte
+    the clean corpus-less result.
+
+    So this crafts the shape instead.  If the rewrite returns, 0x20001 arrives
+    as ``0x20001 ^ 0x20000 | 0x20`` = **0x21**, and both halves of that are
+    asserted: the flag that must survive and the flag that must NOT appear.
+    """
+    from conftest import committed_container
+
+    import dexllm
+
+    _, dex = committed_container()
+    patched, want, cls, name = _craft_declared_synchronized(dex)
+    assert patched, (
+        "no method with a 3-byte access_flags uleb in tests/data/multidex.apk -- "
+        "the fixture no longer offers the shape this craft needs"
+    )
+    assert want & ACC_DECLARED_SYNCHRONIZED and not want & ACC_SYNCHRONIZED
+
+    # The craft is one byte and nothing else.
+    assert len(patched) == len(dex)
+    assert sum(a != b for a, b in zip(patched, dex)) == 1
+
+    target = tmp_path / "declared-sync.dex"
+    target.write_bytes(patched)
+    rows = dexllm.verify(str(target))
+    assert rows and all(r["valid"] for r in rows), rows
+
+    dk = dexllm.DexKit(str(target))
+    got = [
+        m.access_flags
+        for m in dk.get_class_summary(cls).methods
+        if m.name == name and m.access_flags is not None
+    ]
+    assert got, f"{cls}->{name} not reported by get_class_summary"
+    assert want in got, (
+        f"{cls}->{name} reports {[hex(g) for g in got]}, expected {hex(want)}. "
+        f"0x{ACC_SYNCHRONIZED:x} instead of 0x{ACC_DECLARED_SYNCHRONIZED:x} means "
+        "the java.lang.reflect.Modifier rewrite is back in InitBaseCache"
+    )
+    assert not any(g & ACC_SYNCHRONIZED for g in got), [hex(g) for g in got]

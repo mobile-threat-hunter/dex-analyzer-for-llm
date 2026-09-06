@@ -2,20 +2,42 @@ Vendored upstream: DexKit Core
 ==============================
 
 repo      https://github.com/LuckyPray/DexKit
-commit    dff66e8eff15512ac9a2d03cf3ef23de338bd167
-describe  2.2.0-2-gdff66e8
-date      2026-05-22T15:05:09+08:00
-subject   fix(android): normalize unaligned cookie dex before parsing
+baseline  47f7324ae627b0ea9110c33c529cd755d27f379c
+describe  2.2.0-8-g47f7324
+date      2026-08-20T11:41:49+08:00
+subject   fix: endWith opcode matching
 license   Apache-2.0 (Core/LICENSE, unmodified)
+
+fork point  dff66e8eff15512ac9a2d03cf3ef23de338bd167  (2.2.0-2-gdff66e8)
 
 vendored subset   Core/  LICENSE  README.md  README_zh.md  schema/   (136 files)
 divergences       11 files modified, 0 added  ->  docs/dexkit-vendor-divergences.md
-baseline manifest ./UPSTREAM.blobs (the fork-point blob SHA of each of the 136)
+baseline manifest ./UPSTREAM.blobs (the baseline blob SHA of each of the 136)
 guard             tests/test_vendor_baseline.py
 
 
-How the baseline was determined (dexllm#65)
--------------------------------------------
+Baseline and fork point are two different things
+------------------------------------------------
+
+The FORK POINT is where the vendoring happened: dff66e8, recovered by blob
+matching (below).  It is a historical fact and it never moves.
+
+The BASELINE is the upstream revision the tree is compared against TODAY.  It
+started equal to the fork point and advanced to 47f7324 in dexllm#81, which
+carried the four revisions that touch the vendored subset.  Everything the
+manifest, the catalogue and the guard measure is against the BASELINE; the
+fork-point story is kept because it is what makes the baseline re-derivable at
+all, and because two of the three files that already differed at import are
+still divergent for the same reasons.
+
+Advancing the baseline is the one operation that legitimately rewrites
+./UPSTREAM.blobs.  tests/test_vendor_baseline.py pins the manifest's own hash,
+so it is a deliberate two-place edit; that is what stops a single line being
+regenerated to silence a divergence.
+
+
+How the fork point was determined (dexllm#65)
+---------------------------------------------
 
 The import a6f8c3c recorded no version, no revision hash and no provenance file,
 so the fork point was recovered by BLOB MATCHING rather than read off the
@@ -38,7 +60,10 @@ exists in NO upstream revision, so no revision can score higher than 382:
 The runner-up 7415df9 (381) differs from dff66e8 in exactly one file,
 Core/CMakeLists.txt, and the snapshot carries dff66e8's version of it.  A
 reviewer re-ran the scan over `rev-list --all` (606 revisions, adding the dev /
-cache / docs / 1.1.x branches) and reached the same conclusion.
+cache / docs / 1.1.x branches) and reached the same conclusion.  (7415df9 is one
+of the revisions the baseline has since advanced through, so that CMakeLists
+line now reads the way 7415df9 wrote it -- the scan above is a statement about
+the IMPORT snapshot, which is fixed, not about today's tree.)
 
 Five files upstream has at dff66e8 that the import did not carry: the root
 .gitignore and three .github/workflows/*.yml (root-level hidden paths a
@@ -57,40 +82,50 @@ renderer, AnalyzeMethodInvokes, and the SLICER_CHECK -> std::runtime_error
 change in slicer/common.cc.  Those hooks were marked `dexkit-py` (the project's
 earlier name); every marker in the tree reads `dexllm` today.
 
-That gap between the message and the delta is why the baseline had to be
-recovered by matching bytes.  Measured at the HEAD this file was written against,
-it also shows up as a file the import could not reveal: import->HEAD over the
-vendored subset finds 10 changed files, UPSTREAM->HEAD finds 11, and the extra
-one is common.cc, whose blob is identical at the import and at HEAD.  The change
-that adds this file also adds D1's marker there, so from now on both counts are
-11 -- the divergence stopped being invisible because the baseline exists.
-(The figure dexllm#65 quotes for the first of those, "5 files changed, 546/469",
-was path-scoped to Core/dexkit and is now 5 files / 691/508.)
+That gap between the message and the delta is why the fork point had to be
+recovered by matching bytes.  It also showed up as a file the import could not
+reveal: import->HEAD over the vendored subset found 10 changed files,
+fork-point->HEAD found 11, and the extra one was common.cc, whose blob is
+identical at the import and at the HEAD dexllm#65 measured.  Adding D1's marker
+there closed that gap.  (The figure dexllm#65 quotes for the first of those,
+"5 files changed, 546/469", was path-scoped to Core/dexkit.)
 
 
-Upstream drift since the fork point
------------------------------------
+Upstream drift
+--------------
 
-Six revisions.  Over Core/ that is 4 files, +20/-29; over the whole vendored
-subset it is 6 files, +73/-29, because 42b30c4 also rewrites the vendored
-README.md (+28) and README_zh.md (+25) to document the behaviour it changes.
+NONE.  The baseline IS upstream HEAD as of 2026-09-06, so `git diff <baseline>
+HEAD` over the vendored subset is empty and there is nothing waiting to be
+picked up.
 
-  42b30c4  feat(core)!: expose raw DEX access flags      CONVERGED with D7
-  7415df9  fix: wrong CMAKE_CXX_FLAGS used in CMAKE_C_FLAGS   not carried, inert
-  6ca92c3  fix: searchInMethods and searchInClasses          not carried, unreachable
-  47f7324  fix: endWith opcode matching                      not carried, unreachable
+Six revisions separated the fork point from this baseline; four touch the
+vendored subset (6 files, +73/-29, because 42b30c4 also rewrites the vendored
+README.md and README_zh.md to document the behaviour it changes):
 
-Three upstream fixes land in files dexllm vendors UNMODIFIED and does not have.
-Each was checked rather than assumed, and none is an outstanding product bug:
+  42b30c4  feat(core)!: expose raw DEX access flags      converged with D7
+  7415df9  fix: wrong CMAKE_CXX_FLAGS used in CMAKE_C_FLAGS      carried, inert
+  6ca92c3  fix: searchInMethods and searchInClasses       carried, unreachable
+  47f7324  fix: endWith opcode matching                   carried, unreachable
+
+The other two, 1e148f8 and d0e0b98, are Kotlin-only and touch nothing vendored.
+
+Three of the four were fixes dexllm did not have.  Two of them land in files
+dexllm vendored UNMODIFIED; 7415df9 does NOT -- Core/CMakeLists.txt has been
+divergent since the import (D10's Emscripten guard), which is why that one had
+to be applied by hand.  An earlier draft said all three, and a reviewer found
+that this same file refutes it 75 lines down.  Each verdict was re-derived at
+the HEAD this rebase was made against, not carried over:
 
   6ca92c3  an INVERTED condition in BatchFind{Class,Method}UsingStrings.
-           UNREACHABLE: DexKitExt passes 0 for in_classes / in_methods, so
+           UNREACHABLE: dexkit_ext.cpp:1398 and :1445 pass 0 for in_classes /
+           in_methods (fields 4 and 5 of the two query tables), so
            query->in_classes() is null and the branch never runs.  The Python
            surface exposes no scoping argument at all.
   47f7324  EndWith opcode matching anchored to the first kmp hit.
            UNREACHABLE: all five CreateMethodMatcher call sites pass 0 for
-           op_codes, and IsOpCodesMatched returns true on a null matcher.
-           Nothing in the repo builds an OpCodesMatcher.
+           op_codes (field 7 of MethodMatcher), and IsOpCodesMatched returns
+           true on a null matcher.  Nothing in the repo builds an
+           OpCodesMatcher.
   7415df9  Core/CMakeLists.txt sets CMAKE_C_FLAGS from CMAKE_CXX_FLAGS.
            INERT: no .c source exists anywhere in the tree, so CMAKE_C_FLAGS
            is never consulted.  (The vendored project(dexkit) names no
@@ -98,16 +133,38 @@ Each was checked rather than assumed, and none is an outstanding product bug:
            opposite, reading the top-level project(dexllm LANGUAGES CXX)
            instead.  The verdict survives on the second premise alone.)
 
-They are free pickups on the next rebase.  D7 / D13 are entries in
-docs/dexkit-vendor-divergences.md.
+Two of the three are load-bearing the moment a future dexllm change reaches
+them: 6ca92c3 is wrong in the direction that returns results for the WRONG
+scope, so it becomes a correctness bug the day any scoping argument is exposed,
+and 47f7324 the day an OpCodesMatcher is built.
+
+42b30c4 is the fourth, and it is the opposite direction: upstream removed the
+same declared_synchronized -> synchronized rewrite dexllm had removed four days
+later, so taking it meant DROPPING a local change rather than carrying one.
+D7 in docs/dexkit-vendor-divergences.md records that, and is retired.
+
+What the rebase cost the binary, measured rather than predicted:
+
+  step                                   .so md5
+  four files at the fork point           516f5a18ab097a45f3c478c986d6794e  (HEAD)
+  + D7 convergence (dex_item.cpp)        516f5a18ab097a45f3c478c986d6794e  BIT-IDENTICAL
+  + 7415df9 (Core/CMakeLists.txt)        516f5a18ab097a45f3c478c986d6794e  BIT-IDENTICAL
+  + 6ca92c3 (dex_item_batch_find.cpp)    10903b8b4682a60af199101e14eda645
+  + 47f7324 (dex_item_matcher.cpp)       a35512d367f851590ced50abac6693c4  (shipped)
+
+dexllm#81 predicted "42b30c4's Core/ half is the only candidate" for moving the
+md5.  That is FALSE both ways: 42b30c4's half compiles to the same bytes (which
+is the convergence claim stated at binary level), and the two revisions that DO
+move it are the two whose C++ is compiled but unreachable at runtime -- which is
+exactly why the corpus a/b is 0-changed over 854 axis records.
 
 
 Line counts
 -----------
 
 Every diffstat quoted here and in the catalogue is `git diff --numstat` against
-the fork-point tree.  An earlier draft used `diff -u | grep -c '^+[^+]'`, which
-drops added BLANK lines and so reported +1215/-130 where numstat reports
+the baseline tree.  An earlier draft used `diff -u | grep -c '^+[^+]'`, which
+drops added BLANK lines and so reported +1215/-130 where numstat reported
 +1271/-131.  Both are re-derivable; only one matches what the rest of this repo
 prints, and a count without its predicate is not a measurement.
 
@@ -115,13 +172,11 @@ prints, and a count without its predicate is not a measurement.
 Refreshing this file
 --------------------
 
-Changing the baseline means re-running the match above against the new upstream
-revision and regenerating the manifest from it:
+Advancing the baseline means regenerating the manifest from the new revision:
 
     git -C <upstream> ls-tree -r <new-revision> > fork.txt
     # keep only the 136 vendored paths, emit "<sha>  <path>" sorted by path
 
-tests/test_vendor_baseline.py pins the manifest's own hash, so regenerating it
-is a deliberate two-place edit; that is what stops a single line being
-regenerated to silence a divergence.  The guard reads only ./UPSTREAM.blobs, so
-it stays offline -- nothing in the test suite clones upstream.
+and then re-deriving the catalogue's census against it.  The guard reads only
+./UPSTREAM.blobs, so it stays offline -- nothing in the test suite clones
+upstream.

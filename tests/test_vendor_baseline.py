@@ -1,10 +1,16 @@
 """The vendored DexKit tree is pinned to a recorded upstream baseline (dexllm#65).
 
-`vendor/dexkit_core/UPSTREAM` names the fork point and
-`vendor/dexkit_core/UPSTREAM.blobs` records, for each vendored file, the git blob
-SHA it had THERE.  A file whose on-disk bytes hash to that SHA is byte-identical
-to upstream; every other file is a divergence and must be catalogued in
-`docs/dexkit-vendor-divergences.md`.
+`vendor/dexkit_core/UPSTREAM` names the BASELINE -- the upstream revision this
+tree is compared against -- and `vendor/dexkit_core/UPSTREAM.blobs` records, for
+each vendored file, the git blob SHA it has THERE.  A file whose on-disk bytes
+hash to that SHA is byte-identical to upstream; every other file is a divergence
+and must be catalogued in `docs/dexkit-vendor-divergences.md`.
+
+The baseline is not the FORK POINT.  The fork point (`dff66e8`) is where the
+vendoring happened and never moves; the baseline started equal to it and
+advanced to upstream HEAD in dexllm#81.  Both are pinned here, because a rebase
+that lost the fork point would lose the only account of how the baseline is
+re-derivable -- dexllm#65 had to recover it by matching bytes.
 
 Why this is a test and not a convention.  Before dexllm#65 the only record of a
 divergence was an in-source `dexllm` comment, and it undercounted three ways:
@@ -51,17 +57,24 @@ _CATALOGUE = REPO_ROOT / "docs" / "dexkit-vendor-divergences.md"
 # invisible to the coverage check (a reviewer built exactly that and it passed).
 _NOT_VENDORED = frozenset({"UPSTREAM", "UPSTREAM.blobs"})
 
-# The fork point, pinned in THREE places on purpose: here, in UPSTREAM, and in
-# the catalogue's own header.  Rebasing has to move all three, which is the
+# The BASELINE -- the upstream revision the tree is compared against today --
+# pinned in THREE places on purpose: here, in UPSTREAM, and in the catalogue's
+# own header.  Rebasing has to move all three, which is the
 # one-mirror-updated-the-other-missed shape this repo keeps hitting.
-_BASELINE = "dff66e8eff15512ac9a2d03cf3ef23de338bd167"
+#
+# It is NOT the fork point.  The fork point is where the vendoring happened and
+# never moves; the baseline started equal to it and advanced in dexllm#81.  Both
+# are pinned, because losing the fork point would lose the only account of how
+# the baseline is re-derivable at all.
+_BASELINE = "47f7324ae627b0ea9110c33c529cd755d27f379c"
+_FORK_POINT = "dff66e8eff15512ac9a2d03cf3ef23de338bd167"
 
 # sha256 over the manifest's sorted data lines.  Without this the manifest is a
 # SELF-REFERENTIAL oracle: editing a pristine file and regenerating just its
 # line keeps the divergent set at eleven and passes everything (a reviewer built
 # that too, on the very file upstream fix 6ca92c3 would land in).  Regenerating
 # the manifest is now a deliberate two-place edit.
-_MANIFEST_SHA = "beb4ab3b4fd2f0c43f26fb24d2cf207304d153f30fb1c7f8426c096714a19e32"
+_MANIFEST_SHA = "7094c8a217f10ca6d1ea811a48d73661f2d79f10c93484833503650fa5e40dfd"
 
 # Every file that differs from the baseline, as a LITERAL.  Deriving this from
 # the manifest or from the catalogue would make the guard blind to an edit of
@@ -108,6 +121,13 @@ _TREATMENT = {
     "D12": "R",
 }
 
+# Treatment C means the local change has been DROPPED, so the entry names no
+# live divergence.  It is kept rather than deleted because a deletion leaves
+# nothing to find -- the lesson this whole registry exists for -- but it must be
+# excluded from the path-ownership pin below, or it would claim a file it no
+# longer explains.
+_RETIRED = frozenset({"D7"})
+
 _SECTION_TREATMENT = {
     "U — upstreamable": "U",
     "C — converged with upstream": "C",
@@ -120,10 +140,10 @@ _SECTION_TREATMENT = {
 _PATH_ENTRIES = {
     "Core/CMakeLists.txt": frozenset({"D10"}),
     "Core/dexkit/dex_item.cpp": frozenset(
-        {"D4", "D5", "D6", "D7", "D9", "D11", "D12", "D14"}
+        {"D4", "D5", "D6", "D9", "D11", "D12", "D14"}
     ),
     "Core/dexkit/dexkit.cpp": frozenset({"D4", "D13"}),
-    "Core/dexkit/include/dex_item.h": frozenset({"D4", "D7", "D8", "D9", "D11"}),
+    "Core/dexkit/include/dex_item.h": frozenset({"D4", "D8", "D9", "D11"}),
     "Core/dexkit/include/dexkit.h": frozenset({"D4"}),
     "Core/dexkit/include/zip_archive.h": frozenset({"D2"}),
     "Core/third_party/slicer/common.cc": frozenset({"D1"}),
@@ -131,6 +151,105 @@ _PATH_ENTRIES = {
     "Core/third_party/slicer/export/slicer/dex_ir.h": frozenset({"D6"}),
     "Core/third_party/slicer/reader.cc": frozenset({"D6"}),
     "Core/third_party/thread_helper/ThreadPool.h": frozenset({"D3", "D10"}),
+}
+
+
+# A retired entry's subject may still be DISCUSSED in the vendored source (D7's
+# is, inside the D8 accessor that returns the values).  That comment described a
+# live divergence and became FALSE the moment the baseline advanced, which no
+# count can see -- so each retired entry pins the file and the upstream revision
+# that comment must now name.  entry -> (path, token that must appear).
+_RETIRED_SOURCE_PIN = {
+    "D7": (
+        "Core/dexkit/include/dex_item.h",
+        # The CLAIM, not the revision hash.  A token-presence check ("does
+        # `42b30c4` appear") is satisfied by a comment that keeps the token and
+        # asserts the opposite -- a reviewer wrote exactly that ("Upstream STILL
+        # does the rewrite ... so the two trees still differ") and it passed all
+        # 38 cases.  A whole-sentence pin cannot be: an edit to the claim fails,
+        # and an edit that CORRECTS it is a deliberate two-place change.
+        "removed it in 42b30c4 (2026-08-02), dexllm removed it independently four\n"
+        "    // days later, and dexllm#81 advanced the baseline onto that revision, so\n"
+        "    // the two trees now agree.",
+    ),
+}
+
+# `UPSTREAM` records a reachability VERDICT for each upstream fix that was
+# carried but changes nothing here.  A verdict is a claim about THIS repo, and
+# it goes stale silently: the day a scoping argument or an OpCodesMatcher is
+# built, the fix stops being unreachable and the file still says it is.
+#
+# 6ca92c3: `in_classes` / `in_methods` are fields 4 and 5 of the two batch query
+# tables.  The check is over EVERY occurrence, not over the two that exist --
+# both reviewers evaded a present-literal pin by ADDING a scoped call site
+# beside the pinned one, which is how an argument actually gets exposed.
+# Whitespace is normalised so a reformat is not a false positive.
+_BATCH_QUERY_SCOPING = (
+    ("CreateBatchFindClassUsingStrings", 4, "fbb, 0, 0, false, 0, "),
+    ("CreateBatchFindMethodUsingStrings", 5, "fbb, 0, 0, false, 0, 0, "),
+)
+
+# 47f7324: nothing may BUILD an OpCodesMatcher.  flatbuffers generates two
+# spellings and a reviewer used the second: `CreateOpCodesMatcher` and
+# `OpCodesMatcherBuilder`.  Headers count too -- the first cut scanned only
+# `native/**/*.cpp`, and a token in a header under the same tree passed.
+_OPCODES_MATCHER_TOKENS = ("CreateOpCodesMatcher", "OpCodesMatcherBuilder")
+_SCANNED_SOURCE_DIRS = ("native", "src")
+_SCANNED_SOURCE_SUFFIXES = (".cpp", ".cc", ".h", ".hpp")
+
+
+# A pickup that lands in an ALREADY-DIVERGENT file is invisible to everything
+# else here: the manifest sees the file as divergent either way, and the
+# per-file table recomputes only its marker-line column.  Reverting one is a
+# silent un-rebase, so the exact carried lines are pinned.
+# (path, line, expected count, upstream revision that introduced it)
+_CARRIED_INTO_DIVERGENT = (
+    (
+        "Core/CMakeLists.txt",
+        'set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${COMPILE_FLAGS}")',
+        1,
+        "7415df9",
+    ),
+    (
+        "Core/dexkit/dex_item.cpp",
+        "method_access_flags[class_method_idx] = ReadULeb128(&class_data);",
+        2,
+        "42b30c4",
+    ),
+)
+
+# ...and the forms they REPLACED, which must be gone.  Presence alone is not
+# enough: a file can carry both if a hunk is duplicated rather than converged.
+_REPLACED_BY_THE_REBASE = (
+    ("Core/CMakeLists.txt", 'set(CMAKE_C_FLAGS "${CMAKE_CXX_FLAGS}'),
+    (
+        "Core/dexkit/dex_item.cpp",
+        "method_access_flags[class_method_idx] = access_flags;",
+    ),
+)
+
+
+# The per-file census, as a LITERAL: path -> (+, -, hunks, marked, marker lines).
+# The marker-line column is RECOMPUTED from the tree below, and `+`/`-` are
+# anchored by having to sum to the total the prose publishes -- but hunks and
+# marked were anchored to NOTHING, and a reviewer rewrote every row to 0 (with
+# the prose sentence rewritten to match) with the file green.  They cannot be
+# recomputed here: that needs the baseline TREE, which this repo deliberately
+# does not carry (the guard is offline, and `UPSTREAM.blobs` holds SHAs, not
+# content).  So the table is pinned, and re-measuring it after a rebase is a
+# deliberate two-place edit -- the same instrument as `_MANIFEST_SHA`.
+_CENSUS = {
+    "Core/dexkit/dex_item.cpp": (718, 44, 15, 13, 31),
+    "Core/dexkit/include/dex_item.h": (179, 2, 5, 4, 24),
+    "Core/third_party/thread_helper/ThreadPool.h": (149, 40, 3, 3, 9),
+    "Core/dexkit/dexkit.cpp": (168, 22, 8, 6, 9),
+    "Core/third_party/slicer/reader.cc": (24, 0, 1, 1, 4),
+    "Core/third_party/slicer/common.cc": (13, 10, 2, 1, 1),
+    "Core/dexkit/include/zip_archive.h": (16, 0, 1, 1, 1),
+    "Core/CMakeLists.txt": (7, 1, 1, 1, 1),
+    "Core/dexkit/include/dexkit.h": (6, 0, 2, 1, 1),
+    "Core/third_party/slicer/export/slicer/dex_format.h": (5, 0, 1, 1, 1),
+    "Core/third_party/slicer/export/slicer/dex_ir.h": (5, 0, 1, 1, 1),
 }
 
 
@@ -206,7 +325,15 @@ def _entries() -> dict[str, tuple[str, str]]:
 
 
 def _where(body: str) -> str:
-    m = re.search(r"^- \*\*Where:\*\*(.*?)(?=^- \*\*|\Z)", body, re.M | re.S)
+    """A live entry says `Where:`; a RETIRED one says `Where it was:`.
+
+    The two are deliberately different words, and which one an entry uses is
+    itself pinned below -- a retired entry that still said `Where:` would read
+    as a live divergence in the one place a reader looks for the file list.
+    """
+    m = re.search(
+        r"^- \*\*Where(?: it was)?:\*\*(.*?)(?=^- \*\*|\Z)", body, re.M | re.S
+    )
     return m.group(1) if m else ""
 
 
@@ -317,7 +444,11 @@ def test_every_divergent_file_is_named_in_its_own_entry(path: str) -> None:
     under an unrelated one.
     """
     entries = _entries()
-    owners = {eid for eid, (_, body) in entries.items() if path in _where(body)}
+    owners = {
+        eid
+        for eid, (_, body) in entries.items()
+        if eid not in _RETIRED and path in _where(body)
+    }
     assert owners == _PATH_ENTRIES[path], (
         f"{path} is named in the `Where:` of {sorted(owners) or 'no entry'}, "
         f"expected {sorted(_PATH_ENTRIES[path])}"
@@ -337,6 +468,12 @@ def test_every_entry_declares_a_where_and_a_treatment() -> None:
             treatment == _TREATMENT[eid]
         ), f"{eid} is under treatment {treatment}, pinned as {_TREATMENT[eid]}"
         assert _where(body).strip(), f"{eid} has no `- **Where:**` line"
+        # Live vs retired is stated in the bullet's own words, not only by
+        # which section the entry sits under.
+        past = re.search(r"^- \*\*Where it was:\*\*", body, re.M) is not None
+        assert past == (eid in _RETIRED), (
+            f"{eid} uses `Where it was:`" if past else f"{eid} uses `Where:`"
+        ) + f", but it is {'retired' if eid in _RETIRED else 'live'}"
 
     # All four treatments are used: an empty `## C` would erase this change's
     # own headline finding while leaving twelve entries and four headings.
@@ -359,24 +496,33 @@ def test_the_catalogue_publishes_the_numbers_it_measures() -> None:
     assert identical == len(manifest) - len(divergent)
     assert modified == len(divergent)
     assert added == 0
-    # The line totals come from the fork-point tree, which is not in this repo,
+    # The line totals come from the BASELINE tree, which is not in this repo,
     # so they are pinned rather than recomputed -- with the predicate stated.
-    assert "**+1288 / -131 lines**" in text
+    assert "**+1290 / -119 lines**" in text
     assert "git diff --numstat" in text
 
 
 def test_the_baseline_is_pinned_the_same_way_everywhere() -> None:
-    """UPSTREAM, the catalogue and this test must name one fork point."""
+    """UPSTREAM, the catalogue and this test must name one baseline."""
     provenance = _PROVENANCE.read_text(encoding="utf-8")
     assert _BASELINE in provenance, "UPSTREAM does not name the pinned baseline"
 
     short = _BASELINE[:7]
-    assert short in _CATALOGUE.read_text(
-        encoding="utf-8"
-    ), "the catalogue does not name the pinned baseline"
+    # In the BASELINE sentence, not merely somewhere: three upstream revision
+    # hashes are quoted in this doc as fixes, and one of them IS the baseline,
+    # so a bare `in` would pass on the wrong occurrence.
+    assert re.search(
+        r"\*\*Baseline: LuckyPray/DexKit `" + short + "`", _CATALOGUE.read_text("utf-8")
+    ), "the catalogue's baseline sentence does not name the pinned baseline"
     assert short in _MANIFEST.read_text(
         encoding="utf-8"
     ), "UPSTREAM.blobs does not name the baseline its SHAs came from"
+
+    # The fork point is a separate fact and must survive a rebase: it is what
+    # makes the baseline re-derivable, and dexllm#65 recovered it by matching
+    # bytes because nothing recorded it.  Losing it loses that.
+    assert _FORK_POINT in provenance, "UPSTREAM no longer records the fork point"
+    assert _FORK_POINT != _BASELINE
 
     # The manifest is only meaningful next to a repo URL to re-derive it from.
     assert "github.com/LuckyPray/DexKit" in provenance
@@ -395,9 +541,11 @@ def test_upstream_cross_references_resolve() -> None:
     for eid in set(re.findall(r"\bD\d+\b", provenance)):
         assert eid in entries, f"UPSTREAM names {eid}, which is not an entry"
     assert (
-        "CONVERGED with D7" in provenance
+        "converged with D7" in provenance
     ), "UPSTREAM must point the converged revision at the C entry"
     assert _TREATMENT["D7"] == "C"
+    # ...and C means retired, so the two pins cannot drift apart.
+    assert {e for e, tr in _TREATMENT.items() if tr == "C"} == set(_RETIRED)
 
 
 def _table_rows() -> dict[str, tuple[int, ...]]:
@@ -446,6 +594,13 @@ def test_the_per_file_table_is_the_census_it_claims() -> None:
     assert (
         set(rows) == _DIVERGENT
     ), f"the table covers {sorted(set(rows) ^ _DIVERGENT)} on one side only"
+    assert rows == _CENSUS, (
+        "the per-file table no longer matches the pinned census; the rows that "
+        f"differ are {sorted(k for k in rows if rows.get(k) != _CENSUS.get(k))}. "
+        "Re-measure it against the baseline tree and update the pin in the same "
+        "change -- without this, hunks and marked are anchored to nothing and a "
+        "reviewer rewrote every row with the file green."
+    )
 
     text = _CATALOGUE.read_text(encoding="utf-8")
     plus = sum(r[0] for r in rows.values())
@@ -487,11 +642,26 @@ def test_every_entry_says_what_it_is_for() -> None:
 
 
 def test_no_pristine_file_is_catalogued_as_divergent() -> None:
-    """The mirror of `test_no_pristine_file_carries_a_marker`, on the doc side."""
+    """The mirror of `test_no_pristine_file_carries_a_marker`, on the doc side.
+
+    RETIRED entries are excluded here for the same reason they are excluded from
+    the path-ownership pin, and the reason is not symmetry: a retired entry
+    describes a divergence that is GONE, so the natural end state of a
+    convergence is that its file becomes PRISTINE.  Without this, a correct
+    rebase turns the suite red -- the environment-fact-must-skip-not-fail rule
+    (conftest, issue #46) one level up.  D7 escapes today only because
+    `dex_item.cpp` stays divergent for seven other entries; both reviewers
+    demonstrated the failure by repointing its `Where it was:` at a file the
+    rebase made pristine.
+    """
     manifest = _manifest()
     entries = _entries()
     for path in sorted(set(manifest) - _DIVERGENT):
-        owners = [e for e, (_, b) in entries.items() if f"`{path}`" in _where(b)]
+        owners = [
+            e
+            for e, (_, b) in entries.items()
+            if e not in _RETIRED and f"`{path}`" in _where(b)
+        ]
         assert not owners, f"{path} is byte-identical to upstream but {owners} claim it"
 
 
@@ -522,3 +692,107 @@ def test_the_census_is_the_same_in_every_mirror() -> None:
             assert got == want, f"{doc.name} states {got}, measured {want}"
         seen += len(found)
     assert seen >= 3, seen
+
+
+def test_a_retired_entry_is_not_still_described_as_live_in_the_source() -> None:
+    """A prose claim inside a vendored comment is what no count can see.
+
+    D7's subject is still discussed where it belongs -- inside the D8 accessor
+    that returns those values -- and that comment used to say "Upstream DexKit
+    did that rewrite here", which the rebase made FALSE.  Reverting it changes
+    no divergent set, no hash and no line total (the marker-line column counts
+    only LINES containing `dexllm`), so nothing else here would notice.
+
+    The pin is the CLAIM verbatim, not the revision hash: a token-presence check
+    is satisfied by a comment that keeps the token and asserts the opposite, and
+    a reviewer wrote precisely that.
+    """
+    for eid, (path, claim) in sorted(_RETIRED_SOURCE_PIN.items()):
+        assert eid in _RETIRED, f"{eid} is pinned as retired but is not in _RETIRED"
+        text = (_VENDOR / path).read_text(encoding="utf-8", errors="replace")
+        assert claim in text, (
+            f"{path} discusses {eid} but no longer states, verbatim, that the "
+            f"trees agree -- so it is describing a divergence that does not "
+            f"exist any more.  Expected to find:\n{claim}"
+        )
+
+
+def _scanned_sources() -> list[Path]:
+    out: list[Path] = []
+    for d in _SCANNED_SOURCE_DIRS:
+        for p in sorted((REPO_ROOT / d).rglob("*")):
+            if p.suffix in _SCANNED_SOURCE_SUFFIXES and p.is_file():
+                out.append(p)
+    return out
+
+
+def test_the_carried_fixes_reachability_verdicts_are_still_true() -> None:
+    """`UPSTREAM` says three carried upstream fixes change nothing HERE.
+
+    Two of those verdicts are claims about dexllm's own call sites, and both are
+    wrong in the direction that MATTERS the day someone exposes the argument
+    they rest on -- 6ca92c3 returns results for the WRONG scope, 47f7324 anchors
+    EndWith at the first hit.  A verdict that goes stale in silence is worse
+    than no verdict.
+
+    Both halves check EVERY occurrence rather than the ones that exist today:
+    the first cut pinned the two present literals, and both reviewers walked
+    past it by ADDING a scoped call site, which is how an argument gets exposed
+    in practice.
+    """
+    sources = _scanned_sources()
+    assert len(sources) > 20, f"the source scan found only {len(sources)} files"
+    blobs = {p: p.read_text(encoding="utf-8", errors="replace") for p in sources}
+
+    for fn, nargs, unscoped in _BATCH_QUERY_SCOPING:
+        sites = [
+            (p, m)
+            for p, text in blobs.items()
+            for m in re.finditer(re.escape(fn) + r"\s*\(([^;]*?)\)\s*;", text, re.S)
+        ]
+        assert sites, f"no call site of {fn} found at all -- the scan is broken"
+        for p, m in sites:
+            args = " ".join(m.group(1).split())
+            assert args.startswith(unscoped), (
+                f"{p.relative_to(REPO_ROOT)} calls {fn} with `{args[:70]}`, which "
+                f"does not pass 0 for its {nargs} scoping arguments -- UPSTREAM's "
+                "`unreachable` verdict for 6ca92c3 is stale.  The fix IS carried, "
+                "so the behaviour is upstream's; what changes is that it is no "
+                "longer dead code."
+            )
+
+    hits = [
+        f"{p.relative_to(REPO_ROOT)}:{i}"
+        for p, text in blobs.items()
+        for i, line in enumerate(text.splitlines(), 1)
+        if any(tok in line for tok in _OPCODES_MATCHER_TOKENS)
+    ]
+    assert not hits, (
+        "an OpCodesMatcher is built at "
+        + ", ".join(hits)
+        + " -- UPSTREAM's `unreachable` verdict for 47f7324 is stale"
+    )
+
+
+def test_a_pickup_into_an_already_divergent_file_is_still_there() -> None:
+    """The one part of a rebase nothing else here can see.
+
+    Two of the four revisions dexllm#81 carried land in files that diverge for
+    OTHER reasons -- 7415df9 in `Core/CMakeLists.txt` (D10) and 42b30c4 in
+    `dex_item.cpp` (eight entries).  Reverting either leaves the divergent set,
+    every hash and every recomputed column exactly as they are, so it would be
+    a silent un-rebase.
+    """
+    for path, line, want, rev in _CARRIED_INTO_DIVERGENT:
+        text = (_VENDOR / path).read_text(encoding="utf-8", errors="replace")
+        got = text.count(line)
+        assert got == want, (
+            f"{path}: the line {rev} introduced appears {got} time(s), "
+            f"expected {want} -- the pickup has been reverted or duplicated"
+        )
+    for path, line in _REPLACED_BY_THE_REBASE:
+        text = (_VENDOR / path).read_text(encoding="utf-8", errors="replace")
+        assert line not in text, (
+            f"{path} still carries the pre-rebase form `{line}` -- the rebase "
+            "converged it away, so this is either a revert or a duplicate hunk"
+        )
