@@ -25,10 +25,15 @@ exceptions, or wrong-but-non-crashing output (which the sweep won't catch — us
 ## Execute
 
 ```bash
-python /tmp/full_sweep.py
+python scripts/full_sweep.py
 ```
 
-If `/tmp/full_sweep.py` is missing, recreate it. It must:
+It used to live at `/tmp/full_sweep.py`, which is a **tmpfs** on this box — so it
+was held in RAM and vanished on every reboot, which is why this file used to say
+"recreate it" and why one published sweep count was measured by a hand-rolled
+replacement with a different predicate. It is committed now.
+
+If it is ever missing, recreate it. It must:
 - Glob every `*.apk` in `test_apk/APK/`
 - Skip APKs with `dexllm.identify(apk)["dex_count"] == 0` (resources-only) **before**
   constructing `DexKit(apk)` — the constructor now raises on a container with no

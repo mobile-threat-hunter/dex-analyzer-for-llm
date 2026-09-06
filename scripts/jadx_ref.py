@@ -39,7 +39,11 @@ def jadx_cli() -> str | None:
             if os.environ.get("JADX_HOME")
             else None
         ),
-        "/tmp/jadx-dist/bin/jadx",  # prebuilt release
+        # PERSISTENT first: /tmp is a tmpfs on the dev box, so anything unpacked
+        # there is held in RAM and is gone after a reboot. A 110 MB oracle has no
+        # business living in RAM (and it was measurably part of a tmpfs blowout).
+        str(Path.home() / ".local/share/dexllm/jadx-dist/bin/jadx"),
+        "/tmp/jadx-dist/bin/jadx",  # legacy: prebuilt release unpacked into tmpfs
         "/tmp/jadx-ref/build/jadx/bin/jadx",  # gradle `dist` build
     ):
         if cand and Path(cand).is_file() and os.access(cand, os.X_OK):

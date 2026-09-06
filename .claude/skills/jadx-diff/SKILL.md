@@ -18,13 +18,24 @@ comparison. Do **not** wire jadx into any product path.
 ## Setup (once)
 
 jadx must be resolvable by `scripts/jadx_ref.py` (`$JADX` → `$JADX_HOME/bin/jadx` →
-`/tmp/jadx-dist/bin/jadx` → PATH). Get it:
+`~/.local/share/dexllm/jadx-dist/bin/jadx` → `/tmp/jadx-dist/bin/jadx` (legacy) → PATH).
+**Check before installing — it is usually already there**, and a second copy is 110 MB:
 
 ```bash
-# prebuilt release (fastest):
+python scripts/jadx_ref.py   # prints the resolved jadx path, or nothing
+```
+
+Only if that prints nothing:
+
+```bash
+# prebuilt release. NOT /tmp -- that is a tmpfs on this box, so an unpack there is
+# held in RAM (unreclaimable) and is gone after a reboot. A 110 MB duplicate of an
+# already-installed jadx sat there for a week before anyone noticed.
+mkdir -p ~/.local/share/dexllm
 curl -sL -o /tmp/jadx.zip https://github.com/skylot/jadx/releases/download/v1.5.0/jadx-1.5.0.zip
-mkdir -p /tmp/jadx-dist && (cd /tmp/jadx-dist && unzip -oq /tmp/jadx.zip)
-python scripts/jadx_ref.py   # prints the resolved jadx path
+mkdir -p ~/.local/share/dexllm/jadx-dist \
+  && (cd ~/.local/share/dexllm/jadx-dist && unzip -oq /tmp/jadx.zip) && rm -f /tmp/jadx.zip
+python scripts/jadx_ref.py   # confirm
 ```
 
 If jadx is absent the harness returns `None` and the gate SKIPS (never fails) — like the

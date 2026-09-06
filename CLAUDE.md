@@ -8606,7 +8606,63 @@ Before making a change that would **break, contradict, or weaken a principle or 
 - **Decompile model**: lazy per-class on-demand (JEB-style). Cache results.
 - **Permissions**: `--dangerously-skip-permissions` is set — no pre-approval for tool calls.
 - **Docs gate**: a `PreToolUse(Bash)` hook ([.claude/docs-precommit-check.sh](.claude/docs-precommit-check.sh)) blocks `git commit` / `git push` until the project docs (`README.md`, `CLAUDE.md`, `docs/*.md`) have been reviewed for drift against the change and any inaccuracies fixed in the same commit. After reviewing, re-run the same command prefixed with `DOCS_CHECKED=1` to bypass (e.g. `DOCS_CHECKED=1 git commit -m "..."`).
-- **Adversarial-review gate (MANDATORY after any fix)**: a `PreToolUse(Bash)` hook ([.claude/review-precommit-check.sh](.claude/review-precommit-check.sh)) blocks `git commit` / `git push` whose change touches production source (`native/**`, `vendor/dexkit_core/Core/**`, `src/dexllm/**` — `.cpp/.cc/.h/.hpp/.py`) until an **adversarial code review** has been run and its findings addressed. This is not optional: a decompiler type/dataflow change can be subtly wrong in a way tests miss. Required steps before committing a fix — **(0) HACK SELF-CHECK (root-cause, not output masking):** before reviewing, confirm the fix addresses the ROOT of the defect rather than masking a symptom at the output/late layer. A change that suppresses or rewrites **Writer / dast OUTPUT** to hide a defect whose true origin is the **IR builder / dataflow / control-flow** (opcode_ins, instruction, dataflow, graph, control_flow) is a **HACK** — even when the emitted text looks correct, the AST and other consumers still carry the defect. If it is a hack, **do NOT commit — RECONSIDER and redo it at the originating layer** ("structural defects must be fixed at the IR level, not in Writer output"). Only genuine beyond-DAD emit divergences (return-literal / catch-clamp / `<clinit>` `static{}`) legitimately live in the Writer; a defect with an earlier structural origin does not. Precedent: the v0.1.12 void-invoke "fix" masked in `Writer::visit_assign`, left `this = voidcall` in the AST, and was **rewritten at the IR builder** (v0.1.13). (1) spawn **≥2 INDEPENDENT reviewer agents** on the diff (Agent tool: `compound-engineering:ce-adversarial-reviewer` + `ce-correctness-reviewer`, or the `code-review` skill), each trying to CONSTRUCT a breaking input; (2) triage every finding (CONFIRMED/PLAUSIBLE/REFUTED) and fix the real ones; (3) re-verify — **a/b (fix on vs off) 0-regression on the relevant axes + parity 28/28 + 0-crash sweep**, and remove any temporary a/b env-gate (never ship a toggle for the fix). Then re-run the same command prefixed with `REVIEWED=1` (combine with the docs gate: `DOCS_CHECKED=1 REVIEWED=1 git commit -m "..."`). Docs-only / test-only / config-only commits are not gated. This codifies the established practice (the type-inference cascade + mirror fixes were all shipped this way; the v0.1.12→v0.1.13 void-invoke rewrite is the canonical hack→root-cause case). See [[feedback-adversarial-review-after-fix]] and [[feedback-no-hack-root-cause-fix]].
+- **Adversarial-review gate (MANDATORY after any fix)**: a `PreToolUse(Bash)` hook ([.claude/review-precommit-check.sh](.claude/review-precommit-check.sh)) blocks `git commit` / `git push` whose change touches production source (`native/**`, `vendor/dexkit_core/Core/**`, `src/dexllm/**` — `.cpp/.cc/.h/.hpp/.py`) until an **adversarial code review** has been run and its findings addressed. This is not optional: a decompiler type/dataflow change can be subtly wrong in a way tests miss. Required steps before committing a fix — **(0) HACK SELF-CHECK (root-cause, not output masking):** before reviewing, confirm the fix addresses the ROOT of the defect rather than masking a symptom at the output/late layer. A change that suppresses or rewrites **Writer / dast OUTPUT** to hide a defect whose true origin is the **IR builder / dataflow / control-flow** (opcode_ins, instruction, dataflow, graph, control_flow) is a **HACK** — even when the emitted text looks correct, the AST and other consumers still carry the defect. If it is a hack, **do NOT commit — RECONSIDER and redo it at the originating layer** ("structural defects must be fixed at the IR level, not in Writer output"). Only genuine beyond-DAD emit divergences (return-literal / catch-clamp / `<clinit>` `static{}`) legitimately live in the Writer; a defect with an earlier structural origin does not. Precedent: the v0.1.12 void-invoke "fix" masked in `Writer::visit_assign`, left `this = voidcall` in the AST, and was **rewritten at the IR builder** (v0.1.13). (1) spawn **≥2 INDEPENDENT reviewer agents** on the diff (Agent tool: `compound-engineering:ce-adversarial-reviewer` + `ce-correctness-reviewer`, or the `code-review` skill), each trying to CONSTRUCT a breaking input; (2) triage every finding (CONFIRMED/PLAUSIBLE/REFUTED) and fix the real ones; (3) re-verify — **a/b (fix on vs off) 0-regression on the relevant axes + parity 28/28 + 0-crash sweep**, and remove any temporary a/b env-gate (never ship a toggle for the fix). **Run an EXTERNAL analyser inside a memory cap — `scripts/capped.sh` — because
+one of them took the machine down.** On 2026-09-06 `dex-decompile`
+(androguard/dex-decompiler, under evaluation) reached **RSS 119 GB / virt
+161 GB** on ONE APK, on a 123 GB machine. The kernel log is exact:
+
+```
+Out of memory: Killed process 1788679 (dex-decompile)
+  total-vm:161238004kB  anon-rss:119269648kB
+  task_memcg=…/app.slice/app-gnome-code-13641.scope   constraint=CONSTRAINT_NONE, global_oom
+app-gnome-code-13641.scope: A process of this unit has been killed by the OOM killer.
+```
+
+It had been launched from the VS Code integrated terminal, so it lived in VS
+Code's **cgroup scope** — and systemd-oomd kills the SCOPE, not the process. VS
+Code went down with it, taking the session and every background task; that is
+why four tasks, including an idle one, died at the same second. A third-party
+analyser is untrusted input for MEMORY as much as for anything else, so give it
+its own scope with a hard ceiling (`MemoryMax`, `MemorySwapMax=0`) and a runaway
+dies alone.
+
+**Two things that are worth doing but were NOT the cause, and were briefly
+recorded as if they were.** `/tmp` is a tmpfs whose pages the kernel cannot
+reclaim, and it held **6.8 GB** — nine finished reviewer `cp -a` copies at
+~500 MB each, pytest tmp dirs, and a 110 MB duplicate of an already-installed
+jadx. Real waste, now **1.1 GB**, but noise against 119 GB. And the evaluation
+harness held a whole-APK decompile in memory (`capture_output=True`, once per
+mode) while a second whole-APK measurement ran concurrently — bad practice, now
+streamed to disk at 15.5 MB peak RSS, and still not what allocated 119 GB.
+
+So: **reviewer worktrees go on DISK via `scripts/review-worktree.sh` and are
+dropped when the review ends** (it excludes `build/` and `.venv/` — 59 MB
+instead of 500 — not as an optimisation but because a copied `CMakeCache.txt`
+still points `CMAKE_HOME_DIRECTORY` at the ORIGINAL and copied venv shebangs
+still address it, so `pip install -e .` from the copy REPOINTS the author's venv,
+the trap that already retracted a reviewer's readings twice; it symlinks
+`test_apk/`). Long-lived artefacts — the jadx oracle, `scripts/full_sweep.py`,
+a/b captures — belong on disk too: a sweep harness that lived in tmpfs vanished
+on a reboot and was rebuilt with a different predicate, which is how a published
+count stopped being comparable
+[[published-counts-need-the-repos-own-predicate]].
+
+**And the diagnostic lesson is the sharpest part.** I searched
+`journalctl -k --since "6 hours ago"`, found nothing, and reasoned from the
+absence — while having computed, in the same investigation, that the session had
+died **12 hours** earlier. The record was there the whole time. A negative result
+is only ever as strong as the window it was taken in. The helper also EXCLUDES
+`build/` and `.venv/` (59 MB instead of 500) — not as an optimisation but because
+a copied `CMakeCache.txt` still points `CMAKE_HOME_DIRECTORY` at the ORIGINAL and
+copied `.venv` shebangs still address it, so `pip install -e .` from the copy
+REPOINTS the author's venv; a reviewer must rebuild in the copy either way. It
+links `test_apk/` rather than copying it. Same rule for any long-lived artefact:
+the jadx oracle, `scripts/full_sweep.py` and a/b captures belong on disk, not in
+`/tmp` — a sweep harness that lived in tmpfs vanished on a reboot and was
+rebuilt with a different predicate, which is how one published count stopped
+being comparable [[published-counts-need-the-repos-own-predicate]].
+
+Then re-run the same command prefixed with `REVIEWED=1` (combine with the docs gate: `DOCS_CHECKED=1 REVIEWED=1 git commit -m "..."`). Docs-only / test-only / config-only commits are not gated. This codifies the established practice (the type-inference cascade + mirror fixes were all shipped this way; the v0.1.12→v0.1.13 void-invoke rewrite is the canonical hack→root-cause case). See [[feedback-adversarial-review-after-fix]] and [[feedback-no-hack-root-cause-fix]].
 
 ## C++ → Python rebuild loop
 
