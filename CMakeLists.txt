@@ -34,9 +34,12 @@ set(THREADS_PREFER_PTHREAD_FLAG ON)
 find_package(Threads REQUIRED)
 
 # The shared MUTF-8 codec (an ART port, see native/dad_cpp/include/mutf8.h). Its
-# own leaf target with NO dependencies, because three layers need it: the DAD
-# decompiler, the pybind boundary, and — since dexllm#22 — the vendored Core's
-# smali renderer, which must DECODE a pool string before escaping it. Keeping one
+# own leaf target with NO dependencies, because THREE layers need it: the DAD
+# decompiler, the pybind boundary, and the smali renderer, which must DECODE a
+# pool string before escaping it (dexllm#22). That renderer used to be the
+# VENDORED Core's, which is what made `dexkit_static` depend on this target;
+# dexllm#80 moved it to native/core_ext/smali_render.cpp, so the dependency is
+# now dexkit_ext's and the vendored tree needs nothing from native/. Keeping one
 # implementation is the point: CLAUDE.md records that the hand-rolled copies were
 # consolidated onto this file precisely because they drifted.
 add_library(dexkit_mutf8 STATIC native/dad_cpp/mutf8.cpp)
@@ -48,6 +51,7 @@ add_library(dexkit_ext STATIC
     native/core_ext/dexitem_code_source.cpp
     native/core_ext/dex_verifier.cpp
     native/core_ext/invoke_args.cpp
+    native/core_ext/smali_render.cpp
     native/core_ext/analysis.cpp
 )
 target_include_directories(dexkit_ext PUBLIC native/core_ext/include native/dad_cpp/include)
@@ -62,8 +66,12 @@ target_include_directories(dexkit_ext PUBLIC native/core_ext/include native/dad_
 # (invoke_args.h includes only slicer/dex_format.h, already PUBLIC via dexkit_static).
 target_include_directories(dexkit_ext PRIVATE ${DEXKIT_CORE_ROOT}/Core/dexkit)
 target_link_libraries(dexkit_ext PUBLIC dexkit_static Threads::Threads dexkit_mutf8)
-# The vendored Core's smali renderer decodes MUTF-8 before escaping (dexllm#22).
-target_link_libraries(dexkit_static PRIVATE dexkit_mutf8)
+# dexllm#80 RETIRED the `dexkit_static PRIVATE dexkit_mutf8` link that used to be
+# here. Its only consumer was EscapeSmaliString (dexllm#22), which decoded a pool
+# string before escaping it -- and that function left the vendored tree with the
+# rest of the smali renderer. With it went the coupling dexllm#22 recorded as a
+# caveat: the vendored source no longer includes a header from
+# native/dad_cpp/include, so `dexkit_static` builds standalone again.
 
 # DexKit-DAD decompiler.
 add_library(dexkit_dad STATIC

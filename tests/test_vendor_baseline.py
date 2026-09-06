@@ -126,7 +126,7 @@ _TREATMENT = {
 # nothing to find -- the lesson this whole registry exists for -- but it must be
 # excluded from the path-ownership pin below, or it would claim a file it no
 # longer explains.
-_RETIRED = frozenset({"D7"})
+_RETIRED = frozenset({"D7", "D12"})
 
 _SECTION_TREATMENT = {
     "U — upstreamable": "U",
@@ -139,9 +139,7 @@ _SECTION_TREATMENT = {
 # cannot satisfy the catalogue by being mentioned in some UNRELATED entry.
 _PATH_ENTRIES = {
     "Core/CMakeLists.txt": frozenset({"D10"}),
-    "Core/dexkit/dex_item.cpp": frozenset(
-        {"D4", "D5", "D6", "D9", "D11", "D12", "D14"}
-    ),
+    "Core/dexkit/dex_item.cpp": frozenset({"D4", "D5", "D6", "D9", "D11", "D14"}),
     "Core/dexkit/dexkit.cpp": frozenset({"D4", "D13"}),
     "Core/dexkit/include/dex_item.h": frozenset({"D4", "D8", "D9", "D11"}),
     "Core/dexkit/include/dexkit.h": frozenset({"D4"}),
@@ -198,6 +196,41 @@ _SCANNED_SOURCE_DIRS = ("native", "src")
 _SCANNED_SOURCE_SUFFIXES = (".cpp", ".cc", ".h", ".hpp")
 
 
+# A reduction (treatment R) is TAKEN by moving code out, and the manifest cannot
+# see that either way: the files it left are divergent before and after.  So each
+# taken reduction pins every moved symbol, the file it must now be IN, and the
+# fact that it must be GONE from the WHOLE vendored tree -- a re-introduction is
+# a silent un-reduction, and so is a "helper" quietly added back beside the
+# tombstone.  A review put `EscapeSmaliString` back into `dexkit.cpp` (also
+# divergent, also with pinned census columns) and the ENTIRE suite passed,
+# because the first cut scanned only the two files the code came from.
+# entry -> {symbol: destination path}
+_TAKEN_REDUCTIONS = {
+    "D12": {
+        "EscapeSmaliString": "native/core_ext/smali_render.cpp",
+        "SmaliIdent": "native/core_ext/smali_render.cpp",
+        "FormatAccessFlags": "native/core_ext/smali_render.cpp",
+        "FormatFieldAccessFlags": "native/core_ext/smali_render.cpp",
+        "FormatMethodAccessFlags": "native/core_ext/smali_render.cpp",
+        "FormatProto": "native/core_ext/smali_render.cpp",
+        "FormatMethodRef": "native/core_ext/smali_render.cpp",
+        "FormatFieldRef": "native/core_ext/smali_render.cpp",
+        "EmitRegisterRange": "native/core_ext/smali_render.cpp",
+        "FormatOperands": "native/core_ext/smali_render.cpp",
+        "RenderMethodSmali": "native/core_ext/smali_render.cpp",
+        "RenderClassSmali": "native/core_ext/smali_render.cpp",
+        # NOT with the renderer: dexllm#61 keeps this gate in lockstep with
+        # AnalyzeInvokes'.  A review pointed out the first cut checked only the
+        # UNION of destinations, so a symbol landing in the WRONG one passed --
+        # which would silently un-say the change's own "two destinations" claim.
+        "EnumerateInvokeSites": "native/core_ext/invoke_args.cpp",
+        # The 14th moved thing, and it was missing: a review put the STRUCT back
+        # into the vendored header and all 90 cases passed.
+        "InvokeSite": "native/core_ext/include/invoke_args.h",
+    },
+}
+
+
 # A pickup that lands in an ALREADY-DIVERGENT file is invisible to everything
 # else here: the manifest sees the file as divergent either way, and the
 # per-file table recomputes only its marker-line column.  Reverting one is a
@@ -239,8 +272,8 @@ _REPLACED_BY_THE_REBASE = (
 # content).  So the table is pinned, and re-measuring it after a rebase is a
 # deliberate two-place edit -- the same instrument as `_MANIFEST_SHA`.
 _CENSUS = {
-    "Core/dexkit/dex_item.cpp": (718, 44, 15, 13, 31),
-    "Core/dexkit/include/dex_item.h": (179, 2, 5, 4, 24),
+    "Core/dexkit/dex_item.cpp": (172, 44, 15, 13, 21),
+    "Core/dexkit/include/dex_item.h": (166, 2, 5, 4, 25),
     "Core/third_party/thread_helper/ThreadPool.h": (149, 40, 3, 3, 9),
     "Core/dexkit/dexkit.cpp": (168, 22, 8, 6, 9),
     "Core/third_party/slicer/reader.cc": (24, 0, 1, 1, 4),
@@ -498,7 +531,7 @@ def test_the_catalogue_publishes_the_numbers_it_measures() -> None:
     assert added == 0
     # The line totals come from the BASELINE tree, which is not in this repo,
     # so they are pinned rather than recomputed -- with the predicate stated.
-    assert "**+1290 / -119 lines**" in text
+    assert "**+731 / -119 lines**" in text
     assert "git diff --numstat" in text
 
 
@@ -544,8 +577,12 @@ def test_upstream_cross_references_resolve() -> None:
         "converged with D7" in provenance
     ), "UPSTREAM must point the converged revision at the C entry"
     assert _TREATMENT["D7"] == "C"
-    # ...and C means retired, so the two pins cannot drift apart.
-    assert {e for e, tr in _TREATMENT.items() if tr == "C"} == set(_RETIRED)
+    # C means converged, which IMPLIES retired.  R does not: an entry is a
+    # reduction CANDIDATE until the move is taken, and D12's was (dexllm#80), so
+    # retirement is a STATE and treatment is a KIND, and only one direction of
+    # the implication holds.
+    assert {e for e, tr in _TREATMENT.items() if tr == "C"} <= set(_RETIRED)
+    assert set(_RETIRED) <= set(_TREATMENT)
 
 
 def _table_rows() -> dict[str, tuple[int, ...]]:
@@ -650,7 +687,7 @@ def test_no_pristine_file_is_catalogued_as_divergent() -> None:
     convergence is that its file becomes PRISTINE.  Without this, a correct
     rebase turns the suite red -- the environment-fact-must-skip-not-fail rule
     (conftest, issue #46) one level up.  D7 escapes today only because
-    `dex_item.cpp` stays divergent for seven other entries; both reviewers
+    `dex_item.cpp` stays divergent for six other entries; both reviewers
     demonstrated the failure by repointing its `Where it was:` at a file the
     rebase made pristine.
     """
@@ -779,7 +816,7 @@ def test_a_pickup_into_an_already_divergent_file_is_still_there() -> None:
 
     Two of the four revisions dexllm#81 carried land in files that diverge for
     OTHER reasons -- 7415df9 in `Core/CMakeLists.txt` (D10) and 42b30c4 in
-    `dex_item.cpp` (eight entries).  Reverting either leaves the divergent set,
+    `dex_item.cpp` (six entries).  Reverting either leaves the divergent set,
     every hash and every recomputed column exactly as they are, so it would be
     a silent un-rebase.
     """
@@ -796,3 +833,174 @@ def test_a_pickup_into_an_already_divergent_file_is_still_there() -> None:
             f"{path} still carries the pre-rebase form `{line}` -- the rebase "
             "converged it away, so this is either a revert or a duplicate hunk"
         )
+
+
+@pytest.mark.parametrize("eid", sorted(_TAKEN_REDUCTIONS))
+def test_a_taken_reduction_has_not_leaked_back(eid: str) -> None:
+    """The one thing a reduction can lose that no hash or count can see.
+
+    D12 was 558 lines of dexllm code inside a vendored file, and dexllm#80 moved
+    it out.  The files it left are divergent BEFORE and AFTER for other reasons,
+    so the manifest is blind to a re-introduction, the divergent set does not
+    move, and the census would merely change a number the doc also states.
+
+    Three things are pinned, and each closes a mutant a review built and ran:
+
+    * ABSENT from the WHOLE vendored tree, not from the two files the code came
+      from -- `EscapeSmaliString` re-added to `dexkit.cpp` passed everything.
+    * PRESENT at its OWN destination, not at the union of them -- `smali_render`
+      and `invoke_args` are two destinations on purpose, and checking the union
+      un-says that.
+    * on BOTH sides with comments STRIPPED -- deleting a function while leaving
+      a comment that names it passed the deletion half.
+    """
+    assert eid in _RETIRED, f"{eid} pins a taken reduction but is not retired"
+    dests = _TAKEN_REDUCTIONS[eid]
+
+    for path in sorted(_manifest()):
+        body = _strip_line_comments(
+            (_VENDOR / path).read_text(encoding="utf-8", errors="replace")
+        )
+        back = sorted(s for s in dests if s in body)
+        assert not back, (
+            f"{back} are back in the vendored {path} (outside a comment) -- "
+            f"{eid}'s reduction has leaked back into vendor/"
+        )
+
+    for sym, dest in sorted(dests.items()):
+        body = _strip_line_comments(
+            (REPO_ROOT / dest).read_text(encoding="utf-8", errors="replace")
+        )
+        assert sym in body, (
+            f"`{sym}` is in neither the vendored tree nor its pinned destination "
+            f"{dest} -- it was deleted, not moved (a comment naming it there does "
+            "not count)"
+        )
+
+
+def test_every_retired_entry_is_pinned_somewhere() -> None:
+    """`_RETIRED` alone buys nothing: retirement is what REMOVES an entry from
+    the path-ownership check, so an entry that is retired and pinned by neither
+    `_RETIRED_SOURCE_PIN` nor `_TAKEN_REDUCTIONS` is unguarded in both
+    directions.  A review emptied `_TAKEN_REDUCTIONS` and re-introduced four
+    moved helpers into `vendor/`: 89 passed, 1 skipped, and the skip is asserted
+    by nothing.
+    """
+    pinned = set(_RETIRED_SOURCE_PIN) | set(_TAKEN_REDUCTIONS)
+    unpinned = sorted(set(_RETIRED) - pinned)
+    assert not unpinned, (
+        f"retired but pinned by nothing: {unpinned} -- a retired entry must have "
+        "either a source pin (its claim in the vendored source) or a taken-"
+        "reduction pin (the symbols that must stay out)"
+    )
+    # ...and the other direction, so a pin cannot outlive its entry.
+    assert pinned <= set(_RETIRED), sorted(pinned - set(_RETIRED))
+    # Treatment R is a CANDIDATE until the move is taken; a taken one is retired.
+    taken = {e for e, tr in _TREATMENT.items() if tr == "R"} & set(_RETIRED)
+    assert set(_TAKEN_REDUCTIONS) == taken, (
+        f"_TAKEN_REDUCTIONS is {sorted(_TAKEN_REDUCTIONS)}, but the retired R "
+        f"entries are {sorted(taken)} -- emptying this list disables the guard"
+    )
+
+
+def _strip_line_comments(src: str) -> str:
+    """`//` comments removed, string literals preserved.
+
+    A tombstone NAMES the symbols it records, so a bare substring scan of the
+    file would find every one of them and the guard would be vacuous.  Scanned
+    left to right rather than by regex: this repo has paid twice for a `/* */`
+    pass swallowing a line that merely contains `*/` inside a `//` comment.
+    """
+    out: list[str] = []
+    i, n = 0, len(src)
+    while i < n:
+        c = src[i]
+        if c == '"' or c == "'":
+            q = c
+            out.append(c)
+            i += 1
+            while i < n and src[i] != q:
+                if src[i] == "\\" and i + 1 < n:  # an escaped quote is not the end
+                    out.append(src[i])
+                    i += 1
+                out.append(src[i])
+                i += 1
+            if i < n:  # the CLOSING quote -- without this the next one OPENS a
+                out.append(src[i])  # literal and everything between is swallowed
+                i += 1
+            continue
+        if src.startswith("//", i):
+            while i < n and src[i] != "\n":
+                i += 1
+            continue
+        if src.startswith("/*", i):
+            j = src.find("*/", i + 2)
+            i = n if j < 0 else j + 2
+            continue
+        out.append(c)
+        i += 1
+    return "".join(out)
+
+
+def test_the_comment_stripper_strips_comments_and_nothing_else() -> None:
+    """The un-reduction guard is only as good as this, in BOTH directions.
+
+    Too little and the guard is vacuous -- the tombstone NAMES every moved
+    symbol, so an unstripped file matches all of them.  Too much and it is
+    vacuous the other way, because the code it is meant to find gets eaten.  The
+    first cut failed the first way: the string branch consumed a literal's
+    opening quote but not its CLOSING one, so the next quote in the file OPENED
+    a literal and everything between was swallowed -- `#include "dex_item.h"`
+    alone was enough to blind it to the whole file.
+    """
+    f = _strip_line_comments
+    assert f("// gone\nkept;\n") == "\nkept;\n"
+    assert f("/* gone */kept;") == "kept;"
+    assert f('#include "a.h"\n// gone\nkept;\n') == '#include "a.h"\n\nkept;\n'
+    # a `//` inside a literal is not a comment, and a `*/` inside a `//` comment
+    # is not the end of a block comment -- this repo has paid twice for the second
+    assert (
+        f('s = "// not a comment"; // yes\nkept;') == 's = "// not a comment"; \nkept;'
+    )
+    assert f("// a */ b\nkept;") == "\nkept;"
+    # and the real thing: the tombstones name the symbols, the code does not
+    body = _strip_line_comments(
+        (_VENDOR / "Core/dexkit/dex_item.cpp").read_text(encoding="utf-8")
+    )
+    assert "RenderClassSmali" not in body
+    assert "InitBaseCache" in body, "the stripper ate live code"
+
+
+def test_no_dad_cpp_tu_reaches_dexkit_through_a_core_ext_header() -> None:
+    """The transitive half of the hexagonal boundary, in Python.
+
+    `native/core_ext/include` is PUBLIC on `dexkit_ext`, which `dexkit_dad`
+    links, so every core_ext public header is on every `dad_cpp` TU's include
+    path -- and is included by BASENAME, without the string `core_ext` that
+    `scripts/check_dad_boundary.sh` matched.  A review of dexllm#80 CONSTRUCTED
+    the consequence: a `dad_cpp` probe naming `dexkit::DexItem` compiled and
+    linked through such a header while the script reported clean.
+
+    The script derives the same list now, but the script is not itself under
+    test -- a mutant that deletes the derivation leaves the hole open and no
+    pytest sees it.  So the property is re-derived HERE, independently, which is
+    also what puts it in the CI leg.
+    """
+    ext_headers = {p.name for p in (REPO_ROOT / "native/core_ext/include").glob("*.h")}
+    assert len(ext_headers) >= 5, f"only {len(ext_headers)} core_ext headers found"
+
+    dad = REPO_ROOT / "native" / "dad_cpp"
+    leaks = []
+    for src in sorted(dad.rglob("*")):
+        if src.suffix not in (".cpp", ".h", ".hpp", ".cc") or not src.is_file():
+            continue
+        for i, line in enumerate(src.read_text(encoding="utf-8").splitlines(), 1):
+            m = re.match(r'\s*#\s*include\s*"([^"]+)"', line)
+            if m and Path(m.group(1)).name in ext_headers:
+                leaks.append(f"{src.relative_to(REPO_ROOT)}:{i}: {line.strip()}")
+    assert not leaks, (
+        "the domain core includes a core_ext public header, which puts DexKit in "
+        "reach of it transitively (dexkit_ext exports that include dir PUBLIC):\n"
+        + "\n".join(leaks)
+        + "\nRoute the dependency through the IDexCodeSource port instead."
+    )

@@ -172,10 +172,17 @@ def _gate_enumerate_invoke_sites() -> set[int]:
     """`EnumerateInvokeSites` — turns a claimed caller into per-site rows.
 
     Its whole body, for the same reason as above.
+
+    It moved OUT of the vendored `dex_item.cpp` in dexllm#80 and now sits in
+    `invoke_args.cpp`, beside the two gates it has to stay in lockstep with —
+    which is why it went there rather than travelling with the smali renderer it
+    was catalogued alongside. This locator failing is the move working: it named
+    the cause (`DexItem::EnumerateInvokeSites` not found) rather than silently
+    auditing an empty set.
     """
-    src = _strip_comments(_DEX_ITEM.read_text())
-    i = src.index("DexItem::EnumerateInvokeSites(")
-    return _opcodes_in_condition(_block_at(src, src.index(")", i)))
+    src = _strip_comments(_INVOKE_ARGS.read_text())
+    i = src.index("std::vector<InvokeSite> EnumerateInvokeSites(")
+    return _opcodes_in_condition(_block_at(src, i))
 
 
 def _gate_cfg_invoke_mark() -> set[int]:
@@ -213,7 +220,7 @@ def _gate_arg_extractor() -> set[int]:
 
 _GATES = (
     ("dex_item.cpp: InitCache method_invoking collector", _gate_init_cache),
-    ("dex_item.cpp: EnumerateInvokeSites", _gate_enumerate_invoke_sites),
+    ("invoke_args.cpp: EnumerateInvokeSites", _gate_enumerate_invoke_sites),
     ("invoke_args.cpp: BuildCfg invoke mark", _gate_cfg_invoke_mark),
     ("invoke_args.cpp: arg-extractor emit arms", _gate_arg_extractor),
 )

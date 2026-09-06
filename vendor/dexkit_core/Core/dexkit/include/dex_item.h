@@ -177,18 +177,11 @@ public:
     [[nodiscard]] const std::vector<bool> &
     GetFieldAccessFlagsDeclared() const { return field_access_flags_declared; }
 
-    // dexllm L2.5 extension hook — enumerate every invoke-* site within a
-    // single method body. Returns (callee_method_idx, byte_offset_within_insns,
-    // opcode). Works directly off method_codes which InitBaseCache populated;
-    // no cache flag required. Empty if the method has no code item (native /
-    // abstract).
-    struct InvokeSite {
-        uint32_t method_idx;       // callee method_idx in this dex
-        uint32_t bytecode_offset;  // byte offset within insns
-        uint8_t opcode;            // 0x6E~0x72, 0x74~0x78, or 0xFA/0xFB (dexllm#61)
-    };
-    [[nodiscard]] std::vector<InvokeSite>
-    EnumerateInvokeSites(uint32_t method_idx) const;
+    // The L2.5 invoke-site enumerator that used to be declared here moved to
+    // native/core_ext/include/invoke_args.h (dexllm#80), beside the L4 analysis
+    // dexllm#32 moved for the same reason. It needs nothing private:
+    // GetMethodCode() is its whole input, and dexllm#61 keeps its opcode gate in
+    // lockstep with the two in that file.
 
     // Upstream's `GetInvokeMethodsFromCode` was REMOVED from here (dexllm#61). It
     // selected invokes by instruction FORMAT (k35c/k3rc), which is not what BBBB
@@ -207,16 +200,10 @@ public:
     // and GetImage() are the whole input.
 
 
-    // dexllm L5 extension — baksmali-style text rendering of a method body
-    // or a full class. Uses slicer's DecodeInstruction / GetOpcodeName /
-    // GetFormatFromOpcode / GetIndexTypeFromOpcode to format every
-    // instruction. Returns empty string for abstract/native methods. The
-    // indent string is prepended to every output line.
-    [[nodiscard]] std::string
-    RenderMethodSmali(uint32_t method_idx, const std::string& indent = "    ") const;
-
-    [[nodiscard]] std::string
-    RenderClassSmali(uint32_t type_idx) const;
+    // The L5 baksmali-style renderer that used to be declared here moved to
+    // native/core_ext/include/smali_render.h (dexllm#80) -- 560 lines of dexllm
+    // code that existed upstream under no name. Its whole input is the accessors
+    // above, which is what made the move a pure lift.
 
     std::vector<std::future<std::vector<ClassBean>>>
     FindClass(

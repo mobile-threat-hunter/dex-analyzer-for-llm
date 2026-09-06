@@ -14,7 +14,7 @@ dexllm's own code diverges from an AOSP/ART reference it re-implements; this one
 catalogs where the *vendored* tree diverges from the upstream it was copied from.
 
 Measured against the baseline, the vendored subset is **136 files: 125
-byte-identical, 11 modified, 0 added**, **+1290 / -119 lines**.
+byte-identical, 11 modified, 0 added**, **+731 / -119 lines**.
 
 The line counts are `git diff --numstat` against the **baseline** tree — the same
 predicate the rest of this repo uses for a diffstat. (Measured against the fork
@@ -29,8 +29,8 @@ next to it.)
 
 | file | + | - | hunks | marked | marker lines |
 |---|---:|---:|---:|---:|---:|
-| `Core/dexkit/dex_item.cpp` | 718 | 44 | 15 | 13 | 31 |
-| `Core/dexkit/include/dex_item.h` | 179 | 2 | 5 | 4 | 24 |
+| `Core/dexkit/dex_item.cpp` | 172 | 44 | 15 | 13 | 21 |
+| `Core/dexkit/include/dex_item.h` | 166 | 2 | 5 | 4 | 25 |
 | `Core/third_party/thread_helper/ThreadPool.h` | 149 | 40 | 3 | 3 | 9 |
 | `Core/dexkit/dexkit.cpp` | 168 | 22 | 8 | 6 | 9 |
 | `Core/third_party/slicer/reader.cc` | 24 | 0 | 1 | 1 | 4 |
@@ -54,7 +54,7 @@ rebased without colliding with upstream.
 | **U** | upstreamable — upstream still has the defect and would plausibly take the fix | D1 D2 D3 D4 D5 D6 D11 D13 D14 |
 | **C** | converged and RETIRED — upstream reached the same behaviour independently and the local change has been dropped; the entry is kept because a deletion leaves nothing to find | D7 |
 | **P** | permanent — an extension hook or a product decision incompatible with upstream's goals | D8 D9 D10 |
-| **R** | reduction candidate — dexllm code that happens to live in the vendored tree and could move out | D12 |
+| **R** | reduction candidate — dexllm code that happens to live in the vendored tree and should move out; RETIRED once the move is taken | D12 |
 
 **A treatment is a classification of KIND, not a prediction that upstream would
 accept anything.** Nothing here has been proposed upstream. Entry ids are
@@ -63,14 +63,21 @@ allocation order and stable; they are not ordered by section.
 dexllm#65 estimated "roughly 29 of 54 [markers] are upstreamable bug fixes and 17
 are permanent divergence", i.e. that over half the debt could be given away. At
 this granularity the direction holds — 9 of 14 entries are **U** — but the
-largest single item by volume is neither: **D12 is 560 of `dex_item.cpp`'s 2,011
-lines, about 44% of everything this fork adds**, and it is a *reduction*
+largest single item by volume was neither: **D12 was 560 of `dex_item.cpp`'s
+2,011 lines, about 44% of everything this fork added**, and it was a *reduction*
 candidate, code that should leave the vendored tree rather than be sent upstream.
-An entry-weighted count and a line-weighted one point at different work.
+An entry-weighted count and a line-weighted one point at different work — and
+the line-weighted one was right about where the debt was. **dexllm#80 took it**:
+the vendored delta is +731/-119 today and `dex_item.cpp` is 1,465 lines. Which
+file is now "largest" depends on the predicate and neither answer is dramatic:
+by ADDED lines `dex_item.cpp` still leads at 172 (`dexkit.cpp` 168,
+`dex_item.h` 166); by total CHURN it leads more clearly, 216 to 190. An earlier
+draft published "the single largest is now `dexkit.cpp`'s 168" with no
+predicate, and it was false under both.
 
 ## The marker convention, and exactly what it does not cover
 
-Every divergence is marked in-source with a `dexllm` comment — **83 marker lines
+Every divergence is marked in-source with a `dexllm` comment — **74 marker lines
 across all 11 files**, and the marker set and the divergent set are now equal in
 both directions (no pristine file carries one). The convention is **checked**
 rather than merely followed:
@@ -329,10 +336,9 @@ there would have been no way to *take* the convergence either, because
   `GetTypeNames`, `GetStrings`, `GetTypeDefFlags`), L1.5 (`GetClassMethodIds`,
   `GetClassFieldIds`, `GetTypeDefIdx`, `GetMethodAccessFlags`,
   `GetFieldAccessFlags`), L2 (`GetMethodInvokingIds`), L2.5
-  (`GetMethodCallerIds`, `GetFieldGetMethodIds`, `GetFieldPutMethodIds`,
-  `EnumerateInvokeSites`), L5 (`RenderMethodSmali`,
-  `RenderClassSmali`) and L8 (`GetMethodCode`) accessors, plus dexllm#20's
-  hoisting of `IsStringMatched` from private.
+  (`GetMethodCallerIds`, `GetFieldGetMethodIds`, `GetFieldPutMethodIds`) and L8
+  (`GetMethodCode`) accessors, plus dexllm#20's hoisting of `IsStringMatched`
+  from private.
 - **Why permanent:** `native/core_ext/` is an adapter over private core state.
   Upstream is a query library whose C++ core is an implementation detail behind
   a FlatBuffers/JNI boundary; it has no reason to expose these.
@@ -341,8 +347,10 @@ there would have been no way to *take* the convergence either, because
   same reason `GetMethodCallerIds` exists: the bean wrapper keeps only the
   accessor's descriptor, and a per-INSTRUCTION site needs the
   (origin_dex, method_idx) pair it discards.
-- The two L5 accessors are the declaration half of D12, so if that reduction is
-  ever done they leave with it.
+- **Three entries LEFT this list in dexllm#80**: the two L5 renderers and the
+  L2.5 `EnumerateInvokeSites` were the declaration half of D12, and they went out
+  with it. What stayed is the point — the moved code READS nine of these hooks,
+  so shrinking D12 does not shrink D8. It is the CONSUMER that left.
 
 ### D9. Declared vs referenced members (dexllm#41, dexllm#45)
 
@@ -372,39 +380,59 @@ there would have been no way to *take* the convergence either, because
 
 ## R — reduction candidates
 
-### D12. The smali renderer and `EnumerateInvokeSites` live in `dex_item.cpp`
+An entry lands here when the code is dexllm's OWN and merely happens to live in
+the vendored tree. Its resolution is not a patch to upstream but a MOVE out, and
+once that is taken the entry is RETIRED for the same reason a converged one is:
+it names no live divergence, but deleting it would leave a gap in `D1..D14` with
+no answer.
 
-- **Where:** `Core/dexkit/dex_item.cpp`, lines 1452-2011 —
+### D12. The smali renderer and `EnumerateInvokeSites` — MOVED OUT (dexllm#80)
+
+- **Where it was:** `Core/dexkit/dex_item.cpp`, lines 1452-2009 —
   `EscapeSmaliString`, `SmaliIdent`, `FormatAccessFlags`,
   `FormatFieldAccessFlags`, `FormatMethodAccessFlags`, `FormatProto`,
   `FormatMethodRef`, `FormatFieldRef`, `EmitRegisterRange`, `FormatOperands`,
-  `RenderMethodSmali`, `RenderClassSmali`, `EnumerateInvokeSites`.
+  `RenderMethodSmali`, `RenderClassSmali`, `EnumerateInvokeSites`; plus their
+  two declaration blocks in `Core/dexkit/include/dex_item.h`. A tombstone
+  comment stands at each site.
 - **Upstream:** **none of these functions exists**, under any name.
-- **Size:** 560 lines, about 44% of everything this fork adds, and the single
-  largest divergence in the tree.
-- **Why it is a reduction candidate:** this is a wholly dexllm subsystem, and it
-  is where most of dexllm's own later work landed — the MUTF-8 decode-then-escape
-  fix (dexllm#22 / dexllm#23), the `invoke-polymorphic` formats (dexllm#60), the
+- **Size:** **558 lines** (1452-2009 at `5f7ecbf`, which is exactly what
+  `git diff --numstat` reports for the deletion), about 44% of everything this
+  fork added, and the single largest divergence in the tree. Earlier drafts said
+  560 by counting to 2011 — 2010 is blank and 2011 is the brace closing
+  `namespace dexkit`, both of which STAY. The vendored `+` column drops by less
+  than 558 because 11 tombstone lines replace them, and the total drops by more
+  (563) because `dex_item.h`'s two declaration blocks went too.
+- **Why it was a reduction candidate:** a wholly dexllm subsystem, and where most
+  of dexllm's own later work landed — the MUTF-8 decode-then-escape fix
+  (dexllm#22 / dexllm#23), the `invoke-polymorphic` formats (dexllm#60), the
   index-kind labels (dexllm#66), the invoke opcode set (dexllm#61). Every one of
-  those is a dexllm change to dexllm code that happens to sit inside a vendored
-  file, so it collides with upstream on every rebase for no reason.
-- Moving it out is the dexllm#32 pattern exactly: that change took 858 lines of
-  `AnalyzeMethodInvokes` out to `native/core_ext/invoke_args.cpp` and found the
-  whole input was two already-public accessors (`GetMethodCode()`,
-  `GetImage()`). **This entry read "the renderer's inputs look similar" until the
-  intersection was actually taken, and the hedge was weaker than the evidence:**
-  of `DexItem`'s 70 private members, the span touches **9** — `reader` (27 uses),
-  `type_names` (26), `strings` (15), `method_codes` (6),
-  `field_access_flags_declared` (3), `class_field_ids` (2), `type_def_idx`,
-  `type_def_flag`, `class_method_ids` — and **every one already has a public
-  accessor** (`GetReader` / `GetTypeNames` / `GetStrings` / `GetMethodCode`,
-  which bounds the index exactly as the span does / `GetFieldAccessFlagsDeclared`
-  / `GetClassFieldIds` / `GetTypeDefIdx` / `GetTypeDefFlags` /
-  `GetClassMethodIds`). Nine accessors instead of dexllm#32's two; nothing
-  private is reached. Not attempted here — it is a refactor with its own a/b, not
-  part of recording a baseline — and it is filed as **dexllm#80**, which also
-  states what the move does NOT buy: several of those accessors are themselves
-  D8 hooks, so moving the renderer out shrinks D12, not D8.
+  those was a dexllm change to dexllm code that happened to sit inside a vendored
+  file, colliding with upstream on every rebase for no reason.
+- **It is the dexllm#32 pattern exactly**, and this entry read *"the renderer's
+  inputs look similar"* until the intersection was actually taken — the hedge was
+  weaker than the evidence. Of `DexItem`'s private members the span touched
+  **9** — `reader` (25 uses, code-only — a with-comments token count says 27), `type_names` (26), `strings` (15), `method_codes`
+  (6), `field_access_flags_declared` (2), `class_field_ids` (1), `type_def_idx`,
+  `type_def_flag`, `class_method_ids` — and **every one already had a public
+  accessor**, so the move needed nothing private. Nine accessors instead of
+  dexllm#32's two.
+- **Taken in dexllm#80.** The renderer is
+  [`native/core_ext/smali_render.cpp`](../native/core_ext/smali_render.cpp) and
+  `EnumerateInvokeSites` went to
+  [`native/core_ext/invoke_args.cpp`](../native/core_ext/invoke_args.cpp) — not
+  with the renderer it was catalogued beside, because dexllm#61 keeps its opcode
+  gate in LOCKSTEP with `AnalyzeInvokes`' two, and one file means one truth set.
+  The vendored delta drops **+1290/-119 -> +731/-119** and `dex_item.cpp` from
+  **2,011 to 1,465 lines**. It also retired a coupling: `EscapeSmaliString` was
+  the only consumer of `mutf8.h` in the vendored tree, so the
+  `dexkit_static PRIVATE dexkit_mutf8` link went with it and **the vendored Core
+  builds standalone again** — the caveat dexllm#22 recorded is gone.
+- **What it did NOT buy, as the issue said up front: D8 stays.** Several of the
+  nine accessors are themselves dexllm extension hooks in the vendored header
+  (treatment **P**), and moving their CONSUMER out does not remove them. D8's own
+  list lost three entries — the two L5 renderers and `EnumerateInvokeSites`,
+  which were declaration halves of D12 — and keeps the rest.
 
 ---
 
@@ -426,8 +454,8 @@ Step 3 of dexllm#65 is filed one issue per bucket. **dexllm#81 is DONE**: the
 baseline advanced from the fork point to upstream HEAD, the three fixes dexllm
 was missing (`6ca92c3`, `47f7324`, `7415df9` — see `UPSTREAM` for each one's
 reachability verdict) are carried, and **D7** (**C**) was retired, the one entry
-a rebase must *drop* rather than carry. **dexllm#80** — moving **D12** (**R**)
-out of the vendored tree — is open.
+a rebase must *drop* rather than carry. **dexllm#80** — moving **D12** (**R**) out of
+the vendored tree — is DONE.
 
 **dexllm#79, proposing the nine U entries upstream, is deliberately NOT being
 pursued** (user decision, 2026-09-06). That is the second half of its own

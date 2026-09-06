@@ -2415,7 +2415,7 @@ An IDENTIFIER — a class descriptor, a member name, a proto — is dex string-p
 - **decode-OUT `ident_out`** ([module.cpp](native/binding/module.cpp)) on every identifier-returning site — the listing APIs, and the `py::class_` attributes, which moved from `def_readonly` to `def_property_readonly` lambdas (a raw `std::string` field raises on ATTRIBUTE ACCESS, which no return-type wrapper can catch). `__repr__` decodes too. `ResolvedArg.string_value` (`ArgOrigin` until dexllm#69) is included and was the one **corpus-reproducible** raise this found beyond the issue's report (a const-string with an embedded NUL, `C0 80`, in `StringTests.dex`).
 - **encode-IN `ident_in`** (= `mutf8::Utf8ToMutf8`) on every descriptor/name ARGUMENT — including the L7 **NAME** matchers, which dexllm#19 had deliberately left unconverted because the path was unreachable while enumeration still raised. That closes the residual #19 recorded.
 - **the shared decoder.** The binding's private `DecodeMutf8ForPy` body moved into the codec as **`mutf8::Mutf8ToUtf8Lossy`** ([mutf8.h](native/dad_cpp/include/mutf8.h)/[mutf8.cpp](native/dad_cpp/mutf8.cpp)) — lossy exactly where UTF-8 has no form (lone surrogate / malformed → U+FFFD), so the result is ALWAYS valid UTF-8. One implementation now serves the binding and the renderer, so a rendered identifier and `list_classes()` cannot drift. Only addition: an ASCII fast path (it now runs per identifier, not per method).
-- **the smali renderer decodes at the EMISSION POINT** (`SmaliIdent`, [dex_item.cpp](vendor/dexkit_core/Core/dexkit/dex_item.cpp)) — `FormatMethodRef` / `FormatFieldRef` / `emit_index`'s `kIndexTypeRef` / the `.class` / `.super` / `.implements` / `.field` headers. **Not over the assembled text**: that variant is the one the earlier review REJECTED as a hack for the literal half, because decoding after assembly MATERIALISES a structural character that was never escaped. Identifiers are decoded rather than escaped because they are unquoted in smali and a loadable dex cannot carry a structural character in one — see dexllm#23 below, whose check runs on the DECODED code points.
+- **the smali renderer decodes at the EMISSION POINT** (`SmaliIdent`, [smali_render.cpp](native/core_ext/smali_render.cpp) — it was in the vendored `dex_item.cpp` until dexllm#80) — `FormatMethodRef` / `FormatFieldRef` / `emit_index`'s `kIndexTypeRef` / the `.class` / `.super` / `.implements` / `.field` headers. **Not over the assembled text**: that variant is the one the earlier review REJECTED as a hack for the literal half, because decoding after assembly MATERIALISES a structural character that was never escaped. Identifiers are decoded rather than escaped because they are unquoted in smali and a loadable dex cannot carry a structural character in one — see dexllm#23 below, whose check runs on the DECODED code points.
 - **`DecompileClass` sanitises the part it assembles itself** ([decompiler.cpp](native/dad_cpp/decompiler.cpp)) — the class header and the field declarations never passed through `RunPipeline`'s `SanitizeUtf8` (only method bodies did), so an astral class name made the whole class decompile raise. Found by the new sweep-shaped test, not by reasoning. At the time, the Java-text path kept its `\uXXXX` code-unit rendering (`class A\ud800\udc00sTest {`, valid Java) as a deliberate difference from the readable-UTF-8 smali listing. **dexllm#28 later OVERTURNED that for identifiers** — see its section below; the code-unit rule now applies to string LITERALS only, so this class renders `class A𐀀sTest {` today.
 
 **dexllm#23 — ART `CheckInterTypeIdItem` ported** ([dex_verifier.cpp](native/core_ext/dex_verifier.cpp) `CheckInterSection`): a per-`type_id` `IsValidDescriptor` loop, no leading-char predicate (ART has none there). Before it, a descriptor was validated only where ANOTHER id table referenced it, so a type used ONLY as a proto return/parameter type or as an instruction operand (`const-class`, `new-instance`, `check-cast`, `new-array`, …) could hold arbitrary bytes and still pass `VerifyDex`. Fixing it at the **verifier** is candidate (1) of the issue and the one that restores the documented invariant ("a load-time structural verifier is the single gate") rather than escaping identifiers in the renderer. It also runs under `lenient=True` (which skips only `VerifyInsns`), so the channel does not reopen for packer dumps.
@@ -2528,7 +2528,7 @@ Upstream DexKit's `InitBaseCache` ([dex_item.cpp](vendor/dexkit_core/Core/dexkit
 
 **Why it existed.** The grouping is a BYPRODUCT of an unrelated sweep — the loop exists to identify `@Target` / `@Retention` enum constants and appends `class_field_ids[field.class_idx]` as one extra line, at a point where declaredness (a `class_data` fact, read 60 lines later) is not yet known. The method side avoided it by accident, not by design: `class_method_ids` HAD to come from the `class_data` walk because that is where `code_off` → `method_codes` is read, and methods got a SEPARATE structure (`pending_cross_ref_method_ids`) for the reference view. Upstream DexKit is a runtime SEARCH library with no "list this class's members" API at all, and for `FindField` narrowed by class, matching an inherited reference is arguably the point. dexllm then built two DECLARATION-shaped APIs on that reference-shaped index — `get_class_summary` (L1.5) and `render_class_smali` (L5). **The knowledge already existed in-tree**: [dexitem_code_source.cpp:637](native/core_ext/dexitem_code_source.cpp#L637) re-derives the field order from `ClassData` with a comment saying `class_field_ids` does not preserve it, so `decompile_class` was always correct — the insight just never propagated to the other two consumers.
 
-**Fixed on FOUR surfaces** (the issue named three; `find_fields_by_name` was found during the work): (1) `FillInternalClassSummary` ([dexkit_ext.cpp](native/core_ext/dexkit_ext.cpp)) — and with it everything derived from the summary: `class_fields`, `format_class`, the MCP `field_count`; (2) `RenderClassSmali` ([dex_item.cpp](vendor/dexkit_core/Core/dexkit/dex_item.cpp)) — a `.field` line only for a `class_data` entry, as baksmali emits, with the trailing blank line now gated on "any line emitted" rather than "the list is non-empty"; (3) `FindFieldsByName` ([dexkit_ext.cpp](native/core_ext/dexkit_ext.cpp)) — **only when a `declaring_class` is given**, so that argument means what it says. All three reuse the `field_access_flags_declared` bitvector #41 added, so no new state. **(3) is filtered dexllm-side on the returned `FieldRef` (which carries `dex_id` + `field_idx`), NOT in the vendored matcher** — `FindField`'s scan list, `IsFieldsMatched`, `GetFieldBean` and `GetClassBean.field_ids` keep upstream semantics (the latter three are dead ends for dexllm: the parser discards the bean's field list and no dexllm query populates a `fields()` sub-matcher).
+**Fixed on FOUR surfaces** (the issue named three; `find_fields_by_name` was found during the work): (1) `FillInternalClassSummary` ([dexkit_ext.cpp](native/core_ext/dexkit_ext.cpp)) — and with it everything derived from the summary: `class_fields`, `format_class`, the MCP `field_count`; (2) `RenderClassSmali` ([smali_render.cpp](native/core_ext/smali_render.cpp) — it was in the vendored `dex_item.cpp` until dexllm#80) — a `.field` line only for a `class_data` entry, as baksmali emits, with the trailing blank line now gated on "any line emitted" rather than "the list is non-empty"; (3) `FindFieldsByName` ([dexkit_ext.cpp](native/core_ext/dexkit_ext.cpp)) — **only when a `declaring_class` is given**, so that argument means what it says. All three reuse the `field_access_flags_declared` bitvector #41 added, so no new state. **(3) is filtered dexllm-side on the returned `FieldRef` (which carries `dex_id` + `field_idx`), NOT in the vendored matcher** — `FindField`'s scan list, `IsFieldsMatched`, `GetFieldBean` and `GetClassBean.field_ids` keep upstream semantics (the latter three are dead ends for dexllm: the parser discards the bean's field list and no dexllm query populates a `fields()` sub-matcher).
 
 **An UNSCOPED `find_fields_by_name` deliberately still returns references** — the first cut filtered unconditionally, justified as "the way `find_methods_by_name` already behaved", and a reviewer showed that justification is FALSE: `find_methods_by_name` is declaration-only in its `declaring_class` fast path but a whole-`method_ids` scan without one (constructed: it returns `FastSafeIterableMap;->descendingIterator`, which that class inherits). So filtering unconditionally made the field arm the ASYMMETRIC one while the docs claimed symmetry — and it lost real answers, because an inherited field's declaration is usually in the FRAMEWORK: `find_fields_by_name("rightMargin")` went from 12 hits to **0**, i.e. every site where the app touches it. Listing a class's MEMBERS and SEARCHING the id tables by name are different questions, and only the first is answered with declarations alone. Guarded in both directions (`test_an_unscoped_field_search_still_returns_references` kills the unconditional variant; the scoped test kills its removal).
 
@@ -6114,7 +6114,7 @@ hand-maintained-enumeration shape dexllm#32 already records:
 | site | role |
 |---|---|
 | `dex_item.cpp:479` | builds `method_invoking_ids` → `method_caller_ids` |
-| `dex_item.cpp:1910` `EnumerateInvokeSites` | turns a claimed caller into per-site rows |
+| `invoke_args.cpp` `EnumerateInvokeSites` (`dex_item.cpp:1910` until dexllm#80) | turns a claimed caller into per-site rows |
 | `invoke_args.cpp:116` `BuildCfg` | marks a block as needing the extractor |
 | `invoke_args.cpp:591/625` | extracts the arguments |
 
@@ -6821,8 +6821,8 @@ does not keep. **That is the shape `FindCallSitesToApi` already uses**
 (`method_caller_ids` -> `EnumerateInvokeSites`), and the issue said so.
 
 **The enumerator is in `core_ext`, NOT beside `EnumerateInvokeSites`.** That
-function sits inside the 560-line dexllm block **dexllm#80** tracks for removal from
-the vendored file, and this needs nothing private — `GetMethodCode()` is the whole
+function SAT inside the 558-line dexllm block **dexllm#80** has since removed from
+the vendored file (both now live under `native/core_ext/`, so the argument is spent), and this needs nothing private — `GetMethodCode()` is the whole
 input — so a sibling there would grow exactly the pile that issue exists to shrink.
 
 **One vendored addition was unavoidable and it is the D8 shape exactly:**
@@ -7586,8 +7586,8 @@ reviewers caught both.)
 **The real delta, which no in-source census could produce: 136 vendored files,
 125 byte-identical to upstream, 11 modified, 0 added, +1271/-131.** That was
 measured at `4eff18b`; dexllm#84 later added the two field reverse-index accessors
-of D8 and dexllm#81 advanced the BASELINE off the fork point, so the registry
-publishes **+1290/-119** today. Those line
+of D8, dexllm#81 advanced the BASELINE off the fork point, and dexllm#80 moved
+D12's 560 lines out, so the registry publishes **+727/-119** today. Those line
 counts are `git diff --numstat`, the predicate the rest of this repo uses; an
 earlier draft published +1215/-130 from a `diff -u | grep -c '^+[^+]'` pipeline,
 which silently drops 56 added blank lines [[published-counts-need-the-repos-own-predicate]].
@@ -7668,8 +7668,9 @@ is where this goes next. A treatment is a classification of KIND; **nothing here
 has been proposed upstream**, and step 3 is deliberately not attempted *in this
 change* — it is filed one issue per bucket: **dexllm#79** (the nine **U**),
 **dexllm#80** (**D12**, **R**) and **dexllm#81** (the three upstream fixes, in
-which **D7** — **C** — disappears). **dexllm#81 is DONE** — see its section
-below; the other two are open.
+which **D7** — **C** — disappears). **dexllm#81 and dexllm#80 are both DONE** —
+see their sections below; **dexllm#79 is deliberately not pursued** (user
+decision, recorded in the catalogue).
 
 **The convention is now checked, offline.**
 [vendor/dexkit_core/UPSTREAM.blobs](vendor/dexkit_core/UPSTREAM.blobs) records the
@@ -8046,7 +8047,8 @@ check.** The manifest sees the file as divergent either way, and the per-file
 table recomputes only its marker-line column — the `+`/`-`/hunk columns are
 pinned by having to sum to the prose totals, not measured against the tree. Two
 of the four carried revisions are in that position (`7415df9` in `CMakeLists.txt`,
-which carries D10; `42b30c4` in `dex_item.cpp`, which carries eight entries), so
+which carries D10; `42b30c4` in `dex_item.cpp`, which carried eight entries then
+and six now), so
 reverting either would be a **silent un-rebase**. The exact carried lines are
 pinned, with counts, together with the forms they REPLACED — presence alone is
 not enough, because a duplicated hunk carries both.
@@ -8271,7 +8273,289 @@ is its callers' problem), **D5 is a no-op on strict-verified input** and matters
 only to a consumer of unverified dumps, and D11 is a deletion needing a
 "dead AND wrong" argument rather than a diff.
 
-And `Core/dexkit/dex_item.cpp` still carries D12's 560 lines — dexllm#80.
+And `Core/dexkit/dex_item.cpp` still carried D12's 558 lines when this was
+written — **dexllm#80 has since taken them out**; see its section below.
+
+### The smali renderer left the vendored tree (dexllm#80, 2026-09-06)
+
+dexllm#65's **R** bucket has exactly one entry, and dexllm#81 left it standing.
+`D12` was the largest single divergence in the vendored tree and **not upstream's
+code at all**: dexllm's smali renderer plus `EnumerateInvokeSites`, sitting in
+`vendor/dexkit_core/Core/dexkit/dex_item.cpp` for no reason but that it was
+written there first. **558** of that file's 2,011 lines — about 44% of everything
+this fork added — and **none of its 13 functions exists upstream under any
+name** (both reviewers checked all 13 against the baseline tree: 0 hits each).
+
+The span is 1452-**2009**, which is what `git diff --numstat` reports for the
+deletion. Earlier drafts said 560 by counting to 2011; 2010 is blank and 2011 is
+the brace closing `namespace dexkit`, and both STAY
+[[published-counts-need-the-repos-own-predicate]].
+
+Every later dexllm change to that subsystem was therefore a dexllm change to
+dexllm code inside a vendored file, colliding with upstream on every rebase for
+nothing: the MUTF-8 decode-then-escape fix (dexllm#22 / dexllm#23), the
+`invoke-polymorphic` operand formats (dexllm#60), the five index-kind labels
+(dexllm#66), the invoke opcode set (dexllm#61).
+
+## It is the dexllm#32 pattern, and the entry's own hedge was weaker than the evidence
+
+The catalogue read *"the renderer's inputs look similar"*. Intersecting
+`DexItem`'s private members with the identifiers in the moved span gives **9**
+— `reader` (25 uses, code-only — a with-comments token count says 27), `type_names` (26), `strings` (15), `method_codes` (6),
+`field_access_flags_declared` (2), `class_field_ids` (1), `type_def_idx`,
+`type_def_flag`, `class_method_ids` — and **every one already had a public
+accessor**. (`data` and `dexkit` also appear in a naive token scan and are both
+false positives: a word in a comment, and the `dexkit::dad::mutf8::` namespace
+qualifier.) So the whole input was public, exactly as dexllm#32 found for the
+858-line `AnalyzeMethodInvokes` — nine accessors there instead of two.
+
+`GetMethodCode(idx)` is the one that makes it a LIFT rather than a rewrite: it
+bounds the index the same way the moved code did, so
+`(i < method_codes.size()) ? method_codes[i] : nullptr` becomes
+`item.GetMethodCode(i)` with no change in behaviour on any input.
+
+## Two destinations, not one, and the second is the interesting choice
+
+The renderer went to
+[`native/core_ext/smali_render.cpp`](native/core_ext/smali_render.cpp) (12
+functions). **`EnumerateInvokeSites` did NOT travel with it** — it went to
+[`native/core_ext/invoke_args.cpp`](native/core_ext/invoke_args.cpp), beside
+`AnalyzeInvokes`, because dexllm#61 keeps its invoke-opcode gate in **LOCKSTEP**
+with the two gates already in that file and
+[tests/test_invoke_opcode_gates.py](tests/test_invoke_opcode_gates.py) reads all
+of them from source. One file, one truth set; and an invoke-site enumerator in a
+file called `smali_render` would be a second thing the name does not say. D12
+catalogued the 13 as one entry because they shared a location, not a subject.
+
+`core_ext` including DexKit headers is not a boundary violation — only `dad_cpp`
+must stay DexKit-free, and `scripts/check_dad_boundary.sh` is unaffected. This is
+the position `invoke_args.cpp` already occupied.
+
+## Measured
+
+**a/b OFF=`a35512d367f851590ced50abac6693c4` vs
+ON=`59a979acd714839f9d0e4ff9279f9d18`, SAME script, both `.so` md5-verified
+BEFORE and AFTER each capture.** 66 sources — the whole bundled corpus, every
+committed fixture, every `art/test/dexdump/*.dex` and every
+`tools/dexter/testdata/*.dex` — x up to 9 axes (load, the class list, a
+whole-corpus `render_class_smali` digest AND its byte length, every declared
+method's `render_method_smali` over a bounded slice, `find_call_sites_to` over
+400 external targets with caller/dex/offset/opcode, `find_call_sites_from`,
+`resolve_call_args` with every argument's kind and `crossed_branch`, a decompile
+digest, and the subprocess EXIT STATUS) = **545 axis records, 0 changed**. The
+545 is re-derivable rather than a harness number: 59 sources load and carry all
+9 axes, 7 do not load and carry 2 — 9x59 + 2x7
+[[published-counts-need-the-repos-own-predicate]].
+
+The three xref axes are not decoration: `EnumerateInvokeSites` is what
+`find_call_sites_to` and `resolve_call_args` are built on, so a pure lift has to
+be byte-identical THERE as well as in the smali it obviously moves. **A lift is
+the one kind of change where 0-changed is the whole claim** — unlike a rebase,
+nothing here is supposed to be unreachable, so a flat result is evidence rather
+than a construction [[ab-must-prove-the-mechanism-fires]].
+
+**Vendored delta: +1290/-119 -> +731/-119**, and `dex_item.cpp` **2,011 -> 1,465
+lines**. Census 136 / 125 / 11 / 0 **unchanged** — the two files it left are
+divergent before and after, which is exactly why this needed a guard of its own.
+Marker lines **83 -> 74**; hunks 40 and marked 33 unchanged, because the
+tombstones carry markers where the code did.
+
+**Which file is "largest" now depends on the predicate**, and an earlier draft
+published one answer with no predicate and was wrong under both: by ADDED lines
+`dex_item.cpp` still leads at 172 (`dexkit.cpp` 168, `dex_item.h` 166), and by
+total churn it leads more clearly, 216 to 190. The honest statement is that D12
+is no longer a dominant term, not that some other file took its place.
+
+parity **29/29**, pytest **1374 passed / 24 skipped**, TRUE corpus-less
+(`test_apk` MOVED aside) **965 passed / 433 skipped / 0 failed** — 965 + 433 =
+1398 = collected, so every new case runs in the CI leg — narrowed to
+`tests/data/multidex.apk` **1271 passed / 127 skipped**, sweep **21,374-class /
+180,879 method-block 0-crash 0-timeout 0-error, GATE: PASS**, determinism 3
+processes x 3 `PYTHONHASHSEED`s -> one digest (`b6b24bb8…`, unchanged from
+before the change), lint trio clean, doc fences 83,
+`scripts/check_dad_boundary.sh` clean — and it now checks a route it could not
+see before. Every figure was RE-MEASURED on the shipped tree after the review
+fixes [[verify-build-identity-before-measuring]]; the a/b was re-captured too
+(`.so` `a35512d3…` -> `59a979ac…`) and is **545 records, 0 changed** again.
+
+## Guards
+
+The manifest is blind to this by construction, and so is every count: both files
+the code left are divergent BEFORE and AFTER, the divergent set does not move,
+and the census only changes a number the doc also publishes. A re-introduction —
+realistically a "small helper" added back beside the tombstone — would be a
+**silent un-reduction**.
+
+`test_a_taken_reduction_has_not_leaked_back` pins all 13 moved symbols: each must
+be ABSENT from the two vendored files and PRESENT at its destination, so deleting
+them instead of moving them fails too. The tombstones NAME every one of those
+symbols, so the scan has to strip comments first — and
+`test_the_comment_stripper_strips_comments_and_nothing_else` checks that in BOTH
+directions, because a stripper that eats too much makes the guard vacuous just as
+surely as one that eats too little. **The first cut failed the first way**: the
+string-literal branch consumed a literal's opening quote but not its CLOSING one,
+so the next quote in the file OPENED a literal and everything between was
+swallowed — `#include "dex_item.h"` on line 21 was enough to blind it to the
+entire file, and the guard passed for the wrong reason until the self-check
+existed.
+
+**FOUR source-derived audits moved with the code, and every one of them failed
+LOUDLY rather than auditing an empty set.** That is the property those guards
+were built for, demonstrated rather than asserted:
+
+- dexllm#61's `EnumerateInvokeSites` gate
+  ([tests/test_invoke_opcode_gates.py](tests/test_invoke_opcode_gates.py)) —
+  `src.index("DexItem::EnumerateInvokeSites(")` over the vendored file.
+- dexllm#60's and dexllm#66's three format / index-kind audits
+  ([tests/test_smali_instruction_formats.py](tests/test_smali_instruction_formats.py)),
+  which derive the emitter's handled FORMATS and INDEX KINDS from the renderer's
+  own source and compare them against slicer's instruction table.
+
+All four raised `ValueError: substring not found` and named the cause. **A guard
+that had instead derived an empty set would have gone green on a build with no
+renderer at all** — the shape this repo keeps recording, avoided here because
+each of them uses `index()` rather than a tolerant scan.
+
+**18 mutants, each applied and run, each killed** — rebuild-free, because every
+guard here reads committed bytes; the harness restores from a pristine snapshot,
+REFUSES to start from a dirty tree, asserts a control digest before every mutant
+AND after the run, runs `scripts/check_dad_boundary.sh` alongside pytest, and
+reports a replacement that does not apply exactly once as **NOT A MUTANT**.
+Eleven from the diff; **seven CONSTRUCTED BY THE REVIEWERS**, each of which
+passed the file as it then stood:
+
+| mutant | fails |
+|---|---:|
+| M0 the whole lift reverted, guards kept | 6 |
+| M1 a moved helper "restored" beside the tombstone | 1 |
+| M2 a moved symbol DELETED rather than moved | 1 |
+| M3 / M4 the comment stripper eats everything / nothing | 2 each |
+| M5 the stripper's closing-quote fix reverted (the shipped bug) | 2 |
+| M6 D12 left in the live R section as a candidate | 1 |
+| M7 the census left at the pre-lift numbers | 1 |
+| M8 D12 not retired | 5 |
+| M9 the dexllm#61 locator left pointing at the vendored file | 1 |
+| M10 the relocated opcode gate narrowed | 1 |
+| **R1 a moved symbol re-added to a THIRD vendored file** | **1** |
+| **R2 deleted at destination, a comment naming it left behind** | **1** |
+| **R3 `_TAKEN_REDUCTIONS` emptied** | **1** |
+| **R4 the `InvokeSite` STRUCT put back in the vendored header** | **1** |
+| **R5 a symbol landing in the WRONG destination** | **1** |
+| **R6 a `dad_cpp` TU reaching DexKit through a core_ext header** | **1 + BOUNDARY LEAK** |
+| **R7 the boundary script stops deriving the header list** | **1** |
+
+**R6 and R7 are the pair worth reading.** R6 is the HIGH, and it is caught twice
+— by the script and by the pytest that re-derives the same property. R7 deletes
+the script's derivation, which the script cannot catch by construction, and only
+the pytest kills it: **that is why the property is stated in two places rather
+than one.**
+
+**The harness lied twice more** [[mutation-harness-restore-pitfalls]], and both
+times its own assertions caught it. `git checkout HEAD --` cannot revert a file
+the change CREATED, so M0 failed halfway and left the tree mutated; the next run
+snapshotted that and its control failed 3 cases. Recovery was from the first
+run's snapshot, and **the rebuilt `.so` reproducing the a/b's ON md5 exactly is
+what proved the recovery was right**. Then an appended `FILES` entry duplicated
+one already in the list, so M0 unlinked the same untracked file twice and the
+harness reported its own bug as a mutant error. It deduplicates, tolerates an
+absent file in the digest, removes a created probe on restore, and restores after
+ANY exception now.
+
+## What the two reviewers found — 0 in the lift, 1 HIGH it introduced, 4 guard holes, 14 stale claims
+
+**Neither could move a value**, and both proved it with their own instruments:
+the 419-line anonymous namespace is **byte-identical** (`diff` exits 0), the two
+member bodies differ only by the nine listed substitutions, `GetMethodCode`'s
+bound is *literally* the ternary it replaced, no accessor returns by value, and
+independent a/b runs — one at **486** records over a wider population than mine,
+one at **278** over 27,075 classes and 203 MB of smali — are **0-changed**. Every
+census number re-derived against a fresh clone of the real baseline, including
+all 136 manifest blob SHAs.
+
+### The HIGH: this change removed the compiler's half of the `dad_cpp` boundary
+
+`invoke_args.h` and the new `smali_render.h` are **PUBLIC** headers of
+`dexkit_ext`, which `dexkit_dad` links — so `#include "dex_item.h"` in either
+puts a DexKit type in reach of **every `dad_cpp` TU**. A reviewer CONSTRUCTED it:
+a `dad_cpp` file naming `dexkit::DexItem` **compiles and links**, while the same
+probe **fails at HEAD** (`'DexItem' in namespace 'dexkit' does not name a type`),
+and `scripts/check_dad_boundary.sh` reports `✓ clean` throughout — its FORBIDDEN
+pattern matches include TEXT, not the transitive route. That made three claims
+false at once, one of them the CMake comment whose *evidence* is
+*"invoke_args.h includes only slicer/dex_format.h"*, and one of them
+`docs/architecture.md`'s **"the compiler is half of that boundary's
+enforcement"** — a paragraph this change edits three lines below.
+
+Fixed at the root rather than by widening the script:
+
+- **`EnumerateInvokeSites` takes `const dex::Code*`**, as `AnalyzeInvokes` does
+  20 lines below. It used the `DexItem` for exactly one call, `GetMethodCode()`,
+  and the only caller already holds one. `invoke_args.h` is DexKit-free again —
+  **verified: the probe now fails there exactly as it does at HEAD**.
+- **`smali_render.h` FORWARD-DECLARES `class DexItem`**; the `.cpp` includes the
+  real header. Its nine accessors genuinely need the type, but the signatures do
+  not. **Verified: a `dad_cpp` TU can NAME the type through this header but
+  cannot USE it** — `invalid use of incomplete type` on any member call — so no
+  DexKit API is in reach, and the CMake claim about the PRIVATE include dir is
+  true again. The residual is stated rather than hidden: the name is visible, and
+  the script still would not catch a `core_ext` header included by basename.
+
+### And the reduction was incomplete — both reviewers, independently
+
+`EscapeSmaliString` was the **only** consumer of `mutf8.h` in the vendored tree,
+so the lift left a dead `#include`, a dead
+`target_link_libraries(dexkit_static PRIVATE dexkit_mutf8)`, and two CMake
+comments asserting a renderer that is no longer there. Removing them **retires
+the coupling dexllm#22 recorded as a caveat** — *"the vendored SOURCE now
+`#include`s a header from `native/dad_cpp/include`, so `dexkit_static` no longer
+builds standalone"* — so **the vendored Core builds standalone again**. That was
+a stated benefit of D12's reduction, left on the table until a review found it.
+
+Retiring it also EXPOSED a hunk: `#include <algorithm>` / `<unordered_set>` are
+dexllm additions that used to merge with the mutf8 hunk at three lines of context
+and inherit its marker. They now stand alone, so they are marked — and the marker
+records that **`<unordered_set>` is dead and was already dead at HEAD** (0 uses in
+the moved span), i.e. pre-existing rather than a leftover of this reduction.
+
+### Four guard holes, each a mutant that passed
+
+- **The scan covered TWO files while the message said `vendor/`.** Re-adding
+  `EscapeSmaliString` to `dexkit.cpp` — also divergent, its census columns also
+  pinned rather than recomputed, and no `dexllm` token added so the marker column
+  does not move — passed the **whole suite**. It scans all 136 vendored files now.
+- **The "PRESENT at destination" half was comment-blind**, the exact claim it
+  makes: deleting a function and leaving one comment naming it passed.
+- **The guard's own data could be emptied.** `_TAKEN_REDUCTIONS = {}` plus four
+  moved helpers back in `vendor/` gave *89 passed, 1 skipped* — and nothing
+  asserted the skip. It is now cross-pinned against the retired **R** entries,
+  and every retired entry must be pinned by one list or the other.
+- **A 14th thing moved.** The `InvokeSite` **struct** went from `DexItem::` to
+  `ext::` and was not in the list; putting it back in the vendored header passed.
+  The destination is pinned per symbol now, not as a union — checking the union
+  would silently un-say this change's own "two destinations" claim.
+
+### Fourteen stale or false claims
+
+Four are one-mirror-updated-twin-missed, and one contradicted the new section
+**four lines above it**. The two worth naming: *"the single largest divergence is
+now `dexkit.cpp`'s 168 added lines"* was **false under every predicate** and the
+CLAUDE.md twin said something else; and *"nothing here is supposed to be
+unreachable, so a flat result is evidence"* was **false** — `FormatFieldAccessFlags`
+and `FormatMethodAccessFlags` have **zero callers anywhere in the tree**, so two
+of the twelve moved functions cannot be reached by any a/b. The rest: the void
+`FieldSite` justification in two mirrors, a `dex_item.cpp:1910` table row, two
+present-tense links for moved functions, *"still carries D12's 560 lines"*,
+*"dexllm#80 … is open"* thirty-five lines under *"Taken in dexllm#80"*, two
+"above" references now pointing across files, `invoke_args.cpp`'s own opening
+claim that *"nothing here depends on DexKit"* (true again after the `dex::Code*`
+fix), the `core_ext` analysis table that gained no rows, and the member-usage
+counts, which were a **with-comments** token count (27/3/2) where code-only gives
+**25/2/1**.
+
+Retirement is now a STATE and treatment a KIND. D7 is **C** and retired; D12 is
+**R** and retired. Only one direction of the implication holds — converged
+implies retired, a reduction is a CANDIDATE until it is taken — so the pin is
+`{C entries} <= _RETIRED <= {all entries}` rather than an equality.
 
 ### Skills
 

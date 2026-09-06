@@ -1098,7 +1098,7 @@ satisfies the contract (test doubles need no base class). Split ports —
 └── tests/             — C++ parity suites (tests/parity, ctest) + Python pytest suite
 ```
 
-Vendored DexKit Core fork lives at `vendor/dexkit_core/`. Public accessors added to upstream's `DexItem` class live in `vendor/dexkit_core/Core/dexkit/{include/dex_item.h,dex_item.cpp}`. The fork stays small and re-rebases easily on upstream updates.
+Vendored DexKit Core fork lives at `vendor/dexkit_core/`. Public accessors added to upstream's `DexItem` class live in `vendor/dexkit_core/Core/dexkit/include/dex_item.h`; the analyses that READ them live outside the fork, in `native/core_ext/` (dexllm#32, dexllm#80). Its baseline, every local change and each one's treatment are catalogued in [dexkit-vendor-divergences.md](dexkit-vendor-divergences.md).
 
 For the ports & adapters boundary see [architecture.md](architecture.md); for the end-to-end runtime flows (load → verify → decompile → agent) as diagrams see [workflow.md](workflow.md).
 

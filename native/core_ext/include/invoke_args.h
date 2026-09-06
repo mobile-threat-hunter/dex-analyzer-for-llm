@@ -92,6 +92,32 @@ struct InvokeSiteWithArgs {
     std::vector<InvokeArg> args;
 };
 
+// dexllm L2.5 — enumerate every invoke-* site within ONE method body:
+// (callee method_idx, byte offset within insns, opcode).  Empty when the method
+// has no code item (abstract / native) or the index is out of range.
+//
+// Moved out of `DexItem` by dexllm#80 (it was a dexllm addition living in the
+// vendored file, divergence D12) and placed HERE rather than beside the smali
+// renderer it travelled with, because dexllm#61 keeps its opcode gate in
+// LOCKSTEP with `AnalyzeInvokes`' two gates below -- one file, one truth set,
+// and `tests/test_invoke_opcode_gates.py` reads all three from source.
+//
+// It takes the CODE ITEM, not the `DexItem`, for the same reason AnalyzeInvokes
+// does: this header is PUBLIC on `dexkit_ext`, which `dexkit_dad` links, so a
+// `DexItem` here would put a DexKit type in reach of every `dad_cpp` TU -- a
+// review CONSTRUCTED that (a dad_cpp probe using `dexkit::DexItem` compiled,
+// while the same probe fails at HEAD) and `check_dad_boundary.sh` does not
+// match the transitive route.  The one thing it needed the DexItem for was
+// `GetMethodCode()`, and the only caller already holds one.
+struct InvokeSite {
+    uint32_t method_idx;       // callee method_idx in this dex
+    uint32_t bytecode_offset;  // byte offset within insns
+    uint8_t opcode;            // 0x6E~0x72, 0x74~0x78, or 0xFA/0xFB (dexllm#61)
+};
+
+// `code` may be nullptr (abstract / native), in which case the result is empty.
+[[nodiscard]] std::vector<InvokeSite> EnumerateInvokeSites(const ::dex::Code* code);
+
 // `depth` = predecessor levels of basic blocks searched above the invoke's own block.
 // kDefaultArgDepth is the API-wide default; 0 restricts the analysis to the invoke's
 // own block.

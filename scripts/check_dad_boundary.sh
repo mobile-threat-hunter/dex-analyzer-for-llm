@@ -21,6 +21,18 @@ DAD="$ROOT/native/dad_cpp"
 # Infrastructure / adapter includes the domain core must not see.
 FORBIDDEN='dexkit\.h|flatbuffers|zip_archive|core_ext|analyze\.h|schema/|dexitem_code_source'
 
+# ...and EVERY public header of core_ext, BY BASENAME. `native/core_ext/include`
+# is PUBLIC on dexkit_ext, which dexkit_dad links, so those headers are on every
+# dad_cpp TU's include path and are included WITHOUT the string `core_ext` in the
+# path — which the pattern above matches. That is a transitive route the script
+# could not see, and a review CONSTRUCTED it (dexllm#80): a dad_cpp probe that
+# named `dexkit::DexItem` compiled and linked, via a core_ext header that in turn
+# included `dex_item.h`, while this script reported clean. Deriving the list at
+# run time means a header added to core_ext is covered the day it appears.
+for h in "$ROOT"/native/core_ext/include/*.h; do
+    FORBIDDEN="${FORBIDDEN}|\"$(basename "$h")\""
+done
+
 leaks="$(grep -rnE "^[[:space:]]*#include.*(${FORBIDDEN})" "$DAD" || true)"
 if [[ -n "$leaks" ]]; then
     echo "✗ dad_cpp boundary leak — the domain core must not include infrastructure:"

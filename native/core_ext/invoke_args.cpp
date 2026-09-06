@@ -23,6 +23,34 @@ using ::dexkit::GetBytecodeWidth;
 using ::dexkit::ReadInt;
 using ::dexkit::ReadLong;
 
+// dexllm L2.5 — see invoke_args.h for the contract.
+std::vector<InvokeSite> EnumerateInvokeSites(const dex::Code* code) {
+    std::vector<InvokeSite> out;
+    if (code == nullptr) return out;
+
+    const dex::u2* base = code->insns;
+    const dex::u2* p = base;
+    const dex::u2* end_p = base + code->insns_size;
+    while (p < end_p) {
+        uint8_t op = static_cast<uint8_t>(*p);
+        const dex::u2* ptr = p;
+        size_t width = GetBytecodeWidth(ptr++);
+        if (width == 0) break;  // malformed / NOP-data
+        // dexllm#61: the same set as the InitCache collector in the vendored
+        // dex_item.cpp, and as the two gates below in this file.
+        if ((op >= 0x6e && op <= 0x72) || (op >= 0x74 && op <= 0x78)
+            || op == 0xfa || op == 0xfb) {
+            InvokeSite site;
+            site.method_idx = ReadShort(ptr);
+            site.bytecode_offset = static_cast<uint32_t>((p - base) * 2);
+            site.opcode = op;
+            out.push_back(site);
+        }
+        p += width;
+    }
+    return out;
+}
+
 namespace {
 
 // The basic-block CFG of one code item, from a single linear pre-pass. Replaces the

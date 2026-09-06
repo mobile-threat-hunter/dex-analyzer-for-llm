@@ -1,6 +1,7 @@
 #include "dexkit_ext.h"
 
 #include "invoke_args.h"
+#include "smali_render.h"
 
 #include <algorithm>
 #include <array>
@@ -924,7 +925,7 @@ DexKitExt::RenderClassSmali(std::string_view class_descriptor) const {
     auto [dex_item, type_idx] =
         const_cast<dexkit::DexKit&>(*core_).GetClassDeclaredPair(class_descriptor);
     if (dex_item == nullptr) return {};
-    return dex_item->RenderClassSmali(type_idx);
+    return ext::RenderClassSmali(*dex_item, type_idx);
 }
 
 std::string
@@ -953,7 +954,7 @@ DexKitExt::RenderMethodSmali(std::string_view method_descriptor) const {
         if (m.class_idx != type_idx) continue;
         if (strings[m.name_idx] != name) continue;
         if (BuildProtoDescriptor(*dex_item, proto_ids[m.proto_idx]) != proto) continue;
-        return dex_item->RenderMethodSmali(static_cast<uint32_t>(i));
+        return ext::RenderMethodSmali(*dex_item, static_cast<uint32_t>(i));
     }
     return {};
 }
@@ -2066,7 +2067,7 @@ DexKitExt::FindCallSitesToApi(std::string_view api_descriptor) {
     for (const auto& cr : CollectApiCallers(core_.get(), api_resolve_index_, target_class,
                                             target_name, target_proto)) {
         const auto& item = *cr.item;
-        auto sites = item.EnumerateInvokeSites(cr.caller_idx);
+        auto sites = ext::EnumerateInvokeSites(item.GetMethodCode(cr.caller_idx));
         std::string caller_desc = BuildMethodDescriptor(item, cr.caller_idx);
         for (const auto& s : sites) {
             if (s.method_idx != cr.local_target) continue;
@@ -2249,11 +2250,12 @@ std::vector<std::pair<int, uint32_t>> LocateFields(DexKitExt& ext,
 
 // One field-access site inside a method body: the operand's field_ids index, the
 // byte offset within `insns`, and the opcode. The field analogue of
-// DexItem::EnumerateInvokeSites, written HERE rather than beside it — that
-// function sits inside the 560-line dexllm block dexllm#80 tracks for removal
-// from the vendored file, and this needs nothing private (GetMethodCode() is the
-// whole input), so a sibling there would grow exactly the pile that issue exists
-// to shrink.
+// ext::EnumerateInvokeSites, which used to be DexItem::EnumerateInvokeSites and
+// is why this was written HERE rather than beside it: that function sat inside
+// the 558-line dexllm block in the vendored file, and a sibling there would have
+// grown exactly the pile dexllm#80 existed to shrink. dexllm#80 TOOK it, so the
+// argument is spent — both now live under native/core_ext/, and if this ever
+// grows past a struct it belongs beside its invoke sibling in invoke_args.cpp.
 struct FieldSite {
     uint32_t field_idx;
     uint32_t bytecode_offset;

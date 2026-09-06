@@ -105,16 +105,19 @@ the ones the vendored Core has no business carrying:
 |---|---|---|
 | Structural verification | `VerifyDex` — the load-time gate, see below | [dex_verifier.h](../native/core_ext/include/dex_verifier.h) |
 | L4 argument origins | `AnalyzeInvokes` — what value reaches each argument register at every invoke site of one method body. Backs `resolve_call_args`, and also the SITE IDENTITY (caller, offset, opcode) of `find_call_sites_from`, which calls it at depth 0 | [invoke_args.h](../native/core_ext/include/invoke_args.h) |
+| L2.5 invoke sites | `EnumerateInvokeSites` — every `invoke-*` in one method body as (callee, offset, opcode). Backs `find_call_sites_to`. Placed beside `AnalyzeInvokes` rather than with the renderer it moved with, because dexllm#61 keeps its opcode gate in lockstep with that file's two | [invoke_args.h](../native/core_ext/include/invoke_args.h) |
+| L5 smali rendering | `RenderMethodSmali` / `RenderClassSmali` and ten file-local formatters — baksmali-style text for a method body or a whole class | [smali_render.h](../native/core_ext/include/smali_render.h) |
 | Permission / capability join | `analysis.*` — the permission → gated-API → caller join over a loaded `DexKitExt` | [analysis.h](../native/core_ext/include/analysis.h) |
 
-`AnalyzeInvokes` was written into `vendor/.../dex_item.cpp` as a `DexItem` member and
-moved here in dexllm#32. It enlarged the vendor diff in the file that is hardest to
-rebase, and it never needed to be a member: the whole input is one `dex::Code*` plus
-the end of the image it lives in, both reachable through the public `GetMethodCode()`
-/ `GetImage()`. The rule this records — **a dexllm analysis belongs in `core_ext`
+The last three were written into `vendor/.../dex_item.cpp` as `DexItem` members and
+moved here — `AnalyzeInvokes` in dexllm#32, the other two in dexllm#80. They enlarged
+the vendor diff in the file that is hardest to rebase, and none needed to be a member:
+`AnalyzeInvokes` takes one `dex::Code*` plus the end of its image, `EnumerateInvokeSites`
+takes the `dex::Code*` alone, and the renderer reads nine accessors that were already
+public. The rule this records — **a dexllm analysis belongs in `core_ext`
 unless it genuinely needs DexKit's privates** — is the outward-facing counterpart of
-the `dad_cpp` boundary below, and it is why the vendored tree now carries ~860 fewer
-dexllm lines. What remains is catalogued, with its baseline and its fork point, in
+the `dad_cpp` boundary below, and it is why the vendored tree now carries **~1,416
+fewer dexllm lines**: dexllm#32 took 858 and dexllm#80 took 558. What remains is catalogued, with its baseline and its fork point, in
 [dexkit-vendor-divergences.md](dexkit-vendor-divergences.md) — 136 vendored files,
 125 byte-identical to upstream, 11 modified, 0 added.
 

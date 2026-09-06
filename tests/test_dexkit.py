@@ -71,7 +71,7 @@ _CONST_STRING_RE = re.compile(
 
 
 def _unescape_smali(s):
-    """Invert EscapeSmaliString (dex_item.cpp) — \\\\ \\" \\n \\r \\t \\xNN."""
+    """Invert EscapeSmaliString (native/core_ext/smali_render.cpp, dexllm#80) — \\\\ \\" \\n \\r \\t \\xNN."""
     out, i = [], 0
     while i < len(s):
         c = s[i]

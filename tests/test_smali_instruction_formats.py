@@ -31,7 +31,12 @@ _TABLE = (
     REPO_ROOT
     / "vendor/dexkit_core/Core/third_party/slicer/export/slicer/dex_instruction_list.h"
 )
-_DEX_ITEM = REPO_ROOT / "vendor/dexkit_core/Core/dexkit/dex_item.cpp"
+# The renderer LEFT the vendored tree in dexllm#80 -- it was 560 lines of dexllm
+# code sitting in `dex_item.cpp` for no reason but that it was written there
+# first (divergence D12, treatment R, now retired). These three source-derived
+# audits failed LOUDLY on the move ("substring not found") rather than
+# auditing an empty set, which is what they were built to do.
+_RENDERER = REPO_ROOT / "native/core_ext/smali_render.cpp"
 
 _FIXTURES = ("invoke-polymorphic.dex", "method_handles.dex", "invoke-custom.dex")
 # Every committed sample. The three above are the POLYMORPHIC carriers, which the
@@ -67,7 +72,7 @@ def _formats_named_opcodes_use() -> set[str]:
 
 
 def _formats_the_emitter_handles() -> set[str]:
-    src = _strip_comments(_DEX_ITEM.read_text())
+    src = _strip_comments(_RENDERER.read_text())
     i = src.index("switch (fmt) {")
     j = src.index("return o.str();", i)
     return set(re.findall(r"case k(\w+):", src[i:j]))
@@ -461,7 +466,7 @@ _ROW_IDX = re.compile(
 
 
 def _formats_that_call_emit_index() -> set[str]:
-    src = _strip_comments(_DEX_ITEM.read_text())
+    src = _strip_comments(_RENDERER.read_text())
     i = src.index("switch (fmt) {")
     j = src.index("return o.str();", i)
     body = src[i:j]
@@ -489,7 +494,7 @@ def _index_kinds_named_opcodes_carry(formats: set[str]) -> set[str]:
 
 
 def _index_kinds_the_emitter_handles() -> set[str]:
-    src = _strip_comments(_DEX_ITEM.read_text())
+    src = _strip_comments(_RENDERER.read_text())
     i = src.index("auto emit_index = [&](uint32_t v) {")
     j = src.index("switch (fmt) {", i)
     return set(re.findall(r"case (kIndex\w+):", src[i:j]))
