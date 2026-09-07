@@ -31,15 +31,23 @@
 # or, when you have a reason to accept the risk (a tiny input, a tool you have
 # already bounded), re-run the SAME command prefixed with UNCAPPED=1.
 #
-# SCOPE — deliberately narrow, so it does not cry wolf:
-#   * Only binaries OUTSIDE this repo. Our own build/ artefacts (ctest, the
-#     parity suites, the built .so) pass untouched.
-#   * A third-party build output (…/target/{release,debug}/…) or a name on the
-#     known-heavy list.
+# SCOPE — deliberately narrow, because a gate that cries wolf gets bypassed on
+# reflex, which is the failure mode this file exists to prevent:
+#   * COMMAND POSITION only. Naming a tool is not running it: `cd ~/x/dex-decompiler`,
+#     `grep dex-decompile docs/`, `wc -l */dex-decompile*` and a report that merely
+#     mentions it all pass. (Learned the hard way -- the first cut matched the name
+#     anywhere and fired on a `cd`, then on the patch that was fixing it.)
+#   * HEREDOC BODIES ARE STRIPPED before scanning, since a Python/shell heredoc
+#     routinely contains these words as data.
+#   * Only binaries OUTSIDE this repo. Our own build/ artefacts (ctest, the parity
+#     suites, the built .so) pass untouched.
 #   * Anything already wrapped in capped.sh / systemd-run / ulimit passes.
-# It will NOT catch a heavy tool invoked by some name it has never seen. That is
-# a real limit, stated rather than papered over: widen KNOWN_HEAVY when one turns
-# up, and prefer capped.sh by default for anything you did not build here.
+#
+# KNOWN LIMITS, stated rather than papered over: it cannot catch a heavy tool
+# under a name it has never seen (widen KNOWN_HEAVY on discovery, and prefer
+# capped.sh by default for anything you did not build here), and it does not
+# parse shell -- a sufficiently exotic invocation (eval, a variable holding the
+# path) slips through. It is a speed bump on the common case, not a sandbox.
 set -u
 
 cmd="$(jq -r '.tool_input.command // empty' 2>/dev/null || true)"
@@ -53,19 +61,46 @@ root="${CLAUDE_PROJECT_DIR:-.}"
 # Tools known to be memory-unsafe or simply not ours. Add on discovery.
 KNOWN_HEAVY='dex-decompile|dex-decompiler|yara-droid|axml-parser'
 
-hit=""
-# (a) a third-party Cargo/Bazel-style build output that is NOT under this repo
-while read -r tok; do
-    [[ -z "$tok" ]] && continue
-    case "$tok" in
-        "$root"/*) continue ;;                      # our own tree — fine
-        */target/release/*|*/target/debug/*) hit="$tok"; break ;;
-    esac
-done < <(grep -oE '[~/][^[:space:]"'"'"']*/target/(release|debug)/[^[:space:]"'"'"']+' <<<"$cmd" || true)
+# --- Strip heredoc bodies. `cmd <<'EOF' … EOF` carries arbitrary text that is
+# data, not commands; scanning it produced two false positives in three minutes.
+stripped="$(awk '
+    BEGIN { skip = 0 }
+    skip { if ($0 ~ ("^[[:space:]]*" term "[[:space:]]*$")) skip = 0; next }
+    {
+        line = $0
+        if (match(line, /<<-?[[:space:]]*['"'"'"]?[A-Za-z_][A-Za-z0-9_]*['"'"'"]?/)) {
+            t = substr(line, RSTART, RLENGTH)
+            gsub(/^<<-?[[:space:]]*/, "", t); gsub(/['"'"'"]/, "", t)
+            term = t; skip = 1
+        }
+        print line
+    }
+' <<<"$cmd")"
 
-# (b) a known-heavy tool by name, wherever it came from
-[[ -z "$hit" ]] && hit="$(grep -oE "(^|[[:space:]/])($KNOWN_HEAVY)([[:space:]]|$)" <<<"$cmd" \
-                          | head -1 | tr -d ' ' || true)"
+# --- Blank out QUOTED RUNS. A quoted string is data: `grep "dex-decompile" docs/`
+# and `pgrep -af "bench.sh|dex-decompile"` are not invocations, and the second one
+# also hides a `|` that would otherwise be split as an operator. Cost, stated: a
+# tool genuinely invoked as `"dex-decompile" …` slips through -- nobody writes that,
+# and this is a speed bump rather than a sandbox.
+stripped="$(printf '%s\n' "$stripped" | sed -E -e 's/"[^"]*"/__Q__/g' -e "s/'[^']*'/__Q__/g")"
+
+# --- COMMAND POSITION only: split into segments, drop leading env assignments
+# and wrapper words, and look at the word that would actually be EXECUTED.
+hit=""
+while IFS= read -r seg; do
+    [[ -n "$hit" ]] && break
+    while [[ "$seg" =~ ^[[:space:]]*([A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*|time|nohup|exec|command|sudo|env|xargs)[[:space:]]+ ]]; do
+        seg="${seg#"${BASH_REMATCH[0]}"}"
+    done
+    read -r word _ <<<"$seg" || true
+    [[ -z "$word" ]] && continue
+    word="${word%\"}"; word="${word#\"}"; word="${word#\'}"; word="${word%\'}"
+    case "$word" in
+        "$root"/*)  : ;;                                  # our own tree — fine
+        */target/release/*|*/target/debug/*) hit="$word" ;;
+    esac
+    if [[ -z "$hit" && "${word##*/}" =~ ^($KNOWN_HEAVY)$ ]]; then hit="$word"; fi
+done < <(printf '%s\n' "$stripped" | sed -E 's/(\|\||&&|\||;)/\n/g')
 
 [[ -z "$hit" ]] && exit 0
 
