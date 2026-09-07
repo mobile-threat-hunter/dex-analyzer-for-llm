@@ -8618,13 +8618,23 @@ Out of memory: Killed process 1788679 (dex-decompile)
 app-gnome-code-13641.scope: A process of this unit has been killed by the OOM killer.
 ```
 
-It had been launched from the VS Code integrated terminal, so it lived in VS
-Code's **cgroup scope** — and systemd-oomd kills the SCOPE, not the process. VS
-Code went down with it, taking the session and every background task; that is
-why four tasks, including an idle one, died at the same second. A third-party
-analyser is untrusted input for MEMORY as much as for anything else, so give it
-its own scope with a hard ceiling (`MemoryMax`, `MemorySwapMax=0`) and a runaway
-dies alone.
+**systemd-oomd was NOT involved** — its unit log is empty; the first line means
+oomd's own allocation is what tripped the KERNEL's global OOM killer, which then
+picked the correct victim and killed **only** `dex-decompile`. VS Code was not
+killed either: its main process survived and logged the aftermath. What died is
+its **ptyHost** (`No ptyHost heartbeat after 6 seconds` → `terminated
+unexpectedly`), and every process in the integrated terminal went with it — which
+is why four tasks, including an idle one, died at the same second.
+
+**So the defect was the cgroup TOPOLOGY, not the killer's policy**, and tuning
+systemd-oomd would have made it worse: oomd kills a whole **cgroup**, and the
+runaway was running inside `app-gnome-code-<pid>.scope`, i.e. the editor's own
+scope — so an oomd that did fire would have killed VS Code deliberately, where
+the kernel killed just the runaway. A third-party analyser is untrusted input for
+MEMORY as much as for anything else, so give it **its own scope** with a hard
+ceiling (`MemoryMax`, `MemorySwapMax=0`) and a runaway dies alone. The kernel log
+confirms the fix works: a capped run reports
+`constraint=CONSTRAINT_MEMCG, oom_memcg=…/capped-*.scope`, i.e. contained.
 
 **This is ENFORCED, not merely written here** — a rule I have to remember is a
 rule I already forgot once. `.claude/uncapped-analyser-check.sh` is a

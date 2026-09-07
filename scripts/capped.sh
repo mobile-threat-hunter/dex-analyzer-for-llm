@@ -4,10 +4,17 @@
 # Why. On 2026-09-06 `dex-decompile` (androguard/dex-decompiler, under
 # evaluation) reached **RSS 119 GB / virt 161 GB** on one APK -- essentially all
 # of a 123 GB machine. It had been launched from the VS Code integrated
-# terminal, so it lived in `app-gnome-code-<pid>.scope`, and systemd-oomd kills
-# the whole **cgroup scope**, not the one process: VS Code went down with it,
-# taking the session and every background task. The kernel log is unambiguous
-# (`task=dex-decompile ... task_memcg=.../app-gnome-code-13641.scope`).
+# terminal, so it SHARED A CGROUP with the editor: `app-gnome-code-<pid>.scope`.
+# The KERNEL's global OOM killer fired -- systemd-oomd never acted, its unit log
+# is empty -- and correctly killed only dex-decompile; but VS Code's ptyHost
+# missed its heartbeat under the pressure and died, taking the terminal and every
+# process in it.
+#
+# Tuning systemd-oomd would have made that WORSE: oomd kills a whole CGROUP, and
+# the runaway sat inside the editor's own scope. The defect is the TOPOLOGY, so
+# the fix is to give the tool a scope of its own -- confirmed in the kernel log,
+# where a capped run reports `constraint=CONSTRAINT_MEMCG,
+# oom_memcg=.../capped-*.scope`, i.e. contained.
 #
 # A third-party analyser is untrusted input for MEMORY as much as for anything
 # else. Give it its own scope with a hard ceiling so a runaway dies alone.

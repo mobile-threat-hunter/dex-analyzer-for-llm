@@ -5,10 +5,12 @@
 #
 # On 2026-09-06 `dex-decompile` (androguard/dex-decompiler, under evaluation)
 # reached RSS 119 GB / virt 161 GB on ONE 4.6 MB APK, on a 123 GB machine. It had
-# been launched from the VS Code integrated terminal, so it lived in VS Code's
-# cgroup SCOPE — and systemd-oomd kills the scope, not the process. VS Code went
-# down with it, taking the session and every background task, which is why an
-# IDLE task died at the same second. The kernel log names it exactly:
+# been launched from the VS Code integrated terminal, so it SHARED A CGROUP with
+# the editor. The KERNEL's global OOM killer fired -- systemd-oomd never acted --
+# and killed only dex-decompile; but VS Code's ptyHost died under the pressure,
+# taking the terminal and every process in it, which is why an IDLE task died at
+# the same second. Tuning oomd would have been WORSE: it kills a whole CGROUP,
+# and the runaway sat in the editor's own scope. The kernel log:
 #
 #   Out of memory: Killed process 1788679 (dex-decompile)
 #     total-vm:161238004kB  anon-rss:119269648kB
@@ -71,10 +73,10 @@ done < <(grep -oE '[~/][^[:space:]"'"'"']*/target/(release|debug)/[^[:space:]"'"
     echo "🧠 Uncapped-analyser gate — this runs a THIRD-PARTY analyser with no"
     echo "   memory ceiling: ${hit}"
     echo
-    echo "   One of these reached RSS 119 GB on a 4.6 MB APK and systemd-oomd"
-    echo "   killed VS Code's whole cgroup scope with it — the session and every"
-    echo "   background task died together. A third-party tool is untrusted input"
-    echo "   for MEMORY as much as for correctness."
+    echo "   One of these reached RSS 119 GB on a 4.6 MB APK. It shared a cgroup"
+    echo "   with the editor, whose ptyHost then died under the pressure and took"
+    echo "   the terminal and every task in it. A third-party tool is untrusted"
+    echo "   input for MEMORY as much as for correctness."
     echo
     echo "   Wrap it:"
     echo "       scripts/capped.sh 8G <tool> --args"
