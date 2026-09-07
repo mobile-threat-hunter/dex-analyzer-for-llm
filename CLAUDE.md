@@ -8626,6 +8626,18 @@ analyser is untrusted input for MEMORY as much as for anything else, so give it
 its own scope with a hard ceiling (`MemoryMax`, `MemorySwapMax=0`) and a runaway
 dies alone.
 
+**This is ENFORCED, not merely written here** — a rule I have to remember is a
+rule I already forgot once. `.claude/uncapped-analyser-check.sh` is a
+`PreToolUse(Bash)` gate in the same idiom as the docs and review gates: it blocks
+a command that runs a binary from a third-party build output (`…/target/release/…`
+outside this repo) or a name on its known-heavy list, unless the command is
+already wrapped in `capped.sh` / `systemd-run` / `ulimit`, or you re-run it
+prefixed with `UNCAPPED=1`. Our own `build/` artefacts, `cargo build`, pytest and
+ctest pass untouched. Its limit is stated in the file rather than papered over:
+it cannot catch a heavy tool under a name it has never seen, so widen
+`KNOWN_HEAVY` when one turns up and prefer `capped.sh` by default for anything
+you did not build here.
+
 **Two things that are worth doing but were NOT the cause, and were briefly
 recorded as if they were.** `/tmp` is a tmpfs whose pages the kernel cannot
 reclaim, and it held **6.8 GB** — nine finished reviewer `cp -a` copies at

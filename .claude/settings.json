@@ -25,6 +25,11 @@
         "hooks": [
           {
             "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR/.claude/uncapped-analyser-check.sh\"",
+            "statusMessage": "Uncapped-analyser gate (wrap third-party tools in scripts/capped.sh)"
+          },
+          {
+            "type": "command",
             "command": "\"$CLAUDE_PROJECT_DIR/.claude/docs-precommit-check.sh\"",
             "statusMessage": "Docs gate (review docs/*.md before commit/push)"
           },
@@ -42,7 +47,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "jq -r '.tool_input.file_path // empty' | grep -qE '(/vendor/dexkit_core/Core/|/native/(binding|dad_cpp|core_ext)/).*\\.(cpp|cc|h|hpp)$' && echo '⚠ DexKit C++ source modified — run /dexkit-build before testing or sweeping. The currently-installed .so is now stale.' || true"
+            "command": "jq -r '.tool_input.file_path // empty' | grep -qE '(/vendor/dexkit_core/Core/|/native/(binding|dad_cpp|core_ext)/).*\\.(cpp|cc|h|hpp)$' && echo '\u26a0 DexKit C++ source modified \u2014 run /dexkit-build before testing or sweeping. The currently-installed .so is now stale.' || true"
           },
           {
             "type": "command",
