@@ -8673,7 +8673,11 @@ count stopped being comparable
 `journalctl -k --since "6 hours ago"`, found nothing, and reasoned from the
 absence — while having computed, in the same investigation, that the session had
 died **12 hours** earlier. The record was there the whole time. A negative result
-is only ever as strong as the window it was taken in. The helper also EXCLUDES
+is only ever as strong as the window it was taken in.
+
+The tool that did it was under evaluation, and that evaluation — what role it can
+play here, if any — is written up on its own in
+[docs/rust-decompiler-evaluation.md](docs/rust-decompiler-evaluation.md). The helper also EXCLUDES
 `build/` and `.venv/` (59 MB instead of 500) — not as an optimisation but because
 a copied `CMakeCache.txt` still points `CMAKE_HOME_DIRECTORY` at the ORIGINAL and
 copied `.venv` shebangs still address it, so `pip install -e .` from the copy
