@@ -90,6 +90,7 @@ bool DvMethod::BuildProcessedGraph() {
         int reg = start + num_param;
         const std::string key = "v" + std::to_string(reg);
         vmap_[key] = std::make_shared<Param>(key, ptype);
+        declared_params_[key] = ptype;      // dexllm#86 — the DECLARED type
         lparams_.push_back(reg);
         num_param += static_cast<int>(GetTypeSize(ptype));
     }
@@ -140,7 +141,13 @@ bool DvMethod::BuildProcessedGraph() {
     }
     // Beyond-DAD: re-type `<init>` constructor results from the now-finalized
     // base (split_variables can read a stale base for them — version order).
-    FixInitResultTypes(*graph_, m.ret_type);
+    // dexllm#86 — `declared_params_` is recorded where the `Param`s are built,
+    // so the register numbering (the `this` slot, `GetTypeSize` for a wide
+    // parameter) has ONE definition.  A version that IS a parameter has no
+    // entry in `defs_of` for its incoming value, so the boolean def-anchor
+    // cannot see it, and without this the pass could re-type an `int`
+    // parameter and emit `p1 = true` under an `int p1` signature.
+    FixInitResultTypes(*graph_, m.ret_type, declared_params_);
     if (mat_this) {
         graph_->number_ins();
         chains = BuildDefUse(*graph_, lparam_keys);

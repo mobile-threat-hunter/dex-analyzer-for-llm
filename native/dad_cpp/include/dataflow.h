@@ -167,7 +167,9 @@ void RegisterPropagation(Graph& graph, ChainMap& du, ChainMap& ud);
 // §3) uses it as a fallback-tier reference type for a `return v` position. It
 // defaults to empty (no return-position source) for callers that lack it (the
 // unit-parity tests), which is behaviour-neutral (`is_ref("")` is false).
-void FixInitResultTypes(Graph& graph, const std::string& ret_type = {});
+void FixInitResultTypes(
+    Graph& graph, const std::string& ret_type = {},
+    const std::unordered_map<std::string, std::string>& declared_params = {});
 
 // Beyond-DAD: materialise a reused `this` register as a fresh local.
 //

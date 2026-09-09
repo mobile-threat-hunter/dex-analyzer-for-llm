@@ -427,6 +427,46 @@ pass risks the whole-corpus output. So:
   to be derived from the array variable's (possibly-conflated) type — fragile,
   low payoff, deferred. Genuine `has_ref && has_prim` merges still need a version
   split (Phase 3).
+  **Phase 2d — the `Z` return type (dexllm#86, 2026-09).** Phase 2c made the
+  return a source and 2a/2b built the channel it travels on — but that channel
+  is REFERENCE-only by construction: `record()` opens with
+  `if (vid.empty() || !is_ref(t)) return;`, so a `Z` return type was dropped
+  before it was stored. The whole use-bound apparatus existed and could not
+  carry a boolean.
+
+  It also could not have been opened by relaxing that one gate, because the
+  SECOND guard's premise inverts. `has_prim_producer` BLOCKS on a nonzero int
+  constant, which is exactly right for a reference — an int producer proves the
+  value is not one — and exactly backwards for a boolean, since Dalvik has no
+  boolean type and `const/4 v,#1` IS how a `true` is written. So `Z` needs a
+  channel of its own with the opposite proof: `bool_ret_vids` +
+  `all_defs_boolean_valued`, where a 0/1 constant is evidence FOR rather than
+  against.
+
+  Two findings from building it are worth carrying into Phase 3. **A partial
+  re-type is not a partial fix** — typing only the RETURNED member of a
+  move-connected group trades `int v = flag` for `boolean v = intVar`, measured
+  at +16 lines with a conservative resolver and +147 with a cycle-resolving one;
+  the group has to move together, which is why the pass ends in a backwards
+  propagation along move edges rather than at the seed. And the corpus's
+  dominant shape is `equals`, where two registers **move into each other**, so
+  the move-CYCLE handling `gt()` already needed (back edge NEUTRAL, plus a
+  ground-producer requirement so a pure move loop cannot satisfy an
+  all-quantifier vacuously) was needed here for the same reason and in the same
+  form. And the position list has to come from the LANGUAGE, not from the guards
+  that already exist: two adversarial rounds each found an int-requiring
+  position in no guard set — an invoke argument at a primitive parameter, a
+  field-store value, an array-store value, and then a `filled-new-array`
+  ELEMENT — each of which turned valid Java INVALID until `prim_use_vids`
+  recorded it.
+
+  Measured: `boolean` methods returning an `int` local **8,818 → 941** across 46
+  sources, counting a returned local declared `int`/`Object`/`byte`/`short`/
+  `char` — a reviewer's wider predicate (any non-boolean declaration) gives
+  8,863 → 986 on the same builds. Both agree on what the claim rests on: the
+  DELTA is **7,877** either way, and the sibling axis moves 654 → 8,531, so the
+  sites conserve exactly. Every other invalid-Java axis is flat.
+
 - **Phase 3 — split on conflict.** Implement version splitting for genuinely
   conflated registers (the residual PR #12 leaves). This touches variable
   numbering + def/use rewiring — the highest-risk piece; gate behind the sound

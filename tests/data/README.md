@@ -17,6 +17,7 @@ narrowed to the sample here.
 | `const-method-handle.dex` | 2,524 B | the only `const-method-type` anywhere in reach |
 | `multidex-container.dex` | 1,468 B | the only **v41 CONTAINER** in reach — 2 slices sharing one data section |
 | `permissive-tls.dex` | 4,872 B | 13 classes: 4 provably permissive TLS components, 2 that check, 3 duck-typing traps, a sub-interface and its invisible implementor, 2 installers |
+| `bool-return.dex` | 2,236 B | 16 methods, one per branch of the dexllm#86 decision: three shapes the `Z` return type must FIX, two controls with identical bytecode and a different return type, and craft bases that each trip exactly ONE guard (an ordered compare, an array index, an array-creation size, a non-0/1 constant, an arithmetic def, an `iput` and an `sput` value, an array-store value, a wide local) |
 | `literal-escapes.dex` | 1,448 B | 16 string constants, one per branch of the Java literal-escaping rule, each rendered BOTH as a `static_values` initializer and as a `const-string` |
 
 `multidex.apk` is deliberately the WORST case, not a convenient one: it is the
@@ -152,9 +153,9 @@ cross-reference — which is what lets one test state the issue:
 `summarize_capabilities` reports the app supplies its own trust decision, and only
 the detector says which decisions accept everything.
 
-It was the first fixture here that was AUTHORED rather than copied (`literal-escapes.dex`
-is the second), so its source is committed beside it (`permissive-tls.java`) and it is
-re-derivable:
+It was the first fixture here that was AUTHORED rather than copied
+(`literal-escapes.dex` is the second, `bool-return.dex` the third), so its source is
+committed beside it (`permissive-tls.java`) and it is re-derivable:
 
 ```
 javac -source 8 -target 8 -d cls permissive-tls.java     # javac 17.0.17
@@ -169,6 +170,21 @@ cp literal-escapes.java LiteralEscapes.java
 javac -encoding UTF-8 -d cls LiteralEscapes.java      # javac 17.0.17
 d8 --release --min-api 26 --output out cls/LiteralEscapes.class
 ```
+
+`bool-return.dex` likewise (the class is `public`, so the source is copied to
+`BoolReturn.java` first):
+
+```
+cp bool-return.java BoolReturn.java
+javac -d cls BoolReturn.java                          # javac 17.0.17
+d8 --release --min-api 26 --output out cls/BoolReturn.class
+```
+
+Its shape was decided by the MUTATION MATRIX, not up front: three of its methods
+exist because a mutant survived, and each time the cause was the same — a craft
+base refused by TWO guards lets either mutant live, so `cmpUsed`, `newArraySize`
+and `fieldStoreInstance` were added to isolate `int_use_vids`,
+`int_required_vids` and the `iput` arm of `prim_use_vids` respectively.
 
 d8 is not byte-reproducible across versions, so the committed bytes are the
 artefact and the source is the statement of intent — which is why every guard

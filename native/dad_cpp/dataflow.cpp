@@ -484,7 +484,9 @@ static void FixAllocationResultTypes(Graph& graph) {
 // reference class (prim→ref mirror), or a too-narrow primitive → the def width.
 // Two-phase classify-then-apply; every re-type is def-anchored and, where it
 // could be ambiguous, use-corroborated. See docs/type-inference-design.md.
-static void InferCascadeTypes(Graph& graph, const std::string& ret_type) {
+static void InferCascadeTypes(
+    Graph& graph, const std::string& ret_type,
+    const std::unordered_map<std::string, std::string>& declared_params) {
     auto is_ref = [](const std::string& t) {
         return !t.empty() && (t.front() == 'L' || t.front() == '[');
     };
@@ -546,6 +548,36 @@ static void InferCascadeTypes(Graph& graph, const std::string& ret_type) {
     // (once defs_of is complete): if one operand is a nonzero int constant,
     // the other is proven a primitive and joins int_use_vids.
     std::vector<std::pair<std::string, std::string>> eqne_pairs;
+    // dexllm#86 — vids RETURNED by a method whose declared return type is `Z`.
+    // A use-bound BOOLEAN source, kept SEPARATE from the reference machinery
+    // below (`arg_type`/`store_type`, which `record` gates on `is_ref`) because
+    // the two need OPPOSITE soundness arguments — see the `Z` branch in the
+    // classification loop.
+    std::unordered_set<std::string> bool_ret_vids;
+    // dexllm#86 — vids used where a NON-BOOLEAN PRIMITIVE is required: an invoke
+    // argument at an `I`/`J`/`F`/`D`/`B`/`S`/`C` parameter, the value stored by
+    // an `iput`/`sput` into such a field, and the value stored by a non-boolean
+    // `aput`. `int_use_vids` covers arithmetic, ordered comparison and array
+    // INDEXING and does NOT reach any of these — `note_obj` records an invoke
+    // argument only when the parameter is a reference, and `record` drops a
+    // non-reference field type on its first line — so a version used ONLY this
+    // way looked unconstrained. **An adversarial review found that on unmodified
+    // corpus input**: `AppCompatReceiveContentHelper`'s flag is `return`ed from a
+    // `Z` method AND passed to `Builder.setFlags(I)`, so re-typing it turned
+    // valid Java into `setFlags(boolean)`.
+    //
+    // A SEPARATE set, not a widening of `int_use_vids`, because that one is read
+    // by the cascade / mirror / prim→WIDER branches: widening it would change
+    // their verdicts and need their own a/b. This set is consulted by the `Z`
+    // branch and its propagation and by nothing else.
+    //
+    // `Z` is excluded on purpose — passing a boolean at a `Z` parameter or
+    // storing it into a `Z` field is exactly correct and must not block.
+    std::unordered_set<std::string> prim_use_vids;
+    auto is_prim_nonbool = [](const std::string& t) {
+        return t.size() == 1 &&
+               std::string("IJBSCFD").find(t[0]) != std::string::npos;
+    };
     // USE-BOUND reference type (design §3): vid → the reference type a USE pins
     // on it. Unlike `object_vids` (a boolean object-use flag) this carries the
     // TYPE, so a primitive-typed version with NO genuine primitive producer (its
@@ -557,9 +589,12 @@ static void InferCascadeTypes(Graph& graph, const std::string& ret_type) {
     // FIELD STORE (`obj.f = v` / `Cls.f = v` → the field type), and a THROW
     // (`throw v` → Throwable). `ref_use_conflict` holds vids pinned at ≥2
     // DIFFERENT types (kept exact-match-conservative: skip on disagreement
-    // rather than compute a least-upper-bound). Return / array-store are NOT
-    // sources yet — the method return type is not on the graph and the array
-    // element type needs the array's type (deferred, design §3 residual).
+    // rather than compute a least-upper-bound). A RETURN is a source too
+    // (Phase 2c — `ret_type` is threaded in from the method meta), but only
+    // for a REFERENCE return type: `record` drops everything else, which is
+    // why a `Z` return needs the separate channel below (dexllm#86).
+    // ARRAY-STORE is still NOT a source — the element type needs the array's
+    // own type (deferred, design §3 residual).
     // Two TIERS, so a lower-priority source can never disable a higher one by
     // introducing a spurious conflict. PRIMARY = a reference ARGUMENT (a param
     // type is exact and reliable). FALLBACK = a field store / throw (used only
@@ -615,8 +650,12 @@ static void InferCascadeTypes(Graph& graph, const std::string& ret_type) {
             const auto& a = inv->args();
             const auto& pt = inv->ptype();
             if (a.size() == pt.size())
-                for (size_t i = 0; i < a.size(); ++i)
-                    if (!a[i].empty() && is_ref(pt[i])) note_ref_arg(a[i], pt[i]);
+                for (size_t i = 0; i < a.size(); ++i) {
+                    if (a[i].empty()) continue;
+                    if (is_ref(pt[i])) note_ref_arg(a[i], pt[i]);
+                    // dexllm#86 — a NON-BOOLEAN primitive parameter position.
+                    else if (is_prim_nonbool(pt[i])) prim_use_vids.insert(a[i]);
+                }
         } else if (auto* ie = dynamic_cast<InstanceExpression*>(f)) {
             if (!ie->arg_id().empty()) object_vids.insert(ie->arg_id());
         } else if (auto* ii = dynamic_cast<InstanceInstruction*>(f)) {
@@ -624,9 +663,13 @@ static void InferCascadeTypes(Graph& graph, const std::string& ret_type) {
             // pinned (fallback tier) to the field's declared type (atype).
             if (!ii->lhs_id().empty()) object_vids.insert(ii->lhs_id());
             note_ref_store(ii->rhs_id(), ii->atype());
+            if (!ii->rhs_id().empty() && is_prim_nonbool(ii->atype()))
+                prim_use_vids.insert(ii->rhs_id());   // dexllm#86
         } else if (auto* si = dynamic_cast<StaticInstruction*>(f)) {
             // sput `Cls.field = rhs`: the stored value is pinned to the field type.
             note_ref_store(si->rhs_id(), si->ftype());
+            if (!si->rhs_id().empty() && is_prim_nonbool(si->ftype()))
+                prim_use_vids.insert(si->rhs_id());   // dexllm#86
         } else if (auto* te = dynamic_cast<ThrowExpression*>(f)) {
             // `throw v`: v is a Throwable in verified Dalvik (only a reference is
             // throwable). Cast to ThrowExpression SPECIFICALLY — a sibling
@@ -639,7 +682,16 @@ static void InferCascadeTypes(Graph& graph, const std::string& ret_type) {
             // (fallback tier — a return type can be a supertype of the value, so
             // a more specific ref-arg use wins). `ret_type` is the Dalvik
             // descriptor threaded in from the method meta.
-            if (ret->arg()) note_ref_store(*ret->arg(), ret_type);
+            if (ret->arg()) {
+                note_ref_store(*ret->arg(), ret_type);
+                // dexllm#86 — `record` above keeps only a REFERENCE type, so a
+                // `Z` return type was dropped and the returned flag kept DAD's
+                // `int`, giving the uncompilable `boolean m(){ int v=1; …
+                // return v; }`. Record it on its own channel; the branch that
+                // consumes it carries the boolean-specific proof.
+                if (ret_type == "Z" && !ret->arg()->empty())
+                    bool_ret_vids.insert(*ret->arg());
+            }
         }
     };
     auto note_int = [&](IRForm* f) {
@@ -664,6 +716,39 @@ static void InferCascadeTypes(Graph& graph, const std::string& ret_type) {
             add(as->index_id());
             if (!as->index_id().empty())
                 int_required_vids.insert(as->index_id());
+            // dexllm#86 — the STORED VALUE, which the index rule above does not
+            // touch. An ArrayStoreInstruction carries the opcode's CATEGORY
+            // marker as its type: "" (aput, int/float), "W", "B", "C", "S" are
+            // non-boolean primitives; "Z" is a boolean array (correct, skip) and
+            // "O" is an object (a different guard's business).
+            if (!as->rhs_id().empty()) {
+                const std::string& m = as->get_type();
+                if (m.empty() || m == "W" || m == "B" || m == "C" || m == "S")
+                    prim_use_vids.insert(as->rhs_id());
+            }
+        } else if (auto* fa = dynamic_cast<FilledArrayExpression*>(f)) {
+            // dexllm#86 — `new int[]{v, …}`.  Each ELEMENT sits at the array's
+            // element type, which is the FOURTH int-requiring position and the
+            // one a delta review found still open after the other three were
+            // closed: `new int[]{boolean}` does not compile, and javac + d8
+            // produce the shape without any crafting (`sink(new int[]{ b ? 1 :
+            // 0 })` folds the ternary onto the flag's own register).  A
+            // `FilledArrayExpression` carries the ARRAY descriptor as its type,
+            // so the element type is what follows the '['.
+            //
+            // STATED LIMIT — the `/range` form is NOT covered, and the reason is
+            // one level down: `FilledNewArrayRange` is bug-faithful to DAD and
+            // hands the expression only `{cccc, nnnn}`, so `args()` holds TWO
+            // registers whatever the real element count is. The middle elements
+            // are not in the IR at all, so no guard here can see them — such a
+            // method's rendering is already lossy, with or without this pass.
+            // Measured: 45 `/range` sites corpus-wide and **0** of them inside a
+            // `)Z` method, so the residual is 0-incidence rather than latent.
+            const std::string& at = fa->get_type();
+            if (at.size() >= 2 && at[0] == '[' &&
+                is_prim_nonbool(at.substr(1)))
+                for (const std::string& e : fa->args())
+                    if (!e.empty()) prim_use_vids.insert(e);
         } else if (auto* na = dynamic_cast<NewArrayExpression*>(f)) {
             // `new int[v]` — the CREATION size must be an int (a widened
             // long/float/double there is invalid). (The def-side new-array
@@ -1066,6 +1151,134 @@ static void InferCascadeTypes(Graph& graph, const std::string& ret_type) {
         }
         return true;
     };
+    // The narrow-integer family — the widths a `boolean` shares its storage
+    // with. J/F/D are excluded so a wide value can never be narrowed to `Z`.
+    auto is_narrow_int = [](const std::string& t) {
+        return t.size() == 1 &&
+               std::string("ZBSCI").find(t[0]) != std::string::npos;
+    };
+    // dexllm#86 support — is an rhs form provably BOOLEAN-VALUED?
+    //
+    // The soundness argument INVERTS relative to `has_prim_producer` above, and
+    // that inversion is the whole defect. For a REFERENCE re-type a nonzero int
+    // constant is proof the value is NOT a reference, so that walk BLOCKS on
+    // one. Dalvik has no boolean type — `const/4 v,#1` is exactly how a `true`
+    // is written — so the very same constant is proof FOR the boolean. Only 0
+    // and 1 qualify: any other integer is a genuine int that a `Z` return
+    // cannot be reconciled with, and is left alone (no-worse).
+    //
+    // Boolean-valued forms: a narrow-int Constant whose value is 0 or 1, and
+    // any form whose own type is already `Z` (a Z-returning invoke or
+    // field-get). A move is resolved to its source's defs, ALL of which must
+    // qualify (aggregating rather than short-circuiting, symmetric to
+    // `resolve_prim_width`); a move to a PARAM / input with no def qualifies
+    // only if its declared type is `Z`. Everything else — a wider primitive, a
+    // reference, an int outside {0,1}, an unresolvable def — BLOCKS.
+    //
+    // A back edge is NEUTRAL, and a `ground` flag is what makes that safe —
+    // the same pair `gt()` arrived at for move CYCLES, for the same reason and
+    // with the same two halves. A cycle back edge targets an ancestor frame
+    // that already owns that node's defs, so it carries no new ground truth:
+    // re-descending would only re-check what the ancestor is checking. Nothing
+    // can hide behind it, because this is an ALL-quantifier that short-circuits
+    // only on FAILURE — every node reached from the root has its own defs
+    // walked on the path that first reaches it, and the root's own defs are
+    // walked by `all_defs_boolean_valued` itself.
+    //
+    // Blocking the back edge instead was the first cut, and it cost the fix on
+    // the single most common shape in the corpus: `equals` compiles to a pair of
+    // registers that move into EACH OTHER across the branch (`v6 = v5` on one
+    // arm, `v5 = v6` on the other), so 749 of the 752 residual sites were this
+    // and nothing else.
+    //
+    // `ground` is the `!sib_any` half: a PURE move cycle with no producer
+    // anywhere would otherwise satisfy an all-quantifier vacuously — every step
+    // is a move, no step is a counter-example, and the version would be called
+    // boolean on no evidence. At least one CONSTANT 0/1 or `Z`-typed producer
+    // must be reached. (gt() already reports 'M' → has_unknown → `continue` for
+    // that shape, so this is defence in depth, but it makes the resolver answer
+    // for itself rather than lean on a caller's guard.)
+    //
+    // WORK CAP (mirrors pp_budget / gt_budget): the per-path backtracking is
+    // O(2^N) on a crafted nested move-diamond chain. On exhaustion return false
+    // (BLOCK — the conservative bail, so a crafted input loses a fix rather
+    // than gaining a wrong type).
+    size_t bv_budget = 2'000'000;
+    std::function<bool(IRForm*, std::set<std::string>&, bool&)> is_bool_valued =
+        [&](IRForm* r, std::set<std::string>& seen, bool& ground) -> bool {
+            if (bv_budget == 0) return false;         // work cap → conservative
+            --bv_budget;
+            if (!r) return false;                     // unknown → conservative
+            if (r->is_ident()) {                      // move — resolve the source
+                const std::string sid = r->Vid();
+                if (seen.count(sid)) return true;     // back edge → neutral
+                seen.insert(sid);
+                struct Pop { std::set<std::string>& s; const std::string& k;
+                             ~Pop() { s.erase(k); } } pop_{seen, sid};
+                auto it = defs_of.find(sid);
+                if (it == defs_of.end()) {
+                    // A def-less source is a PARAMETER (or an input the graph
+                    // does not define).  Consult the DECLARED type where there
+                    // is one: a `Param`'s own `get_type()` is mutated by a write
+                    // to its register — the same corruption this pass repairs —
+                    // so reading it here would contradict the rule the branch
+                    // above enforces at the root.  A delta review caught that
+                    // this arm said `declared` in its pin and read `get_type()`
+                    // in the code; corpus-neutral, and now they agree.
+                    auto dp = declared_params.find(sid);
+                    const std::string& dt =
+                        dp != declared_params.end() ? dp->second : r->get_type();
+                    if (dt != "Z") return false;
+                    ground = true;
+                    return true;
+                }
+                for (IRForm* d : it->second) {
+                    auto dr = d->get_rhs();
+                    if (dr.empty() || !dr[0]) return false;  // unresolvable → block
+                    if (!is_bool_valued(dr[0].get(), seen, ground)) return false;
+                }
+                return true;
+            }
+            if (auto* c = dynamic_cast<Constant*>(r)) {
+                if (!is_narrow_int(c->get_type())) return false;  // ref/wide const
+                const auto cv = c->get_int_value();
+                if (cv != 0 && cv != 1) return false;
+                ground = true;
+                return true;
+            }
+            if (r->get_type() != "Z") return false;
+            ground = true;
+            return true;
+        };
+    // Is EVERY def of a version provably boolean-valued? The caller skips an
+    // empty def set and an unresolvable def blocks, so this is a genuine
+    // all-quantifier over ground truth — and `ground` keeps it from being
+    // satisfied vacuously by a closure that is nothing but moves.
+    // dexllm#86 — a version that IS a PARAMETER carries an implicit incoming
+    // definition that `defs_of` does not hold, so `all_defs_boolean_valued` walks
+    // only the writes INSIDE the method and cannot see it.  A parameter is
+    // re-typable only when its DECLARED type is already `Z`; the `Param`'s own
+    // `get_type()` is NOT usable, because writing to a param register mutates it
+    // (the same mechanism that corrupts `this`) and that corruption is exactly
+    // what this pass repairs.  An unknown vid — no map, i.e. the unit-parity
+    // callers — is refused, which is the conservative direction.
+    auto declared_param_is_boolean = [&](const std::string& vid,
+                                         IRForm* var) -> bool {
+        if (!dynamic_cast<Param*>(var)) return true;   // not a parameter at all
+        auto it = declared_params.find(vid);
+        return it != declared_params.end() && it->second == "Z";
+    };
+    auto all_defs_boolean_valued = [&](const std::string& vid,
+                                       const std::vector<IRForm*>& dvec) -> bool {
+        bool ground = false;
+        for (IRForm* d : dvec) {
+            auto dr = d->get_rhs();
+            if (dr.empty() || !dr[0]) return false;
+            std::set<std::string> seen{vid};
+            if (!is_bool_valued(dr[0].get(), seen, ground)) return false;
+        }
+        return ground;
+    };
     // Recover the ARRAY type of an array-used version from its def(s): every def
     // must produce an ARRAY (a def rhs whose type starts with '[', incl. a
     // check-cast to an array, a move off an array var, an array-returning
@@ -1101,6 +1314,7 @@ static void InferCascadeTypes(Graph& graph, const std::string& ret_type) {
     // GENUINE conflation (needs a version split) and is left untouched, as
     // is any version with an unresolved ('U'/'M') def.
     std::vector<std::pair<IRForm*, std::string>> retypes;
+    std::vector<std::string> z_seeds;   // dexllm#86 — vids the Z branch re-typed
     for (auto& [vid, dvec] : defs_of) {
         if (dvec.empty()) continue;
         auto vit = dvec[0]->var_map.find(vid);
@@ -1257,6 +1471,63 @@ static void InferCascadeTypes(Graph& graph, const std::string& ret_type) {
             // out (same documented precedent as the other use-corroborated
             // re-types).
             retypes.emplace_back(vit->second.get(), ref_use_type(vid));
+        } else if (cur_prim && cur != "Z" && is_narrow_int(cur) &&
+                   bool_ret_vids.count(vid) &&
+                   !int_use_vids.count(vid) &&
+                   !int_required_vids.count(vid) &&
+                   !prim_use_vids.count(vid) &&
+                   !object_vids.count(vid) &&
+                   !dynamic_cast<ThisParam*>(vit->second.get()) &&
+                   declared_param_is_boolean(vid, vit->second.get()) &&
+                   all_defs_boolean_valued(vid, dvec)) {
+            // USE-BOUND int→Z (dexllm#86) — the RETURN TYPE as a constraint.
+            // Dalvik has no boolean, so every `const*` builds an int-typed
+            // value and DAD's last-write typing leaves a boolean flag declared
+            // `int`; returning it from a `Z` method is uncompilable Java
+            // (`int` → `boolean` has no widening). Measured on the bundled
+            // corpus this is not an occasional slip: 57 of the 60 sites where a
+            // `boolean` method returns a VARIABLE declared it `int`.
+            //
+            // The return position is the proof, exactly as a reference ARGUMENT
+            // is for the mirror branch above: in verified Dalvik `return v` in a
+            // `Z` method requires v to hold a boolean, so a version reaching one
+            // IS a boolean and its `int` type is a register-conflation artifact.
+            // The `record`/`ref_use_type` channel cannot carry this — it is
+            // gated on `is_ref`, by design, because every OTHER use-bound source
+            // pins a reference.
+            //
+            // The anti-conflation guards are needed because a register genuinely
+            // shared between a flag and an int satisfies neither type. THREE
+            // sets, and it takes all three — the first cut had two and an
+            // adversarial review turned valid corpus Java into invalid with the
+            // third missing:
+            //   `int_use_vids`      arithmetic, ordered comparison, array INDEX.
+            //                       `==`/`!=` are correctly excluded, so a plain
+            //                       `if (v != 0)` flag test does NOT block.
+            //   `int_required_vids` array-creation size and `switch` selector —
+            //                       NOT a subset of the above, which is why it
+            //                       is consulted separately.
+            //   `prim_use_vids`     a non-boolean primitive ARGUMENT, field
+            //                       store or array-store VALUE (dexllm#86) —
+            //                       positions neither of the others records.
+            // `object_vids` blocks a version also used as an object, and the
+            // ThisParam exclusion is the same structural belt-and-suspenders the
+            // mirror branch carries (a `this = X` reuse can leave the receiver
+            // primitive-typed, and re-typing it would corrupt the writer's
+            // super-vs-this detection).
+            //
+            // DEF-anchored as well as use-corroborated: EVERY def must be
+            // provably boolean-valued (`all_defs_boolean_valued`), so a version
+            // holding a real int on any path is left. `is_narrow_int(cur)` keeps
+            // a J/F/D version out, so nothing can be narrowed.
+            //
+            // No emitter change is needed and that is the point of fixing it
+            // HERE: with the version typed `Z`, `write_inplace_if_possible`
+            // already renders `= true` / `= false` and the declaration already
+            // renders `boolean v`, in the text AND the AST. Doing it in the
+            // Writer would have been the masking variant.
+            retypes.emplace_back(vit->second.get(), "Z");
+            z_seeds.push_back(vid);
         } else if (cur_prim && !int_required_vids.count(vid)) {
             // prim→WIDER-prim: an `int`-typed version whose value is really a
             // WIDER primitive — `int v = System.currentTimeMillis()` /
@@ -1281,6 +1552,74 @@ static void InferCascadeTypes(Graph& graph, const std::string& ret_type) {
             };
             if (!w.empty() && rank(w) > rank(cur))
                 retypes.emplace_back(vit->second.get(), w);
+        }
+    }
+    // dexllm#86 — PROPAGATE `Z` BACKWARDS along move edges, so a move-connected
+    // group is re-typed TOGETHER.  Typing only the RETURNED member is a partial
+    // answer that trades one invalid line for another: `equals` compiles to two
+    // registers that move into each other, so re-typing just the returned one
+    // gives `boolean v6 = false; … v6 = v5;` with `v5` still `int` — the
+    // `T v = varOfOtherKind` bucket, measured at +16 lines for the def-blocking
+    // variant of the resolver and +147 for the cycle-neutral one.  Both are the
+    // SAME structural flaw, so it is fixed here rather than avoided by keeping
+    // the resolver weak.
+    //
+    // SOUND for the same reason the seed is: if `v6` provably holds a boolean
+    // and its value came from `move v6, v5`, then `v5` held that boolean at the
+    // move.  So a source is re-typed only when it independently satisfies EVERY
+    // guard the seed did — never int-used, never object-used, not `this`, a
+    // narrow non-Z primitive today, and all of its OWN defs boolean-valued.  A
+    // source failing any of them is a genuine conflation and is left, which is
+    // exactly the case the `v = v` line will still show.
+    //
+    // TERMINATES: a version enters `zed` once and is never revisited, so the
+    // worklist is bounded by the number of versions and each is expanded once.
+    // DETERMINISM: `z_seeds` follows `defs_of`, an unordered_map, so the
+    // worklist ORDER varies per process. The resulting SET does not — a source
+    // is re-typed iff it is move-reachable from a seed and passes guards that
+    // read only PRE-mutation state. That holds WHILE `bv_budget` is unexhausted:
+    // the budget is one per-pass counter spent in `defs_of` order, so on
+    // exhaustion WHICH versions were resolved before it ran out is
+    // order-dependent — the same posture as the pre-existing `gt_budget`, and
+    // unreached on every measured input (9 runs x 3 `PYTHONHASHSEED`s give one
+    // digest). A version another branch already
+    // re-typed would be a genuine hazard: two entries for one Variable with
+    // DIFFERENT types, resolved by whichever `retypes` order the run produced.
+    // No branch can currently collide (each requires def shapes this one
+    // excludes), so `already` is defence in depth by POINTER identity, which is
+    // the identity that decides the outcome.
+    {
+        std::unordered_set<const IRForm*> already;
+        for (auto& [var, t] : retypes) already.insert(var);
+        std::unordered_set<std::string> zed(z_seeds.begin(), z_seeds.end());
+        std::vector<std::string> work = z_seeds;
+        while (!work.empty()) {
+            const std::string cur_vid = work.back();
+            work.pop_back();
+            auto dit = defs_of.find(cur_vid);
+            if (dit == defs_of.end()) continue;
+            for (IRForm* d : dit->second) {
+                auto dr = d->get_rhs();
+                if (dr.empty() || !dr[0] || !dr[0]->is_ident()) continue;
+                const std::string sid = dr[0]->Vid();
+                if (sid.empty() || zed.count(sid)) continue;
+                auto sdefs = defs_of.find(sid);
+                if (sdefs == defs_of.end() || sdefs->second.empty()) continue;
+                auto svit = sdefs->second[0]->var_map.find(sid);
+                if (svit == sdefs->second[0]->var_map.end() || !svit->second) continue;
+                const std::string st = svit->second->get_type();
+                if (st == "Z" || !is_narrow_int(st)) continue;
+                if (int_use_vids.count(sid) || int_required_vids.count(sid) ||
+                    prim_use_vids.count(sid) || object_vids.count(sid)) continue;
+                if (dynamic_cast<ThisParam*>(svit->second.get())) continue;
+                if (!declared_param_is_boolean(sid, svit->second.get())) continue;
+                if (already.count(svit->second.get())) continue;
+                if (!all_defs_boolean_valued(sid, sdefs->second)) continue;
+                retypes.emplace_back(svit->second.get(), "Z");
+                already.insert(svit->second.get());
+                zed.insert(sid);
+                work.push_back(sid);
+            }
         }
     }
     for (auto& [var, t] : retypes) var->set_type(t);
@@ -1364,9 +1703,11 @@ static void InferCascadeTypes(Graph& graph, const std::string& ret_type) {
 // (orig_var.type), so a Dalvik register reused across incompatible types
 // leaves its split versions mistyped. This corrects them at the VALUE/version
 // level in two def-anchored passes (docs/type-inference-design.md).
-void FixInitResultTypes(Graph& graph, const std::string& ret_type) {
+void FixInitResultTypes(
+    Graph& graph, const std::string& ret_type,
+    const std::unordered_map<std::string, std::string>& declared_params) {
     FixAllocationResultTypes(graph);  // design §1: allocation ground truth
-    InferCascadeTypes(graph, ret_type);  // design §2/§3: cascade/mirror + use-bound
+    InferCascadeTypes(graph, ret_type, declared_params);  // §2/§3 + use-bound
 }
 
 // Beyond-DAD: see dataflow.h. Materialise a reused receiver register as a local.

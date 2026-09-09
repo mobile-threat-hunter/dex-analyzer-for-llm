@@ -275,6 +275,400 @@ The residual `has_ref && has_prim` genuine merges — a Dalvik register reused a
 
 The largest remaining invalid-Java bucket after the Object+cast work was **`T v = wN` where one of {T, decl-type-of w} is a primitive and the other a reference** (an obfuscated register reused across a prim and a ref, connected by a `move`; census: bundled 108, obf 55) — DAD's last-write typed ONE of the two split versions wrong, e.g. `OnPrepareListViewListener v4 = v1` (v1 is an int index) or `int v3 = v24` (v24 is a View). **These are all int↔reference mismatches, which Java has NO cast for** (`(int) someView` / `(View) intVar` are both invalid and misleading), so the Object+cast model does not apply — the fix is to CORRECT the mistyped version. **The ground truth is the Dalvik move OPCODE**, which the IR was discarding: DAD (and our port's `MoveImpl`) collapsed `move` / `move-wide` / `move-object` into one `MoveExpression`. On verified Dalvik the opcode fixes the moved value's KIND (`move-object` copies a reference, `move` a 32-bit primitive, `move-wide` a 64-bit primitive). **Fix:** thread the opcode kind onto `MoveExpression` (`MoveKind::{Object,Plain,Wide,Unknown}`, set in the [opcode_ins.cpp](native/dad_cpp/opcode_ins.cpp) move handlers; `MoveResultExpression` stays `Unknown` → inert), then a **bounded-fixpoint post-pass in `InferCascadeTypes`** ([dataflow.cpp](native/dad_cpp/dataflow.cpp), run AFTER the cascade/mirror `retypes` are applied so it reads FINAL types) re-types a SINGLE-def move-DEST whose declared type contradicts its move opcode: `move-object` dest declared primitive → the source's reference type; `move`/`move-wide` dest declared reference → the source's primitive type. **ANTI-CONFLATION GUARDS:** the version must NOT also be used as the contradicting kind — a direct use (`object_vids`, which covers receiver/field-owner/ref-arg/return/throw/ref-field-store via `record` / `int_use_vids`) OR a move-SOURCE of the contradicting opcode (`moveobj_src_vids` / `moveprim_src_vids`); a move-object DEST that is also a plain-move SOURCE is a GENUINE prim+ref conflation (no single Java type) and is LEFT (needs a version split). **Kind-consistency is structurally enforced** by reading the source's FINAL type (`is_ref(st)` / `is_prim_desc(st)`) — the original in-loop attempt read the source's PRE-mutation type and a review found it could emit `ref v = primSrc` at a source independently re-typed by the cascade, or leave `int v2 = LFoo v1` at a two-hop `move-object` chain; the post-pass + FIXPOINT closes both (round 1 fixes the first link, round 2 the second). **Termination is guaranteed** by monotonicity — a version's def has ONE fixed opcode kind so it fires AT MOST ONCE (move-object → the →ref branch needs cur_prim, and once flipped cur is a reference; symmetric for →prim) — so a move-cycle re-types nothing (no oscillation); the `round < 32` cap is a crafted-input WORK backstop (real chains are ≤3 links, measured 0 added lines), documented-GIGO on a crafted >32-link chain (deterministic, no crash, no worse than DAD). **This is a root-cause IR/dataflow re-type** (the Variable's type is read by BOTH the text Writer and the AST — verified text/AST agree; `int v4_0 = v1_1` in both), NOT a Writer mask. **Measured (a/b OFF vs ON, SAME script):** `T v = wN` kind-mismatch **bundled 108 → 36, obfuscated 55 → 31**; an OFF/ON line-set diff on BOTH corpora shows **72 / 24 removed, 0 ADDED** (no new mismatch — the fixpoint + final-type read + guards prevent any move-chain-boundary cascade); all other invalid axes flat (`prim_used_as_object` obf 5→3); parity 28/28, determinism (multi-process byte-identical, 2 APKs), 0-crash/0-hang (2 full sweeps × 25,309 classes), AST smoke 159k/0-exceptions. Reviewers (initial + delta after the fix): correctness 0 confirmed bugs (finding CLOSED — fixpoint terminates, no oscillation, reads final types, single-def guard protects multi-def conflations); adversarial the confirmed chain finding REFUTED post-fix + all other attacks REFUTED + 1 PLAUSIBLE crafted-only >32-link cap escape (documented GIGO). Beyond-DAD (no `*DADFaithful` — parity suites don't assert declaration types; return-literal/catch-clamp precedent). Guards: `move-kind` fixtures in [dataflow_parity_test.cpp](tests/parity/dataflow_parity_test.cpp) (→ref single-def, two-hop chain fixpoint, anti-conflation-left) + the tightened `test_prim_ref_mismatch_var_assign_bounded` (≤48) in [tests/test_cascade_type.py](tests/test_cascade_type.py). **Residual:** genuine object+int merges (a real ref def AND a real prim def on one register that MERGE) still need a version split.
 
+### Production fix — a `Z` return type constrains the returned register (dexllm#86, 2026-09-09)
+
+`decompile_class` declared a local `int` and then returned it from a `boolean`
+method. `javac` rejects that — there is no `int` → `boolean` widening — and it is
+not an occasional slip: across the whole bundled corpus **8,818** return sites
+were in that shape, and of the 60 places in a 150-class sample where a `boolean`
+method returns a VARIABLE at all, **57 declared it `int`**. The path was
+essentially always wrong.
+
+**Why no measurement had seen it.** The legality checker used for the androguard
+comparison matched `return <integer literal>` only. The LITERAL form was fixed
+long ago — the return-literal section above turns `return 0` into `return false`
+— and every case here returns a VARIABLE, so the checker scored dexllm at 1
+defect across 600 classes where the real figure was 178. **The form that was
+fixed is the form that was measured.**
+
+## The proof existed and structurally could not carry a boolean
+
+The issue proposed propagating the return descriptor backwards as a constraint.
+Half of that was already built and running: Phase 2c made `return v` a use-bound
+type source and `ret_type` is threaded in from the method meta
+(`DvMethod::BuildProcessedGraph`, [decompile.cpp](native/dad_cpp/decompile.cpp) —
+no line number, because nothing guards one). It never fired for a
+boolean, because of two gates — and the second one is the interesting half.
+
+**Gate 1** — `record()` opens with `if (vid.empty() || !is_ref(t)) return;`, so a
+`Z` return type is dropped before it is stored. The whole use-bound apparatus is
+REFERENCE-only by design, which is correct: every other source it carries (a
+reference argument, a field store, a throw) pins a reference.
+
+**Gate 2 is why relaxing gate 1 would not have worked.** `has_prim_producer`
+BLOCKS the re-type when any def's closure holds a nonzero int constant. For a
+reference that is exactly right — an int producer proves the value is not a
+reference. **For a boolean the premise inverts**: Dalvik has no boolean type, so
+`const/4 v,#1` IS how a `true` is written, and the very same constant is evidence
+FOR the boolean rather than against it. So `Z` needed a channel of its own with
+the opposite proof, not a widened gate: `bool_ret_vids` plus
+`all_defs_boolean_valued`, in which a 0/1 constant qualifies and anything else —
+a wider primitive, a reference, an int outside {0,1}, an unresolvable def —
+blocks.
+
+**Sound on verified Dalvik** by the same argument the mirror branch uses one
+position over: `return v` in a `Z` method requires v to hold a boolean, so a
+version reaching one IS a boolean and its `int` type is a register-conflation
+artifact. THREE anti-conflation sets are consulted, and it takes all three —
+`int_use_vids` (arithmetic / ordered compare / array index, with `==`/`!=`
+correctly excluded so an ordinary `if (v != 0)` flag test does not block),
+`int_required_vids` (array-creation size, `switch` selector — NOT a subset of
+the first) and `prim_use_vids` (a non-boolean primitive argument, field-store or
+array-store VALUE, which the review below is about), plus `object_vids`, the
+`ThisParam` exclusion and the declared-parameter rule.
+
+**No emitter changed, and that is the point of fixing it here.** With the version
+typed `Z`, `write_inplace_if_possible`'s existing Z-lhs branch renders `= true` /
+`= false` and the declaration renders `boolean v`, in the text AND the AST. Doing
+it in the Writer would have been the masking variant this file's own HACK
+self-check forbids.
+
+## Two findings from building it, neither of which the issue predicted
+
+**A partial re-type is not a partial fix.** Typing only the RETURNED member of a
+move-connected group trades one invalid line for another: `equals` compiles to
+two registers that move into each other, so re-typing just the returned one gives
+`boolean v6 = false; … v6 = v5;` with `v5` still `int`. Measured on the
+`T v = varOfOtherKind` axis that costs **+16** lines with a conservative resolver
+and **+147** with a cycle-resolving one. The group has to move together, so the
+pass ends in a bounded backwards PROPAGATION along move edges — each source
+re-checked against every guard the seed passed, so a genuinely-conflated source
+is left, which is what `viaLocalConflated` pins.
+
+**The corpus's dominant shape is a move CYCLE**, and blocking it was the first
+cut's single largest cost: 749 of the 752 residual sites were `v5 ← v6, v6 ← v5`
+and nothing else. `gt()` had already solved exactly this in this file — back edge
+NEUTRAL, plus a ground-producer requirement so a pure move loop cannot satisfy an
+all-quantifier vacuously — and the same pair is what the resolver needed. The
+variants are worth recording because they are not ordered by conservatism:
+
+| resolver | `bool_ret_int` | `T v = varOfOtherKind` |
+|---|---:|---:|
+| OFF (HEAD) | 8,818 | 590 |
+| back edge BLOCKS | 752 | 606 (+16) |
+| back edge NEUTRAL | 604 | 737 (+147) |
+| **NEUTRAL + backwards propagation** | **604** | **592 (+2)** |
+| …and with the review-driven use guards (shipped) | **941** | 592 (+2) |
+
+(The first four rows were measured before `prim_use_vids` existed; the last row
+is what ships. The third guard costs 335 fixes and removes a class of output
+that was invalid, which is the right way round — a "fix" that emits
+`setFlags(boolean)` is not one.)
+
+## Measured
+
+**a/b OFF=`59a979acd714839f9d0e4ff9279f9d18` vs
+ON=`5b02e4bc320894d20db6b24bdc74014a`, SAME script, both `.so` md5-verified —
+and the pre-fix build BIT-REPRODUCES the OFF md5 exactly**, which is the diff's
+functional content (four files under `native/dad_cpp/`, +368/-11) stated as a
+measurement. Both halves were RE-CAPTURED on the shipped binary after every
+review fix, and with the same fixture on both sides, so the record covers what is
+committed and not a predecessor [[verify-build-identity-before-measuring]].
+The md5 that
+decides identity is the one in **site-packages**, not in `build/`: the editable
+install COPIES the extension, so `ninja` alone leaves Python loading the previous
+binary — a scan taken that way reported OFF numbers from the ON build until the
+`.so` hash caught it [[verify-build-identity-before-measuring]].
+
+46 sources — the whole bundled corpus plus every committed fixture — x up to 18 axes
+(both verify verdicts, load, `dex_count`, class list, a smali digest, a
+whole-decompile digest, its line count, `// DECOMPILE ERROR` count, four
+return-type axes, two boolean-declaration axes, an AST digest, `warm_analysis_caches`,
+and the subprocess EXIT STATUS) = **758 axis records, 102 changed on 17
+sources**, over 2,335,340 decompiled lines.  The 758 is re-derivable rather
+than a harness number: 41 sources load and carry all 18 axes, 5 are not
+loadable containers and carry 4 — 18x41 + 4x5
+[[published-counts-need-the-repos-own-predicate]].
+
+| axis | OFF | ON |
+|---|---:|---:|
+| `boolean` method returns an `int` local | **8,818** | **941** |
+| the same sites, correctly declared `boolean` | 654 | **8,531** |
+| `ref_ret_prim` / `prim_ret_ref` | 4 / 15 | 4 / 15 |
+| decompiled lines | 2,335,340 | 2,335,340 |
+| `// DECOMPILE ERROR` | 0 | 0 |
+
+8,818 − 941 = **7,877** = 8,531 − 654: every site that left the bad axis arrived
+on the good one, **none vanished**. `verify`, `verify_lenient`, `load`,
+`dex_count`, the class lists, the smali digests and `warm_analysis_caches` are
+identical on every source — only the Java view moves, and its LINE COUNT does
+not, so nothing was added or removed.
+
+**A separate method-scoped invalid-Java scan is what says the re-type created
+nothing**, since the a/b's axes cannot see a misused boolean. Over 172,073
+methods:
+
+| shape | OFF | ON |
+|---|---:|---:|
+| `boolean v = <integer>` | 1 | 1 |
+| `boolean v = new X()` / a string | 11 | 11 |
+| a `boolean` local in arithmetic / ordered compare / array index | 28 | 28 |
+| an integer literal re-assigned to a `boolean` local | 14 | 14 |
+| **`boolean` locals declared** | **1,945** | **9,371** |
+
+Every misuse axis is FLAT while boolean declarations grow 4.8x. The `T v =
+varOfOtherKind` axis moves 590 → 592; the +2 are what the propagation's guards
+deliberately decline to chase.
+
+**The residual 939, characterised by def shape** — and the first draft of this
+paragraph called it "dominated by `flag |= cond`", which an adversarial review
+refuted from the data: 590 (63%) are versions whose defs ARE all 0/1 and which a
+USE guard refuses, 161 (17%) are the `|=` idiom (an int OR, so the def-anchor
+refuses it), 137 a call result, 42 a move, 9 other. So the residual is dominated
+by **genuinely conflated registers the pass declines to guess at**, which is the
+guards working rather than the def-anchor failing. Recognising `|`/`&`/`^` on
+boolean operands is a further refinement with its own blast radius, not part of
+this change.
+
+parity **29/29**, pytest **1404 passed / 24 skipped**, TRUE corpus-less
+(`test_apk` MOVED aside) **991 passed / 437 skipped / 0 failed** — **26 of the 30
+new cases run in the CI leg**, since every craft is on the committed fixture and
+only the four corpus ceilings skip — narrowed to `tests/data/multidex.apk`
+**1297 passed / 131 skipped**, the guard file green narrowed to **each of the 34
+bundled samples one at a time**, sweep **21,374-class / 180,879 method-block
+0-crash 0-timeout 0-error, GATE: PASS**, determinism 3 processes x 3
+`PYTHONHASHSEED`s -> one digest, lint trio clean, doc fences 83,
+`scripts/check_dad_boundary.sh` clean.
+
+## The fixture had to be AUTHORED, and rebuilt twice
+
+`tests/data/bool-return.dex` is the third fixture in this repo written rather
+than copied (`permissive-tls.dex`, `literal-escapes.dex`), because **no committed
+fixture carries a `boolean` method that returns a flag register** — 6 boolean
+methods across all of them, none in this shape. Its source is committed beside
+it.
+
+Java cannot express what has to be REFUSED — a `boolean` local used as an
+arithmetic operand or an array index is a compile error — so those arrive by
+CRAFT: the guard repoints an `(I)I` method's `method_id` at the `(I)Z` proto the
+fixture already provides. One u2, length-preserving, and it cannot disturb the
+`method_ids` sort because the order key is class then NAME and every method is
+uniquely named. Each craft ASSERTS the dex still verifies.
+
+**Both rebuilds were forced by the mutation matrix, and each was the same
+defect**: a craft base refused by TWO guards lets either mutant survive.
+`intUsed` is refused by the def-anchor AND `int_use_vids`; `arrayIndex` by
+`int_use_vids` AND `int_required_vids` (an index lands in both). So `cmpUsed`
+(an ordered compare) isolates the first and `newArraySize` isolates the second —
+an array-CREATION size and a `switch` selector are recorded in
+`int_required_vids` and NOWHERE else, which is the fact that makes it possible.
+
+## Mutation matrix
+
+Each mutant BUILT and RUN with its own `.so` md5; the harness restores from a
+pristine snapshot, `touch`es it (copy2 preserves mtime and ninja would SKIP),
+rebuilds to the control before every mutant and ASSERTS the control md5 there and
+again at the end. A replacement that does not apply exactly once, or does not
+compile, is reported as **NOT A MUTANT** rather than counted as a kill.
+
+| mutant | .so md5 | guards |
+|---|---|---|
+| M0  pre-fix (whole file at HEAD) | `59a979ac` | 13 failed, 16 passed in 4.59s |
+| M1  the Z return is never recorded as a source | `4d4bebe1` | 12 failed, 17 passed in 4.62s |
+| M2  int_use_vids guard removed | `34efad3b` | 2 failed, 27 passed in 4.61s |
+| M3  int_required_vids guard removed | `1eb5063f` | 2 failed, 27 passed in 4.61s |
+| M4  object_vids guard removed | `213e01b8` | 1 failed, 28 passed in 4.64s |
+| M5  the def-anchor always succeeds | `a3ebd21b` | 2 failed, 27 passed in 4.59s |
+| M6  any narrow-int constant counts as boolean | `2bb75c4e` | 1 failed, 28 passed in 4.62s |
+| M7  the narrow-width gate on `cur` removed | `8532ab5a` | 1 failed, 28 passed in 4.60s |
+| M8  a wide constant counts as boolean | `b0e279ed` | 1 failed, 28 passed in 4.61s |
+| M7b BOTH narrow-width gates removed (they mask each other) | `71b714e1` | 2 failed, 27 passed in 4.64s |
+| M9  the back edge blocks again (the first cut) | `360362e8` | 2 failed, 27 passed in 4.63s |
+| M10 the ground-producer requirement removed | `4cb1cea5` | 1 failed, 28 passed in 4.62s |
+| M11 the backwards propagation removed | `6dd0ff51` | 1 failed, 28 passed in 4.60s |
+| M12 propagation ignores the int-use guards | `2a6fafcf` | 1 failed, 28 passed in 4.59s |
+| M13 propagation ignores the def-anchor | `8a3cbd5d` | 1 failed, 28 passed in 4.58s |
+| M14 the source is any return type, not just Z | `2b819b68` | 1 failed, 28 passed in 4.61s |
+| M15 the ThisParam exclusion removed | `15242a50` | 1 failed, 28 passed in 4.63s |
+| M16 prim_use_vids never populated (invoke arg) | `af36924e` | 2 failed, 27 passed in 4.62s |
+| M17 the Z branch drops !prim_use_vids | `bd4a955c` | 7 failed, 22 passed in 4.65s |
+| M18 the propagation drops prim_use_vids | `3c92b440` | 1 failed, 28 passed in 4.62s |
+| M19 declared_param_is_boolean always true | `cf8ce8f2` | 1 failed, 28 passed in 4.59s |
+| M21 is_prim_nonbool also blocks Z (loses legitimate fixes) | `05c13dad` | 2 failed, 27 passed in 4.61s |
+| M22 REVIEW-C8: the work-cap bail declares boolean instead of refusing | `dc7a4093` | 1 failed, 28 passed in 4.63s |
+| M23 the IPUT store value is not recorded | `a89fef97` | 1 failed, 28 passed in 4.62s |
+| M24 the aput store value is not recorded | `b7afe5f9` | 2 failed, 27 passed in 4.62s |
+| M26 the filled-new-array element arm removed | `6a438458` | 1 failed, 28 passed in 4.63s |
+| M27 REVIEW-C8: the def-less arm reads the CORRUPTED type again | `41d561ea` | 1 failed, 28 passed in 4.61s |
+| M28 is_prim_nonbool drops F and D | `4ee6ea82` | 1 failed, 28 passed in 4.60s |
+| M29 the array-store marker set gains Z | `45c3706d` | 1 failed, 28 passed in 4.67s |
+| M25 the SPUT store value is not recorded | `e0741d53` | 1 failed, 28 passed |
+
+**Every one of the 30 is killed**, and SIX of them only after the fixture was
+rebuilt around them — a craft base refused by TWO guards lets either mutant
+survive, which is the defect this file's fixture paid for repeatedly: `intUsed`
+tripped the def-anchor AND `int_use_vids`; `arrayIndex` tripped `int_use_vids`
+AND `int_required_vids` (an index lands in both); `fieldStore` uses a STATIC
+field, so it left the `iput` arm open until `fieldStoreInstance` existed; and a
+DELTA review showed the invoke-argument arm — the fix for the whole first
+finding — was revertible with the corpus-less leg GREEN, because the fixture had
+a craft base for every other arm and none for that one. Each was found by
+RUNNING the mutant, never by reading.
+
+**M7 and M8 MASK EACH OTHER** and neither is redundant: the narrow-width gate on
+`cur` and the narrow check on the CONSTANT each refuse the `wide` craft on their
+own, so removing either alone is output-equivalent. M7b removes both and dies —
+the complementarity stated as a measurement rather than as prose
+[[mutants-can-mask-each-other]].
+
+**Three conditions are pinned at SOURCE level because no dex that verifies can
+reach them**, and the pin says so rather than implying a behavioural guard:
+`object_vids` (a version with all-0/1 defs used as a receiver is invalid Dalvik),
+the `ground` requirement (a closure of nothing but moves is reported `'M'` by
+`gt()`, so the caller `continue`s first) and the `ThisParam` exclusion (a
+receiver register is reference-typed, so `cur_prim` already excludes it). **The
+first cut of that pin was satisfied by the WRONG occurrence** —
+`!object_vids.count(vid) &&` also appears in the move-opcode fixpoint 200 lines
+down, so a per-conjunct substring check passed while the guard was gone. It pins
+the branch's WHOLE condition now, whitespace-normalised so a re-wrap is not a
+false positive.
+
+**And the propagation's guards needed a corpus CEILING, not a fixture.** Java
+cannot write `boolean b = intLocal`, so a move between an int and a boolean
+exists only through d8's register reuse — no authored fixture reaches it. The
+ceiling asserts that `boolean` locals are not used as ints and are not assigned
+arithmetic; the DEF half was added after a mutant that propagates without
+re-checking the def-anchor survived the use half alone.
+
+**Two harness failures worth recording.** A `nohup … &` completion notification
+is for the WRAPPER SHELL, not the job — checked with `pgrep` both times. And an
+`until [ -f on.json ]` wait passed INSTANTLY against a stale file from the
+previous capture, so a published diff was a previous variant's; the `.so` md5
+assertion plus a direct re-scan (604 vs 752) is what caught it
+[[ab-harness-must-itself-be-deterministic]].
+
+## What the adversarial review found — one REAL regression, and it is why there
+are three use guards
+
+The first cut had TWO anti-conflation sets and its own comment claimed they
+covered "the same register passed at an `I` parameter and returned". **They did
+not, and the reviewer proved it on unmodified corpus input.** `note_obj` records
+an invoke argument only when the parameter is a REFERENCE, and `record` drops a
+non-reference field type on its first line, so three int-typed use positions —
+a primitive ARGUMENT, an `iput`/`sput` VALUE, an `aput` VALUE — were in no set
+at all.
+
+`AppCompatReceiveContentHelper.maybeHandleMenuActionViaPerformReceiveContent`
+returns a 0/1 flag from a `Z` method AND passes the same register at
+`ContentInfoCompat$Builder.setFlags(int)`. Pre-fix it read `int v2 = 0; …
+setFlags(v2)` — **valid Java**; the first cut made it `boolean v2 = false; …
+setFlags(v2)`. A valid → INVALID regression, on an ordinary support-library
+class, that every measurement in this section missed because the invalid-Java
+scan's regexes covered arithmetic, ordered comparison and array INDEXING and not
+a call argument.
+
+`prim_use_vids` closes it — a SEPARATE set rather than a widening of
+`int_use_vids`, because that one is read by the cascade / mirror / prim→WIDER
+branches and widening it would change their verdicts and need their own a/b.
+`Z` is excluded from it on purpose: passing a boolean at a `Z` parameter is
+exactly right.
+
+**Confirmed with the reviewer's own instrument**, which resolves each `boolean`
+local used as an argument against the callee's real parameter type taken from
+the enclosing method's smali. On the APK that carried the regression:
+**`bad=22 ok=72` on BOTH halves, identical** — all 22 are pre-existing and this
+change adds none. Pinned by name in
+`test_a_boolean_is_not_passed_where_an_int_is_required`, because the decompiled
+text does not carry a callee's parameter types and only a named case can assert
+that THIS argument is an int one.
+
+**The review's SECOND example was misattributed, and measuring it is what
+showed that.** `InputConnectionCompat`'s `v2.send(v3, 0)` already reads
+`boolean v3 = false` on a clean pre-fix build (`.so` 59a979ac): `v3` is typed
+from `onCommitContent()Z`, which is correct, and the int/boolean conflation is
+at the CALL. Pre-existing, neither caused nor closed here, and NOT pinned — a
+guard that asserted on it would fail against HEAD.
+
+**A second finding needed the param types threaded in.** A version that IS a
+parameter carries an implicit incoming definition `defs_of` does not hold, so
+the def-anchor walks only the writes inside the method and cannot see it — a
+reviewer's mutant relaxed the one-hop form of that rule and passed every
+behavioural case. `declared_param_is_boolean` refuses a `Param` whose DECLARED
+type is not `Z`; the `Param`'s own `get_type()` is unusable, because writing to
+a param register mutates it and that corruption is what this pass repairs.
+
+The map is recorded in `DvMethod`'s constructor, on the line that builds each
+`Param` — not rebuilt at the call site, which is what the first cut did and
+which DUPLICATED the register numbering (the `this` slot, `GetTypeSize` for a
+wide parameter). That is the "a rule read a second time drifts" shape this file
+keeps recording, and it was caught by reading the diff rather than by a test.
+Proven output-neutral before and after: an ON-vs-ON capture over all 758 axis
+records differs in **0**.
+
+**And three findings were in the guards**, which is where this repo's defects
+concentrate [[review-responses-are-the-weak-spot]]: the corpus ceiling scanned
+`[:400]` classes of a 286-class sample while both regressed classes sat at index
+438 and 1836 of a 5,907-class APK 23rd in the candidate order (it walks the six
+LARGEST loadable APKs, 1,200 classes deep, with an absolute bound now); its
+regexes did not cover the positions the new guard exists for; and the param arm
+of the resolver was held by nothing.
+
+## The correctness pass — 0 code defects, and the numbers re-derive
+
+A third review, on the final state, found **no defect in the code**. It rebuilt
+both halves and re-derived every headline measurement with its OWN predicate:
+decompiled lines and `// DECOMPILE ERROR` exact, the sibling axis exact
+(654 → 8,531), **17 sources changed** matching, and `verify` / `dex_count` /
+class lists / **smali digests** identical on all 41 loading sources — only the
+Java digest and the two return axes move. Its non-boolean endpoint is 8,863 →
+986 rather than 8,818 → 941 because it counts ANY non-boolean declaration where
+this section counts `int`/`Object`/`byte`/`short`/`char`; the **delta is 7,877
+either way**, which is what the conservation claim rests on
+[[published-counts-need-the-repos-own-predicate]]. It also traced the
+back-edge/`ground` pair, the `Pop` RAII lifetime, `declared_params_`'s keying
+for an instance method and a wide parameter (and that `SplitVariables` PRESERVES
+a param version's vid, so a split vid can never collide with a param key), the
+branch's disjointness from both neighbours, and the propagation's termination —
+and checked text/AST agreement on **95 real corpus methods, 95/95**.
+
+**A stated limit it surfaced, measured rather than assumed.** The
+`filled-new-array/RANGE` form is NOT covered, and the reason is one level down:
+`FilledNewArrayRange` is bug-faithful to DAD and hands the expression only
+`{cccc, nnnn}`, so `args()` holds TWO registers whatever the real element count
+is. The middle elements are not in the IR at all, so no guard here can see them
+— such a method is already rendered lossily, with or without this pass.
+Measured: **45 `/range` sites corpus-wide and 0 of them inside a `)Z` method**,
+so the residual is 0-incidence rather than latent.
+
+**Three prose defects, all fixed here.** `docs/type-inference-design.md` still
+carried the numbers from before the delta-review fixes while `CLAUDE.md` carried
+the shipped ones — one commit publishing two answers to one question, the
+dexllm#83 pattern; the fixture comment named `p2` where the flag is `p3` (the
+`long` consumes two slots ahead of it) while the test docstring beside it said
+`p3` correctly; and the propagation's determinism comment claimed the re-typed
+SET is order-independent without qualifying that this holds only while
+`bv_budget` is unexhausted — the same posture as `gt_budget`, unreached on every
+measured input, but the claim as written was stronger than the code supports.
+
+**And one test assertion was a tautology**: `ast["source"] == decompile_method(…)`
+compares the AST call's own field against the call that produced it, since
+`DecompileMethodAst` assigns it from there. Replaced with the AST's own type and
+literal nodes, which the text path does not produce, plus a corpus-level case so
+the property is pinned outside the fixture too.
+
+## Adjacent
+
+A `Z`-typed PARAM written inside the method rendered `p1 = 1` rather than
+`p1 = true`, because writing to a param register corrupts the `Param`'s own type
+to `I` — the same mechanism that corrupts `this` (each `this = X` AssignExpression
+ctor calls `set_type` on the receiver). This change fixes it as a side effect,
+since the version is re-typed back to `Z`; it is pinned by
+`test_a_written_boolean_param_renders_a_boolean_literal` so it cannot regress
+silently. And the comment above the use-bound source list said *"Return /
+array-store are NOT sources yet — the method return type is not on the graph"*,
+which Phase 2c had already made false — corrected here
+[[a-rule-you-wrote-binds-your-next-commit]].
+
 ### Production fix — reused `this` register materialised as a local (`this = X` → valid, 2026-07-03)
 
 When a method reuses its receiver register p0 (`this`) as a scratch local — reads `this` early, overwrites it (`move-result` / `const`), reads the new value later, the two merging at a shared use (e.g. `return`) — `GroupVariables` binds the param-def and reuse-defs into ONE version (they share the merge use), so `SplitVariables` leaves it unsplit and it keeps its `ThisParam` identity. DAD (and our 1:1 port) then emit **`this = <value>`** — always invalid Java (you cannot assign to `this`). **Confirmed identical bug in androguard DAD**, so this is a beyond-DAD production divergence. Dominant real-corpus invalid-Java bucket (269 occurrences bundled, above every other). **Fix — `MaterializeReusedThis` ([dataflow.cpp](native/dad_cpp/dataflow.cpp), declared in [dataflow.h](native/dad_cpp/include/dataflow.h)), runs AFTER SplitVariables and BEFORE the chain consumers:** allocate a fresh local `vX`, rewrite every graph reference to the receiver → `vX`, and inject `vX = this` at the entry block head — the sole remaining `this` is that copy's rhs → `<Ret> vX = this; … vX = …; return vX;` (valid). `findFragmentByWho` (the canonical repro) becomes byte-valid: `Fragment v7 = this; if(!p2.equals(this.mWho)){ if(this.mChildFragmentManager==null){ v7 = null; } else { v7 = this.mChildFragmentManager.findFragmentByWho(p2); } } return v7;` (reads stay `this.mWho` because RP propagates the entry copy for uses it dominates; `v7 = 0` renders `null` via the existing reference-lhs null-render). **Type safety (two adversarial-review rounds, 4 reviewers):** `vX` is typed as the method **RETURN type** — the one assignability anchor valid Dalvik gives (everything reaching a `return` is assignable to it). The pass is a **validate-then-mutate** (atomic — Phase A reads only, so every early bail leaves the graph pristine) that fires ONLY when (a) the return type is a reference, (b) the receiver is RETURNED, and (c) every reassignment rhs is a reference whose type **EXACTLY equals** ret_type, or the narrow-integer constant 0 (null). Exact equality (not just `is_ref`) is REQUIRED: the unsplit phi-web can bind a def reaching only an intermediate use (never the return) with an unrelated type — `vX = getBar()` where `Bar ⊄ Foo` (adversarial CONFIRMED) — the merge-point-assignability property does NOT hold per-def, and there is no type hierarchy to check assignability. A **void-invoke artifact** (`this = super.onDraw()` — a void call DAD wrongly models as defining the receiver; DAD keeps the `this` name so its later `this.getScrollX()` reads accidentally render correctly, and renaming would EXPOSE the artifact as `v.getScrollX()` on a void result — strictly worse), a non-reference return, a non-returned reuse, a genuine primitive (`this = 5`), or a non-exact reference reuse all bail → left as DAD's (invalid but **no-worse**) `this = X`. The receiver's ThisParam type is CORRUPTED during Construct (each `this = X` AssignExpression ctor does `this_param.set_type(X.get_type())`) so it is restored to the class before seeding the copy. On a `true` return the caller `number_ins()` + recomputes `BuildDefUse` (the injected copy + renumbered locs) before DCE/RP/PlaceDeclarations; `FixInitResultTypes` runs between (graph-only, no chain access, safe). Excludes `<init>` (super()/this() uses the receiver specially). **Measured (a/b off vs on, bundled corpus):** `this =` **269 → 218** (51 genuine reuses materialised valid; residual 218 = void-invoke artifacts + non-provable reuses, correctly left), **90 valid `<Ref> vX = this;` seeds**; **ALL other invalid-Java buckets byte-unchanged** (prim-used-as-object 55, ref-declared-int 23, `v<op>null` 3, `prim=new` 2), the pre-existing separate `void v=this` move-into-conflated-local bug **40→40 unchanged**, parity 28/28, 0-crash/25,309-class. No `*DADFaithful` sibling (parity suites don't assert method bodies — return-literal/catch-clamp precedent). Remaining (deferred, no-worse-than-DAD): the void-invoke-defines-receiver DAD bug itself, and genuine multi-type phi-web merges (need a real version split). Regression test `tests/test_this_reuse.py` (materialisation valid + active + the Fragment repro).

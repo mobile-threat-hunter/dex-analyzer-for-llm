@@ -11,6 +11,7 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <unordered_map>
 
 #include "dast.h"
 #include "graph.h"
@@ -69,6 +70,12 @@ private:
     IsAssignableFn is_assignable_;
     Vmap vmap_;
     std::vector<int> lparams_;
+    // dexllm#86 — each parameter's DECLARED descriptor, keyed by its
+    // register vid.  Recorded where the `Param`s are built so the
+    // register numbering has ONE definition; a `Param`'s own type is
+    // mutated by a write to its register (the mechanism that corrupts
+    // `this`), so only this survives as the declared type.
+    std::unordered_map<std::string, std::string> declared_params_;
     std::unique_ptr<Graph> graph_;
     GenInvokeRetName gen_ret_;
     std::string source_;
