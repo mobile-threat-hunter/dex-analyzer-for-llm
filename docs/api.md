@@ -977,7 +977,7 @@ subclasses (`AccessibilityService`, `InputMethodService`,
 **declares such a service** — the members are invoked on the app's own subclass or
 are callbacks the system calls, and only `super()` is spelled under the framework
 class. They aggregate exactly like any other method key. See
-[usage](usage.md#reading-an--key-on-a-framework-service) for the three limits
+[usage](usage.md#reading-an-init-key-on-a-framework-service) for the three limits
 (no manifest check, no ctor-less subclass, one key per ctor overload), for why the
 implication is exact only for the two classes AOSP declares `abstract`, and for
 why an **interface** needs no key form of its own — for a capability-shaped one

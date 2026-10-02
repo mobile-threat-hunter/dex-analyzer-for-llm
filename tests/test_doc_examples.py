@@ -442,20 +442,73 @@ def test_the_docs_enumerate_the_fields_a_record_actually_has():
         ), f"{doc} {name} is listed as abridged but has a field TABLE"
 
 
+#: GitHub's heading-anchor rule, MEASURED rather than inferred — the heading
+#: shapes this repo's documents actually contain were run through
+#: `POST https://api.github.com/markdown/raw` and the returned `id=` recorded
+#: in :func:`test_the_slug_rule_is_githubs` below. The rule is: render the
+#: heading, take its TEXT (an HTML tag contributes nothing, a CODE SPAN
+#: contributes its literal characters), lowercase, drop every character outside
+#: `[A-Za-z0-9_\s-]`, then map EACH space to a hyphen without collapsing runs
+#: (so an em dash leaves a `--`).
+#:
+#: The code-span half is what a bare `<[^>]+>` strip gets WRONG, and it was
+#: wrong here: a heading carrying a backticked `<init>` slugs with `init` IN
+#: the anchor, while `<a name="x"></a>` disappears. Both guards below read this
+#: ONE function — two copies of a rule drift, and these two had drifted
+#: together into an `api.md` link that resolves nowhere on GitHub while both
+#: of them called it fine.
+def doc_slug(heading: str) -> str:
+    """Return the anchor GitHub generates for a markdown heading."""
+    spans: list[str] = []
+
+    def _keep(m):
+        spans.append(m.group(1))
+        return f"\x00{len(spans) - 1}\x00"
+
+    h = re.sub(r"`([^`]*)`", _keep, heading)  # protect code-span text
+    h = re.sub(r"<[^>]+>", "", h)  # a real HTML tag contributes nothing
+    h = re.sub(r"\x00(\d+)\x00", lambda m: spans[int(m.group(1))], h)
+    h = re.sub(r"[^\w\s-]", "", h.lower())
+    return h.strip().replace(" ", "-")
+
+
+def test_the_slug_rule_is_githubs():
+    """The heading shapes in these documents, pinned to MEASURED values.
+
+    Each right-hand side is what `api.github.com/markdown/raw` returned for that
+    heading (minus GitHub's `user-content-` prefix), so a future simplification
+    of :func:`doc_slug` — dropping the code-span protection, say — fails here
+    instead of silently publishing a link that resolves nowhere.
+    """
+    assert (
+        doc_slug("Reading an `<init>` key on a framework service")
+        == "reading-an-init-key-on-a-framework-service"
+    )
+    assert (
+        doc_slug("`mmap.h` unconditional `<unistd.h>` (the one hard source blocker)")
+        == "mmaph-unconditional-unistdh-the-one-hard-source-blocker"
+    )
+    assert doc_slug('<a name="found"></a>`found` semantics') == "found-semantics"
+    assert (
+        doc_slug("8. Python analyses (IOC, providers, TLS, components)")
+        == "8-python-analyses-ioc-providers-tls-components"
+    )
+    assert (
+        doc_slug("`dexllm.find_component_subclasses(dk, *, with_xref=True) -> list`")
+        == "dexllmfind_component_subclassesdk--with_xreftrue---list"
+    )
+
+
 def test_no_in_page_doc_link_is_dangling():
     """An invented anchor reads as a working cross-reference and is not one.
 
     Written after one was added by hand during the dexllm#69 audit — the exact
-    defect the audit was looking for. GitHub's slug keeps `[A-Za-z0-9_]`, spaces
-    and hyphens, lowercases, and maps EACH space to a hyphen (it does not collapse
-    runs), so a heading with an em dash slugs with a `--` in it.
+    defect the audit was looking for. The rule lives in :func:`doc_slug`, measured
+    against GitHub's own renderer rather than inferred.
     """
     import re
 
-    def slug(h):
-        h = re.sub(r"<[^>]+>", "", h)
-        h = re.sub(r"[^\w\s-]", "", h.lower())
-        return h.strip().replace(" ", "-")
+    slug = doc_slug
 
     docs = sorted(REPO_ROOT.glob("*.md")) + sorted((REPO_ROOT / "docs").glob("*.md"))
     assert len(docs) >= 12, f"only {len(docs)} md files found"
@@ -478,16 +531,15 @@ def test_no_cross_file_doc_anchor_is_dangling():
     document's heading is unchecked, and the dexllm#53 audit found three dangling
     ones that way: two pre-existing (`api.md` -> a `usage.md` heading whose slug
     drops a backticked `<init>`, and `usage.md` -> a CLAUDE.md heading that had
-    been retitled) plus one this change had just introduced. Same slug rule and
-    same anchor set as the sibling above, so the two cannot disagree about what a
-    heading is called.
+    been retitled) plus one this change had just introduced. The two guards share
+    :func:`doc_slug`, so they cannot disagree about what a heading is called —
+    and when they agreed on a WRONG rule (a bare `<[^>]+>` strip took a
+    backticked `<init>` out of the anchor), they agreed the `api.md` link into
+    that heading was fine while GitHub resolved it nowhere.
     """
     import re
 
-    def slug(h):
-        h = re.sub(r"<[^>]+>", "", h)
-        h = re.sub(r"[^\w\s-]", "", h.lower())
-        return h.strip().replace(" ", "-")
+    slug = doc_slug
 
     docs = sorted(REPO_ROOT.glob("*.md")) + sorted((REPO_ROOT / "docs").glob("*.md"))
     anchors = {}

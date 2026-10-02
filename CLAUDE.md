@@ -3770,6 +3770,25 @@ had been retitled. All three fixed, and
 rule and the same anchor set as its sibling, so the two cannot disagree about
 what a heading is called.
 
+**And the shared rule they agreed on was itself WRONG — measured 2026-10-03.**
+Both guards pre-stripped `<[^>]+>`, which is right for a real HTML tag
+(`<a name="x"></a>` contributes nothing to GitHub's anchor) and wrong for a
+CODE SPAN: GitHub renders a backticked `<init>` as literal text, so
+``### Reading an `<init>` key on a framework service`` slugs with `init` IN the
+anchor. So the `<init>` link above was "fixed" by making it match the guards
+rather than GitHub, and it resolved nowhere for as long as the heading existed
+while both guards called it fine. Measured by running the heading through
+`POST https://api.github.com/markdown/raw`:
+`user-content-reading-an-init-key-on-a-framework-service`. The rule is now ONE
+function, `doc_slug`, which protects code-span text before stripping tags; both
+guards read it (two copies of a rule drift, and these two drifted together);
+and five measured heading shapes are pinned in `test_the_slug_rule_is_githubs`
+so a simplification fails there instead of publishing a dead link. Three
+mutants — the old strip-only rule, no HTML strip at all, and collapsing
+whitespace runs — fail 2 / 1 / 3 cases. The sibling shape in
+`windows-port-plan.md` (``​`<unistd.h>`​``) has no inbound link; its measured
+slug is pinned too, so one written later cannot be written wrong.
+
 ### One raised and NOT acted on, with the reason
 
 `kind` now appears in two MCP payloads with different vocabularies — `ConstString`
