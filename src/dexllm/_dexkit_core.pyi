@@ -195,6 +195,27 @@ class ClassRef:
     @property
     def class_idx(self) -> int: ...
 
+class ClassHeader:
+    """A class_def's header: identity, declared supertypes, access flags.
+
+    The bulk record behind ``list_class_headers()``. ``superclass_descriptor``
+    names a type the dex may not DECLARE (a framework class); ``""`` only when
+    the class_def's ``superclass_idx`` is NO_INDEX.
+    """
+
+    @property
+    def descriptor(self) -> str: ...
+    @property
+    def dex_id(self) -> int: ...
+    @property
+    def class_idx(self) -> int: ...
+    @property
+    def access_flags(self) -> int: ...
+    @property
+    def superclass_descriptor(self) -> str: ...
+    @property
+    def interface_descriptors(self) -> list[str]: ...
+
 class MethodRef:
     @property
     def descriptor(self) -> str: ...
@@ -510,6 +531,28 @@ class DexKit:
 
     def list_classes_in_dex(self, dex_id: int) -> list[str]:
         """``list_classes`` scoped to one dex — use with ``locate_class_dex``."""
+
+    def list_class_headers(self) -> list[ClassHeader]:
+        """Every class_def of every loaded dex as a :class:`ClassHeader`, in bulk.
+
+        The hierarchy half of ``get_class_summary`` for ALL classes in one
+        crossing: descriptor, ``dex_id``, ``class_idx``, ``access_flags``,
+        ``superclass_descriptor`` and ``interface_descriptors`` — no member is
+        materialised. In ``list_classes()`` order, one row PER DECLARATION (a
+        descriptor declared in two dexes appears twice, each with its own
+        ``dex_id``, exactly as ``list_classes`` repeats it); dedupe first-wins
+        if a descriptor-keyed view is wanted. ``superclass_descriptor`` is
+        present for a framework superclass no dex declares — it is a type_id of
+        the declaring dex — and is ``""`` only for a class_def whose
+        ``superclass_idx`` is NO_INDEX (``java.lang.Object``'s own shape).
+
+        Example::
+
+            >>> h = next(h for h in dk.list_class_headers()
+            ...          if h.descriptor == "La2dp/Vol/StoreLoc;")
+            >>> h.superclass_descriptor, h.access_flags
+            ('Landroid/app/Service;', 1)
+        """
 
     def list_class_methods(self, class_descriptor: str) -> list[str]:
         """Full descriptors of the class's declared methods (no superclass walk).

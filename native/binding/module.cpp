@@ -422,6 +422,10 @@ public:
     py::list list_classes_in_dex(int dex_id) const {
         return ident_out(ext_.ListClassesInDex(dex_id));
     }
+    // Every class_def's header in one crossing (see ClassHeader in api_ref.h).
+    std::vector<dexkit::ext::ClassHeader> list_class_headers() const {
+        return ext_.ListClassHeaders();
+    }
     py::list list_fields() const {
         return ident_out(ext_.ListFieldDescriptors());
     }
@@ -781,6 +785,31 @@ PYBIND11_MODULE(_dexkit_core, m) {
                    std::to_string(c.dex_id) + ")";
         });
 
+    // A class_def's header: the one record a hierarchy walk needs, in bulk.
+    // Every identifier goes through ident_out (dexllm#22): a superclass or
+    // interface name is pool MUTF-8 exactly like the class's own.
+    py::class_<dexkit::ext::ClassHeader>(m, "ClassHeader")
+        .def_property_readonly("descriptor",
+            [](const dexkit::ext::ClassHeader& h) {
+                return ident_out(h.descriptor);
+            })
+        .def_readonly("dex_id", &dexkit::ext::ClassHeader::dex_id)
+        .def_readonly("class_idx", &dexkit::ext::ClassHeader::class_idx)
+        .def_readonly("access_flags", &dexkit::ext::ClassHeader::access_flags)
+        .def_property_readonly("superclass_descriptor",
+            [](const dexkit::ext::ClassHeader& h) {
+                return ident_out(h.superclass_descriptor);
+            })
+        .def_property_readonly("interface_descriptors",
+            [](const dexkit::ext::ClassHeader& h) {
+                return ident_out(h.interface_descriptors);
+            })
+        .def("__repr__", [](const dexkit::ext::ClassHeader& h) {
+            return "ClassHeader(" + DecodeMutf8ForPy(h.descriptor) + " extends " +
+                   DecodeMutf8ForPy(h.superclass_descriptor) + " in dex " +
+                   std::to_string(h.dex_id) + ")";
+        });
+
     py::class_<dexkit::ext::MethodRef>(m, "MethodRef")
         .def_property_readonly("descriptor",
             [](const dexkit::ext::MethodRef& m) {
@@ -1063,6 +1092,16 @@ PYBIND11_MODULE(_dexkit_core, m) {
              "L8: Return every class descriptor declared in any loaded dex "
              "(e.g. `Lcom/foo/Bar;`). Replaces androguard's "
              "AnalyzeAPK→get_classes for decompile drivers.")
+        .def("list_class_headers", &PyDexKit::list_class_headers,
+             "Every class_def of every loaded dex as a ClassHeader — descriptor, "
+             "dex_id, class_idx, access_flags, superclass_descriptor and "
+             "interface_descriptors — in list_classes() order, one row PER "
+             "DECLARATION (a descriptor declared in two dexes appears twice, "
+             "with its own dex_id each time). The bulk form of the hierarchy "
+             "half of get_class_summary: one crossing instead of N, and no "
+             "member is materialised. superclass_descriptor is present for a "
+             "framework superclass no dex declares (it is a type_id of the "
+             "declaring dex); it is \"\" only when superclass_idx is NO_INDEX.")
         .def("list_value_strings", &PyDexKit::list_value_strings,
              "Return every distinct string the app loads as DATA — const-string/"
              "jumbo (0x1a/0x1b) operands + static-field VALUE_STRING (0x17) "

@@ -771,6 +771,52 @@ std::vector<std::string> DexKitExt::ListClasses() const {
     return out;
 }
 
+std::vector<ClassHeader> DexKitExt::ListClassHeaders() const {
+    std::vector<ClassHeader> out;
+    auto& mut = const_cast<dexkit::DexKit&>(*core_);
+    const int n = core_->GetDexNum();
+    for (int i = 0; i < n; ++i) {
+        auto* item = mut.GetDexItem(static_cast<uint16_t>(i));
+        if (!item) continue;
+        const auto& reader = item->GetReader();
+        const auto& type_names = item->GetTypeNames();
+        const auto& flags = item->GetTypeDefFlags();
+        const auto class_defs = reader.ClassDefs();
+        for (size_t type_idx = 0; type_idx < flags.size(); ++type_idx) {
+            if (!flags[type_idx]) continue;
+            const uint32_t def_idx = item->GetTypeDefIdx(
+                static_cast<uint32_t>(type_idx));
+            if (def_idx == dex::kNoIndex || def_idx >= class_defs.size()) continue;
+            const auto& cdef = class_defs[def_idx];
+            ClassHeader h;
+            h.descriptor = std::string(type_names[type_idx]);
+            h.dex_id = static_cast<uint16_t>(item->GetDexId());
+            h.class_idx = static_cast<uint32_t>(type_idx);
+            h.access_flags = cdef.access_flags;
+            // kNoIndex is java.lang.Object's own shape; an app class_def always
+            // names a superclass, and the gate bounds the index it names.
+            if (cdef.superclass_idx != dex::kNoIndex &&
+                cdef.superclass_idx < type_names.size()) {
+                h.superclass_descriptor = std::string(type_names[cdef.superclass_idx]);
+            }
+            // Same walk as FillInternalClassSummary: interfaces_off == 0 means
+            // none; the type_list it names is verified by the gate.
+            if (cdef.interfaces_off != 0) {
+                const auto* ifaces = reader.dataPtr<dex::TypeList>(cdef.interfaces_off);
+                if (ifaces != nullptr) {
+                    for (uint32_t k = 0; k < ifaces->size; ++k) {
+                        const uint32_t t = ifaces->list[k].type_idx;
+                        if (t < type_names.size())
+                            h.interface_descriptors.emplace_back(std::string(type_names[t]));
+                    }
+                }
+            }
+            out.push_back(std::move(h));
+        }
+    }
+    return out;
+}
+
 namespace {
 
 // Minimal leb/int readers for the static-values EncodedArray scan. Bounded:
@@ -1024,7 +1070,14 @@ void FillInternalClassSummary(const dexkit::DexItem& item,
     out.is_internal = true;
     out.dex_id = static_cast<int16_t>(item.GetDexId());
     out.access_flags = class_def.access_flags;
-    out.superclass_descriptor = std::string(type_names[class_def.superclass_idx]);
+    // The gate admits kNoIndex here (dex_verifier.cpp CheckInterSection: it
+    // bounds superclass_idx only when it is not kNoIndex), so a crafted class_def
+    // that verifies VALID can carry one; reading type_names[0xFFFFFFFF] was an
+    // unchecked OOB on this line until the ListClassHeaders review found it.
+    if (class_def.superclass_idx != dex::kNoIndex &&
+        class_def.superclass_idx < type_names.size()) {
+        out.superclass_descriptor = std::string(type_names[class_def.superclass_idx]);
+    }
     if (class_def.source_file_idx != dex::kNoIndex) {
         out.source_file = std::string(strings[class_def.source_file_idx]);
     }

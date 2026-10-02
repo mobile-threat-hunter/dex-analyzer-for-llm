@@ -873,6 +873,22 @@ em.referenced_in_dex_ids      # [0]      (list[int])
 # ExternalTypeRef(Landroid/accessibilityservice/AccessibilityServiceInfo;)   len 1035
 ```
 
+### `dk.list_class_headers() -> list[ClassHeader]`
+Every class_def of every loaded dex as a [`ClassHeader`](#classheader) — the
+hierarchy half of `get_class_summary` for ALL classes in one crossing, with no
+member materialised. In `list_classes()` order, one row PER DECLARATION (a
+descriptor declared in two dexes appears twice, each with its own `dex_id`);
+dedupe first-wins for a descriptor-keyed view. `superclass_descriptor` is present
+for a framework superclass no dex declares (it is a type_id of the declaring dex)
+and is `""` only for a class_def whose `superclass_idx` is NO_INDEX.
+```python
+headers = dk.list_class_headers()
+by_desc = {h.descriptor: h for h in headers}          # first-wins: setdefault order
+h = headers[0]
+h.descriptor, h.superclass_descriptor, h.access_flags, list(h.interface_descriptors)
+# ('La2dp/Vol/ALauncher;', 'Landroid/app/Service;', 1, [])          (a2dp.Vol_137.apk)
+```
+
 Python-side filter helpers: `dexllm.filter_method_refs(refs, ...)`,
 `filter_field_refs`, `filter_type_refs` (e.g. keep only `android.content.*`).
 `dexllm.find_call_sites_to_ref(dk, ref)` → the `list[CallSite]` for an
@@ -1139,6 +1155,63 @@ so the decision that an app disables TLS validation is testable on crafted bodie
 Raises `ValueError` for a `kind` outside the table above; a silent `not_proven`
 there would read as "this app does not do this".
 
+### `dexllm.find_component_subclasses(dk, *, with_xref=True) -> list`
+Every declared class that CAN be used as an Android component — whose
+superclass chain, or declared-interface chain, reaches one of the nine types an
+`AndroidManifest.xml` can name. Returns one row per class, DEDUPLICATED by
+descriptor (first-wins across loaded dexes) and sorted by descriptor:
+
+| field | meaning |
+|---|---|
+| `descriptor`, `dex_id` | the class and its first-wins declaring dex |
+| `root_descriptor`, `root_kind` | the base the chain reaches — `activity` / `service` / `receiver` / `provider` / `application` / `backup_agent` / `instrumentation` / `app_component_factory` / `zygote_preload`; both `""` when unresolved |
+| `chain_descriptors` | the class, then every superclass up to the root, FRAMEWORK intermediates included (`[LMyTile;, Landroid/service/quicksettings/TileService;, Landroid/app/Service;]`); for the interface root, the class then a SHORTEST declared-interface chain. A row carries one root: the superclass chain first, the interface root (`ZygotePreload`) only when no class root is reached — `extends Activity implements ZygotePreload` is an `activity` row |
+| `resolution` | `"resolved"`, or `"unresolved"` when the chain leaves the loaded dexes at a parent that is neither declared nor an SDK class — a hidden-API base, a `uses-library` class, a split-APK or packer remnant; the unknown parent is then the chain's last element |
+| `is_abstract` | an abstract class is a chain NODE, not a component; reported so the chain is visible |
+| `is_instantiable` | whether the framework's `newInstance()` would succeed — ART's own predicate (`java_lang_Class.cc` `Class_newInstance`): not abstract, the CLASS public (the caller is `android.app.AppComponentFactory`, another package, so a package-private class is refused at `:890` whatever its constructor), and a public zero-argument constructor. A class failing it cannot be a MANIFEST component; it can still be constructed in code |
+| `constructed_in` | the methods calling one of its constructors OTHER than a subclass's own `<init>` (`super()`, a chain edge) and the class's own `<init>` (`this(...)` delegation); `[]` when `with_xref=False`. Non-empty is the dynamic-registration shape. Decided by the CALLER's shape, not its body: a subclass constructor that also does `new Base()` hides that construction, and a factory method on the class itself is kept |
+
+**This is the SUPERSET of what the manifest registers, on purpose.** Measured on
+the bundled corpus (22 loadable APKs, 21 with a manifest; every component-naming
+attribute on the seven component elements counted as a declaration): the walk
+yields **279** rows, the manifests declare **98** of them — and the other 181 are
+what an analyst wants to see, annotated rather than filtered: abstract classes
+(58, chain nodes; separately, 53 of ALL rows are an intermediate of another
+row, 23 of them abstract), library classes
+bundled but not registered (90 — `FileProvider` in nine APKs, where the SAME
+bytes are a declared component in a tenth), and app classes constructed in code
+(33, every one an anonymous `BroadcastReceiver` handed to `registerReceiver`: a
+LIVE component the manifest never names). Six root kinds occur on the corpus
+(activity 119, receiver 75, service 63, provider 11, application 4,
+app_component_factory 4); 3 rows are `unresolved`. Nothing here reads
+`AndroidManifest.xml` (dexllm#54); a declared-in-manifest annotation belongs on
+this record when it does.
+
+**The framework half of every chain is never in the dex, so a table supplies
+it.** A dex walk from `Landroid/app/Service;` finds only classes whose parent is
+IN a loaded dex; an app class `extends android.service.media.MediaBrowserService`
+names a parent no dex declares, and the walk stops there — 25 such classes across
+the corpus, 0 reachable from the five class roots a naive walk would start at,
+and a name heuristic cannot stand in (`AccessibilityNodeProvider`,
+`ViewOutlineProvider`, `VolumeProvider`, `ResultReceiver` are direct parents on
+the same corpus and not components). The bundled `component_bases.json` is aosp_data_set's layer 13
+(issue #7): the transitive `extends` closure of the nine roots across the public +
+system + module-lib SDK (152 classes), the manifest-attribute → base-type table,
+and the full SDK class list — the last is what separates "parent is a known SDK
+class that is not a base" (resolved: not a candidate, e.g. `android.view.View`)
+from "parent is unknown" (`unresolved`). androidx intermediates need no table:
+they are bundled into the dex and their chains end at a framework class. The file
+is mechanical extraction, so like `perm_api.json` it is not in the `data_dir`
+override channel; `scripts/gen_component_data.py` regenerates it.
+
+Bounds, stated rather than discovered: a component the manifest names DIRECTLY
+with no app subclass (`<activity android:name="android.app.AliasActivity">` with
+`hasCode="false"` — AOSP's own `development/samples/AliasActivity`) has no
+class_def anywhere and is a manifest fact; the table's `depth` counts API-visible
+classes only (two framework chains pass through the hidden
+`android.window.WindowProviderService`); and an interface that extends the
+interface root is a type, not a row.
+
 ---
 
 ## 9. Dangerous permission APIs (Python)
@@ -1248,6 +1321,18 @@ are read-only attributes.
 | `descriptor` | `str` |
 | `class_idx` | `int` |
 | `dex_id` | `int` |
+
+### `ClassHeader`
+A class_def's header, from [`list_class_headers`](#dklist_class_headers---listclassheader):
+identity, declared supertypes and access flags, with no member materialised.
+| field | type |
+|---|---|
+| `descriptor` | `str` |
+| `dex_id` | `int` |
+| `class_idx` | `int` |
+| `access_flags` | `int` |
+| `superclass_descriptor` | `str` |
+| `interface_descriptors` | `list[str]` |
 
 ### `MethodRef`
 | field | type |

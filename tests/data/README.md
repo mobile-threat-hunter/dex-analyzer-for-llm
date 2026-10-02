@@ -19,6 +19,7 @@ narrowed to the sample here.
 | `permissive-tls.dex` | 4,872 B | 13 classes: 4 provably permissive TLS components, 2 that check, 3 duck-typing traps, a sub-interface and its invisible implementor, 2 installers |
 | `bool-return.dex` | 2,236 B | 16 methods, one per branch of the dexllm#86 decision: three shapes the `Z` return type must FIX, two controls with identical bytecode and a different return type, and craft bases that each trip exactly ONE guard (an ordered compare, an array index, an array-creation size, a non-0/1 constant, an arithmetic def, an `iput` and an `sput` value, an array-store value, a wide local) |
 | `literal-escapes.dex` | 1,448 B | 16 string constants, one per branch of the Java literal-escaping rule, each rendered BOTH as a `static_values` initializer and as a `const-string` |
+| `component-bases.dex` | 8,792 B | 32 classes, one per branch of `find_component_subclasses`: a depth-2 chain through an app abstract class, a chain through a FRAMEWORK intermediate no dex declares (`TileService`), the `ZygotePreload` interface root reached directly and through an app interface, two `Service`s without a public no-arg constructor, a `Service` constructed only through a subclass's `super()`, an anonymous receiver handed to `registerReceiver`, a receiver constructed inside an UNRELATED class's constructor, a public class with a PRIVATE no-arg constructor, a service constructed twice in one method, a class on which BOTH a class root and the interface root hold, a constructor delegating `this(...)`, two known-SDK non-component parents (`View`, `Thread`), and a parent compiled then EXCLUDED from the dex (the `unresolved` shape) |
 
 `multidex.apk` is deliberately the WORST case, not a convenient one: it is the
 sample that produced 17 of the failures in dexllm#46 (no `switch` header, no
@@ -185,6 +186,28 @@ exist because a mutant survived, and each time the cause was the same — a craf
 base refused by TWO guards lets either mutant live, so `cmpUsed`, `newArraySize`
 and `fieldStoreInstance` were added to isolate `int_use_vids`,
 `int_required_vids` and the `iput` arm of `prim_use_vids` respectively.
+
+`component-bases.dex` is the fourth authored fixture. It compiles against
+`android.jar` (every class extends a framework type), and ONE class is compiled
+and then left out of the dex on purpose — `Orphan extends
+com.example.missing.Vanished` — so that a parent in no loaded dex and not in the
+SDK exists, which is the `unresolved` shape no corpus sample offers. Its classes
+are PUBLIC STATIC members of one public outer class (`ComponentBases$…`): javac
+allows one top-level public class per file, and `is_instantiable` is ART's
+`Class.newInstance` predicate — a PUBLIC class with a public no-arg constructor —
+so a file of package-private classes would make every row non-instantiable.
+`PkgClass` drops `public` on the class alone, which is the half a
+constructor-only predicate cannot see:
+
+```
+cp component-bases.java ComponentBases.java
+javac -source 8 -target 8 -cp $SDK/platforms/android-36/android.jar \
+      -d cls Vanished.java ComponentBases.java              # javac 17.0.17
+rm cls/com/example/missing/Vanished.class
+d8 --release --min-api 26 --output out $(find cls -name '*.class')   # D8 8.10.9-dev, build-tools 36.0.0
+```
+
+where `Vanished.java` is `package com.example.missing; public class Vanished {}`.
 
 d8 is not byte-reproducible across versions, so the committed bytes are the
 artefact and the source is the statement of intent — which is why every guard

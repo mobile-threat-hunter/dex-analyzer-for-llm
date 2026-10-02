@@ -740,6 +740,33 @@ def _t_detect_permissive_tls(dk: DexKit, with_xref: bool = True) -> dict:
     }
 
 
+def _t_find_component_subclasses(
+    dk: DexKit,
+    with_xref: bool = True,
+    limit: int = DEFAULT_LIST_LIMIT,
+    offset: int = 0,
+) -> dict:
+    """Every class whose inheritance chain reaches a component base, with the chain.
+
+    The SUPERSET of what a manifest registers — abstract chain nodes, bundled
+    library classes, and anonymous receivers handed to ``registerReceiver`` are
+    all reported and annotated, never filtered (``dexllm.components``).
+    ``unresolved_count`` says how many chains left the loaded dexes at a parent
+    neither declared nor in the SDK, so a short list is not mistaken for a
+    complete one.
+    """
+    from .components import UNRESOLVED, find_component_subclasses
+
+    with_xref = bool(with_xref)
+    rows = find_component_subclasses(dk, with_xref=with_xref)
+    out = _paginate(rows, int(offset), int(limit))
+    out["unresolved_count"] = sum(1 for r in rows if r["resolution"] == UNRESOLVED)
+    # Echoed, COERCED (dexllm#49): a JSON-slip "false" is a truthy string that
+    # enables the xref, and nothing else in the payload says which mode ran.
+    out["with_xref"] = with_xref
+    return out
+
+
 # ─── container / verification / AST / batch ───────────────────────────────
 
 
@@ -866,6 +893,7 @@ TOOL_IMPLS: dict[str, Callable] = {
     "render_class_smali": _t_render_class_smali,
     "detect_content_providers": _t_detect_content_providers,
     "detect_permissive_tls": _t_detect_permissive_tls,
+    "find_component_subclasses": _t_find_component_subclasses,
     "batch_find_methods_using_strings": _t_batch_find_methods_using_strings,
     "find_classes_by_name": _t_find_classes_by_name,
     "find_classes_by_super": _t_find_classes_by_super,
@@ -1524,6 +1552,38 @@ TOOL_DEFINITIONS: list[dict] = [
                     "default": True,
                     "description": "attach the methods constructing each component",
                 },
+            },
+        },
+    },
+    {
+        "name": "find_component_subclasses",
+        "description": (
+            "Every declared class whose inheritance chain reaches an Android component "
+            "base — Activity / Service / BroadcastReceiver / ContentProvider / "
+            "Application / BackupAgent / Instrumentation / AppComponentFactory, or the "
+            "ZygotePreload interface — with the full chain (`chain_descriptors`), "
+            "framework intermediates included (`MyTile -> TileService -> Service`). "
+            "This is the SUPERSET of what the manifest registers, on purpose: abstract "
+            "chain nodes (`is_abstract`), bundled library classes, and anonymous "
+            "receivers handed to registerReceiver (`constructed_in` non-empty, "
+            "`is_instantiable` false) are all reported and annotated. `resolution` "
+            "is `unresolved` when the chain leaves the loaded dexes at a parent that is "
+            "neither declared nor an SDK class (hidden API, uses-library, split-APK "
+            "remnant) — then `root_kind` is empty and the unknown parent ends the "
+            "chain. Does NOT read AndroidManifest.xml; a component the manifest names "
+            "directly with no app subclass (android.app.AliasActivity) has no "
+            "class_def and is not here."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "with_xref": {
+                    "type": "boolean",
+                    "default": True,
+                    "description": "fill constructed_in — the methods constructing each class other than a subclass's super()",
+                },
+                "limit": {"type": "integer", "default": DEFAULT_LIST_LIMIT},
+                "offset": {"type": "integer", "default": 0},
             },
         },
     },

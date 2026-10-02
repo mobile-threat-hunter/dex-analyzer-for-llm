@@ -144,6 +144,26 @@ struct ClassRef {
     uint32_t class_idx = 0;
 };
 
+// A class_def's HEADER — the fields the dex stores for a class before any of
+// its members: identity, declared superclass and interfaces, access flags.
+// `superclass_descriptor` is the type_id the class_def names, so it is present
+// for a FRAMEWORK superclass that no loaded dex declares (the type_ids table
+// of the declaring dex carries every type it references); it is "" only for a
+// class_def whose superclass_idx is kNoIndex, which a well-formed app dex
+// never has (that is java.lang.Object's own shape).
+//
+// The point of the record is BULK: one pass over every dex's class_defs, one
+// Python crossing, where `get_class_summary` per class materialises every
+// member of every class (component-hierarchy walks need none of that).
+struct ClassHeader {
+    std::string descriptor;
+    uint16_t dex_id = 0;
+    uint32_t class_idx = 0;
+    uint32_t access_flags = 0;
+    std::string superclass_descriptor;
+    std::vector<std::string> interface_descriptors;
+};
+
 // Method identity. `descriptor` is upstream's full "Lpkg/Cls;->name(...)Ret;".
 struct MethodRef {
     std::string descriptor;                 // upstream's dex_descriptor form

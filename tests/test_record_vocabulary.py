@@ -67,6 +67,12 @@ _SUFFIX_TO_RECORDS: dict[str, frozenset[str]] = {
     "Callers": frozenset({"ApiCallers", "PermissionCallers"}),
     "Use": frozenset({"ContentProviderUse"}),
     "Component": frozenset({"TlsTrustComponent"}),
+    # a class_def's HEADER (identity + supertypes + flags) — what the dex spec
+    # calls the thing, and what the record carries
+    "Header": frozenset({"ClassHeader"}),
+    # a SUBCLASS of a component base — what the class IS in the hierarchy, not
+    # how it was found (a walk, which would be provenance)
+    "Subclass": frozenset({"ComponentSubclass"}),
     "Indicator": frozenset({"Indicator"}),
     "References": frozenset({"TypeReferences"}),
     # head nouns, not suffixes — the word IS the thing

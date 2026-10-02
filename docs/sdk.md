@@ -119,6 +119,11 @@ needs — metadata, fields and methods are three queries.
   superclass_descriptor, interface_descriptors, source_file, dex_name)` — class metadata, no members. `dex_name` is the
   declaring dex's file name (`classes.dex` / `classes2.dex` / …); `""` for an external
   class (`dex_id == -1`).
+- **`ClassHeader`** `(descriptor, dex_id, class_idx, access_flags,
+  superclass_descriptor, interface_descriptors)` — a class_def's header, the bulk
+  record behind `EnumerationPort.list_class_headers`: the hierarchy half of
+  `ClassInfo` for EVERY declared class in one crossing. One row per DECLARATION
+  (like `list_classes`); shared verbatim with the raw layer.
 - **`FieldInfo`** `(name, type, access_flags, class_descriptor, descriptor)` — one
   declared field.
 - **`MethodInfo`** `(name, proto, access_flags, class_descriptor, descriptor)` — one
@@ -246,6 +251,15 @@ other spelling, and the reason `MethodInfo` exposes the bits instead.
   set could not give back an API.
 
 ### Content providers
+- **`ComponentSubclass`** `(descriptor, dex_id, root_descriptor, root_kind,
+  chain_descriptors, resolution, is_abstract, is_instantiable,
+  constructed_in)` — a declared class whose inheritance chain reaches a component
+  base (`ComponentSubclassPort.find_component_subclasses`). The SUPERSET of what
+  the manifest registers, deliberately: `chain_descriptors` runs from the class to
+  the root with framework intermediates included; `resolution == "unresolved"`
+  means the chain left the loaded dexes at a parent neither declared nor in the
+  SDK (then `root_kind` / `root_descriptor` are `""`); `constructed_in` lists the
+  methods constructing it other than a subclass's `super()`. See docs/api.md §8.
 - **`ContentProviderUse`** `(uri, family, methods)` — a `content://` provider URI
   the app references (the runtime-assembled surface the `@RequiresPermission` map
   misses). `family` ∈ `blockednumber` / `bluetooth` / `browser` / `calendar` / `calllog` / `contacts` / `media` / `settings` / `simphonebook` / `sms` / `telephony` / `timezone` / `userdictionary` / `voicemail` — the 14 the BUNDLED dataset uses (an
@@ -266,7 +280,7 @@ so a consumer depends on just what it needs:
 |---|---|
 | **`ContainerProbePort`** | `identify(path) -> ContainerInfo`, `verify(path, *, lenient=False) -> tuple[DexVerifyStatus, …]` (load-free) |
 | **`DecompilationPort`** | `decompile_method`, `decompile_method_with_pc_map`, `decompile_class`, `decompile_method_ast`, `render_method_smali`, `render_class_smali`. **Split any of the text results on `"\n"`, never `str.splitlines()`** — a string literal may carry a raw U+0085 / U+2028 / U+2029 that `splitlines()` breaks on and the emitter does not (the `pc_map` line numbering depends on it; since dexllm#83 a `static final String` initializer follows the same rule as a method body) |
-| **`EnumerationPort`** | `list_classes` / `list_classes_in_dex`, `list_class_methods`, `list_fields` / `list_fields_in_dex`, `list_methods` / `list_methods_in_dex`, `list_value_strings` / `list_class_strings` / `list_method_strings` (app-wide, class-scoped, method-scoped — the forward direction of `find_*_using_strings`), `list_external_method_refs` / `list_external_field_refs` / `list_external_type_refs`, `verify_report`, `source_info` (what each source WAS, probed at load — a session fact that survives the file) (uniform scope axis: bare = all dexes, `…_in_dex(dex_id)` = one dex) |
+| **`EnumerationPort`** | `list_classes` / `list_classes_in_dex`, `list_class_methods`, `list_fields` / `list_fields_in_dex`, `list_methods` / `list_methods_in_dex`, `list_value_strings` / `list_class_strings` / `list_method_strings` (app-wide, class-scoped, method-scoped — the forward direction of `find_*_using_strings`), `list_external_method_refs` / `list_external_field_refs` / `list_external_type_refs`, `list_class_headers` (every class_def's supertypes + access flags in ONE crossing — the bulk form of `class_info`'s hierarchy half), `verify_report`, `source_info` (what each source WAS, probed at load — a session fact that survives the file) (uniform scope axis: bare = all dexes, `…_in_dex(dex_id)` = one dex) |
 | **`DexExtractionPort`** | `extract_dex` → `ExtractedDex` / `extract_dexes` → all of them in `dex_id` order (bytes + provenance: `source` / `entry` / `offset`; the packer/dump primitive). Provenance is not derivable elsewhere — the verify report's `name` is only the entry name for a zip member, so two sources both report `classes.dex`, and only `offset` says where in a concatenated container a dex starts |
 | **`ClassInspectionPort`** | `class_info`, `class_fields`, `class_methods`, `locate_class_dex` (the ISP split of raw's `get_class_summary`; `class_methods` is the structured twin of `class_fields` — `EnumerationPort.list_class_methods` returns descriptors, which carry no access flags, so before dexllm#37 a method modifier was reachable only by dropping to `.raw`; `locate_class_dex` = cheap declaring-dex lookup, vs the heavy `class_info().dex_id`) |
 | **`CrossReferencePort`** | `find_call_sites_to` (a target's callers — the reverse edge) / `find_call_sites_from` (a method's callees — the forward edge), `resolve_call_args`, `find_field_read_sites`, `find_field_write_sites`, `find_type_references`. `find_call_sites_to` / `find_call_sites_from` is the same pair the raw `DexKit` and the MCP catalog use — one spelling across all three layers, and the only one: the pre-unification adapter aliases (`find_call_sites`, `find_call_sites_to_api`, `find_call_sites_from_method`, `find_field_readers`, `find_field_writers`) were removed, as were `find_methods_reading_field` / `find_methods_writing_field` when dexllm#84 gave the pair its return type. Both call-site directions and `resolve_call_args` take `method_descriptor` |
@@ -276,9 +290,10 @@ so a consumer depends on just what it needs:
 | **`CapabilityPort`** | `summarize_capabilities` (`app_only=True` by default — the app's own callers, not the bundled libraries it ships; `dropped_touches` / `dropped_apis` say what that removed, so an empty report is not mistaken for an inert APK; dexllm#49) |
 | **`ContentProviderPort`** | `detect_content_providers` |
 | **`TlsTrustPort`** | `detect_permissive_tls` |
+| **`ComponentSubclassPort`** | `find_component_subclasses` (every class that CAN be used as a component — the transitive subclasses of the nine manifest-nameable bases, with the chain; the manifest's SUPERSET on purpose) |
 | **`CacheControlPort`** | `decompiler_cache_capacity` / `set_decompiler_cache_capacity` / `decompiler_cache_size` / `clear_decompiler_cache`, `warm_analysis_caches` (operational cache/lifecycle knobs, not analysis — a long-lived embedder bounds/frees/warms caches without dropping to `.raw`) |
 
-**`DexAnalysisUseCase`** composes the twelve session-bound ports (every port except
+**`DexAnalysisUseCase`** composes the thirteen session-bound ports (every port except
 `ContainerProbePort`, which is load-free) and adds `sources` / `apk_path` (=
 `sources[0]`) / `dex_count()`. It is
 the single interface a consumer annotates against — the analogue of a top-level

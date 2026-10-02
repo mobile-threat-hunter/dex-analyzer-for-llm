@@ -43,6 +43,7 @@ from .capability import (
     CapabilityReport,
     summarize_capabilities,
 )
+from .components import find_component_subclasses
 from .dangerous_api import (
     PERM_LEVELS,
     dangerous_permission_api_callers,
@@ -105,6 +106,7 @@ __all__ = [
     "detect_permissive_tls",
     "extract_iocs",
     "find_call_sites_to_ref",
+    "find_component_subclasses",
     "format_class",
     "format_class_summary",
     "identify",

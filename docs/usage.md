@@ -784,6 +784,30 @@ reported whatever its verdict, so "this app carries a custom TLS trust component
 stays legible either way. See [api.md](api.md#8-ioc-extraction-python) for the
 two proven shapes and the bounds.
 
+### Component subclasses — every class that CAN be used as a component
+
+An Android component is a class the framework instantiates BY NAME —
+`(Activity) cl.loadClass(name).newInstance()` and its siblings — so "could this
+class be a component" is a question about its inheritance chain, and
+`find_component_subclasses` walks that chain for every declared class:
+
+```python
+for c in dexllm.find_component_subclasses(dk):
+    print(c["root_kind"], c["descriptor"], "->".join(c["chain_descriptors"][1:]))
+# service  La2dp/Vol/NotificationCatcher;  Landroid/service/notification/NotificationListenerService;->Landroid/app/Service;
+# receiver La2dp/Vol/NotificationCatcher$1;  Landroid/content/BroadcastReceiver;   (constructed_in: NotificationCatcher.<init>)
+```
+
+It reports the manifest's SUPERSET on purpose: abstract chain nodes
+(`is_abstract`), library classes bundled but unused, and anonymous receivers
+handed to `registerReceiver` (`constructed_in` non-empty, `is_instantiable`
+false) are all rows, annotated rather than filtered — the last is a LIVE
+component the manifest never names. The framework half of the chain
+(`TileService → Service`) comes from the bundled `component_bases.json`, because
+no dex declares it; `resolution == "unresolved"` marks a chain that left the
+loaded dexes at a parent neither declared nor in the SDK. See
+[api.md](api.md#8-ioc-extraction-python) for the fields and bounds.
+
 ### Overriding the bundled data
 
 Two of the four data files carry **hand judgement** rather than mechanical AOSP
@@ -1070,6 +1094,7 @@ ioc = session.extract_iocs()                              # -> IocReport; ioc.do
 cap = session.summarize_capabilities()                   # -> CapabilityReport(...); app_only=True by default
 prov = session.detect_content_providers()                # -> tuple[ContentProviderUse(uri, family, methods)]
 tls = session.detect_permissive_tls()                     # -> tuple[TlsTrustComponent(..., verdict, reason)]
+comps = session.find_component_subclasses()               # -> tuple[ComponentSubclass(descriptor, root_kind, chain_descriptors, ...)]
 
 session.raw       # the underlying dexllm.DexKit (escape hatch for L7 search etc.)
 ```

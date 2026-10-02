@@ -336,6 +336,33 @@ class ClassRef:
 
 
 @dataclass(frozen=True)
+class ClassHeader:
+    """A class_def's header: identity, declared supertypes, access flags.
+
+    The bulk record behind ``list_class_headers()`` — the hierarchy half of
+    :class:`ClassInfo` for EVERY declared class in one crossing, with no member
+    materialised. ``superclass_descriptor`` names a type the dex may not DECLARE
+    (a framework class: it is a type_id of the declaring dex), and is ``""`` only
+    for a class_def whose ``superclass_idx`` is NO_INDEX. One row PER
+    DECLARATION, like ``list_classes``: a descriptor declared in two dexes
+    appears twice, each with its own ``dex_id``.
+
+    Example (real, a2dp.Vol_137.apk)::
+
+        ClassHeader(descriptor='La2dp/Vol/StoreLoc;', dex_id=0, class_idx=84,
+                    access_flags=1, superclass_descriptor='Landroid/app/Service;',
+                    interface_descriptors=())
+    """
+
+    descriptor: str
+    dex_id: int
+    class_idx: int
+    access_flags: int
+    superclass_descriptor: str
+    interface_descriptors: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class MethodRef:
     """One method hit from a search query: descriptor + dex location.
 
@@ -950,4 +977,43 @@ class TlsTrustComponent:
     method_descriptor: str
     verdict: str
     reason: str
+    constructed_in: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class ComponentSubclass:
+    """A declared class whose inheritance chain reaches a component base.
+
+    The SUPERSET of what the manifest registers, deliberately — see
+    :mod:`dexllm.components` for what it contains (abstract chain nodes, bundled
+    but unused library classes, anonymous receivers handed to
+    ``registerReceiver``) and why each is reported rather than filtered.
+
+    ``chain_descriptors`` runs from the class itself to the root, framework
+    intermediates included. ``resolution`` is ``"resolved"`` when the chain
+    reaches a root and ``"unresolved"`` when it leaves the loaded dexes at a
+    parent that is neither declared nor in the SDK catalog — then ``root_kind``
+    and ``root_descriptor`` are ``""`` and the unknown parent is the chain's last
+    element. ``constructed_in`` lists the methods constructing the class OTHER
+    than a subclass's ``super()``; non-empty is the dynamic-registration shape.
+
+    Example (real, a2dp.Vol_137.apk)::
+
+        ComponentSubclass(descriptor='La2dp/Vol/NotificationCatcher;', dex_id=0,
+                          root_descriptor='Landroid/app/Service;', root_kind='service',
+                          chain_descriptors=('La2dp/Vol/NotificationCatcher;',
+                                             'Landroid/service/notification/NotificationListenerService;',
+                                             'Landroid/app/Service;'),
+                          resolution='resolved', is_abstract=False,
+                          is_instantiable=True, constructed_in=())
+    """
+
+    descriptor: str
+    dex_id: int
+    root_descriptor: str
+    root_kind: str
+    chain_descriptors: tuple[str, ...]
+    resolution: str
+    is_abstract: bool
+    is_instantiable: bool
     constructed_in: tuple[str, ...]

@@ -27,8 +27,10 @@ from .model import (
     ApiUsage,
     CallSite,
     CapabilityReport,
+    ClassHeader,
     ClassInfo,
     ClassRef,
+    ComponentSubclass,
     ContainerInfo,
     ContentProviderUse,
     DecompiledClass,
@@ -58,6 +60,7 @@ from .ports import (
     CacheControlPort,
     CapabilityPort,
     ClassInspectionPort,
+    ComponentSubclassPort,
     ContainerProbePort,
     ContentProviderPort,
     CrossReferencePort,
@@ -93,6 +96,7 @@ __all__ = [
     "CapabilityPort",
     "ContentProviderPort",
     "TlsTrustPort",
+    "ComponentSubclassPort",
     "CacheControlPort",
     # search
     "MatchType",
@@ -127,4 +131,6 @@ __all__ = [
     "CapabilityReport",
     "ContentProviderUse",
     "TlsTrustComponent",
+    "ClassHeader",
+    "ComponentSubclass",
 ]

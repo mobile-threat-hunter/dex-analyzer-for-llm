@@ -19,6 +19,7 @@ from dexllm.sdk import (
     CapabilityReport,
     ClassInspectionPort,
     ClassRef,
+    ComponentSubclassPort,
     ContainerInfo,
     ContainerProbe,
     ContainerProbePort,
@@ -60,6 +61,7 @@ _PORTS = [
     CapabilityPort,
     ContentProviderPort,
     TlsTrustPort,
+    ComponentSubclassPort,
     CacheControlPort,
 ]
 
@@ -121,6 +123,7 @@ _SDK_ONLY_MODELS = {
     "Indicator",
     "ContentProviderUse",
     "TlsTrustComponent",
+    "ComponentSubclass",
     "CapabilityReport",
     "ApiUsage",
     "PermissionCallers",
@@ -142,6 +145,7 @@ _PORT_FROM_MODULE_FUNCTION = {
     "detect_content_providers",
     "detect_permissive_tls",
     "summarize_capabilities",
+    "find_component_subclasses",
 }
 
 

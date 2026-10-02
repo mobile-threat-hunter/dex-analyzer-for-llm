@@ -18,8 +18,10 @@ from typing import Literal, Protocol, runtime_checkable
 from .model import (
     CallSite,
     CapabilityReport,
+    ClassHeader,
     ClassInfo,
     ClassRef,
+    ComponentSubclass,
     ContainerInfo,
     ContentProviderUse,
     DecompiledClass,
@@ -184,6 +186,15 @@ class EnumerationPort(Protocol):
         self, *, framework_only: bool = True
     ) -> tuple[ExternalTypeRef, ...]:
         """Framework / library types the app references but does not declare."""
+        ...
+
+    def list_class_headers(self) -> tuple[ClassHeader, ...]:
+        """Every class_def's header (supertypes + access flags), in bulk.
+
+        The hierarchy half of :meth:`ClassInspectionPort.class_info` for ALL
+        declared classes in one crossing, with no member materialised. One row
+        per DECLARATION, like :meth:`list_classes`.
+        """
         ...
 
     def verify_report(self) -> tuple[DexVerifyStatus, ...]:
@@ -584,6 +595,17 @@ class TlsTrustPort(Protocol):
 
 
 @runtime_checkable
+class ComponentSubclassPort(Protocol):
+    """Component-subclass detection — every class that CAN be used as a component."""
+
+    def find_component_subclasses(
+        self, *, with_xref: bool = True
+    ) -> tuple[ComponentSubclass, ...]:
+        """Return every declared class whose inheritance chain reaches a component base."""
+        ...
+
+
+@runtime_checkable
 class CacheControlPort(Protocol):
     """Session cache / lifecycle control — the operational (non-analysis) knobs.
 
@@ -626,6 +648,7 @@ class DexAnalysisUseCase(
     CapabilityPort,
     ContentProviderPort,
     TlsTrustPort,
+    ComponentSubclassPort,
     CacheControlPort,
     Protocol,
 ):

@@ -3794,7 +3794,7 @@ records, reached from the other direction.
 
 ### Typed API — `dexllm.sdk` (ports & adapters over the raw binding)
 
-For embedding, `dexllm.sdk` wraps this whole raw surface in a typed ports-and-adapters layer ([src/dexllm/sdk/](src/dexllm/sdk/) — `model.py` frozen dataclasses / `ports.py` `@runtime_checkable` Protocols / `adapter.py` `DexKitAdapter`; component reference in [docs/sdk.md](docs/sdk.md)). `open_apk(sources) → DexKitAdapter` satisfies the composite `DexAnalysisUseCase`, which composes **twelve session-bound ports** — `Decompilation` (incl. `render_*_smali`), `Enumeration` (classes/methods/fields/value-strings/external-{method,field,type}-refs, per-dex + all-dex), `DexExtraction` (`extract_dex` → `ExtractedDex`), `ClassInspection` (`class_info`/`class_fields`/`class_methods`/`locate_class_dex` — the god-object `get_class_summary` decomposed by ISP), `CrossReference` (call-sites/args/field-read-write/type-refs), `Search` (the L1–L7 family, `match_type: Literal`), `PermissionAnalysis`, `IndicatorExtraction`, `Capability`, `ContentProvider`, `TlsTrust`, and `CacheControl` (the operational cache/lifecycle knobs) — plus the load-free `ContainerProbePort` (`identify`). `.raw` is the escape hatch to the underlying `DexKit`. This is the boundary a consumer programs against instead of the dict/struct raw returns; the audit invariant is **every session-bound port fully implemented, isinstance-conformant, and 0 adapter-method-without-a-port drift apart from an explicit allow-list** — the documented `.raw` escape hatch plus the enumerated dexllm#21 back-compat aliases (now none — stage 4 removed them, and the allow-list is an empty declaration) (locked by `tests/test_sdk.py::test_adapter_public_surface_has_no_undeclared_drift`, which asserts the set equality; before 2026-08-05 the "locked by tests" half was overstated — the isinstance test only checked ports ⊆ adapter, never the reverse). **The raw ↔ port axis is locked too** (`test_raw_and_port_share_one_spelling_per_operation`): a raw `DexKit` method and its port method must share a NAME — the dexllm#21 series existed because `find_call_sites_to_api` (raw) and `find_call_sites` (port) were one operation under two names for three releases and nothing noticed. Set EQUALITY both ways against three declared exception kinds: `_RAW_DEPRECATED_ALIASES` (alias→canonical, and the canonical must itself be unified, so a new raw method cannot be hidden by listing it), `_RAW_DECOMPOSED` (`get_class_summary` → `class_info` + `class_fields` + `class_methods`, an ISP split = a genuinely different operation), and `_PORT_FROM_MODULE_FUNCTION` (`identify`/`verify`/`extract_iocs`/… are module-level `dexllm` functions, a location difference not a naming drift). Verified to catch a port-side rename, a stale exception entry, an alias claiming a non-unified canonical, and a bogus module-function claim. **Adding a raw binding now requires either the matching port name or a conscious edit to one of those three lists.** **The TYPE axis is locked too since dexllm#37** (`test_raw_and_sdk_share_one_spelling_per_record_type`): a record type present on both layers uses ONE name — `ClassMemberField` (raw) and `FieldInfo` (SDK) were one field-for-field identical record under two names, the exact defect #21 removed, on an axis nothing checked (reverting a type rename in `model.py` passed every existing assertion). Set equality both ways against `_SDK_ONLY_MODELS` (a composite, or a raw dict/tuple return given a type) and `_RAW_ONLY_MODELS` (`ClassSummary`, the god object the SDK decomposes). An exception must be JUSTIFIED, not merely listed: a raw-only type field-identical to an SDK-only model is rejected, because otherwise the cheapest way past a failure is to add BOTH names to the two lists — which absorbs the very defect (constructed: renaming SDK `MethodRef` to `MethodHit` goes green that way). **The MCP tool-NAME axis is locked too** (`test_every_mcp_tool_name_exists_on_another_layer`): every advertised tool must carry the name THAT operation already has on the raw `DexKit`, on a port, or as a module-level `dexllm` function. Two assertions, because name-existence alone is the weaker claim "the name SOME operation has" — under which renaming the `get_class_summary` tool to `class_info` passes silently, the mirror defect (one name, two operations); the second ties each tool to `_t_<name>` and requires that impl to CALL an identically-named operation (`safe_`-wrapped counts, for the two decompile tools). **The ARGUMENT axis is locked too since dexllm#44** (its own paragraph below). It was the last unlocked NAME axis and it had drifted — `capability_report` was `summarize_capabilities` under a second name; renamed outright (the MCP surface has no consumers yet, so it takes no alias), and the exception list is an empty declaration. **A shared NAME can still carry a shared KEY with two meanings**, which assertion (2) cannot see (the impl does call the same-named operation). The one such case — MCP `identify` overwriting `dex_count` with the count of all LOADED dexes while `dexllm.identify(path)` reports one container's own — was fixed in dexllm#38 by making every shared key mean the same thing, moving that total to `loaded_dex_count` and adding `source` (WHICH source the shared keys describe: `add_dumped_dexes` puts the dump first, so a packer session probes a bare dex — dexllm#26's lesson for `extract_dex`). Rename to `session_info` was the alternative and was REJECTED for a stated reason: no such name exists on raw/port/module, so it would have taken the first entry in `_MCP_ONLY_TOOLS` and weakened the audit being locked in the same change. Guard `test_identify_means_the_same_thing_on_every_layer` is driven by a CRAFTED concatenated dex — a packer dump is ONE source that splits, so the earlier belief that only a multi-source session diverges was false, and the crafted fixture also removes the skip and the second-source-fails-to-load hazard. Two legs, because on a single source `identify(apk_path())` and `identify(sources()[-1])` are the same call: 5 of 6 mutants die (the survivor swaps `dex_count()` for `len(verify_report())`, which coincide unless a dex is rejected). Distinct from the *internal* `IDexCodeSource` hexagonal boundary above (that isolates `dad_cpp` from DexKit; this one is the outward Python API).
+For embedding, `dexllm.sdk` wraps this whole raw surface in a typed ports-and-adapters layer ([src/dexllm/sdk/](src/dexllm/sdk/) — `model.py` frozen dataclasses / `ports.py` `@runtime_checkable` Protocols / `adapter.py` `DexKitAdapter`; component reference in [docs/sdk.md](docs/sdk.md)). `open_apk(sources) → DexKitAdapter` satisfies the composite `DexAnalysisUseCase`, which composes **thirteen session-bound ports** — `Decompilation` (incl. `render_*_smali`), `Enumeration` (classes/methods/fields/value-strings/external-{method,field,type}-refs, per-dex + all-dex, plus `list_class_headers` — every class_def's supertypes in one crossing), `DexExtraction` (`extract_dex` → `ExtractedDex`), `ClassInspection` (`class_info`/`class_fields`/`class_methods`/`locate_class_dex` — the god-object `get_class_summary` decomposed by ISP), `CrossReference` (call-sites/args/field-read-write/type-refs), `Search` (the L1–L7 family, `match_type: Literal`), `PermissionAnalysis`, `IndicatorExtraction`, `Capability`, `ContentProvider`, `TlsTrust`, `ComponentSubclass` (`find_component_subclasses` — every class that CAN be used as a component, chain included), and `CacheControl` (the operational cache/lifecycle knobs) — plus the load-free `ContainerProbePort` (`identify`). `.raw` is the escape hatch to the underlying `DexKit`. This is the boundary a consumer programs against instead of the dict/struct raw returns; the audit invariant is **every session-bound port fully implemented, isinstance-conformant, and 0 adapter-method-without-a-port drift apart from an explicit allow-list** — the documented `.raw` escape hatch plus the enumerated dexllm#21 back-compat aliases (now none — stage 4 removed them, and the allow-list is an empty declaration) (locked by `tests/test_sdk.py::test_adapter_public_surface_has_no_undeclared_drift`, which asserts the set equality; before 2026-08-05 the "locked by tests" half was overstated — the isinstance test only checked ports ⊆ adapter, never the reverse). **The raw ↔ port axis is locked too** (`test_raw_and_port_share_one_spelling_per_operation`): a raw `DexKit` method and its port method must share a NAME — the dexllm#21 series existed because `find_call_sites_to_api` (raw) and `find_call_sites` (port) were one operation under two names for three releases and nothing noticed. Set EQUALITY both ways against three declared exception kinds: `_RAW_DEPRECATED_ALIASES` (alias→canonical, and the canonical must itself be unified, so a new raw method cannot be hidden by listing it), `_RAW_DECOMPOSED` (`get_class_summary` → `class_info` + `class_fields` + `class_methods`, an ISP split = a genuinely different operation), and `_PORT_FROM_MODULE_FUNCTION` (`identify`/`verify`/`extract_iocs`/… are module-level `dexllm` functions, a location difference not a naming drift). Verified to catch a port-side rename, a stale exception entry, an alias claiming a non-unified canonical, and a bogus module-function claim. **Adding a raw binding now requires either the matching port name or a conscious edit to one of those three lists.** **The TYPE axis is locked too since dexllm#37** (`test_raw_and_sdk_share_one_spelling_per_record_type`): a record type present on both layers uses ONE name — `ClassMemberField` (raw) and `FieldInfo` (SDK) were one field-for-field identical record under two names, the exact defect #21 removed, on an axis nothing checked (reverting a type rename in `model.py` passed every existing assertion). Set equality both ways against `_SDK_ONLY_MODELS` (a composite, or a raw dict/tuple return given a type) and `_RAW_ONLY_MODELS` (`ClassSummary`, the god object the SDK decomposes). An exception must be JUSTIFIED, not merely listed: a raw-only type field-identical to an SDK-only model is rejected, because otherwise the cheapest way past a failure is to add BOTH names to the two lists — which absorbs the very defect (constructed: renaming SDK `MethodRef` to `MethodHit` goes green that way). **The MCP tool-NAME axis is locked too** (`test_every_mcp_tool_name_exists_on_another_layer`): every advertised tool must carry the name THAT operation already has on the raw `DexKit`, on a port, or as a module-level `dexllm` function. Two assertions, because name-existence alone is the weaker claim "the name SOME operation has" — under which renaming the `get_class_summary` tool to `class_info` passes silently, the mirror defect (one name, two operations); the second ties each tool to `_t_<name>` and requires that impl to CALL an identically-named operation (`safe_`-wrapped counts, for the two decompile tools). **The ARGUMENT axis is locked too since dexllm#44** (its own paragraph below). It was the last unlocked NAME axis and it had drifted — `capability_report` was `summarize_capabilities` under a second name; renamed outright (the MCP surface has no consumers yet, so it takes no alias), and the exception list is an empty declaration. **A shared NAME can still carry a shared KEY with two meanings**, which assertion (2) cannot see (the impl does call the same-named operation). The one such case — MCP `identify` overwriting `dex_count` with the count of all LOADED dexes while `dexllm.identify(path)` reports one container's own — was fixed in dexllm#38 by making every shared key mean the same thing, moving that total to `loaded_dex_count` and adding `source` (WHICH source the shared keys describe: `add_dumped_dexes` puts the dump first, so a packer session probes a bare dex — dexllm#26's lesson for `extract_dex`). Rename to `session_info` was the alternative and was REJECTED for a stated reason: no such name exists on raw/port/module, so it would have taken the first entry in `_MCP_ONLY_TOOLS` and weakened the audit being locked in the same change. Guard `test_identify_means_the_same_thing_on_every_layer` is driven by a CRAFTED concatenated dex — a packer dump is ONE source that splits, so the earlier belief that only a multi-source session diverges was false, and the crafted fixture also removes the skip and the second-source-fails-to-load hazard. Two legs, because on a single source `identify(apk_path())` and `identify(sources()[-1])` are the same call: 5 of 6 mutants die (the survivor swaps `dex_count()` for `len(verify_report())`, which coincide unless a dex is rejected). Distinct from the *internal* `IDexCodeSource` hexagonal boundary above (that isolates `dad_cpp` from DexKit; this one is the outward Python API).
 
 **Call-site xref naming — one spelling in all four layers (dexllm#21, 2026-08-05).** The reverse/forward call-site pair is `find_call_sites_to(api)` / `find_call_sites_from(method)` on the raw `DexKit`, the `CrossReferencePort`/adapter, AND the MCP tool catalog. Previously the SDK said `find_call_sites` while raw + MCP said `find_call_sites_to_api` / `find_call_sites_from_method`, so a name learned in one layer raised `AttributeError` in another. `_to`/`_from` was chosen over `find_callers`/`find_callees` because the return is one entry per invoke INSTRUCTION (a caller invoking twice yields two entries) — "call sites" is the accurate noun, "callers" reads as a deduped set. Every pre-rename name still worked as a **deprecated alias** (all REMOVED in stage 4 below): extra `.def`s in [module.cpp](native/binding/module.cpp) (pybind registers the same C++ member twice — verified to produce two independent methods, not an overload chain), **delegating** methods on `DexKitAdapter` (deliberately NOT on the Protocol — a port-annotated call to an alias is a mypy error (which names the replacement when the spelling is close enough for its did-you-mean)), and — at the time — a `TOOL_ALIASES` map resolved in `tools.execute` (**since REMOVED in stage 3, see below**: the MCP catalog now carries no aliases at all). **The adapter aliases MUST delegate, not rebind** (`find_call_sites = find_call_sites_to` binds the base function object, so a subclass overriding the canonical name is silently bypassed when a caller uses the old spelling — `DexKitAdapter` is the documented embedding surface, so subclassing is supported; guarded, until the aliases were removed in stage 4, by `test_deprecated_adapter_aliases_delegate_not_rebind`). **Accepted MCP caveat:** an alias is not advertised in the catalog, and mcp validates arguments only for advertised names, so an alias call skips JSON-Schema validation — a malformed argument becomes an in-band `{"error": …}` instead of a protocol-level error (error SHAPE only; no crash, no OOB — probed with non-string / list / dict descriptors, negative offset, `limit=10**12`). The same change documents what the issue's second half asked for — which half of a `CallSite` is FIXED depends on the producing direction, `bytecode_offset` is always inside the CALLER, and `caller_method_idx` is a **dex-local** `method_ids` index (not a stable global id) — in `sdk/model.py`, `_dexkit_core.pyi`, docs/api.md §13 and docs/sdk.md. Guards: `test_call_site_names_are_unified_across_layers` (tests/test_sdk.py) + `test_no_adapter_alias_survives` (tests/test_sdk.py).
 
@@ -7932,6 +7932,247 @@ while MIXED, which the guard omitted, did.
 "46 sources" is 46 ENUMERATED entries, of which **45 are files** - `test_apk/APK/
 apksig` is a DIRECTORY - and **40 load**. The 6 non-loaders are that directory,
 two certificates, a `.jar`, a resources-only APK and a `.apksig`.
+
+### Every class that CAN be used as a component, with its chain (`find_component_subclasses`, 2026-10-02)
+
+An Android component is a class the FRAMEWORK instantiates by name —
+`(Activity) cl.loadClass(name).newInstance()` at `AppComponentFactory.java:97`,
+and the same shape for Service / BroadcastReceiver / ContentProvider /
+Application, `ActivityThread` for a BackupAgent (`:5412`) and an
+Instrumentation (`:8388`), `LoadedApk` for the AppComponentFactory itself
+(`:299`), and `AppZygoteInit.java:88`'s `isAssignableFrom` for the one INTERFACE
+root, `ZygotePreload`. Nine base types; the cast IS the requirement. So "which
+classes could be used as a component" is a question about INHERITANCE CHAINS,
+and `find_component_subclasses(dk)` ([components.py](src/dexllm/components.py))
+answers it for every class the loaded dexes declare.
+
+**The deliverable is the SUPERSET of what the manifest registers — the user's
+own framing — and the manifest is an annotation, not a filter.** Measured on the
+bundled corpus (22 loadable APKs, 21 with a manifest; every component-naming
+attribute on the seven component elements counted as a declaration — ONE
+predicate, after a correctness review showed the first draft's 226/73/53/31/36
+were two disjoint slices presented as a partition): the walk yields **279**
+rows, the manifests declare **98**, and the other 181 are what an analyst
+wants to see: abstract classes (58, chain NODES; 53 rows are an intermediate of
+another row), library classes bundled but not registered (90 — `FileProvider`
+in nine APKs, where the SAME bytes are a declared component in a tenth, so no
+property of the class decides it), and app classes constructed in code (33,
+every one an anonymous `BroadcastReceiver` handed to `registerReceiver` — a
+LIVE component the manifest never names). Six root kinds occur on the corpus;
+3 rows are `unresolved`. Nothing here reads `AndroidManifest.xml`; that stays
+dexllm#54, and when it lands a `declared_in_manifest` annotation belongs on
+this record. A component the manifest names DIRECTLY with no app subclass
+(AOSP's own `development/samples/AliasActivity`: `hasCode="false"`, zero Java,
+the framework's `android.app.AliasActivity` runs under the app's UID) has no
+class_def anywhere and is stated as a manifest fact rather than traced.
+
+**The framework half of every chain is never in the dex, which is why a table
+had to exist — and it had to be ASKED FOR.** A dex walk from `Landroid/app/Service;`
+finds only classes whose parent is IN a loaded dex. An app class
+`extends android.service.media.MediaBrowserService` names a parent no dex
+declares, and the walk stops there: measured, **25 such classes across the
+corpus** (`MediaBrowserService` 6, `PreferenceActivity` 5, `ListActivity` 4,
+`IntentService` 4, `NotificationListenerService` 2, `AppWidgetProvider` 2,
+`WallpaperService` 1, `TabActivity` 1), **0 of them reachable from the five
+roots**, and a name heuristic cannot stand in — the same scan returns
+`AccessibilityNodeProvider` (16), `ViewOutlineProvider` (11), `VolumeProvider`
+(6) and `ResultReceiver` (5) as direct parents, none a component. Filed as
+**aosp_data_set#7** with that measurement; upstream shipped **layer 13**
+(`component_bases.tsv` / `manifest_component_attrs.tsv`, `9825dea` + `cf8c6d6`)
+the same day, and every number in it was re-derived here from the files before
+it was consumed: my own BFS over the regenerated catalog = the SAME 152
+subclasses, 0 root/depth disagreements, 76 public / 76 system, 52 abstract /
+24 concrete / 23 instantiable, all 38 cited `path:line` sites resolving in the
+AOSP tree. `scripts/gen_component_data.py` turns it into the bundled
+`component_bases.json` (544 KB; roots, the 161-row closure keyed by Dalvik
+descriptor, the 23-row attribute table, and the **full 9,966-class SDK list**).
+androidx intermediates (`AppCompatActivity`, `JobIntentService`,
+`GlanceAppWidgetReceiver`) need no table: they are bundled into the dex and
+their chains end at a framework class. Nested classes are spelled the dex way
+(`Landroid/app/Notification$Builder;`): a dot is a nesting separator exactly
+when the prefix is itself a catalog class, decided recursively.
+
+**The SDK list is what makes "unresolved" a distinct answer.** A parent in no
+loaded dex is one of two things: a KNOWN SDK class that is not a component base
+(`android.view.View`, `java.lang.Thread`, `java.lang.Object` itself) — resolved,
+not a candidate, no row — or something neither declared nor in the SDK (a
+hidden-API base, a `uses-library` class, a split-APK or packer remnant) —
+`resolution == "unresolved"`, REPORTED with `root_kind == ""` and the unknown
+parent as the chain's last element, because its parent may well be a component
+base. Without the list the two are indistinguishable. Corpus: 3 unresolved rows
+in 279 (`WearableActivityController$AmbientCallback` x2, an androidx
+`DrawableWrapper` the APK does not bundle).
+
+## The record, and the two decisions a reviewer-shaped probe changed before review
+
+One row per class, DEDUPLICATED by descriptor (first-wins across loaded dexes —
+the resolution every descriptor-keyed API uses, pinned on a session loading the
+fixture twice): `descriptor`, `dex_id`, `root_descriptor`, `root_kind`,
+`chain_descriptors` (self → … → root, framework intermediates included:
+`[LMyTile;, Landroid/service/quicksettings/TileService;, Landroid/app/Service;]`),
+`resolution`, `is_abstract`, `is_instantiable`, `constructed_in`. A row carries ONE root: the
+superclass chain is consulted first and the interface root only when no class
+root is reached, so `extends Activity implements ZygotePreload` is an
+`activity` row — the kind that decides how the framework instantiates it. (The
+first cut consulted the interface first and said nothing about it; a reviewer
+built the shape. The fixture carries it now.)
+
+**`is_instantiable` is ART's predicate, not half of it.** The first cut carried
+`has_public_noarg_ctor`, which is what every instantiation site visibly needs.
+Reading `Class_newInstance` (`art/runtime/native/java_lang_Class.cc`) before
+review: it refuses an interface/abstract class, then **a class the CALLER cannot
+access (`:890`)** — the caller is `android.app.AppComponentFactory`, another
+package, so a package-private class with a PUBLIC constructor is refused with
+`IllegalAccessException` — then a non-public zero-arg constructor (`:925`). A
+constructor-only field would have called such a class instantiable. The field
+is the whole predicate now, and the fixture's `PkgClass` (package-private
+class, public ctor) is the case that separates them — which forced the fixture
+into one public outer class with public static nested members, since javac's
+default constructor takes the CLASS's access and a file of package-private
+classes makes every row non-instantiable.
+
+**`interface_root_paths` is a reverse BFS with parent pointers, and it got
+there in two steps.** The first cut's DFS memoised `None` for a type it
+abandoned because the path led back into its own ancestor stack: `X implements
+Z`, `Z implements X, R` — entering at `Z` reaches `R` and leaves `X` recorded
+as unreachable, which it is not; modelled and measured (`X: None`) before any
+dex existed for it. The replacement, a per-type fixed point that MATERIALISED
+every path, was correct and QUADRATIC — a correctness reviewer measured a
+reversed 8,000-interface chain at 7.2 s / 257 MB, extrapolating to minutes and
+gigabytes at the 65,535-type ceiling, reachable from `/upload` — and its
+docstring described a "first declared interface" rule the code did not
+implement. The shipped version walks FROM the roots over the reversed
+`implements` edges, O(types + edges) with one pointer per type, records a
+SHORTEST path, and says so; the 8,000-chain is a guard now (< 5 s, linear).
+Interface cycles are invalid Java and ART refuses them at link time, but the
+structural verifier this project ports does not, so the answer must not depend
+on visit order; the pure function is pinned on exactly that cycle. The superclass memo needs no such
+treatment and the comment says why: single inheritance gives each class ONE
+parent, so its answer cannot depend on where the walk entered, except inside a
+superclass cycle, where every member is "none" unless its own interfaces
+resolve it, and those are consulted first. **Superclass cycles are GATE-LEGAL
+in both verify modes** (measured by crafting `SuperOnly <-> NewedService` in
+place, two u4 fields), so the walk's termination on one is a crafted guard in a
+subprocess, not an assumption.
+
+**`constructed_in` separates `new` from `super()` and from `this()`.** All
+three reach the constructor through `invoke-direct`, so the call-site index
+cannot tell them apart; the caller's IDENTITY can — a caller that is `<init>`
+of a class whose declared superclass is this class is a chain edge, and a
+caller that is `<init>` of the class ITSELF is constructor delegation (2 real
+corpus cases of the latter were being reported as constructions, a reviewer's
+finding; `androidx.activity.ComponentActivity` was one). The bound is stated
+rather than hidden: the exclusion is by the caller's SHAPE, not its body, so a
+subclass constructor that also does `new Base()` hides that construction and a
+factory method on the class itself is kept. A non-empty list is
+the dynamic-registration shape; the fixture's `SuperOnly`, constructed ONLY
+through `SubOfSuperOnly`'s `super()`, must come back empty, with the premise
+(the subclass's `<init>` DOES call it) asserted beside it so the empty list is
+the filter working and not an absent call.
+
+## The bulk accessor it rides on
+
+`list_class_headers()` (C++ `ListClassHeaders`, record `ClassHeader`: descriptor,
+`dex_id`, `class_idx`, `access_flags`, `superclass_descriptor`,
+`interface_descriptors`) — every class_def of every loaded dex in ONE crossing,
+reading only the fields `DexItem` init already touches. The per-class route,
+`get_class_summary`, materialises every member of every class, which a
+hierarchy walk needs none of: measured 1,353 headers in 0.4 ms. `superclass_descriptor`
+is present for a framework parent (it is a type_id of the declaring dex), `""`
+only for a kNoIndex `superclass_idx`. One row PER DECLARATION, like
+`list_classes`, so the Python side does the first-wins. On the raw layer, the
+port (`EnumerationPort`), and shared verbatim as an SDK dataclass; the
+`ComponentSubclass` record and `ComponentSubclassPort` are the thirteenth
+session-bound port, with `find_component_subclasses` an MCP tool
+(`unresolved_count` over the WHOLE list, pinned on a page that holds no
+unresolved row).
+
+## Measured
+
+**a/b OFF=`281856759462163d925fe9949c929065` (HEAD `55b28df`, built in a git
+worktree) vs ON=`27b60aeacd102fdc0d8ad51b2d3b0966`, SAME script, both `.so`
+md5-verified before AND after each capture, and the ON half RE-CAPTURED on the
+shipped binary after every review fix** [[verify-build-identity-before-measuring]]. 48 sources — the whole bundled
+corpus plus every committed fixture; 42 load — x up to 18 axes (both verify
+verdicts + reasons, load, `dex_count`, class list, whole-corpus smali and
+decompile digests + line count, external type refs, `find_classes_by_super`,
+every class's summary supertypes, the capability report, TLS components, the
+subprocess EXIT STATUS, and the four NEW axes) = **OFF 612 / ON 780 axis
+records, 0 changed, 168 new-axis records** (4 x 42). The change ADDS a reader
+and touches no existing path, and a flat result on every existing axis is that
+restated as a measurement; the new axes are what prove the mechanism fires
+[[ab-must-prove-the-mechanism-fires]]. Each source runs in a subprocess whose
+axes are flushed one per line; all 48 exit 0 on both halves.
+
+parity **29/29**, pytest **1452 passed / 24 skipped**, narrowed to `tests/data/multidex.apk`
+**1343 passed / 133 skipped / 0 failed** — every one of the 44 new cases but the corpus floor runs
+there, since every craft is on the committed fixture — TRUE corpus-less
+(`test_apk` MOVED aside) **1036 passed / 440 skipped / 0 failed**, sweep
+**21,374-class / 180,879 method-block 0-crash 0-timeout 0-error, GATE: PASS**,
+determinism 3 processes x 3 `PYTHONHASHSEED`s over every header and every
+component row of every source -> one digest, lint trio clean,
+`scripts/check_dad_boundary.sh` unaffected (nothing under `dad_cpp/` moved).
+
+Cost: the walk is 279 rows over 21 APKs in 0.4 s with xref on; `_constructed_in`
+is one call-site query per constructor of each CANDIDATE, not of each class.
+
+## The fixture is the fourth authored one, and it was rebuilt once
+
+`tests/data/component-bases.dex` (32 classes, source beside it; `javac 17.0.17`
+against `android.jar`, D8 8.10.9 from build-tools 36.0.0) carries one class per
+branch: a depth-2 chain through an app abstract class, a chain through a
+FRAMEWORK intermediate no dex declares, the interface root reached directly and
+through an app interface, a class on which BOTH a class root and the interface
+root hold, two `Service`s without a public no-arg constructor and one
+package-private class WITH one, a `Service` constructed only through `super()`,
+a constructor delegating `this(1)`, an anonymous receiver handed to
+`registerReceiver`, a receiver constructed inside an UNRELATED class's
+constructor, a public class with a PRIVATE no-arg constructor, a service
+constructed twice in one method (the three shapes an adversarial review's
+surviving mutants demanded — below), two known-SDK non-component parents
+(`View`, `Thread`), and
+a parent COMPILED THEN EXCLUDED from the dex (`Orphan extends
+com.example.missing.Vanished`) — the only way to make the `unresolved` shape
+exist, since no corpus sample offers one. Two more shapes are CRAFTED on it in
+place rather than compiled, because javac cannot write them: a superclass CYCLE
+(two u4 fields) and a class_def whose `superclass_idx` is NO_INDEX — both
+verify VALID in both modes, and both are judged in a subprocess. The
+expected rows are a LITERAL table checked for set equality both ways: an extra
+row (`ViewSub`, the `MyPreload` interface) fails as loudly as a missing one.
+
+**Mutation matrix — 21 mutants, each applied and run, 5 of them BUILT with a
+distinct `.so` md5; the harness snapshots, restores (and clears `__pycache__`),
+rebuilds to the control and asserts its md5 before and after — 21 KILLED:**
+the SDK arm dropped (a known non-base parent becomes unresolved), the
+framework tail stopped at depth 1, interface edges ignored, `constructed_in`
+keeping `super()` and keeping `this()`, `is_instantiable` dropping the
+class-public half and dropping the abstract half, last-wins, interfaces
+reported as rows, the superclass-cycle guard removed, the reverse BFS stopping
+after one level and never recording a parent, the interface root given
+PRECEDENCE over the class root, the MCP `unresolved_count` taken over the
+page, the adapter dropping `with_xref` and mapping `is_instantiable` from
+`not is_abstract`, and five C++ mutants — interfaces dropped, superclass never
+filled, `dex_id` always 0, and the summary's `kNoIndex` guard removed, whose
+`.so` md5 is `cf5b7827…`, the PRE-review build's exactly: that guard is the
+diff's whole C++ content since the review, stated as a measurement.
+
+**Two mutants SURVIVED the first run** and shaped the guards: the
+`p == Object` branch, PROVEN EQUIVALENT (`java.lang.Object` is in the SDK list,
+so the SDK arm already ends the walk there) and therefore DELETED with its
+premise pinned (`Ljava/lang/Object;` must stay in `sdk_classes`); and the
+adapter mapping `is_instantiable` from `not is_abstract`, which survived
+because the SDK-layer guard looked only at classes where the two agree —
+`PkgClass` (not abstract, not instantiable) is pinned there now. Two anchors
+went stale under `black` between the runs and were reported as NOT A MUTANT
+rather than counted; both killed on the corrected anchors.
+
+**A hand-applied mutant then reproduced a trap this file already records**
+[[mutation-harness-restore-pitfalls]]: `not r["is_abstract"]` and
+`r["is_instantiable"]` are the same length, the restoring `cp` landed in the
+same second, so CPython's (mtime, size) check kept the MUTANT's `.pyc` and a
+narrowed suite run reported one failure the source could not explain. The
+harness clears `__pycache__`; the hand edit had not. Clearing it gave the
+numbers above.
 
 ### The vendored fork has a baseline, and the divergences are catalogued (dexllm#65, 2026-09-01)
 

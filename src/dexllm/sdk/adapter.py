@@ -23,8 +23,10 @@ from .model import (
     ApiUsage,
     CallSite,
     CapabilityReport,
+    ClassHeader,
     ClassInfo,
     ClassRef,
+    ComponentSubclass,
     ContainerInfo,
     ContentProviderUse,
     DecompiledClass,
@@ -383,6 +385,20 @@ class DexKitAdapter:
         return tuple(
             _to_ext_type_ref(r)
             for r in self._dk.list_external_type_refs(framework_only)
+        )
+
+    def list_class_headers(self) -> tuple[ClassHeader, ...]:
+        """Return every class_def's header (supertypes + access flags), in bulk."""
+        return tuple(
+            ClassHeader(
+                descriptor=h.descriptor,
+                dex_id=h.dex_id,
+                class_idx=h.class_idx,
+                access_flags=h.access_flags,
+                superclass_descriptor=h.superclass_descriptor,
+                interface_descriptors=tuple(h.interface_descriptors),
+            )
+            for h in self._dk.list_class_headers()
         )
 
     def verify_report(self) -> tuple[DexVerifyStatus, ...]:
@@ -842,6 +858,27 @@ class DexKitAdapter:
                 constructed_in=tuple(t["constructed_in"]),
             )
             for t in dexllm.detect_permissive_tls(self._dk, with_xref=with_xref)
+        )
+
+    # -- ComponentSubclassPort --
+
+    def find_component_subclasses(
+        self, *, with_xref: bool = True
+    ) -> tuple[ComponentSubclass, ...]:
+        """Return every declared class whose inheritance chain reaches a component base."""
+        return tuple(
+            ComponentSubclass(
+                descriptor=r["descriptor"],
+                dex_id=r["dex_id"],
+                root_descriptor=r["root_descriptor"],
+                root_kind=r["root_kind"],
+                chain_descriptors=tuple(r["chain_descriptors"]),
+                resolution=r["resolution"],
+                is_abstract=r["is_abstract"],
+                is_instantiable=r["is_instantiable"],
+                constructed_in=tuple(r["constructed_in"]),
+            )
+            for r in dexllm.find_component_subclasses(self._dk, with_xref=with_xref)
         )
 
     # -- CacheControlPort --

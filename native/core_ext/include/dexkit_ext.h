@@ -179,6 +179,14 @@ public:
     // type-id order. External-only refs (no class_def in any dex) excluded.
     [[nodiscard]] std::vector<std::string> ListClasses() const;
 
+    // Every class_def of every loaded dex as a ClassHeader (identity, dex_id,
+    // class_idx, access flags, declared superclass + interfaces), in the same
+    // order ListClasses() enumerates. A descriptor declared in several dexes
+    // appears once PER DECLARATION with its own dex_id, exactly as ListClasses
+    // repeats it (dexllm#45) — the caller decides first-wins. Reads only the
+    // class_def and its type_list; no class_data is decoded.
+    [[nodiscard]] std::vector<ClassHeader> ListClassHeaders() const;
+
     // Every distinct string the app loads as a VALUE — a `const-string`/
     // `const-string/jumbo` (0x1a/0x1b) bytecode operand, or a static-field
     // EncodedValue VALUE_STRING (0x17, incl. nested in arrays). Raw MUTF-8,
