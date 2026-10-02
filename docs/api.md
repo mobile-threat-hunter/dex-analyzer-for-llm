@@ -1184,8 +1184,10 @@ bytes are a declared component in a tenth), and app classes constructed in code
 LIVE component the manifest never names). Six root kinds occur on the corpus
 (activity 119, receiver 75, service 63, provider 11, application 4,
 app_component_factory 4); 3 rows are `unresolved`. Nothing here reads
-`AndroidManifest.xml` (dexllm#54); a declared-in-manifest annotation belongs on
-this record when it does.
+`AndroidManifest.xml`, by design: dexllm extracts what the dex can say, and the
+manifest join (which candidates the app REGISTERS) belongs to a separate
+manifest tool that consumes this list — which is why the rows are the superset,
+annotated rather than filtered. dexllm#54 was closed on that decision.
 
 **The framework half of every chain is never in the dex, so a table supplies
 it.** A dex walk from `Landroid/app/Service;` finds only classes whose parent is

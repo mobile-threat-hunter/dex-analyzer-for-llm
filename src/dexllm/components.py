@@ -83,9 +83,12 @@ interface chain, reaches a root:
   ``new Base()`` hides that construction, and a factory method on the class
   itself (``static Base create() { return new Base(); }``) is kept.
 
-Nothing here reads ``AndroidManifest.xml`` — that is dexllm#54. When it lands,
-a declared-in-manifest annotation belongs on this record; it is an ANNOTATION,
-not a filter, for the reason in the second paragraph.
+Nothing here reads ``AndroidManifest.xml``, BY DESIGN: dexllm extracts what
+the dex can say, and the manifest join — which of these candidates the app
+REGISTERS — is the job of a separate manifest tool (axmllm) that consumes
+this list. That is why the rows are the superset and are annotated rather
+than filtered: a downstream selector needs every candidate, not dexllm's
+guess at which ones matter. dexllm#54 was closed on that decision.
 
 ## What it does not reach, stated rather than discovered
 

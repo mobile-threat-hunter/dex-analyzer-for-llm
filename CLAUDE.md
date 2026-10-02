@@ -7959,9 +7959,13 @@ in nine APKs, where the SAME bytes are a declared component in a tenth, so no
 property of the class decides it), and app classes constructed in code (33,
 every one an anonymous `BroadcastReceiver` handed to `registerReceiver` — a
 LIVE component the manifest never names). Six root kinds occur on the corpus;
-3 rows are `unresolved`. Nothing here reads `AndroidManifest.xml`; that stays
-dexllm#54, and when it lands a `declared_in_manifest` annotation belongs on
-this record. A component the manifest names DIRECTLY with no app subclass
+3 rows are `unresolved`. Nothing here reads `AndroidManifest.xml`, and after this shipped the user
+settled it as a BOUNDARY rather than a backlog item: dexllm extracts what the
+dex can say, and the manifest join — which candidates the app registers — is
+the job of a separate manifest tool (axmllm) that consumes this list. That is
+the reason the rows are the superset, annotated and never filtered: the
+downstream selector needs every candidate. dexllm#54 was closed on that
+decision (2026-10-03). A component the manifest names DIRECTLY with no app subclass
 (AOSP's own `development/samples/AliasActivity`: `hasCode="false"`, zero Java,
 the framework's `android.app.AliasActivity` runs under the app's UID) has no
 class_def anywhere and is stated as a manifest fact rather than traced.
