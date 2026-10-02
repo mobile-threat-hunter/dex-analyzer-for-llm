@@ -24,8 +24,8 @@ Three components, three files:
 
 | Component | File | What it is |
 |---|---|---|
-| **Domain models** | [`model.py`](../src/dexllm/sdk/model.py) | 28 frozen dataclasses — the typed values every port returns/accepts. |
-| **Ports** | [`ports.py`](../src/dexllm/sdk/ports.py) | 12 `@runtime_checkable` Protocol use cases + the composite `DexAnalysisUseCase`. |
+| **Domain models** | [`model.py`](../src/dexllm/sdk/model.py) | 32 frozen dataclasses — the typed values every port returns/accepts. |
+| **Ports** | [`ports.py`](../src/dexllm/sdk/ports.py) | 14 `@runtime_checkable` Protocol use cases (13 session-bound + the load-free `ContainerProbePort`) + the composite `DexAnalysisUseCase`. |
 | **Adapter** | [`adapter.py`](../src/dexllm/sdk/adapter.py) | `DexKitAdapter` (implements the ports over `DexKit`) + `ContainerProbe` + `open_apk` / `identify` / `verify` factories. |
 
 ---

@@ -300,7 +300,7 @@ def test_the_runner_is_not_vacuous():
     pinned.
     """
     cases = _cases()
-    assert len(cases) >= 78, f"only {len(cases)} runnable fences collected"
+    assert len(cases) >= 80, f"only {len(cases)} runnable fences collected"
 
     per_doc = {}
     for case in cases:

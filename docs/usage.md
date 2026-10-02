@@ -781,7 +781,7 @@ never that it validates, and never that the app is clean: a trust-all written
 all (dexllm#78). A verifier that logs and then returns true is permissive
 and lands there, because proving it needs real dataflow; every implementor is
 reported whatever its verdict, so "this app carries a custom TLS trust component"
-stays legible either way. See [api.md](api.md#8-ioc-extraction-python) for the
+stays legible either way. See [api.md](api.md#8-python-analyses-ioc-providers-tls-components) for the
 two proven shapes and the bounds.
 
 ### Component subclasses — every class that CAN be used as a component
@@ -806,7 +806,7 @@ component the manifest never names. The framework half of the chain
 (`TileService → Service`) comes from the bundled `component_bases.json`, because
 no dex declares it; `resolution == "unresolved"` marks a chain that left the
 loaded dexes at a parent neither declared nor in the SDK. See
-[api.md](api.md#8-ioc-extraction-python) for the fields and bounds.
+[api.md](api.md#8-python-analyses-ioc-providers-tls-components) for the fields and bounds.
 
 ### Overriding the bundled data
 
@@ -1038,7 +1038,15 @@ for s in sites[:20]:
     if s.args[0].kind == "ConstString":
         print(f"  Class.forName(\"{s.args[0].string_value}\") @ {s.caller_descriptor}")
 
-# 5. Drill into one suspicious method
+# 5. Which classes could be components, and which are reached dynamically?
+comps = dexllm.find_component_subclasses(dk)
+live = [c for c in comps if c["is_instantiable"] or c["constructed_in"]]
+print(f"\n{len(comps)} component candidates, {len(live)} instantiable or constructed:")
+for c in live[:15]:
+    how = "new/registered" if c["constructed_in"] else "manifest-instantiable"
+    print(f"  {c['root_kind']:9} {c['descriptor']}  ({how})")
+
+# 6. Drill into one suspicious method
 print("\n--- decompiled ---")
 print(dk.decompile_method(
     "Lcom/example/SuspiciousReceiver;->onReceive(Landroid/content/Context;Landroid/content/Intent;)V"

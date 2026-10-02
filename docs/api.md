@@ -339,6 +339,23 @@ entry name for a zip member, so two sources in one session both report
 dex — fixed separately in dexllm#25, see the rows↔dex_ids note above — but
 `offset` remains the only thing that says WHERE in the container a dex starts.)
 
+### `dk.list_class_headers() -> list[ClassHeader]`
+Every class_def of every loaded dex as a [`ClassHeader`](#classheader) — the
+hierarchy half of `get_class_summary` for ALL classes in one crossing, with no
+member materialised. In `list_classes()` order, one row PER DECLARATION (a
+descriptor declared in two dexes appears twice, each with its own `dex_id`);
+dedupe first-wins for a descriptor-keyed view. `superclass_descriptor` is present
+for a framework superclass no dex declares (it is a type_id of the declaring dex)
+and is `""` only for a class_def whose `superclass_idx` is NO_INDEX.
+```python
+headers = dk.list_class_headers()
+by_desc = {h.descriptor: h for h in headers}          # first-wins: setdefault order
+h = headers[0]
+h.descriptor, h.superclass_descriptor, h.access_flags, list(h.interface_descriptors)
+# ('La2dp/Vol/ALauncher;', 'Landroid/app/Service;', 1, [])          (a2dp.Vol_137.apk)
+```
+
+
 ---
 
 ## 3. Decompilation (DAD-aligned Java)
@@ -873,22 +890,6 @@ em.referenced_in_dex_ids      # [0]      (list[int])
 # ExternalTypeRef(Landroid/accessibilityservice/AccessibilityServiceInfo;)   len 1035
 ```
 
-### `dk.list_class_headers() -> list[ClassHeader]`
-Every class_def of every loaded dex as a [`ClassHeader`](#classheader) — the
-hierarchy half of `get_class_summary` for ALL classes in one crossing, with no
-member materialised. In `list_classes()` order, one row PER DECLARATION (a
-descriptor declared in two dexes appears twice, each with its own `dex_id`);
-dedupe first-wins for a descriptor-keyed view. `superclass_descriptor` is present
-for a framework superclass no dex declares (it is a type_id of the declaring dex)
-and is `""` only for a class_def whose `superclass_idx` is NO_INDEX.
-```python
-headers = dk.list_class_headers()
-by_desc = {h.descriptor: h for h in headers}          # first-wins: setdefault order
-h = headers[0]
-h.descriptor, h.superclass_descriptor, h.access_flags, list(h.interface_descriptors)
-# ('La2dp/Vol/ALauncher;', 'Landroid/app/Service;', 1, [])          (a2dp.Vol_137.apk)
-```
-
 Python-side filter helpers: `dexllm.filter_method_refs(refs, ...)`,
 `filter_field_refs`, `filter_type_refs` (e.g. keep only `android.content.*`).
 `dexllm.find_call_sites_to_ref(dk, ref)` → the `list[CallSite]` for an
@@ -1057,7 +1058,7 @@ The `dexllm.capability` module also exposes `ApiUsage` / `CapabilityReport` type
 
 ---
 
-## 8. IOC extraction (Python)
+## 8. Python analyses (IOC, providers, TLS, components)
 
 ### `dexllm.extract_iocs(dk, *, with_xref=True, denoise=True, xref_limit=300) -> dict`
 Static network-IOC over `list_value_strings()`. Defang-aware, public-suffix-

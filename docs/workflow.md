@@ -78,7 +78,8 @@ verifier's per-check parity with AOSP ART `DexFileVerifier`.
 
 `L` = **capability level** — a numbered grouping, not a strict abstraction
 hierarchy. One search engine (L7) underpins the higher-level analyses (L1–L4);
-L5/L6 are the render/decompile paths. Each level is independently callable.
+L5/L6 are the render/decompile paths, L8 the plain enumeration the drivers and
+the inheritance walk read. Each level is independently callable.
 
 ```mermaid
 flowchart LR
@@ -109,6 +110,7 @@ flowchart LR
 | L5 | smali for a method/class (no JVM) | smali render |
 | L6 | DAD-quality Java text / AST | `decompile_method` / `_class` / `_method_ast` |
 | L7 | find classes/methods by name/string/literal/super/annotation | `find_*` family |
+| L8 | enumerate what the dex declares — classes, members, class HEADERS (supertypes) | `list_classes` / `list_class_headers` |
 
 Full recipes: [usage.md](usage.md).
 
