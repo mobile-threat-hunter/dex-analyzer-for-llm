@@ -21,15 +21,40 @@ concurrency:
 
 jobs:
   guard:
-    # Fail fast unless the tag matches [project].version in pyproject.toml.
+    # Fail fast unless the tag, [project].version and dexllm.__version__ all agree.
+    #
+    # This is the ONLY pre-publish gate. `release` fires on the tag ref while `ci`
+    # fires on a branch, so publishing master and the tag in one command starts the
+    # two concurrently and a red CI does not stop `publish`/`pypi` -- and `pypi` is
+    # skip-existing, so a bad version can never be replaced, only yanked. That is
+    # why the version identity tests/test_dexkit.py asserts is re-asserted HERE:
+    # there it is a CI gate, here it is a release gate.
+    #
+    # Both seds are scoped. `[project]`'s own table is the version
+    # scikit-build-core puts in the wheel, and the scoping is not cosmetic -- an
+    # unscoped `^version = "` takes the FIRST such line in the file, which a
+    # `version` key in any table above [project] would win.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - name: tag == pyproject version
+      - name: tag == [project].version == dexllm.__version__
         run: |
           TAG="${{ github.event.inputs.tag || github.ref_name }}"
-          VER="v$(sed -nE 's/^version = "([^"]+)".*/\1/p' pyproject.toml | head -1)"
-          echo "tag=$TAG  pyproject=$VER"
+          VER="v$(sed -nE '/^\[project\]/,/^\[/{s/^version = "([^"]+)".*/\1/p}' pyproject.toml | head -1)"
+          INIT="v$(sed -nE 's/^__version__ = "([^"]+)".*/\1/p' src/dexllm/__init__.py | head -1)"
+          echo "tag=$TAG  pyproject=$VER  __version__=$INIT"
+          if [ "$VER" = "v" ]; then
+            echo "::error::no [project].version found in pyproject.toml"
+            exit 1
+          fi
+          if [ "$INIT" = "v" ]; then
+            echo "::error::no __version__ found in src/dexllm/__init__.py"
+            exit 1
+          fi
+          if [ "$INIT" != "$VER" ]; then
+            echo "::error::dexllm.__version__ '$INIT' != [project].version '$VER' — a half-bump would publish a wheel naming the previous release (docs/RELEASING.md step 1)"
+            exit 1
+          fi
           if [ "$TAG" != "$VER" ]; then
             echo "::error::tag '$TAG' != pyproject version '$VER' — bump [project].version first"
             exit 1

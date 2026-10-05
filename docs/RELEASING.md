@@ -48,8 +48,21 @@ turning on if releases are ever cut by automation.
 ## Cutting a release
 
 1. **Bump the version** in [pyproject.toml](../pyproject.toml) `[project] version`
-   **and** [src/dexllm/__init__.py](../src/dexllm/__init__.py) `__version__` (the
-   `guard` job fails if the tag and pyproject version don't match).
+   **and** [src/dexllm/__init__.py](../src/dexllm/__init__.py) `__version__`.
+   **The `guard` job blocks the release unless the tag and both version sites
+   agree** — it reads `[project] version` and `__version__` with scoped seds and
+   compares all three. That is where the check has to live: `release` fires on
+   the **tag** ref while `ci` fires on a **branch**, so step 2's single push
+   starts the two concurrently and a red CI does not stop `publish`/`pypi`.
+   `tests/test_dexkit.py::test_the_version_is_written_once_as_far_as_a_consumer_can_tell`
+   asserts the same identity locally and in CI, so a half-bump is caught before
+   you ever tag.
+
+   This is not hypothetical: **`v0.1.7` shipped with `__version__ = "0.1.6"`**
+   (1 of 39 tags), because until v0.22.0 `guard` compared the tag against
+   pyproject alone and never opened `__init__.py`. A wheel naming the previous
+   release cannot be fixed in place either — `pypi` is `skip-existing`, so such
+   a version can only be yanked or superseded.
 2. Commit, then tag and push:
    ```bash
    git commit -am "release: vX.Y.Z"

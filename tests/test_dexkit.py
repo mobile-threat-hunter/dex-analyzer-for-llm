@@ -27,6 +27,133 @@ def test_import_and_version():
     assert dexllm.DexKit is not None
 
 
+def _project_version(text):
+    """Return ``[project] version`` from pyproject.toml TEXT, or None.
+
+    A regex rather than ``tomllib``, because ``requires-python`` is 3.9 and
+    ``tomllib`` arrived in 3.11. Scoped to the ``[project]`` table and not to the
+    file's first ``version =``: the shipped version is the one scikit-build-core
+    parses out of that table, so a ``version`` key in any table ABOVE it would
+    otherwise be compared against silently. The release ``guard`` job's sed is
+    scoped the same way, deliberately, so the two readings cannot disagree.
+
+    KNOWN LIMIT, shared with that sed: this matches TEXT, not TOML, so a line
+    that merely LOOKS like ``[project]`` -- inside a multi-line string, say --
+    opens the table as far as either reader is concerned. Pinned by
+    ``test_the_project_version_reader_is_text_not_toml`` so the gap is an
+    asserted property instead of a surprise. Every legal TOML spelling the
+    regex does not cover (``'single quotes'``, ``\"\"\"multi-line\"\"\"``,
+    ``dynamic = [\"version\"]``) returns None, i.e. fails CLOSED.
+    """
+    table = re.search(r"(?ms)^\[project\]\s*$(.*?)(?=^\[|\Z)", text)
+    if not table:
+        return None
+    m = re.search(r'(?m)^version\s*=\s*"([^"]+)"', table.group(1))
+    return m.group(1) if m else None
+
+
+def test_the_version_is_written_once_as_far_as_a_consumer_can_tell():
+    """``dexllm.__version__`` must equal ``[project] version`` in pyproject.toml.
+
+    The release procedure says to bump BOTH by hand, and until v0.22.0 the only
+    automated check was the release workflow's ``guard`` job comparing the TAG
+    against pyproject -- so the one a consumer reads (and that CI's import smoke
+    prints) was held by nothing.
+
+    **It shipped broken once**: of 39 tags, ``v0.1.7`` carries
+    ``[project] version = "0.1.7"`` and ``__version__ = "0.1.6"``, with every
+    gate green at the time. That is the defect, measured rather than imagined.
+
+    This is the CI half. ``guard`` re-asserts the same identity on the tag, which
+    is what makes it block a release: ``release`` fires on the tag ref while
+    ``ci`` fires on a branch, so pushing master and the tag together starts the
+    two concurrently and a red CI does not stop ``publish``/``pypi`` -- and
+    ``pypi`` is skip-existing, so a bad version can never be replaced. The two
+    halves read the same property through different implementations (a Python
+    regex here, sed there), which is the only thing standing behind an assertion
+    that is otherwise a leaf.
+
+    NOT covered: ``importlib.metadata.version("dexllm")``, a third thing a
+    consumer can read. In a wheel it derives from ``[project] version`` too, so
+    it agrees by construction; in an editable install it comes from dist-info
+    and goes stale until reinstall, which is a dev-env artefact rather than a
+    release property.
+    """
+    text = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    declared = _project_version(text)
+    assert (
+        declared
+    ), "no [project] version in pyproject.toml -- the release guard reads it"
+    assert dexllm.__version__ == declared, (
+        f"dexllm.__version__ is {dexllm.__version__!r} but [project] version is "
+        f"{declared!r} -- bump whichever of the two is behind, in the same commit "
+        f"(docs/RELEASING.md step 1)"
+    )
+
+
+@pytest.mark.parametrize(
+    "shape, body, want",
+    [
+        # the committed shape
+        ("plain", '[project]\nname = "x"\nversion = "1.2.3"\n', "1.2.3"),
+        # SCOPING: a version key above [project] must not win. This is what the
+        # release guard's unscoped predecessor got wrong, and it is behaviourally
+        # unguarded without this case -- nothing in the committed file has a
+        # competing `version`, so dropping the scoping is an equivalent mutant.
+        (
+            "decoy above",
+            '[tool.d]\nversion = "9.9.9"\n\n[project]\nversion = "1.2.3"\n',
+            "1.2.3",
+        ),
+        (
+            "decoy below",
+            '[project]\nversion = "1.2.3"\n\n[tool.d]\nversion = "9.9.9"\n',
+            "1.2.3",
+        ),
+        # [project] LAST, i.e. the \Z alternative of the lookahead
+        (
+            "project last",
+            '[build-system]\nx = 1\n\n[project]\nversion = "1.2.3"\n',
+            "1.2.3",
+        ),
+        ("no spaces", '[project]\nversion="1.2.3"\n', "1.2.3"),
+        ("trailing comment", '[project]\nversion = "1.2.3"  # c\n', "1.2.3"),
+        ("crlf", '[project]\r\nversion = "1.2.3"\r\n', "1.2.3"),
+        # fail CLOSED rather than reading something else
+        ("single quotes", "[project]\nversion = '1.2.3'\n", None),
+        ("multi-line string", '[project]\nversion = """1.2.3"""\n', None),
+        ("dynamic", '[project]\ndynamic = ["version"]\n', None),
+        ("no project table", '[tool.d]\nversion = "1.2.3"\n', None),
+    ],
+)
+def test_the_project_version_reader_reads_the_project_table(shape, body, want):
+    """``_project_version`` takes ``[project]``'s own key, or nothing at all."""
+    assert _project_version(body) == want, shape
+
+
+def test_the_project_version_reader_is_text_not_toml():
+    """A line that LOOKS like ``[project]`` inside a string opens the table.
+
+    Contrived -- it needs a multi-line-string key above the real table -- and the
+    release guard's sed is fooled by the identical shape, so closing it would mean
+    a TOML parser on both sides and ``tomllib`` is 3.11+. Pinned as the asserted
+    boundary of the reader rather than left for someone to discover: if this ever
+    stops being true because a parser replaced the regex, the new behaviour is
+    strictly better and this case is the one to delete.
+    """
+    crafted = (
+        "[build-system]\n"
+        'backend-path = """\n'
+        "[project]\n"
+        'version = "9.9.9"\n'
+        '"""\n'
+        "\n"
+        "[project]\n"
+        'version = "1.2.3"\n'
+    )
+    assert _project_version(crafted) == "9.9.9"
+
+
 def test_optional_extras_bound_incompatible_majors():
     """Every optional dependency whose MAJOR bump is known to break us must carry an
     upper bound (#18).
