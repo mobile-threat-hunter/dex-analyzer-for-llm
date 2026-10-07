@@ -9215,6 +9215,202 @@ Retirement is now a STATE and treatment a KIND. D7 is **C** and retired; D12 is
 implies retired, a reduction is a CANDIDATE until it is taken — so the pin is
 `{C entries} <= _RETIRED <= {all entries}` rather than an equality.
 
+### The smali view prints what the register receives (dexllm#87, 2026-10-07)
+
+`render_*_smali` printed a `const/high16` operand as the raw 16-bit value the
+instruction ENCODES, so the smali and Java views of one instruction disagreed:
+
+```
+smali  0x4a: const/high16 v5, #0x1000          <- 4096
+Java   v3_1.addFlags(268435456);               <- 0x10000000
+```
+
+`#0x1000` is a well-formed operand that nothing marks, so every such site is a
+confident wrong answer. The bundled APK corpus has 9,349 of them
+(`const/high16` 8,435 + `const-wide/high16` 914), in 2,138 of its 25,309 classes.
+
+**The slicer declines to shift, and says why** (`dex_bytecode.cc:189`): it
+*"doesn't know if it's the top bits of a 32- or 64-bit value."* So the shift
+belongs to the consumer, and its WIDTH comes from the OPCODE. `0x15` loads
+`BBBB << 16` into an int; `0x19` loads `BBBB << 48` into a long. Shift the
+zero-extended operand through `uint64_t`: `insn.vB << 48` on the 32-bit field is
+a shift count at the operand width, which is undefined, and gcc folds it to 0.
+
+## The form is jadx's fallback literal — chosen through a gate, not by taste
+
+```
+const/high16 v1, #-1082130432(0xbf800000, float:-1.0)
+const-wide/high16 v0, #-4592264245034352640(0xc045000000000000, double:-42.0)
+const/high16 v0, #0
+```
+
+The form is the SIGNED value, then every reading of the bits, when `|v| > 100`
+(jadx's `TypeGen.literalToString`, read from the jadx 1.5.3 jar). The design was
+put through a **hack gate written for this decision**:
+[docs/hack-gate.md](docs/hack-gate.md), eight runnable criteria (HG1–HG8). It is
+now step 0 of the adversarial-review gate. Three findings decided the form:
+
+- **Every other tool prints the value SIGNED** (baksmali, jadx, AOSP dexdump,
+  androguard, androguard's Rust port, each measured on one crafted dex).
+  - The first cut printed unsigned hex (`#0xbf800000`). It was the only tool
+    that did.
+  - That made it the only form whose literal disagreed, at 2,117 top-bit-set APK
+    sites, with the number `resolve_call_args` and the Java view report.
+- **No reading is guessed.** baksmali's likely-float comment calls
+  `MeasureSpec.EXACTLY` (`0x40000000`) `2.0f` at 875 sites, so it fails HG4 by
+  measurement. Showing every reading is noisier and never wrong.
+- **Three divergences from jadx, all deliberate and pinned:**
+  - The hex is the register's own width. jadx prints `0xffffffffbf800000` for a
+    32-bit load.
+  - The float/double string is JDK 19+'s shortest round-trip `toString`
+    (`JavaFpString`). jadx's own output depends on its JDK: JDK 17 prints
+    `2.5243549E-29` where JDK 21 prints `2.524355E-29`. `JavaFpString` equals
+    Java only on the high16 domain, which is the only one it is called with.
+  - The threshold is compared exactly. jadx's `Math.abs` overflows on
+    `Long.MIN_VALUE`, so jadx prints the wide `BBBB = 0x8000` (`-0.0`) bare;
+    here it is decorated. Pinned by the JDK 21 edge table. (A correctness
+    reviewer found this one by reading jadx's bytecode.)
+
+## The gate found the rule read in FIVE places, and a reviewer found the fifth
+
+`k21h` is read by:
+
+- this arm;
+- `resolve_call_args` (`invoke_args.cpp`);
+- the decompiler (`opcode_ins.cpp`, `instruction_dispatch.cpp`);
+- the vendored DexKit number matcher (`PushEncodeNumber`);
+- slicer's `code_ir.cc:590`, which branches on the opcode and casts to `u8`
+  before `<< 48` exactly as the fix does. It is compiled into the build but
+  nothing calls it.
+
+All but the smali arm already shifted. **My first enumeration called the number
+matcher unreachable.** I had grepped its internal names; it is bound as
+`find_methods_using_{int,double}_literals`. A correctness reviewer reproduced it.
+HG2's check now says: walk inward from the binding's `.def`s. Measured, that
+matcher finds narrow sites 7,181 / 7,181 and finite wide sites 808 / 808. The
+other 41 wide sites are NaN or ±Inf, which its `abs(a - b) < EPS` comparison can
+never match.
+
+## Measured
+
+**a/b OFF=`27b60aea` vs ON=`038c6e9c`:**
+
+- **OFF** is the shipped v0.22.0 binary, bit-reproduced by rebuilding the HEAD
+  `smali_render.cpp`.
+- **Population:** 44 sources (the bundled corpus plus every committed fixture),
+  41 of which load.
+- **Unchanged on every source:** every NON-high16 line, through both smali APIs;
+  the line counts; and the decompiled Java of every class that holds a high16.
+- **Changed:** all 10,225 high16 lines, on 22 sources. The population is
+  `test_apk/APK/*.{apk,dex}` + `tests/data/*.{dex,apk}`, so the bundled `.jar`
+  (`OPCommonTelephony.jar`, 23 more lines) is NOT in it; an adversarial reviewer
+  re-derived 10,225 exactly under that predicate. Each new value is exactly
+  the old raw operand shifted by its opcode's width (0 mismatches).
+
+**Blast radius, measured over every public API (a second a/b, 48 sources /
+1,416 axis records):**
+
+- **Moved:** only the smali outputs and the MCP `render_class_smali` result.
+- **Identical:** verify, identify, the class / method / field / string lists,
+  `decompile_class`, the AST, `pc_map`, `resolve_call_args`, call sites, field
+  sites, the number matcher, capabilities, IOCs, permission callers, TLS
+  detection, component subclasses and content providers.
+- **Exported symbols:** identical, 2,838 on both builds. `JavaFpString` is
+  internal.
+- **Determinism:** 3 `PYTHONHASHSEED`s give one digest.
+- **The harness lied twice, and both were caught by re-measuring.**
+  - `capabilities` differed between two runs of ONE build. `str()` of a set
+    follows the hash seed.
+  - The number-matcher queries were derived from the rendered text, which this
+    change alters.
+  - With canonical sets and a fixed query list, both are byte-identical across
+    the builds.
+- **Costs, stated rather than hidden:**
+  - Smali grows by 0.151% (203,875,017 -> 204,183,664 bytes).
+  - At the MCP default `max_chars`, **4 classes now truncate that did not**
+    before.
+  - Rendering tvleanback's 4,135 classes takes 0.085 s -> 0.090 s, best of 5,
+    interleaved.
+  - An ASan+UBSan build of `JavaFpString` over 8.1M inputs (the full high16
+    domain plus random float/double bits) is clean.
+
+**JavaFpString was checked exhaustively.** There are only 131,072 possible
+readings (65,536 `BBBB` x 2 opcodes). All of them, assembled with the smali
+assembler and rendered, equal a JDK 21's `Float.toString` / `Double.toString`.
+
+**Gates:** parity 29/29; sweep 21,374-class 0-crash, GATE: PASS; lint trio and
+boundary clean. pytest:
+
+| run | passed | skipped | failed |
+|---|---:|---:|---:|
+| full | 1518 | 24 | 0 |
+| narrowed to `tests/data/multidex.apk` | 1404 | 138 | 0 |
+| TRUE corpus-less (`test_apk` moved aside, restore asserted) | 1097 | 445 | 0 |
+
+## Guards
+
+[tests/test_smali_high16.py](tests/test_smali_high16.py) holds 52 cases, all on
+the committed `tests/data/invoke-custom.dex` except the corpus legs. That
+fixture is the only one carrying both shapes: 4 narrow sites and 2 wide ones.
+
+- **Every parsed line is checked for internal consistency.** The signed decimal
+  must fit the register, the hex must be the same bits, the reading must parse
+  back to those bits, and the `|v| > 100` decoration rule must hold. So every
+  corpus leg checks the form at every site.
+- **Pinned literals:** the six fixture sites, and a 23-case JDK 21 edge table
+  (`-0.0`, subnormals, either side of 1e-3 and 1e7, ±Inf, NaN), crafted onto
+  fixture sites.
+- **The exhaustive JDK comparison** runs when a JDK 19+ and a smali-assembler jar
+  are present, and skips otherwise.
+- **Cross-view tests** compare smali, `resolve_call_args`, the Java line and the
+  number matcher on:
+  - the fixture;
+  - a top-bit `-1.0f` craft;
+  - a `+Infinity` craft (the oracle's first cut failed correct output there);
+  - a **wide** call-argument craft, which a reviewer showed was missing: without
+    it, the wide shift in `resolve_call_args` was revertible with CI green;
+  - the corpus.
+- **Also:** an independent raw-bytes decoder whose widths are derived from the
+  slicer table; the `k21h` opcode set derived as exactly `{0x15, 0x19}`; and a
+  sibling-arm non-regression pin.
+
+**Mutants for the form, 14 BUILT with distinct `.so` md5s.** The CI shape is the
+suite narrowed to the committed fixture, with the JDK test excluded.
+
+- **13 are killed in the CI shape and again by the JDK test.** They include:
+  - the raw `BBBB`;
+  - swapped widths;
+  - an unsigned decimal;
+  - the sign-extended (jadx) hex;
+  - a threshold removed, and its negative half dropped;
+  - `std::to_string` used for the float reading;
+  - a float formatted as a double;
+  - both plain-notation bounds moved;
+  - the `.0` dropped;
+  - the sign of `-0.0` lost;
+  - the float/double labels swapped.
+- **An adversarial reviewer built 12 more**: 9 were killed in the CI shape. The
+  other 3 also pass the exhaustive test, so they are equivalent on every
+  reachable input. They are `ax < 1e7` -> `<= 1e7` (1e7 is not a high16 value),
+  the threshold as `v != 0` (every nonzero high16 has `|v| >= 0x10000`), and the
+  N14 path again.
+- **N14 survives both, and it is PROVEN EQUIVALENT, not escaped.** It drops the
+  `.0` of a one-digit `E`-notation mantissa. The JDK test covers the entire input
+  domain and saw no output change, so no high16 value reaches that branch.
+
+The cross-view matrix (10 mutants across the four readers) is in
+docs/hack-gate.md. The first-cut mutants for the unsigned-hex form (M0–M7)
+measured a form that did not ship.
+
+**Lessons kept from the review rounds:**
+
+- dexllm#87's own claim that `grep -rn 'const/high16' tests/` is empty was false;
+  it hits the decompiler's pins in `return_literal_parity_test.cpp`.
+- The first raw-bytes oracle used a hand-written width table that was wrong for
+  nine opcodes. Desynced, it UNDER-reported, the masking direction.
+- A digit-count assertion failed on a leading-zero `BBBB` (`0x010a0000`). A
+  derived property is weaker than the one it is derived from.
+
 ### Skills
 
 `dexkit-build` is the production rebuild loop (ninja + pip install). Use `/dexkit-build` after any C++ change.
@@ -9264,7 +9460,7 @@ Before making a change that would **break, contradict, or weaken a principle or 
 - **Decompile model**: lazy per-class on-demand (JEB-style). Cache results.
 - **Permissions**: `--dangerously-skip-permissions` is set — no pre-approval for tool calls.
 - **Docs gate**: a `PreToolUse(Bash)` hook ([.claude/docs-precommit-check.sh](.claude/docs-precommit-check.sh)) blocks `git commit` / `git push` until the project docs (`README.md`, `CLAUDE.md`, `docs/*.md`) have been reviewed for drift against the change and any inaccuracies fixed in the same commit. After reviewing, re-run the same command prefixed with `DOCS_CHECKED=1` to bypass (e.g. `DOCS_CHECKED=1 git commit -m "..."`).
-- **Adversarial-review gate (MANDATORY after any fix)**: a `PreToolUse(Bash)` hook ([.claude/review-precommit-check.sh](.claude/review-precommit-check.sh)) blocks `git commit` / `git push` whose change touches production source (`native/**`, `vendor/dexkit_core/Core/**`, `src/dexllm/**` — `.cpp/.cc/.h/.hpp/.py`) until an **adversarial code review** has been run and its findings addressed. This is not optional: a decompiler type/dataflow change can be subtly wrong in a way tests miss. Required steps before committing a fix — **(0) HACK SELF-CHECK (root-cause, not output masking):** before reviewing, confirm the fix addresses the ROOT of the defect rather than masking a symptom at the output/late layer. A change that suppresses or rewrites **Writer / dast OUTPUT** to hide a defect whose true origin is the **IR builder / dataflow / control-flow** (opcode_ins, instruction, dataflow, graph, control_flow) is a **HACK** — even when the emitted text looks correct, the AST and other consumers still carry the defect. If it is a hack, **do NOT commit — RECONSIDER and redo it at the originating layer** ("structural defects must be fixed at the IR level, not in Writer output"). Only genuine beyond-DAD emit divergences (return-literal / catch-clamp / `<clinit>` `static{}`) legitimately live in the Writer; a defect with an earlier structural origin does not. Precedent: the v0.1.12 void-invoke "fix" masked in `Writer::visit_assign`, left `this = voidcall` in the AST, and was **rewritten at the IR builder** (v0.1.13). (1) spawn **≥2 INDEPENDENT reviewer agents** on the diff (Agent tool: `compound-engineering:ce-adversarial-reviewer` + `ce-correctness-reviewer`, or the `code-review` skill), each trying to CONSTRUCT a breaking input; (2) triage every finding (CONFIRMED/PLAUSIBLE/REFUTED) and fix the real ones; (3) re-verify — **a/b (fix on vs off) 0-regression on the relevant axes + parity 28/28 + 0-crash sweep**, and remove any temporary a/b env-gate (never ship a toggle for the fix). **Run an EXTERNAL analyser inside a memory cap — `scripts/capped.sh` — because
+- **Adversarial-review gate (MANDATORY after any fix)**: a `PreToolUse(Bash)` hook ([.claude/review-precommit-check.sh](.claude/review-precommit-check.sh)) blocks `git commit` / `git push` whose change touches production source (`native/**`, `vendor/dexkit_core/Core/**`, `src/dexllm/**` — `.cpp/.cc/.h/.hpp/.py`) until an **adversarial code review** has been run and its findings addressed. This is not optional: a decompiler type/dataflow change can be subtly wrong in a way tests miss. Required steps before committing a fix — **(0) HACK SELF-CHECK (root-cause, not output masking):** before reviewing, confirm the fix addresses the ROOT of the defect rather than masking a symptom at the output/late layer. A change that suppresses or rewrites **Writer / dast OUTPUT** to hide a defect whose true origin is the **IR builder / dataflow / control-flow** (opcode_ins, instruction, dataflow, graph, control_flow) is a **HACK** — even when the emitted text looks correct, the AST and other consumers still carry the defect. If it is a hack, **do NOT commit — RECONSIDER and redo it at the originating layer** ("structural defects must be fixed at the IR level, not in Writer output"). Only genuine beyond-DAD emit divergences (return-literal / catch-clamp / `<clinit>` `static{}`) legitimately live in the Writer; a defect with an earlier structural origin does not. The criteria are written out as eight RUNNABLE checks (HG1–HG8: origin layer, every reader of the input, views agree mechanically, no value-sniffing, no silent re-derivation, no new convention without a guard, no incidental guarantee, removal observable) in [docs/hack-gate.md](docs/hack-gate.md), with dexllm#87 worked through as the first application; a criterion whose check was not run is unexamined, not passed. Precedent: the v0.1.12 void-invoke "fix" masked in `Writer::visit_assign`, left `this = voidcall` in the AST, and was **rewritten at the IR builder** (v0.1.13). (1) spawn **≥2 INDEPENDENT reviewer agents** on the diff (Agent tool: `compound-engineering:ce-adversarial-reviewer` + `ce-correctness-reviewer`, or the `code-review` skill), each trying to CONSTRUCT a breaking input; (2) triage every finding (CONFIRMED/PLAUSIBLE/REFUTED) and fix the real ones; (3) re-verify — **a/b (fix on vs off) 0-regression on the relevant axes + parity 28/28 + 0-crash sweep**, and remove any temporary a/b env-gate (never ship a toggle for the fix). **Run an EXTERNAL analyser inside a memory cap — `scripts/capped.sh` — because
 one of them took the machine down.** On 2026-09-06 `dex-decompile`
 (androguard/dex-decompiler, under evaluation) reached **RSS 119 GB / virt
 161 GB** on ONE APK, on a 123 GB machine. The kernel log is exact:

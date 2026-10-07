@@ -573,6 +573,67 @@ uninformative there but actively wrong — and they are reachable on a
 strict-verified dex because `VerifyInsns` has no opcode-legality gate, so an
 odex-derived packer dump carries them.
 
+**Literal contract (dexllm#87).** A `const*` operand prints **the value the
+register receives**, not the bits the instruction encodes. That is only a
+distinction for the two `k21h` opcodes, where the dex stores the HIGH half of the
+value and the slicer hands it over raw (its decoder declines to shift, because at
+that level it cannot know whether the operand is the top of a 32- or a 64-bit
+value), so the width comes from the opcode:
+
+| operand | encodes | the register receives |
+|---|---|---|
+| `const/high16 vAA, #+BBBB` | `BBBB` | `BBBB << 16`, a 32-bit int |
+| `const-wide/high16 vAA, #+BBBB` | `BBBB` | `BBBB << 48`, a 64-bit long |
+
+Until dexllm#87 these printed the raw operand (`#0x1000`), so the smali and Java
+views of one instruction disagreed on **9,349 sites across 2,138 of the 25,309
+bundled classes**, with nothing marking it: `#0x1000` is a well-formed operand,
+and a reader searching the listing for the flag's value found nothing. `k21s`
+(`const/16`) and `k31i` (`const`) were always right; they store the whole value.
+
+**The form is jadx's fallback literal** (`TypeGen.literalToString`). It prints the
+SIGNED value, then, because the instruction does not say whether the bits are an
+int or a float, every reading of them:
+
+```
+const/high16 v5, #268435456(0x10000000, float:2.524355E-29)      // FLAG_ACTIVITY_NEW_TASK
+const/high16 v1, #-1082130432(0xbf800000, float:-1.0)
+const-wide/high16 v0, #-4592264245034352640(0xc045000000000000, double:-42.0)
+const/high16 v0, #0
+```
+
+- **The value is signed decimal**, like every other literal arm in this renderer
+  (`const/16 v0, #-42`). It is also the number `resolve_call_args`'s `int_value`
+  and the Java view report, so a reader can search for one token and land in any
+  of the three. This matters for the 2,117 top-bit-set sites in the APK corpus.
+  An unsigned hex there would read `0xbf800000` where the other two say
+  `-1082130432`.
+- **No reading is guessed.** baksmali instead comments `# 1.0f` where its
+  heuristic thinks a value is a float. That heuristic annotates
+  `MeasureSpec.EXACTLY` (`0x40000000`) as `2.0f` at 875 corpus sites. Showing
+  every reading is noisier (a flag carries a meaningless `float:2.5E-29`), but it
+  is never wrong.
+- **The decoration appears when `|v| > 100`, jadx's threshold.** A nonzero high16
+  always exceeds it (`|v| >= 0x10000`), so only `BBBB == 0` renders bare as `#0`.
+- **Three deliberate divergences from jadx:**
+  - The hex is the register's own width — not sign-extended, though not
+    zero-padded either (`BBBB = 0x0100` prints `0x1000000`). jadx prints the sign-extended long,
+    `0xffffffffbf800000`, even for a 32-bit load.
+  - The float/double string is Java's `Float.toString` / `Double.toString` as of
+    JDK 19, the shortest round-trip string. jadx's output depends on the JDK it
+    runs on: on JDK 17 it prints `2.5243549E-29` where 19+ prints `2.524355E-29`.
+    All 131,072 possible high16 readings were checked against a JDK 21.
+  - The threshold is compared exactly. jadx computes `Math.abs(lit) > 100`,
+    which overflows on `Long.MIN_VALUE`, so jadx prints the wide `BBBB = 0x8000`
+    (the double `-0.0`) bare. Here it is decorated like every other nonzero value:
+    `#-9223372036854775808(0x8000000000000000, double:-0.0)`.
+- **This form applies to the two `k21h` opcodes only.** The other const arms
+  still print a bare signed decimal; extending jadx's form to them is a separate
+  decision.
+
+The design was put through the hack gate, with the alternatives and the
+measurements, in [docs/hack-gate.md](hack-gate.md).
+
 One thing this does **not** cover:
 - Only C0 is escaped. **DEL, the C1 range and the Unicode line separators U+2028 /
   U+2029 / U+0085 render as themselves**, and Python's `str.splitlines()` treats the

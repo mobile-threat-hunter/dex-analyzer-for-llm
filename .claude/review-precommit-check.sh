@@ -78,6 +78,8 @@ grep -qE '^(native/|vendor/dexkit_core/Core/|src/dexllm/).*\.(cpp|cc|h|hpp|py)$'
     echo "        Output-layer suppression that hides an earlier structural defect"
     echo "        (AST still carries it) is a HACK — RECONSIDER and redo it at the"
     echo "        originating layer (cf. v0.1.12 void-invoke: Writer-hack → IR fix)."
+    echo "        Run the eight criteria in docs/hack-gate.md (HG1-HG8); a criterion"
+    echo "        whose check was not RUN is unexamined, not passed."
     echo "        Only genuine beyond-DAD emit divergences belong in the Writer."
     echo "     1. Spawn ≥2 INDEPENDENT reviewers on the diff (Agent tool:"
     echo "        compound-engineering:ce-adversarial-reviewer +"

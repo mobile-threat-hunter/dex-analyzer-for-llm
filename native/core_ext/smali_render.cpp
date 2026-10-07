@@ -2,7 +2,11 @@
 
 #include "smali_render.h"
 
+#include <charconv>
+#include <cmath>
 #include <cstdio>
+#include <cstring>
+#include <algorithm>
 #include <sstream>
 #include <vector>
 
@@ -16,6 +20,51 @@
 namespace dexkit::ext {
 
 namespace {
+
+// Java's `Float.toString` / `Double.toString` as of JDK 19+ (the shortest
+// decimal that round-trips, JDK-8202555), so the reading the smali view prints
+// beside a high16 literal is the string jadx prints on a current JDK. JDK 17 and
+// earlier print a non-shortest string for some values (`2.5243549E-29` where 21
+// prints `2.524355E-29`), so "what jadx prints" is only stable on 19+.
+// Pinned exhaustively against a JDK 21 over every high16 value by
+// tests/test_smali_high16.py -- and equal to Java ONLY there: outside that
+// domain Java's two-digit minimum differs from the shortest string
+// (`Double.MIN_VALUE` is `4.9E-324` in Java, `5.0E-324` here). Every caller
+// passes a high16 value.
+std::string JavaFpString(double x, bool is_float) {
+    if (std::isnan(x)) return "NaN";
+    if (std::isinf(x)) return x > 0 ? "Infinity" : "-Infinity";
+    if (x == 0) return std::signbit(x) ? "-0.0" : "0.0";
+    char buf[64];
+    const auto r = is_float
+        ? std::to_chars(buf, buf + sizeof buf, static_cast<float>(x), std::chars_format::scientific)
+        : std::to_chars(buf, buf + sizeof buf, x, std::chars_format::scientific);
+    std::string sci(buf, r.ptr);  // e.g. "-2.524355e-29", "1e+00"
+    std::string out;
+    if (sci[0] == '-') { out += '-'; sci.erase(0, 1); }
+    const size_t e_at = sci.find('e');
+    std::string digits = sci.substr(0, e_at);
+    digits.erase(std::remove(digits.begin(), digits.end(), '.'), digits.end());
+    const int exp10 = std::stoi(sci.substr(e_at + 1));
+    const double ax = std::fabs(x);
+    if (ax >= 1e-3 && ax < 1e7) {
+        // plain decimal, at least one digit after the point
+        if (exp10 >= 0) {
+            std::string ip = digits.substr(0, std::min<size_t>(digits.size(), exp10 + 1));
+            ip.append(exp10 + 1 - ip.size(), '0');
+            std::string fp = digits.size() > static_cast<size_t>(exp10 + 1)
+                ? digits.substr(exp10 + 1) : "0";
+            out += ip + "." + fp;
+        } else {
+            out += "0." + std::string(-exp10 - 1, '0') + digits;
+        }
+    } else {
+        // computerized scientific: d.ddd E n, at least one fractional digit
+        out += digits.substr(0, 1) + "." + (digits.size() > 1 ? digits.substr(1) : "0");
+        out += "E" + std::to_string(exp10);
+    }
+    return out;
+}
 
 // Escape a string literal for smali display (similar to baksmali rules).
 // dexllm#22: DECODE the dex MUTF-8 first, then escape CHARACTERS.
@@ -334,8 +383,64 @@ std::string FormatOperands(const dex::Instruction& insn,
         case k20t:
         case k30t:
             o << "+" << static_cast<int32_t>(insn.vA); break;
-        case k21h:
-            o << "v" << insn.vA << ", #0x" << std::hex << insn.vB << std::dec; break;
+        case k21h: {
+            // dexllm#87: BBBB is the HIGH half of the loaded value, and the
+            // slicer hands it over RAW (dex_bytecode.cc:189 declines to shift,
+            // since the decoder "doesn't know if it's the top bits of a 32- or
+            // 64-bit value"), so the width comes from the OPCODE: 0x15
+            // const/high16 loads BBBB << 16 into a 32-bit int, 0x19
+            // const-wide/high16 loads BBBB << 48 into a 64-bit long. Printing
+            // the raw BBBB made smali `#0x1000` disagree with the Java view's
+            // 268435456 on 9,349 sites / 2,138 of the 25,309 bundled classes.
+            //
+            // Rendered in jadx's fallback form (TypeGen.literalToString): the
+            // SIGNED value, then -- when |v| > 100, jadx's threshold -- every
+            // reading of the bits, since the instruction does not say whether
+            // they are an int or a float:
+            //
+            //   const/high16 v1, #-1082130432(0xbf800000, float:-1.0)
+            //   const-wide/high16 v0, #-4592264245034352640(0xc045000000000000, double:-42.0)
+            //
+            // Signed, like every other const arm here and like the value
+            // resolve_call_args / the Java view report. No reading is GUESSED
+            // (baksmali's likely-float comment calls MeasureSpec.EXACTLY
+            // `2.0f`); all are shown. Three deliberate divergences from jadx:
+            // the hex is the register's own width (jadx prints the
+            // sign-extended long, 0xffffffffbf800000, for a 32-bit load); the
+            // float/double string is JDK 19+'s, see JavaFpString; and the
+            // threshold is compared exactly, where jadx's `Math.abs` overflows
+            // on Long.MIN_VALUE and so prints the wide `BBBB == 0x8000`
+            // (-0.0) bare. Every nonzero high16 has |v| >= 0x10000, so here
+            // only BBBB == 0 renders bare: `#0`. docs/hack-gate.md records why
+            // this form was chosen over the alternatives.
+            //
+            // Shift the ZERO-EXTENDED operand through uint64_t: `insn.vB` is
+            // the raw u2 widened into a u4 (k21h is the one const format the
+            // decoder does NOT sign-extend), and `insn.vB << 48` on a 32-bit
+            // type is a shift count at the operand's width -- undefined, and
+            // gcc folds it to 0.
+            const bool wide = insn.opcode == dex::OP_CONST_WIDE_HIGH16;
+            const uint64_t bits = wide ? static_cast<uint64_t>(insn.vB) << 48
+                                       : static_cast<uint64_t>(insn.vB) << 16;
+            const int64_t v = wide ? static_cast<int64_t>(bits)
+                                   : static_cast<int64_t>(static_cast<int32_t>(static_cast<uint32_t>(bits)));
+            o << "v" << insn.vA << ", #" << v;
+            if (v > 100 || v < -100) {
+                o << "(0x" << std::hex << bits << std::dec << ", ";
+                if (wide) {
+                    double d;
+                    std::memcpy(&d, &bits, sizeof d);
+                    o << "double:" << JavaFpString(d, false);
+                } else {
+                    const auto b32 = static_cast<uint32_t>(bits);
+                    float f;
+                    std::memcpy(&f, &b32, sizeof f);
+                    o << "float:" << JavaFpString(f, true);
+                }
+                o << ")";
+            }
+            break;
+        }
         case k21s:
             o << "v" << insn.vA << ", #" << static_cast<int32_t>(insn.vB); break;
         case k21t:
