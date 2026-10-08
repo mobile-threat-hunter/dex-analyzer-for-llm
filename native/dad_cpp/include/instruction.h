@@ -991,8 +991,17 @@ public:
 
     const std::string& clsdesc() const noexcept { return clsdesc_; }
 
+    // Beyond-DAD, inert (dexllm#88): the Dalvik width of the OPERAND
+    // ("I"/"J"/"F"/"D"), set by the type-conversion handlers. `type` is the
+    // RESULT width, so `float-to-int` and `long-to-int` were indistinguishable
+    // in the IR, and a `float-to-int` operand could not be recognised as a
+    // float USE. Empty when unknown (a CastExpression built elsewhere).
+    const std::string& src_type() const noexcept { return src_type_; }
+    void set_src_type(std::string_view t) { src_type_ = std::string{t}; }
+
 private:
     std::string clsdesc_;
+    std::string src_type_;
     void Accept(Visitor& v) override;
 };
 

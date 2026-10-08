@@ -669,6 +669,170 @@ array-store are NOT sources yet — the method return type is not on the graph"*
 which Phase 2c had already made false — corrected here
 [[a-rule-you-wrote-binds-your-next-commit]].
 
+### Production fix — a float USE types the register version it reads (dexllm#88, 2026-10-08)
+
+A Dalvik constant is UNTYPED — `const/high16 v, #0x3f800000` is how a `1.0f` is
+written — and every `const*` builds an INT-typed `Constant`. When the same
+register version also carried an int, DAD's last-write typing declared it `int`
+and the Java view printed the raw IEEE-754 bits; in a `float` method it RETURNED
+them, which Java widens to `1.06535322E9f` — a wrong VALUE, not merely a wrong
+type:
+
+```java
+int v4_0 = 1065353216;          // LookupTableInterpolator.getInterpolation(F)F
+... v4_0 = 0;
+return v4_0;
+```
+
+The issue's hypothesis held: the use-bound channel (Phase 2c, dexllm#86) carries
+a reference or a `Z` and nothing else, and the one branch that could have
+re-typed this version — prim→WIDER — needs every def to AGREE on a width, while
+an untyped constant resolves to `I` beside a real float producer. **A float USE
+is the proof**, exactly as a reference argument is for the mirror and a `Z`
+return for dexllm#86: in verified Dalvik an `add-float` / `cmp-float` /
+`neg-float` / `float-to-int` operand, the value of `return` in an `F` method, an
+argument at an `F` parameter and a value stored into an `F` field or a `float[]`
+element all REQUIRE a float in that register.
+
+**The fix, in `InferCascadeTypes` ([dataflow.cpp](native/dad_cpp/dataflow.cpp)):**
+
+* **Uses, per position.** Every operand of the IR classes the pass knows goes
+  through one `pin(v, width)`: `F`/`D` is a float use (`fp_use`), anything else a
+  non-float use (`nonfp_use`), with `nonfp_prim` the subset that needs a
+  NON-reference value. Every other class is FAIL-CLOSED — a used var no position
+  accounts for is a primitive non-float use.
+* **A CANDIDATE** is a version with a float use, no non-float use, no width
+  conflict, not an object or `this`, a `Param` only by its DECLARED type, and
+  EVERY def provably W-valued (`is_fp_valued`: a narrow int constant for `F`, a
+  `const-wide` for `D`, a producer whose own type is W — a `cmp-*` result is
+  refused, it carries the operand width but produces an int — and moves resolved
+  with a neutral back edge plus a `ground` requirement, the pair dexllm#86 needed
+  for the same reason). It is only RECORDED and the classification falls through,
+  so a candidate that is later dropped leaves the version to the branches that
+  follow exactly as before this pass existed.
+* **Propagation both ways along moves.** Backwards: a move source whose float use
+  is only through the move, seeded by candidates AND by versions already typed W.
+  Forwards: a move destination with no non-float use and W-valued defs is
+  ADOPTED (a loop-exit copy no one reads, `ArcCurveFit$Arc.buildTable`).
+* **The MOVE RULE — both sides of a move end the same width**, enforced as a
+  worklist fixpoint over both adjacency directions. A W source moving into a
+  destination that stays non-W prints `int v1; … v1 = v0;` with a float `v0`; a W
+  destination fed by a source that stays non-W prints `float v0 = v1`, which
+  compiles and WIDENS the int's bits. The losing side is dropped. The width a
+  side WILL have reads the other branches' pending re-types (prim→WIDER can make
+  a destination `double`) and a never-written parameter's DECLARED type. A float
+  ARITHMETIC def is a value edge too, one-way: a W operand whose result version
+  stays non-W would render `int v2 = (- v0)` with a float `v0`, so the operand is
+  dropped. **One exception**, bounded three ways: a destination
+  that is non-W only because of a REFERENCE use, that has a reference arm of its
+  own (a `move-object` or non-move def), from a source that can never be 0 — a
+  nonzero float cannot reach a reference slot in verified Dalvik, so that is a
+  register DAD left unsplit (`GradientColorInflaterCompat`: a `float[]` on the
+  other path). A 0 is also `null` (ART's Zero type), so a source that can be 0
+  gets no exception. The exception is sound for ART-VERIFIED input; on dex that
+  this port's structural `verify()` accepts but ART's dataflow verifier rejects
+  (a nonzero float moved into an `Integer` register) it can turn compiling Java
+  into non-compiling Java — the documented lenient-GIGO posture, recorded.
+* A surviving candidate overrides whatever another branch decided for the same
+  Variable (the use-driven ref→prim branch would narrow a float constant to `I`),
+  applied in sorted-vid order so no Variable is written twice.
+
+Three things the fix needed that the issue did not predict:
+
+* **`CastExpression` could not say what it casts FROM.** `float-to-int` and
+  `long-to-int` were one IR node of type `I` (DAD), so a cast operand could not be
+  a float use at all. An inert `src_type` is set by the 15 conversion handlers
+  ([opcode_ins.cpp](native/dad_cpp/opcode_ins.cpp)); nothing else reads it.
+* **`UnaryExpression::get_type()` returns the ARG's type** (DAD), so `neg-float`
+  is recognised through the stored `type` member.
+* **A float can arrive typed as a REFERENCE.** `SplitConflatedVersion` types a
+  constant merged with a stale reference register `Object`, and the use-driven
+  ref→prim branch then narrowed it to the constant's `I` (`drawShadow`'s
+  `v15_0`). Candidates admit a reference `cur`; the def proof still refuses any
+  genuine reference producer.
+
+**No emitter changed** — with the version typed `F`, `typed_rhs_expr` already
+renders `= 1f` in the text AND the AST (verified on the AST declaration node).
+
+## Three review rounds (four reviewers), and each response needed its own review
+
+**Round 1 (adversarial + correctness) — both CONFIRMED the same two holes, each
+with a built input that turned valid Java invalid:** one register at a float AND
+an int position of ONE instruction (`aput v0, arr, v0` into a `float[]`;
+`sinkFI(v0, v0)`) — the first cut kept a per-INSTRUCTION use set and
+`get_used_vars()` DEDUPS — and an int use behind a move (`float v1 = 1f; … sInt =
+(v1 + 1);`). Plus a `cmp-float` result accepted as a float producer (LOW).
+
+**The response over-blocked, and only the corpus a/b showed it.** Carrying EVERY
+non-float use back over moves lost three real fixes, all a float moved into a
+register DAD left unsplit; restricting it to primitive uses restored them.
+
+**Round 2 (delta review of the responses) CONFIRMED three more:** a FORWARD
+partial re-type (the source typed, its move destination refused for an int-used
+OTHER arm — dexllm#86's "a partial re-type is not a partial fix", one direction
+over); the "a reference position cannot carry a float" premise is false for 0 —
+`Integer v1 = v0` with a float `v0`; and the use closure was a round-robin, O(N²)
+on a move chain (12.8 s at 25,000 moves against OFF's 2.7 s, past `safe.py`'s
+10 s deadline for ONE method). It also REFUTED the claim that a move-opcode-pass
+guard I had removed was dead — true on the fixture and corpus, false in general.
+
+**The second response introduced its own regression, which the a/b caught:**
+three versions OFF typed `float` (through prim→WIDER) came out `int`, because the
+float branch `continue`d past the later branches and the move rule then dropped
+the candidate. Hence the fall-through design. The final shape — one symmetric
+move rule — REPLACED two earlier mechanisms (a backwards closure of int uses and
+a def-walk check of the move source), both of which were the int-use case of it.
+
+**Round 3 (delta review of the restructure) CONFIRMED one more, with an
+ART-valid input and independently by a verifier-shaped fuzzer (~15,000
+methods):** the operand of a float ARITHMETIC def carries the width like a move
+— a float `v0` under an `int` result version printed `int v2 = (- v0)`. It also
+found a float PARAMETER as a move source dropping its destination (a missed fix,
+not a regression), and measured its own javac a/b over all 318 changed classes:
+184 errors gone, 0 genuine new ones. **And the first mutant written for the
+arithmetic edge only HALF-disabled it** — it skipped the initial pass and left
+the worklist re-check, so it survived the fixture; a reviewer's build of the
+pre-fix source is what showed the fixture DID carry the shape.
+
+**Accepted and recorded, not fixed:** a NaN constant renders `Float.NaN` and
+loses its payload (OFF returned `2.1e9`); on a crafted move chain long enough the
+work budget runs out and the fix is missed (≥27,000 moves SIGSEGVs identically
+OFF and ON, pre-existing); and a `const 0` moved by `move-object` into an
+`Object` slot boxes the same way it did OFF.
+
+**Measured (a/b OFF=`038c6e9c…` vs ON=`97f4e777…`, SAME script, both `.so`
+md5-verified; the pre-fix mutant reproduces the OFF md5 exactly):** 43 sources /
+2,344,376 decompiled lines → **1,440 lines changed on 15 sources, line counts
+equal on every source, 0 lines where OFF declared `float`/`double` and ON does
+not.** Every changed line differs ONLY in a type keyword and/or a literal:
+int→float 602, long→double 54, double→float 2, int→double 1, **47 invalid
+reference-typed declarations** (`android.view.View v6_5 = p6.getY();`) that
+become `float`/`double`, and one `= null` → `= 0f`. All **917** changed integer
+literals equal the bit-reinterpretation of the float/double that replaced them.
+Census (a high16 whose next straight-line reader is a float op and whose int decimal appears in the method's Java): **80 → 14**, and all 14 are predicate false positives — `MeasureSpec.EXACTLY` (a genuine int that equals `2.0f`'s bits) and `float[]` fill-array payloads (below). parity **29/29**, pytest **1586 passed / 24 skipped**, TRUE corpus-less (`test_apk` MOVED aside) **1164 passed / 446 skipped / 0 failed** — 67 of the 68 new cases run there — narrowed to `tests/data/multidex.apk` **1471 passed**, sweep **21,374-class / 180,879 method-block 0-crash 0-timeout, GATE: PASS**, determinism 3 `PYTHONHASHSEED`s → one digest, lint trio clean, `scripts/check_dad_boundary.sh` clean. The move-chain craft that took 12.8 s under the round-robin closure takes 2.7 s, OFF's time.
+
+**Guards** — [tests/test_fp_use_typing.py](tests/test_fp_use_typing.py), 68 cases,
+all but one on the committed `tests/data/fp-reuse.dex`, the fifth authored
+fixture and the first written in **smali**: d8 duplicates a `return` into every
+predecessor, so no Java source reaches the shape. One method per float-use
+POSITION with that position as the only use and two constant defs (so
+RegisterPropagation cannot inline it away), the reference / cycle / propagation /
+adoption shapes, and 19 negatives — eleven of them built from review findings.
+The corpus case pins five real methods by name, selected by a smali marker
+(other APKs carry a d8 build of the class that never had the shape). **35
+mutants, each BUILT and RUN, all killed** — two of them (the pending-type read
+and the fall-through) only by the corpus case, which skips in CI. The `ground`
+requirement and the worklist shape of the move rule are pinned at SOURCE level.
+
+**Adjacent, pre-existing, NOT fixed here — filed, each measured OFF and ON:**
+negative `static final` integers print UNSIGNED, so the value is wrong (1,076
+values, dexllm#91); `long` literals lack the `L` suffix (896 lines, dexllm#92); a
+`float[]` fill-array payload renders its elements as int bits (216 lines,
+dexllm#93); an int `Math.min(II)I` result can be declared `float` when its
+register was earlier a float — the opposite direction, 10 lines (dexllm#94);
+and DAD renders a `cmp` outside an `if` as `return v0 cmp p3;` (0 in the corpus,
+dexllm#95).
+
 ### Production fix — reused `this` register materialised as a local (`this = X` → valid, 2026-07-03)
 
 When a method reuses its receiver register p0 (`this`) as a scratch local — reads `this` early, overwrites it (`move-result` / `const`), reads the new value later, the two merging at a shared use (e.g. `return`) — `GroupVariables` binds the param-def and reuse-defs into ONE version (they share the merge use), so `SplitVariables` leaves it unsplit and it keeps its `ThisParam` identity. DAD (and our 1:1 port) then emit **`this = <value>`** — always invalid Java (you cannot assign to `this`). **Confirmed identical bug in androguard DAD**, so this is a beyond-DAD production divergence. Dominant real-corpus invalid-Java bucket (269 occurrences bundled, above every other). **Fix — `MaterializeReusedThis` ([dataflow.cpp](native/dad_cpp/dataflow.cpp), declared in [dataflow.h](native/dad_cpp/include/dataflow.h)), runs AFTER SplitVariables and BEFORE the chain consumers:** allocate a fresh local `vX`, rewrite every graph reference to the receiver → `vX`, and inject `vX = this` at the entry block head — the sole remaining `this` is that copy's rhs → `<Ret> vX = this; … vX = …; return vX;` (valid). `findFragmentByWho` (the canonical repro) becomes byte-valid: `Fragment v7 = this; if(!p2.equals(this.mWho)){ if(this.mChildFragmentManager==null){ v7 = null; } else { v7 = this.mChildFragmentManager.findFragmentByWho(p2); } } return v7;` (reads stay `this.mWho` because RP propagates the entry copy for uses it dominates; `v7 = 0` renders `null` via the existing reference-lhs null-render). **Type safety (two adversarial-review rounds, 4 reviewers):** `vX` is typed as the method **RETURN type** — the one assignability anchor valid Dalvik gives (everything reaching a `return` is assignable to it). The pass is a **validate-then-mutate** (atomic — Phase A reads only, so every early bail leaves the graph pristine) that fires ONLY when (a) the return type is a reference, (b) the receiver is RETURNED, and (c) every reassignment rhs is a reference whose type **EXACTLY equals** ret_type, or the narrow-integer constant 0 (null). Exact equality (not just `is_ref`) is REQUIRED: the unsplit phi-web can bind a def reaching only an intermediate use (never the return) with an unrelated type — `vX = getBar()` where `Bar ⊄ Foo` (adversarial CONFIRMED) — the merge-point-assignability property does NOT hold per-def, and there is no type hierarchy to check assignability. A **void-invoke artifact** (`this = super.onDraw()` — a void call DAD wrongly models as defining the receiver; DAD keeps the `this` name so its later `this.getScrollX()` reads accidentally render correctly, and renaming would EXPOSE the artifact as `v.getScrollX()` on a void result — strictly worse), a non-reference return, a non-returned reuse, a genuine primitive (`this = 5`), or a non-exact reference reuse all bail → left as DAD's (invalid but **no-worse**) `this = X`. The receiver's ThisParam type is CORRUPTED during Construct (each `this = X` AssignExpression ctor does `this_param.set_type(X.get_type())`) so it is restored to the class before seeding the copy. On a `true` return the caller `number_ins()` + recomputes `BuildDefUse` (the injected copy + renumbered locs) before DCE/RP/PlaceDeclarations; `FixInitResultTypes` runs between (graph-only, no chain access, safe). Excludes `<init>` (super()/this() uses the receiver specially). **Measured (a/b off vs on, bundled corpus):** `this =` **269 → 218** (51 genuine reuses materialised valid; residual 218 = void-invoke artifacts + non-provable reuses, correctly left), **90 valid `<Ref> vX = this;` seeds**; **ALL other invalid-Java buckets byte-unchanged** (prim-used-as-object 55, ref-declared-int 23, `v<op>null` 3, `prim=new` 2), the pre-existing separate `void v=this` move-into-conflated-local bug **40→40 unchanged**, parity 28/28, 0-crash/25,309-class. No `*DADFaithful` sibling (parity suites don't assert method bodies — return-literal/catch-clamp precedent). Remaining (deferred, no-worse-than-DAD): the void-invoke-defines-receiver DAD bug itself, and genuine multi-type phi-web merges (need a real version split). Regression test `tests/test_this_reuse.py` (materialisation valid + active + the Fragment repro).

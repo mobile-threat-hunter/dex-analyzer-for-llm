@@ -467,6 +467,35 @@ pass risks the whole-corpus output. So:
   DELTA is **7,877** either way, and the sibling axis moves 654 → 8,531, so the
   sites conserve exactly. Every other invalid-Java axis is flat.
 
+  **Phase 2e — a float/double USE (dexllm#88, 2026-10).** The same gap one
+  width over: a Dalvik constant is untyped, so a `1.0f` sharing a register
+  version with an int kept DAD's `int` and rendered its bits. The prim→WIDER
+  branch could not help — it needs every def to agree on a width, and an untyped
+  constant resolves to `I` beside a real float producer. A float USE (an F/D
+  operation operand, an `F`/`D` return, argument, field or `float[]` element) is
+  the proof, recorded PER POSITION and fail-closed, with a def proof
+  (`is_fp_valued`) in which a narrow constant is evidence FOR a float.
+
+  The finding that carries forward is about MOVES, and it took three review
+  rounds to reach: **both sides of a move must end the same width**. Typing one
+  side prints either `int v1 = v0` with a float `v0`, or `float v0 = v1`, which
+  compiles and widens an int's bits. So candidates propagate both ways (backwards
+  to a source, forwards by ADOPTING a destination with no other use), and a
+  worklist fixpoint drops whichever side loses — one rule that replaced a
+  backwards closure of int uses and a def-walk source check. The operand of a
+  float ARITHMETIC def is the same kind of edge (a float `v0` under an `int`
+  result renders `int v2 = (- v0)`), which a fourth review round found. Its one exception is
+  a register DAD left unsplit (a float on one path, a `float[]` on the other,
+  used as the reference), which is safe only for a source that can never be 0:
+  0 is also `null`. Two smaller lessons: `get_used_vars()` DEDUPS, so a
+  per-instruction use set cannot see one register at an int and a float position
+  of the same `aput`; and a candidate must FALL THROUGH the later branches rather
+  than `continue`, or a dropped candidate loses what those branches would have
+  typed. Measured: 1,440 lines on 15 of 43 sources, every one a type keyword
+  and/or a literal, none turning OFF's `float` into anything else; the census of
+  raw float bits in a float context goes 80 → 14, all 14 predicate false
+  positives.
+
 - **Phase 3 — split on conflict.** Implement version splitting for genuinely
   conflated registers (the residual PR #12 leaves). This touches variable
   numbering + def/use rewiring — the highest-risk piece; gate behind the sound

@@ -20,6 +20,7 @@ narrowed to the sample here.
 | `bool-return.dex` | 2,236 B | 16 methods, one per branch of the dexllm#86 decision: three shapes the `Z` return type must FIX, two controls with identical bytecode and a different return type, and craft bases that each trip exactly ONE guard (an ordered compare, an array index, an array-creation size, a non-0/1 constant, an arithmetic def, an `iput` and an `sput` value, an array-store value, a wide local) |
 | `literal-escapes.dex` | 1,448 B | 16 string constants, one per branch of the Java literal-escaping rule, each rendered BOTH as a `static_values` initializer and as a `const-string` |
 | `component-bases.dex` | 8,792 B | 32 classes, one per branch of `find_component_subclasses`: a depth-2 chain through an app abstract class, a chain through a FRAMEWORK intermediate no dex declares (`TileService`), the `ZygotePreload` interface root reached directly and through an app interface, two `Service`s without a public no-arg constructor, a `Service` constructed only through a subclass's `super()`, an anonymous receiver handed to `registerReceiver`, a receiver constructed inside an UNRELATED class's constructor, a public class with a PRIVATE no-arg constructor, a service constructed twice in one method, a class on which BOTH a class root and the interface root hold, a constructor delegating `this(...)`, two known-SDK non-component parents (`View`, `Thread`), and a parent compiled then EXCLUDED from the dex (the `unresolved` shape) |
+| `fp-reuse.dex` | 4,232 B | 45 methods for dexllm#88, a float/double constant sharing a register version with an int. 21 POSITIVES: the corpus shape (`LookupTableInterpolator.getInterpolation`, byte for byte) and its `double` twin, a field store, one method per float-USE position with that position as the ONLY use (return F/D, `cmp`, `neg`, `float-to-int`, `add`, an `F` argument, `sput`, `iput`, `aput` into `float[]`), a parameter declared `F`, a reference-typed register (`drawShadow`), a move cycle, two move-only sources (one into an already-`float` destination), a float moved into a register DAD leaves unsplit, a destination adopted forward, and a float parameter as a move source. 19 NEGATIVES that must stay `int`: a genuine int flag, a constant used as both, an int-producing def, an `int` field, an `int[]` element, a parameter declared `I`, two lenient-only width shapes, and eleven from review findings (one register at a float AND an int position of one instruction, twice; an int use behind a move, three ways; a `cmp` result; a forward orphan; a 0 into an `Integer`, twice; a plain move into a reference; a float operand under an `int` arithmetic result). Plus a pure move cycle with no producer and four sinks |
 
 `multidex.apk` is deliberately the WORST case, not a convenient one: it is the
 sample that produced 17 of the failures in dexllm#46 (no `switch` header, no
@@ -209,6 +210,26 @@ d8 --release --min-api 26 --output out $(find cls -name '*.class')   # D8 8.10.9
 
 where `Vanished.java` is `package com.example.missing; public class Vanished {}`.
 
+`fp-reuse.dex` is the fifth authored fixture and the first written in **smali**
+rather than Java. dexllm#88's defect needs a float constant and an int to share ONE
+register version that meets at a use, and d8 never produces that from Java: it
+duplicates a `return` into every predecessor (`return 1f` on one path, the index
+arithmetic on another), so the registers never merge. The corpus shape comes from
+older `dx` output; the smali here reproduces it byte for byte. The isolated-source
+methods each carry TWO constant defs so RegisterPropagation cannot inline the
+register away — the one use left is the only thing that can prove it a float,
+which is what lets a mutant that drops one position be killed by one method.
+Like `bool-return.dex`, its shape was decided by the mutation matrix and the
+reviews: nineteen of its methods exist because a mutant survived, a reviewer
+built an input that turned valid Java invalid, or a fix for one of those
+measurably over-blocked. The smali assembler IS
+byte-reproducible (rebuilt twice, identical md5):
+
+```
+java -cp jadx-1.5.3-all.jar com.android.tools.smali.smali.Main \
+     a fp-reuse.smali -o fp-reuse.dex                   # smali 3.0.9, OpenJDK 21.0.6
+```
+
 d8 is not byte-reproducible across versions, so the committed bytes are the
 artefact and the source is the statement of intent — which is why every guard
 pins the exact rendering it depends on rather than trusting a rebuild.
@@ -248,3 +269,7 @@ of the same name which is NOT usable here — it fails this repo's verifier with
 NOT copied from anywhere: it was written for dexllm#53 and compiled from the
 committed `permissive-tls.java` with the toolchain named above. It is part of this
 project and carries this project's licence.
+
+`fp-reuse.dex` (md5 `4c70add950421bd9d70ac81b012f50d0`) was written for dexllm#88
+and assembled from the committed `fp-reuse.smali`. It is part of this project and
+carries this project's licence.

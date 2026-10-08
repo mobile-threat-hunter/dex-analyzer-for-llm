@@ -69,9 +69,10 @@ IRFormPtr StoreArrayInst(std::string_view val_a, std::string_view val_b,
 // DAD: opcode_ins.py:118 assign_cast_exp.
 IRFormPtr AssignCastExp(std::string_view val_a, std::string_view val_b,
                         std::string_view val_op, std::string_view op_type,
-                        Vmap& vmap) {
+                        Vmap& vmap, std::string_view src_type) {
     auto regs = GetVariables(vmap, {val_a, val_b});
     auto cast = std::make_shared<CastExpression>(val_op, op_type, regs[1]);
+    cast->set_src_type(src_type);
     return std::make_shared<AssignExpression>(regs[0], std::move(cast));
 }
 
@@ -809,21 +810,21 @@ IRFormPtr NegFloat (std::string_view a, std::string_view b, Vmap& v) { return Un
 IRFormPtr NegDouble(std::string_view a, std::string_view b, Vmap& v) { return UnaryImpl(a, b, Op::NEG,  "D", v); }
 
 // DAD: opcode_ins.py:1186-1272 type-conv via assign_cast_exp.
-IRFormPtr IntToLong   (std::string_view a, std::string_view b, Vmap& v) { return AssignCastExp(a, b, "(long)",   "J", v); }
-IRFormPtr IntToFloat  (std::string_view a, std::string_view b, Vmap& v) { return AssignCastExp(a, b, "(float)",  "F", v); }
-IRFormPtr IntToDouble (std::string_view a, std::string_view b, Vmap& v) { return AssignCastExp(a, b, "(double)", "D", v); }
-IRFormPtr LongToInt   (std::string_view a, std::string_view b, Vmap& v) { return AssignCastExp(a, b, "(int)",    "I", v); }
-IRFormPtr LongToFloat (std::string_view a, std::string_view b, Vmap& v) { return AssignCastExp(a, b, "(float)",  "F", v); }
-IRFormPtr LongToDouble(std::string_view a, std::string_view b, Vmap& v) { return AssignCastExp(a, b, "(double)", "D", v); }
-IRFormPtr FloatToInt   (std::string_view a, std::string_view b, Vmap& v) { return AssignCastExp(a, b, "(int)",    "I", v); }
-IRFormPtr FloatToLong  (std::string_view a, std::string_view b, Vmap& v) { return AssignCastExp(a, b, "(long)",   "J", v); }
-IRFormPtr FloatToDouble(std::string_view a, std::string_view b, Vmap& v) { return AssignCastExp(a, b, "(double)", "D", v); }
-IRFormPtr DoubleToInt  (std::string_view a, std::string_view b, Vmap& v) { return AssignCastExp(a, b, "(int)",    "I", v); }
-IRFormPtr DoubleToLong (std::string_view a, std::string_view b, Vmap& v) { return AssignCastExp(a, b, "(long)",   "J", v); }
-IRFormPtr DoubleToFloat(std::string_view a, std::string_view b, Vmap& v) { return AssignCastExp(a, b, "(float)",  "F", v); }
-IRFormPtr IntToByte (std::string_view a, std::string_view b, Vmap& v) { return AssignCastExp(a, b, "(byte)",  "B", v); }
-IRFormPtr IntToChar (std::string_view a, std::string_view b, Vmap& v) { return AssignCastExp(a, b, "(char)",  "C", v); }
-IRFormPtr IntToShort(std::string_view a, std::string_view b, Vmap& v) { return AssignCastExp(a, b, "(short)", "S", v); }
+IRFormPtr IntToLong   (std::string_view a, std::string_view b, Vmap& v) { return AssignCastExp(a, b, "(long)",   "J", v, "I"); }
+IRFormPtr IntToFloat  (std::string_view a, std::string_view b, Vmap& v) { return AssignCastExp(a, b, "(float)",  "F", v, "I"); }
+IRFormPtr IntToDouble (std::string_view a, std::string_view b, Vmap& v) { return AssignCastExp(a, b, "(double)", "D", v, "I"); }
+IRFormPtr LongToInt   (std::string_view a, std::string_view b, Vmap& v) { return AssignCastExp(a, b, "(int)",    "I", v, "J"); }
+IRFormPtr LongToFloat (std::string_view a, std::string_view b, Vmap& v) { return AssignCastExp(a, b, "(float)",  "F", v, "J"); }
+IRFormPtr LongToDouble(std::string_view a, std::string_view b, Vmap& v) { return AssignCastExp(a, b, "(double)", "D", v, "J"); }
+IRFormPtr FloatToInt   (std::string_view a, std::string_view b, Vmap& v) { return AssignCastExp(a, b, "(int)",    "I", v, "F"); }
+IRFormPtr FloatToLong  (std::string_view a, std::string_view b, Vmap& v) { return AssignCastExp(a, b, "(long)",   "J", v, "F"); }
+IRFormPtr FloatToDouble(std::string_view a, std::string_view b, Vmap& v) { return AssignCastExp(a, b, "(double)", "D", v, "F"); }
+IRFormPtr DoubleToInt  (std::string_view a, std::string_view b, Vmap& v) { return AssignCastExp(a, b, "(int)",    "I", v, "D"); }
+IRFormPtr DoubleToLong (std::string_view a, std::string_view b, Vmap& v) { return AssignCastExp(a, b, "(long)",   "J", v, "D"); }
+IRFormPtr DoubleToFloat(std::string_view a, std::string_view b, Vmap& v) { return AssignCastExp(a, b, "(float)",  "F", v, "D"); }
+IRFormPtr IntToByte (std::string_view a, std::string_view b, Vmap& v) { return AssignCastExp(a, b, "(byte)",  "B", v, "I"); }
+IRFormPtr IntToChar (std::string_view a, std::string_view b, Vmap& v) { return AssignCastExp(a, b, "(char)",  "C", v, "I"); }
+IRFormPtr IntToShort(std::string_view a, std::string_view b, Vmap& v) { return AssignCastExp(a, b, "(short)", "S", v, "I"); }
 
 // DAD: opcode_ins.py:1276-1404 int/long arithmetic 3-addr.
 IRFormPtr AddInt (std::string_view aa, std::string_view bb, std::string_view cc, Vmap& v) { return AssignBinaryExp(aa, bb, cc, Op::ADD,    "I", v); }

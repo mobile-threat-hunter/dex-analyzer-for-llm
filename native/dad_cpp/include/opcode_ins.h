@@ -113,10 +113,12 @@ IRFormPtr StoreArrayInst(std::string_view val_a, std::string_view val_b,
                          std::string_view val_c, std::string_view ar_type,
                          Vmap& vmap);
 
-// DAD: opcode_ins.py:118 assign_cast_exp.
+// DAD: opcode_ins.py:118 assign_cast_exp. `src_type` is beyond-DAD and inert
+// (dexllm#88): the OPERAND's width, which `op_type` (the RESULT) cannot carry —
+// see CastExpression::src_type.
 IRFormPtr AssignCastExp(std::string_view val_a, std::string_view val_b,
                         std::string_view val_op, std::string_view op_type,
-                        Vmap& vmap);
+                        Vmap& vmap, std::string_view src_type = {});
 
 // DAD: opcode_ins.py:123 assign_binary_exp.
 // `ins.AA / ins.BB / ins.CC` mapped here to explicit operand IDs.

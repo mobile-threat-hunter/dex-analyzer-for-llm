@@ -829,6 +829,166 @@ static void InferCascadeTypes(
                 note_int(rhs[0].get()); note_arr(rhs[0].get()); }
         }
     }
+
+    // dexllm#88 — USE-BOUND float/double typing. Dalvik constants are UNTYPED:
+    // `const/high16 v, #0x3f800000` is how a `1.0f` is written, and every
+    // `const*` builds an INT-typed Constant, so a register reused for a float
+    // value and an int one keeps DAD's last-write `int` and the Java view
+    // declares — and returns — the raw IEEE-754 bits (`int v = 1065353216;
+    // return v;` in a `float` method; the return WIDENS it to 1.06535322E9f, a
+    // wrong VALUE, not merely a wrong type).
+    //
+    // A float/double USE is the proof, exactly as a reference argument is for
+    // the use-bound reference branch and a `Z` return is for dexllm#86: in
+    // verified Dalvik an operand of `add-float` / `cmpl-float` / `float-to-int`,
+    // the value of `return` in an `F` method, an argument at an `F` parameter
+    // and a value stored into an `F` field all REQUIRE a float in that register.
+    //
+    // `fp_use`  vid → the width ("F"/"D") a use pins; `fp_conflict` holds a vid
+    //           pinned at BOTH widths (left alone — no single type).
+    // `nonfp_use` every OTHER use position. Recorded PER POSITION for the
+    //           classes `scan` knows (every operand of those goes through `pin`,
+    //           which files a non-W width as non-float), and FAIL-CLOSED for every
+    //           other class: a used var not pinned anywhere in the instruction is
+    //           non-float. Per position matters — one register can fill a float
+    //           AND an int position of ONE instruction (`aput v0, arr, v0` into a
+    //           `float[]`, `sinkFI(v0, v0)`), and a per-instruction set saw only
+    //           the float one (a review constructed both).
+    //           A MOVE is not a use of either kind; the value is the same on both
+    //           sides, so the MOVE RULE below makes both sides of every move end
+    //           the same width. `nonfp_prim` is the subset of `nonfp_use` that
+    //           needs a NON-reference value (an int operand, an `I` argument, an
+    //           index, …, and every fail-closed position) — the one exception
+    //           of that rule reads it.
+    std::unordered_map<std::string, std::string> fp_use;
+    std::unordered_set<std::string> fp_conflict, nonfp_use, nonfp_prim;
+    std::vector<std::pair<std::string, std::string>> fp_moves;  // (dst, src)
+    // (operand, result) of a float/double ARITHMETIC def — `v2 = (- v0)`. The
+    // rendered expression takes its type from the operands, so this carries
+    // the width exactly as a move does (see the move rule)
+    std::vector<std::pair<std::string, std::string>> fp_arith;
+    {
+        auto is_fp = [](const std::string& t) { return t == "F" || t == "D"; };
+        for (NodeBase* n : graph.nodes) {
+            auto* bb = dynamic_cast<BasicBlock*>(n);
+            if (!bb) continue;
+            for (auto& ins : bb->get_ins()) {
+                if (!ins) continue;
+                if (auto* mv = dynamic_cast<MoveExpression*>(ins.get())) {
+                    // a MoveResultExpression is a MoveExpression too, but its
+                    // source is an invoke temporary, not a register version
+                    auto l = mv->GetLhsId();
+                    if (l && !mv->rhs_id().empty() &&
+                        !dynamic_cast<MoveResultExpression*>(mv))
+                        fp_moves.emplace_back(*l, mv->rhs_id());
+                    continue;
+                }
+                std::unordered_map<std::string, std::string> here;
+                std::unordered_set<std::string> nonfp_here, prim_here;
+                auto is_reft = [](const std::string& t) {
+                    return !t.empty() && (t[0] == 'L' || t[0] == '[');
+                };
+                // `w` is the width the POSITION requires: "F"/"D" pins, a
+                // reference descriptor (or "L") is a reference position, and
+                // anything else — a primitive, or "" for unknown — is primitive
+                auto pin = [&](const std::string& v, const std::string& w) {
+                    if (v.empty()) return;
+                    if (!is_fp(w)) {
+                        nonfp_here.insert(v);
+                        if (!is_reft(w)) prim_here.insert(v);
+                        return;
+                    }
+                    auto [it, fresh] = here.emplace(v, w);
+                    if (!fresh && it->second != w) fp_conflict.insert(v);
+                };
+                auto scan = [&](IRForm* f) {
+                    if (!f) return;
+                    if (auto* be = dynamic_cast<BinaryExpression*>(f)) {
+                        // `type` is the OPERATION's width (cmp-float carries
+                        // "F"); a lit op is always "I".
+                        if (be->op() == "instanceof") {
+                            pin(be->arg1_id(), "L");
+                            pin(be->arg2_id(), "L");
+                        } else {
+                            pin(be->arg1_id(), be->type);
+                            pin(be->arg2_id(), be->type);
+                        }
+                    } else if (auto* ce = dynamic_cast<CastExpression*>(f)) {
+                        pin(ce->arg_id(), ce->src_type());
+                    } else if (auto* ue = dynamic_cast<UnaryExpression*>(f)) {
+                        // `get_type()` returns the ARG's type (DAD); the
+                        // operation's own width is the stored `type`.
+                        pin(ue->arg_id(), ue->type);
+                    } else if (auto* ret = dynamic_cast<ReturnInstruction*>(f)) {
+                        if (ret->arg()) pin(*ret->arg(), ret_type);
+                    } else if (auto* inv = dynamic_cast<InvokeInstruction*>(f)) {
+                        const auto& a = inv->args();
+                        const auto& pt = inv->ptype();
+                        for (size_t i = 0; i < a.size(); ++i)
+                            pin(a[i], a.size() == pt.size() ? pt[i] : std::string{});
+                        pin(inv->base(), "L");
+                    } else if (auto* ii = dynamic_cast<InstanceInstruction*>(f)) {
+                        pin(ii->rhs_id(), ii->atype());
+                        pin(ii->lhs_id(), "L");
+                    } else if (auto* si = dynamic_cast<StaticInstruction*>(f)) {
+                        pin(si->rhs_id(), si->ftype());
+                    } else if (auto* as = dynamic_cast<ArrayStoreInstruction*>(f)) {
+                        // `aput` / `aput-wide` carry only a category marker
+                        // ("" = int-or-float, "W" = long-or-double), so the
+                        // element width comes from the ARRAY's type.
+                        auto it = as->var_map.find(as->array_id());
+                        const std::string at = (it != as->var_map.end() &&
+                                                it->second)
+                                                   ? it->second->get_type() : "";
+                        const std::string& m = as->get_type();
+                        const bool fpe =
+                            (m.empty() && at == "[F") || (m == "W" && at == "[D");
+                        // the element width when known; aput-object ("O") is a
+                        // reference position, any other marker primitive
+                        pin(as->rhs_id(), fpe ? at.substr(1)
+                                              : (m == "O" ? std::string{"L"}
+                                                          : std::string{}));
+                        pin(as->array_id(), "L");
+                        pin(as->index_id(), "I");
+                    }
+                };
+                scan(ins.get());
+                auto rhs = ins->get_rhs();
+                if (!rhs.empty() && rhs[0]) scan(rhs[0].get());
+                if (auto res = ins->GetLhsId(); res && !rhs.empty() && rhs[0]) {
+                    IRForm* r = rhs[0].get();
+                    if (!dynamic_cast<BinaryCompExpression*>(r) &&
+                        !dynamic_cast<CastExpression*>(r)) {
+                        if (auto* be = dynamic_cast<BinaryExpression*>(r)) {
+                            if (is_fp(be->type) && be->op() != "instanceof") {
+                                if (!be->arg1_id().empty())
+                                    fp_arith.emplace_back(be->arg1_id(), *res);
+                                if (!be->arg2_id().empty())
+                                    fp_arith.emplace_back(be->arg2_id(), *res);
+                            }
+                        } else if (auto* ue = dynamic_cast<UnaryExpression*>(r)) {
+                            if (is_fp(ue->type) && !ue->arg_id().empty())
+                                fp_arith.emplace_back(ue->arg_id(), *res);
+                        }
+                    }
+                }
+                for (auto& [v, w] : here) {
+                    auto it = fp_use.find(v);
+                    if (it == fp_use.end()) fp_use.emplace(v, w);
+                    else if (it->second != w) fp_conflict.insert(v);
+                }
+                // fail-closed: a used var no `scan` position accounts for is
+                // a non-float use of unknown kind, so treated as primitive
+                for (const std::string& v : ins->get_used_vars())
+                    if (!here.count(v) && !nonfp_here.count(v)) {
+                        nonfp_use.insert(v);
+                        nonfp_prim.insert(v);
+                    }
+                nonfp_use.insert(nonfp_here.begin(), nonfp_here.end());
+                nonfp_prim.insert(prim_here.begin(), prim_here.end());
+            }
+        }
+    }
     auto is_prim_desc = [](const std::string& t) {
         return t.size() == 1 &&
                std::string("IJZBSCFD").find(t[0]) != std::string::npos;
@@ -1279,6 +1439,106 @@ static void InferCascadeTypes(
         }
         return ground;
     };
+
+    // dexllm#88 — is an rhs form a provably W-valued ("F"/"D") producer? The
+    // soundness argument is the dexllm#86 one with the width changed: a Dalvik
+    // constant is UNTYPED, so an int-typed narrow `Constant` IS a float when it
+    // reaches a float use (any value — the bits ARE the float), and a
+    // `const-wide` ("J") likewise for a double. A producer whose OWN type is W
+    // (a float op, an `F`-returning invoke, an `F` field, an `aget` off a
+    // `float[]`, a cast TO float) qualifies. Anything else — an int op (`cmp-float` included: it carries the OPERAND width but produces an int), an
+    // int-returning call, a reference, an unresolvable def — BLOCKS: that
+    // version holds a genuine int on some path and no single Java type fits.
+    // Moves resolve to their source's defs with a NEUTRAL back edge and a
+    // `ground` requirement, the pair `is_bool_valued` uses for the same reason.
+    // A def-less source is a parameter; only its DECLARED type is trusted (a
+    // write to a param register corrupts the `Param`'s own type).
+    size_t fv_budget = 2'000'000;
+    std::function<bool(IRForm*, const std::string&, std::set<std::string>&,
+                       bool&)> is_fp_valued =
+        [&](IRForm* r, const std::string& w, std::set<std::string>& seen,
+            bool& ground) -> bool {
+            if (fv_budget == 0) return false;         // work cap → conservative
+            --fv_budget;
+            if (!r) return false;
+            if (r->is_ident()) {
+                const std::string sid = r->Vid();
+                if (seen.count(sid)) return true;     // back edge → neutral
+                seen.insert(sid);
+                struct Pop { std::set<std::string>& s; const std::string& k;
+                             ~Pop() { s.erase(k); } } pop_{seen, sid};
+                auto it = defs_of.find(sid);
+                if (it == defs_of.end()) {
+                    auto dp = declared_params.find(sid);
+                    const std::string& dt =
+                        dp != declared_params.end() ? dp->second : r->get_type();
+                    if (dt != w) return false;
+                    ground = true;
+                    return true;
+                }
+                for (IRForm* d : it->second) {
+                    auto dr = d->get_rhs();
+                    if (dr.empty() || !dr[0]) return false;
+                    if (!is_fp_valued(dr[0].get(), w, seen, ground)) return false;
+                }
+                return true;
+            }
+            if (auto* c = dynamic_cast<Constant*>(r)) {
+                const std::string ct = c->get_type();
+                const bool ok = (w == "F") ? is_narrow_int(ct) && ct != "Z"
+                                           : ct == "J";
+                if (!ok) return false;
+                ground = true;
+                return true;
+            }
+            // `cmp-float` / `cmp-double` / `cmp-long` carry the OPERAND width
+            // as their type but PRODUCE an int (-1/0/1)
+            if (dynamic_cast<BinaryCompExpression*>(r)) return false;
+            if (dynamic_cast<CastExpression*>(r)) {
+                if (r->get_type() != w) return false;   // the RESULT width
+            } else if (auto* ue = dynamic_cast<UnaryExpression*>(r)) {
+                if (ue->type != w) return false;        // neg-float, not arg type
+            } else if (r->get_type() != w) {
+                return false;
+            }
+            ground = true;
+            return true;
+        };
+    auto all_defs_fp_valued = [&](const std::string& vid,
+                                  const std::vector<IRForm*>& dvec,
+                                  const std::string& w) -> bool {
+        bool ground = false;
+        for (IRForm* d : dvec) {
+            auto dr = d->get_rhs();
+            if (dr.empty() || !dr[0]) return false;
+            std::set<std::string> seen{vid};
+            if (!is_fp_valued(dr[0].get(), w, seen, ground)) return false;
+        }
+        return ground;
+    };
+    // The guards a version must pass to be re-typed to W, shared by the seed
+    // branch and the backwards propagation so the two cannot drift.
+    auto fp_retypable = [&](const std::string& vid, IRForm* var,
+                            const std::vector<IRForm*>& dvec,
+                            const std::string& w) -> bool {
+        const std::string cur = var->get_type();
+        // A REFERENCE `cur` is admitted too: a float can be typed `Object` by
+        // SplitConflatedVersion (a constant sharing a register with a `Paint`)
+        // and then narrowed to the CONSTANT's `I` by the use-driven ref→prim
+        // branch, which cannot know an untyped constant is a float. The def
+        // proof below still refuses any genuine reference producer.
+        if (cur == w || (!is_prim_desc(cur) && !is_ref(cur))) return false;
+        if (nonfp_use.count(vid) || fp_conflict.count(vid) ||
+            object_vids.count(vid)) return false;
+        auto fu = fp_use.find(vid);
+        if (fu != fp_use.end() && fu->second != w) return false;
+        if (dynamic_cast<ThisParam*>(var)) return false;
+        if (dynamic_cast<Param*>(var)) {
+            auto dp = declared_params.find(vid);
+            if (dp == declared_params.end() || dp->second != w) return false;
+        }
+        return all_defs_fp_valued(vid, dvec, w);
+    };
     // Recover the ARRAY type of an array-used version from its def(s): every def
     // must produce an ARRAY (a def rhs whose type starts with '[', incl. a
     // check-cast to an array, a move off an array var, an array-returning
@@ -1315,6 +1575,10 @@ static void InferCascadeTypes(
     // is any version with an unresolved ('U'/'M') def.
     std::vector<std::pair<IRForm*, std::string>> retypes;
     std::vector<std::string> z_seeds;   // dexllm#86 — vids the Z branch re-typed
+    std::vector<std::pair<std::string, std::string>> fp_seeds;  // dexllm#88
+    // dexllm#88 — the float re-types, held apart until the FORWARD check below
+    // has had its say (vid -> the Variable and its width)
+    std::unordered_map<std::string, std::pair<IRForm*, std::string>> fp_retypes;
     for (auto& [vid, dvec] : defs_of) {
         if (dvec.empty()) continue;
         auto vit = dvec[0]->var_map.find(vid);
@@ -1334,6 +1598,33 @@ static void InferCascadeTypes(
         }
         const bool cur_ref = is_ref(cur), cur_prim = is_prim_desc(cur);
         if (!cur_ref && !cur_prim) continue;
+        // dexllm#88 — USE-BOUND int→float/double (see `fp_use`). Runs before
+        // the gt() classification because that one reports an `aget` / a
+        // conflated register as 'U' and would `continue` past a version this
+        // branch proves from its own defs. It only records a CANDIDATE and
+        // falls through: the forward move check below can still drop it, and a
+        // dropped candidate must leave the version to the branches that follow
+        // exactly as before this pass existed (a first cut `continue`d here, and
+        // three versions the prim→WIDER branch types `float` came out `int`).
+        // A candidate that survives overrides whatever those branches decided
+        // for the same Variable — the use-driven ref→prim branch would narrow a
+        // float constant to `I` (`drawShadow`).
+        {
+            auto fu = fp_use.find(vid);
+            if (fu != fp_use.end() &&
+                fp_retypable(vid, vit->second.get(), dvec, fu->second)) {
+                fp_retypes[vid] = {vit->second.get(), fu->second};
+                fp_seeds.emplace_back(vid, fu->second);
+            }
+            // A version ALREADY typed W and used only as W is a proof too: it
+            // seeds the backwards propagation (its move SOURCE held a W at the
+            // move) without needing a re-type of its own. Without it a float
+            // that reaches its float use only through a move into an already
+            // `float` register kept `int` (`drawShadow`'s `v15_0`).
+            if (fu != fp_use.end() && cur == fu->second &&
+                !nonfp_use.count(vid) && !fp_conflict.count(vid))
+                fp_seeds.emplace_back(vid, fu->second);
+        }
         bool has_ref = false, has_prim = false, has_unknown = false;
         bool ref_conflict = false;
         std::string prim_type, ref_type;
@@ -1621,6 +1912,224 @@ static void InferCascadeTypes(
                 work.push_back(sid);
             }
         }
+    }
+    // dexllm#88 — PROPAGATE the float/double width BACKWARDS along move edges,
+    // for the reason the `Z` propagation above gives: `v4 = v5` where only v4
+    // is float-used would otherwise leave `int v5` beside `float v4 = v5`. A
+    // source is re-typed only when it passes every guard the seed did
+    // (`fp_retypable`); one that fails is a genuine conflation and is left.
+    // Terminates for the same reason: a version enters `fed` once.
+    {
+        std::unordered_set<std::string> fed;
+        for (auto& [v, w] : fp_seeds) fed.insert(v);
+        std::vector<std::pair<std::string, std::string>> work = fp_seeds;
+        while (!work.empty()) {
+            auto [cur_vid, w] = work.back();
+            work.pop_back();
+            auto dit = defs_of.find(cur_vid);
+            if (dit == defs_of.end()) continue;
+            for (IRForm* d : dit->second) {
+                auto dr = d->get_rhs();
+                if (dr.empty() || !dr[0] || !dr[0]->is_ident()) continue;
+                const std::string sid = dr[0]->Vid();
+                if (sid.empty() || fed.count(sid)) continue;
+                auto sdefs = defs_of.find(sid);
+                if (sdefs == defs_of.end() || sdefs->second.empty()) continue;
+                auto svit = sdefs->second[0]->var_map.find(sid);
+                if (svit == sdefs->second[0]->var_map.end() || !svit->second)
+                    continue;
+                if (!fp_retypable(sid, svit->second.get(), sdefs->second, w))
+                    continue;
+                fp_retypes[sid] = {svit->second.get(), w};
+                fed.insert(sid);
+                work.emplace_back(sid, w);
+            }
+        }
+    }
+    // dexllm#88 — the MOVE RULE: both sides of a move must end the same width.
+    // A source re-typed W moving into a destination that stays non-W prints
+    // `int v1; … v1 = v0;` with `v0` a float — the partial re-type dexllm#86
+    // recorded, one direction over (a delta review constructed it: the
+    // destination refused for an int-used OTHER arm). A destination re-typed W
+    // fed by a source that stays non-W prints `float v0 = v1`, which compiles
+    // and WIDENS the int's bits — a wrong value. So the losing side is dropped,
+    // to a fixpoint over both adjacency directions (a drop can orphan either
+    // neighbour). This one rule replaces a backwards closure of int uses over
+    // moves and a def-walk check of the move source: both are the int-use case
+    // of it.
+    //
+    // One exception, bounded three ways: a destination that is non-W only
+    // because of a REFERENCE use (no primitive one), that has a reference arm
+    // (a `move-object` or non-move def), while the source can never be 0 — a nonzero float cannot
+    // reach a reference slot in verified Dalvik, so that destination is a
+    // register DAD left unsplit (`GradientColorInflaterCompat`: a `float[]` on
+    // the other path) and the source keeps its type.
+    // A 0, however, is also `null` (ART's Zero type), so a source that can be 0
+    // and reaches a reference slot is dropped (`Integer v1 = v0` with `v0` a
+    // float does not compile — the same review).
+    {
+        std::unordered_map<std::string, std::vector<std::string>> dsts_of,
+            srcs_into;
+        for (auto& [dst, src] : fp_moves) {
+            dsts_of[src].push_back(dst);
+            srcs_into[dst].push_back(src);
+        }
+        // vids whose def closure can hold a 0 constant (forward over moves)
+        std::unordered_set<std::string> can_be_zero;
+        std::vector<std::string> zq;
+        for (auto& [v, dvec] : defs_of)
+            for (IRForm* d : dvec) {
+                auto dr = d->get_rhs();
+                auto* c = (!dr.empty() && dr[0])
+                              ? dynamic_cast<Constant*>(dr[0].get()) : nullptr;
+                if (c && !is_ref(c->get_type()) && c->get_int_value() == 0 &&
+                    can_be_zero.insert(v).second)
+                    zq.push_back(v);
+            }
+        while (!zq.empty()) {
+            const std::string v = std::move(zq.back());
+            zq.pop_back();
+            auto it = dsts_of.find(v);
+            if (it == dsts_of.end()) continue;
+            for (const std::string& d : it->second)
+                if (can_be_zero.insert(d).second) zq.push_back(d);
+        }
+        // the type a destination WILL have: another branch's pending re-type
+        // (prim→WIDER can make it `double`) wins over its current type
+        std::unordered_map<const IRForm*, std::string> pending;
+        for (auto& [var, t] : retypes) pending[var] = t;
+        auto type_of = [&](const std::string& vid) -> std::string {
+            auto dit = defs_of.find(vid);
+            if (dit == defs_of.end() || dit->second.empty()) {
+                // a parameter never written has no defs: its DECLARED type
+                // (a `move vX, pF` source is a float)
+                auto dp = declared_params.find(vid);
+                return dp != declared_params.end() ? dp->second : std::string{};
+            }
+            auto vit = dit->second[0]->var_map.find(vid);
+            if (vit == dit->second[0]->var_map.end() || !vit->second) return {};
+            auto pt = pending.find(vit->second.get());
+            return pt != pending.end() ? pt->second : vit->second->get_type();
+        };
+        auto keeps = [&](const std::string& src, const std::string& dst) {
+            const std::string& w = fp_retypes.at(src).second;
+            auto d = fp_retypes.find(dst);
+            if (d != fp_retypes.end()) return d->second.second == w;
+            if (type_of(dst) == w) return true;
+            if (nonfp_prim.count(dst) || !nonfp_use.count(dst) ||
+                can_be_zero.count(src))
+                return false;
+            // and only when the destination has a REFERENCE arm — a def that is
+            // a `move-object` or not a move at all — which is what an unsplit
+            // register looks like; a destination fed by plain moves alone
+            // holds nothing but the float, so its reference use is ill-typed
+            // input and the source is dropped
+            auto dd = defs_of.find(dst);
+            if (dd == defs_of.end()) return false;
+            for (IRForm* d : dd->second) {
+                auto* mv = dynamic_cast<MoveExpression*>(d);
+                if (!mv || mv->move_kind() == MoveKind::Object) return true;
+            }
+            return false;
+        };
+        // first ADOPT forward: a destination with no non-float use whose defs
+        // are all W-valued is a float too (`fp_retypable` is the same proof a
+        // seed passes, minus the use evidence the move supplies) — the forward
+        // twin of the backwards propagation. Without it a source moved on into
+        // a plain carrier register was dropped (`ArcCurveFit$Arc.buildTable`).
+        {
+            std::vector<std::string> q;
+            for (auto& [v, e] : fp_retypes) q.push_back(v);
+            std::sort(q.begin(), q.end());
+            while (!q.empty()) {
+                const std::string src = std::move(q.back());
+                q.pop_back();
+                auto it = dsts_of.find(src);
+                if (it == dsts_of.end() || !fp_retypes.count(src)) continue;
+                const std::string w = fp_retypes.at(src).second;
+                for (const std::string& dst : it->second) {
+                    if (fp_retypes.count(dst) || type_of(dst) == w) continue;
+                    auto dd = defs_of.find(dst);
+                    if (dd == defs_of.end() || dd->second.empty()) continue;
+                    auto dv = dd->second[0]->var_map.find(dst);
+                    if (dv == dd->second[0]->var_map.end() || !dv->second)
+                        continue;
+                    if (!fp_retypable(dst, dv->second.get(), dd->second, w))
+                        continue;
+                    fp_retypes[dst] = {dv->second.get(), w};
+                    q.push_back(dst);
+                }
+            }
+        }
+        // then DROP to a fixpoint: every move must end with the SAME width on
+        // both sides. The width a side WILL have is its float candidate's, or
+        // else its (pending) type when that is `F`/`D`.
+        auto width_of = [&](const std::string& v) -> std::string {
+            auto f = fp_retypes.find(v);
+            if (f != fp_retypes.end()) return f->second.second;
+            std::string t = type_of(v);
+            return (t == "F" || t == "D") ? t : std::string{};
+        };
+        std::vector<std::string> dropped;
+        auto drop = [&](const std::string& v) {
+            if (fp_retypes.erase(v)) dropped.push_back(v);
+        };
+        auto check = [&](const std::string& src, const std::string& dst) {
+            const std::string ws = width_of(src), wd = width_of(dst);
+            if (ws == wd) return;
+            if (!ws.empty() && wd.empty()) {
+                // a float moved into a destination that stays non-W
+                if (fp_retypes.count(src) && !keeps(src, dst)) drop(src);
+            } else if (ws.empty() && !wd.empty()) {
+                // a destination typed W whose value comes from a source that
+                // stays non-W: `float v0 = v1` would WIDEN v1's int bits
+                drop(dst);
+            } else {  // F against D: no single width
+                drop(src);
+                drop(dst);
+            }
+        };
+        // a float ARITHMETIC def is a value edge too, one-way: a W operand
+        // whose result version stays non-W renders `int v2 = (- v0)` with a
+        // float `v0` (a delta review found it by construction and by fuzz). The
+        // other way round is not new — a W result over a non-W operand renders
+        // exactly as it did before this pass.
+        std::unordered_map<std::string, std::vector<std::string>> ops_of;
+        for (auto& [op, res] : fp_arith) ops_of[res].push_back(op);
+        auto check_arith = [&](const std::string& op, const std::string& res) {
+            if (!width_of(op).empty() && width_of(res).empty()) drop(op);
+        };
+        for (auto& [dst, src] : fp_moves) check(src, dst);
+        for (auto& [op, res] : fp_arith) check_arith(op, res);
+        while (!dropped.empty()) {
+            const std::string x = std::move(dropped.back());
+            dropped.pop_back();
+            if (auto it = srcs_into.find(x); it != srcs_into.end())
+                for (const std::string& src : it->second) check(src, x);
+            if (auto it = dsts_of.find(x); it != dsts_of.end())
+                for (const std::string& dst : it->second) check(x, dst);
+            if (auto it = ops_of.find(x); it != ops_of.end())
+                for (const std::string& op : it->second) check_arith(op, x);
+        }
+        // apply in a FIXED order: fp_retypes is keyed by vid in an unordered
+        // map, and each Variable is written once, so order cannot change the
+        // result — sorted anyway so no future edit can make it matter
+        std::vector<std::string> keys;
+        std::unordered_set<const IRForm*> won;
+        for (auto& [v, e] : fp_retypes) {
+            keys.push_back(v);
+            won.insert(e.first);
+        }
+        std::sort(keys.begin(), keys.end());
+        // a surviving float candidate replaces any other branch's verdict on
+        // the same Variable, so one Variable is never written twice
+        retypes.erase(std::remove_if(retypes.begin(), retypes.end(),
+                                     [&](const auto& r) {
+                                         return won.count(r.first) != 0;
+                                     }),
+                      retypes.end());
+        for (const std::string& v : keys)
+            retypes.emplace_back(fp_retypes[v].first, fp_retypes[v].second);
     }
     for (auto& [var, t] : retypes) var->set_type(t);
 
