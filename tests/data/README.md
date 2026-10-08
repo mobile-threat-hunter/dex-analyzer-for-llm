@@ -230,6 +230,20 @@ java -cp jadx-1.5.3-all.jar com.android.tools.smali.smali.Main \
      a fp-reuse.smali -o fp-reuse.dex                   # smali 3.0.9, OpenJDK 21.0.6
 ```
 
+`negative-statics.dex` is the sixth (dexllm#91): one `static final` per branch of
+the integer-family `encoded_value` rule — SHORT / INT / LONG sign-extend from
+`value_arg + 1` bytes, CHAR zero-extends. d8 encodes each value in the fewest
+bytes that hold it SIGNED, so the byte count is part of the shape: `-1` is a
+single `ff`, a positive `128` needs `80 00` (the control that must stay
+positive), `Long.MIN_VALUE` takes eight and `-(1L << 32)` five. No committed
+fixture carried a negative static initializer before it. The class is `public`:
+
+```
+cp negative-statics.java NegativeStatics.java
+javac -source 8 -target 8 -d cls NegativeStatics.java   # javac 17.0.17
+d8 --release --min-api 26 --output out cls/NegativeStatics.class   # D8 8.10.9-dev, build-tools 36.0.0
+```
+
 d8 is not byte-reproducible across versions, so the committed bytes are the
 artefact and the source is the statement of intent — which is why every guard
 pins the exact rendering it depends on rather than trusting a rebuild.

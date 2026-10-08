@@ -97,10 +97,10 @@ uint32_t ReadULEB128(const U1*& p, const U1* end) {
     return result;
 }
 
-// Read N bytes (little-endian) as a plain unsigned 64-bit integer.
-// androguard `_getintvalue` does the same (no sign extension), so DAD
-// emits the unsigned value verbatim — we follow that for byte-identical
-// matching even when the result isn't valid Java.
+// Read N bytes (little-endian) as a plain unsigned 64-bit integer. Signedness
+// is the CALLER's: a SHORT / INT / LONG caller passes the result through
+// `SignExtend` (dexllm#91 — androguard `_getintvalue` stops here, which is why
+// it prints `-1` as `255`); CHAR and every index arm use it as-is.
 uint64_t ReadIntLE(const U1*& p, const U1* end, size_t nbytes) {
     uint64_t v = 0;
     for (size_t i = 0; i < nbytes && p < end; ++i) {
@@ -155,6 +155,10 @@ bool ResolveMethodHandle(DexItemCodeSource& src, const dexkit::DexItem& item,
                          uint16_t dex_id, uint32_t mh_idx,
                          dad::IDexCodeSource::CallSiteArg& out);
 
+// Defined below beside ParseCallSiteArg, its first caller; declared here so
+// the static-initializer decoder shares it rather than re-deriving it (dexllm#91).
+int64_t SignExtend(uint64_t v, size_t nbytes);
+
 // Decode a single EncodedValue and produce Java-equivalent text.
 //
 // `expression` says which of two things the text is. TRUE (the common case) is
@@ -200,12 +204,22 @@ EncodedValueText DecodeEncodedValueText(const U1*& p,
             else       std::snprintf(buf, sizeof(buf), "0x%x", static_cast<int>(v));
             return {std::string(buf)};
         }
+        // dexllm#91 — SHORT / INT / LONG are SIGN-extended from their
+        // `value_arg + 1` bytes (dex spec; ART `ReadSignedInt`/`ReadSignedLong`).
+        // This arm used to read all four unsigned, ported bug-compatibly from
+        // androguard's `_getintvalue`, so `-1` stored in one byte rendered
+        // `255` and `0xff000000` rendered `4278190080` — a wrong VALUE, and
+        // past the type's range an uncompilable one. Beyond-DAD, the same
+        // posture as the IEEE754 / null / true / false corrections on this path.
+        // `SignExtend` is the one ParseCallSiteArg already uses, so the rule is
+        // read once in this file (dexllm#70's lesson).
         case 0x02:   // SHORT
-        case 0x03:   // CHAR
         case 0x04:   // INT
-        case 0x06: { // LONG — androguard reads all of these as LE unsigned
-            uint64_t v = ReadIntLE(p, end, nbytes);
-            return {std::to_string(v)};
+        case 0x06: { // LONG
+            return {std::to_string(SignExtend(ReadIntLE(p, end, nbytes), nbytes))};
+        }
+        case 0x03: { // CHAR — the ONE unsigned member: zero-extended.
+            return {std::to_string(ReadIntLE(p, end, nbytes))};
         }
         case 0x10: {  // FLOAT — 32-bit IEEE754, "zero-extended to the right"
             // dexllm#70 — the payload's stored bytes are the MOST significant
@@ -680,7 +694,8 @@ uint32_t ReadULeb128(const U1*& p, const U1* end) {
 
 // Sign-extend the low `nbytes` of a little-endian payload, which is what an
 // encoded BYTE/SHORT/INT/LONG is (CHAR is the one unsigned member and its
-// caller masks instead).
+// caller masks instead). Two callers: `ParseCallSiteArg` and, since dexllm#91,
+// `DecodeEncodedValueText`.
 int64_t SignExtend(uint64_t v, size_t nbytes) {
     if (nbytes == 0 || nbytes >= 8) return static_cast<int64_t>(v);
     const unsigned shift = static_cast<unsigned>(64 - 8 * nbytes);
