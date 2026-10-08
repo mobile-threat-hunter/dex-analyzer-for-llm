@@ -236,10 +236,14 @@ the integer-family `encoded_value` rule — SHORT / INT / LONG sign-extend from
 bytes that hold it SIGNED, so the byte count is part of the shape: `-1` is a
 single `ff`, a positive `128` needs `80 00` (the control that must stay
 positive), `Long.MIN_VALUE` takes eight and `-(1L << 32)` five. No committed
-fixture carried a negative static initializer before it. The class is `public`:
+fixture carried a negative static initializer before it. `all()` READS every
+constant, and javac inlines each read as a `const*` instruction, so the same
+values also reach the Java view through the method body's reader - the second
+view the cross-view guard compares against. The class is `public`:
 
 ```
 cp negative-statics.java NegativeStatics.java
+mkdir -p cls out                                        # d8 needs an EXISTING output dir
 javac -source 8 -target 8 -d cls NegativeStatics.java   # javac 17.0.17
 d8 --release --min-api 26 --output out cls/NegativeStatics.class   # D8 8.10.9-dev, build-tools 36.0.0
 ```

@@ -75,6 +75,59 @@ def test_each_static_initializer_renders_its_signed_value(fixture_decls, field) 
     assert fixture_decls[field] == _EXPECTED[field]
 
 
+# -- a second VIEW of the same fact ------------------------------------------
+
+# `all()` reads every constant; javac inlines each read as a `const*`
+# instruction, so the METHOD BODY carries the same values through a different
+# reader (the IR builder's const handlers, which always sign-extended). The
+# order is the source order of the array.
+_ALL_ORDER = [
+    "SHORT_MINUS_ONE",
+    "SHORT_MIN",
+    "INT_MINUS_ONE",
+    "INT_MINUS_128",
+    "INT_PLUS_128",
+    "INT_ALPHA_MASK",
+    "INT_MIN",
+    "INT_MAX",
+    "LONG_MINUS_ONE",
+    "LONG_MIN",
+    "LONG_MINUS_2_32",
+    "LONG_PLUS_255",
+    "CHAR_0X80",
+    "CHAR_MAX",
+    "BYTE_MINUS_ONE",
+]
+
+
+def test_the_declaration_and_the_inlined_read_agree(fixture_decls) -> None:
+    """HG3: the declaration (static_values reader) and the method body (const
+    reader) must state the same value for every field. Pre-fix they disagreed
+    on every negative one (`255` beside `-1`).
+
+    Compared by VALUE via `int(x, 0)`, because BYTE renders as `-0x1` in a
+    declaration and `-1` in a body - two spellings, one value. The body's array
+    initializer is itself mis-structured (a pre-existing, DAD-faithful
+    `filled-new-array/range` limitation recorded in CLAUDE.md), so only the
+    `valueOf(...)` arguments are read, in order, which that defect leaves intact.
+
+    Coverage is thinner than one-per-field: d8 SHARES constants, so one
+    `const/4 #-1` feeds the SHORT, INT and BYTE `-1` reads, and `CHAR_0X80`'s
+    body value is `INT_PLUS_128`'s `const/16 #128`. The comparison is still by
+    value and still kills a sign-extending CHAR arm (`-128` beside `128`).
+    """
+    dexllm = pytest.importorskip("dexllm")
+    body = dexllm.DexKit(str(_FIXTURE)).decompile_method(
+        "LNegativeStatics;->all()[Ljava/lang/Object;"
+    )
+    # `L?`: dexllm#92 will suffix long literals, and that must not blind this.
+    inlined = re.findall(r"\.valueOf\((-?\d+)L?\)", body)
+    assert len(inlined) == len(_ALL_ORDER), body
+    for name, val in zip(_ALL_ORDER, inlined):
+        decl = fixture_decls[name].removesuffix("L")
+        assert int(decl, 0) == int(val), (name, fixture_decls[name], val)
+
+
 # -- an independent byte-level oracle ----------------------------------------
 
 

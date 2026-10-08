@@ -20,4 +20,16 @@ public class NegativeStatics {
     public static final char CHAR_0X80 = '\u0080';           // 80          (1 byte, must stay 128)
     public static final char CHAR_MAX = '￿';            // ff ff       (must stay 65535)
     public static final byte BYTE_MINUS_ONE = -1;            // the BYTE arm, untouched
+
+    // Every READ of a compile-time constant is inlined by javac as a `const*`
+    // instruction, so each value also reaches the Java view through the
+    // METHOD BODY's reader - a second, independent reader of the same fact.
+    // An array, not a concatenation, so javac cannot fold the values together.
+    public static Object[] all() {
+        return new Object[] {
+            SHORT_MINUS_ONE, SHORT_MIN, INT_MINUS_ONE, INT_MINUS_128, INT_PLUS_128,
+            INT_ALPHA_MASK, INT_MIN, INT_MAX, LONG_MINUS_ONE, LONG_MIN,
+            LONG_MINUS_2_32, LONG_PLUS_255, CHAR_0X80, CHAR_MAX, BYTE_MINUS_ONE,
+        };
+    }
 }
