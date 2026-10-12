@@ -331,6 +331,12 @@ def test_a_diamond_ladder_of_constants_stays_in_bounded_memory():
     import subprocess
     import sys
 
+    # macOS refuses to lower RLIMIT_AS (setrlimit raises ValueError), and
+    # running this uncapped would let a regression take the machine with it.
+    # The Linux CI legs run it.
+    if sys.platform == "darwin":
+        pytest.skip("RLIMIT_AS cannot be lowered on macOS; the Linux legs run this")
+
     r = subprocess.run(
         [sys.executable, "-c", _LADDER_CHILD, str(FIXTURE)],
         capture_output=True,
