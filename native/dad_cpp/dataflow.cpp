@@ -4,11 +4,13 @@
 #include "dataflow.h"
 
 #include <algorithm>
+#include <deque>
 #include <cstdio>
 #include <cstdlib>
 #include <functional>
 #include <iterator>
 #include <memory>
+#include <map>
 #include <set>
 #include <string>
 #include <string_view>
@@ -486,7 +488,8 @@ static void FixAllocationResultTypes(Graph& graph) {
 // could be ambiguous, use-corroborated. See docs/type-inference-design.md.
 static void InferCascadeTypes(
     Graph& graph, const std::string& ret_type,
-    const std::unordered_map<std::string, std::string>& declared_params) {
+    const std::unordered_map<std::string, std::string>& declared_params,
+    const ChainMap* ud) {
     auto is_ref = [](const std::string& t) {
         return !t.empty() && (t.front() == 'L' || t.front() == '[');
     };
@@ -578,6 +581,21 @@ static void InferCascadeTypes(
         return t.size() == 1 &&
                std::string("IJBSCFD").find(t[0]) != std::string::npos;
     };
+    // dexllm#94 — WHERE each int-required / non-boolean-primitive use is: the
+    // instruction, so the narrow-integral pass can ask what VALUE reaches that
+    // one use (a lone constant there says nothing about the version's type).
+    // Filled by the same inserts that fill the two sets, so the rule for what
+    // counts as such a use stays in one place.
+    IRForm* cur_ins = nullptr;
+    std::unordered_map<std::string, std::vector<IRForm*>> num_pos;
+    auto add_req = [&](const std::string& v) {
+        int_required_vids.insert(v);
+        if (!v.empty() && cur_ins) num_pos[v].push_back(cur_ins);
+    };
+    auto add_prim = [&](const std::string& v) {
+        prim_use_vids.insert(v);
+        if (!v.empty() && cur_ins) num_pos[v].push_back(cur_ins);
+    };
     // USE-BOUND reference type (design §3): vid → the reference type a USE pins
     // on it. Unlike `object_vids` (a boolean object-use flag) this carries the
     // TYPE, so a primitive-typed version with NO genuine primitive producer (its
@@ -654,7 +672,7 @@ static void InferCascadeTypes(
                     if (a[i].empty()) continue;
                     if (is_ref(pt[i])) note_ref_arg(a[i], pt[i]);
                     // dexllm#86 — a NON-BOOLEAN primitive parameter position.
-                    else if (is_prim_nonbool(pt[i])) prim_use_vids.insert(a[i]);
+                    else if (is_prim_nonbool(pt[i])) add_prim(a[i]);
                 }
         } else if (auto* ie = dynamic_cast<InstanceExpression*>(f)) {
             if (!ie->arg_id().empty()) object_vids.insert(ie->arg_id());
@@ -664,12 +682,12 @@ static void InferCascadeTypes(
             if (!ii->lhs_id().empty()) object_vids.insert(ii->lhs_id());
             note_ref_store(ii->rhs_id(), ii->atype());
             if (!ii->rhs_id().empty() && is_prim_nonbool(ii->atype()))
-                prim_use_vids.insert(ii->rhs_id());   // dexllm#86
+                add_prim(ii->rhs_id());   // dexllm#86
         } else if (auto* si = dynamic_cast<StaticInstruction*>(f)) {
             // sput `Cls.field = rhs`: the stored value is pinned to the field type.
             note_ref_store(si->rhs_id(), si->ftype());
             if (!si->rhs_id().empty() && is_prim_nonbool(si->ftype()))
-                prim_use_vids.insert(si->rhs_id());   // dexllm#86
+                add_prim(si->rhs_id());   // dexllm#86
         } else if (auto* te = dynamic_cast<ThrowExpression*>(f)) {
             // `throw v`: v is a Throwable in verified Dalvik (only a reference is
             // throwable). Cast to ThrowExpression SPECIFICALLY — a sibling
@@ -711,11 +729,11 @@ static void InferCascadeTypes(
         } else if (auto* al = dynamic_cast<ArrayLoadExpression*>(f)) {
             add(al->idx_id());
             if (!al->idx_id().empty())
-                int_required_vids.insert(al->idx_id());
+                add_req(al->idx_id());
         } else if (auto* as = dynamic_cast<ArrayStoreInstruction*>(f)) {
             add(as->index_id());
             if (!as->index_id().empty())
-                int_required_vids.insert(as->index_id());
+                add_req(as->index_id());
             // dexllm#86 — the STORED VALUE, which the index rule above does not
             // touch. An ArrayStoreInstruction carries the opcode's CATEGORY
             // marker as its type: "" (aput, int/float), "W", "B", "C", "S" are
@@ -724,7 +742,7 @@ static void InferCascadeTypes(
             if (!as->rhs_id().empty()) {
                 const std::string& m = as->get_type();
                 if (m.empty() || m == "W" || m == "B" || m == "C" || m == "S")
-                    prim_use_vids.insert(as->rhs_id());
+                    add_prim(as->rhs_id());
             }
         } else if (auto* fa = dynamic_cast<FilledArrayExpression*>(f)) {
             // dexllm#86 — `new int[]{v, …}`.  Each ELEMENT sits at the array's
@@ -748,19 +766,19 @@ static void InferCascadeTypes(
             if (at.size() >= 2 && at[0] == '[' &&
                 is_prim_nonbool(at.substr(1)))
                 for (const std::string& e : fa->args())
-                    if (!e.empty()) prim_use_vids.insert(e);
+                    if (!e.empty()) add_prim(e);
         } else if (auto* na = dynamic_cast<NewArrayExpression*>(f)) {
             // `new int[v]` — the CREATION size must be an int (a widened
             // long/float/double there is invalid). (The def-side new-array
             // itself is a reference producer, handled elsewhere; here we only
             // record its SIZE operand as an int-required use.)
             if (!na->size_id().empty())
-                int_required_vids.insert(na->size_id());
+                add_req(na->size_id());
         } else if (auto* sw = dynamic_cast<SwitchExpression*>(f)) {
             // `switch(v)` — the selector must be char/byte/short/int (never
             // long/float/double), so a widened selector is invalid Java.
             if (!sw->src_id().empty())
-                int_required_vids.insert(sw->src_id());
+                add_req(sw->src_id());
         } else if (auto* cz = dynamic_cast<ConditionalZExpression*>(f)) {
             // vs-ZERO comparisons (if-ltz/lez/gtz/gez → `<`/`<=`/`>`/`>=`)
             // require a numeric operand; if-eqz/nez (`==`/`!=`) are the
@@ -790,6 +808,7 @@ static void InferCascadeTypes(
         if (!bb) continue;
         for (auto& ins : bb->get_ins()) {
             if (!ins) continue;
+            cur_ins = ins.get();
             auto lid = ins->GetLhsId();
             if (lid) defs_of[*lid].push_back(ins.get());
             note_obj(ins.get());
@@ -1030,6 +1049,7 @@ static void InferCascadeTypes(
         if (!a.empty() && is_nonzero_int_const(b)) int_use_vids.insert(a);
         if (!b.empty() && is_nonzero_int_const(a)) int_use_vids.insert(b);
     }
+
     // Ground-truth of a def's rhs: 'R' ref producer, 'P' prim forcer,
     // 'N' null/zero-neutral, 'U' unknown, 'M' unresolved-move (cycle).
     // SAFETY-FIRST: 'P' only when the producer's OWN type is a genuine
@@ -1819,6 +1839,30 @@ static void InferCascadeTypes(
             // Writer would have been the masking variant.
             retypes.emplace_back(vit->second.get(), "Z");
             z_seeds.push_back(vid);
+        } else if (cur_prim && int_required_vids.count(vid) &&
+                   (cur == "J" || cur == "F" || cur == "D")) {
+            // dexllm#94 — prim→NARROWER, the mirror of the branch below. A
+            // version typed `long` / `float` / `double` but used where only an
+            // INT is legal (an array index, a `switch` selector, an array-
+            // creation size — `int_required_vids`) is, in verified Dalvik, an
+            // int on that path: the verifier rejects a wide or float register
+            // there. Its J/F/D type is a register-conflation artifact — an
+            // UNSPLIT register keeps its last write, and a `move` from a
+            // sibling copies that sibling's stale type (`double v4 = 0; …
+            // v0_2[v4]` in `QuantizerWu.createBoxes`, where `move v4, v6`
+            // copied the D of an earlier `cmpg-double v6`).
+            //
+            // USE-corroborated AND DEF-anchored, the same pair the widening
+            // branch uses: EVERY def must resolve (through moves) to the SAME
+            // narrow integer width, so a genuine wide/float producer on any
+            // path (`agreed_prim_width` → "J"/"F"/"D", or a disagreement → "")
+            // leaves the version alone. `Z` is not accepted — a boolean index
+            // is not what any compiler emits and a boolean/int conflation has
+            // no single right answer. Disjoint from the branch below by the
+            // `int_required_vids` gate.
+            const std::string w = agreed_prim_width(vid, dvec);
+            if (w == "I" || w == "S" || w == "B" || w == "C")
+                retypes.emplace_back(vit->second.get(), w);
         } else if (cur_prim && !int_required_vids.count(vid)) {
             // prim→WIDER-prim: an `int`-typed version whose value is really a
             // WIDER primitive — `int v = System.currentTimeMillis()` /
@@ -2133,6 +2177,564 @@ static void InferCascadeTypes(
     }
     for (auto& [var, t] : retypes) var->set_type(t);
 
+    // dexllm#94 — NARROW INTEGRAL typing as a FORWARD DATAFLOW over moves.
+    //
+    // A Dalvik register's narrow integral type (boolean / byte / short / char /
+    // int) is not decided by one def: a plain `move` copies its source's value,
+    // and a bitwise `and`/`or`/`xor` of booleans is how d8 writes `flag |=
+    // cond`. DAD types each version alone — from the register's last write, or
+    // (since dexllm#94 trusts a `move-result`) from its own def — so typing one
+    // end of a move right exposes the stale other end (`boolean v7_7 = isX();
+    // … v16_0 = v7_7` with `int v16_0`), and a version with several defs
+    // picks by def ORDER.
+    //
+    // Here each version's type is the join ART's verifier uses
+    // (RegType::Merge) over what FLOWS INTO it: its own producers, and the
+    // types of the versions it is moved or bitwise-combined FROM:
+    //   B ∪ S = S; any other disagreement among B/S/C/I = I; Z ∪ non-Z = I
+    //   a bitwise result is Z when every operand is Z, else I (Java promotes
+    //     `byte | 1` to int)
+    //   a constant — and a version whose every def is a constant — is untyped
+    //     in Dalvik: NEUTRAL, widening to I only when a value does not fit
+    //     (a 0/1 fits Z)
+    // and a `Z` is refused (→ I) at a version used where Java needs a number:
+    // an arithmetic / unary operand, an ordered comparison, an index or size,
+    // a non-boolean primitive argument / field / element.
+    //
+    // FORWARD, not a union, and the direction is the point: a move copies the
+    // source's value at that point, so the DESTINATION'S uses say nothing about
+    // the source. A union-by-component first cut let `move v4, v3` (a loop
+    // counter starting from a `const/4 v3, 0` that later holds a boolean)
+    // impose the counter's int uses on the boolean — 196 corpus lines worse.
+    //
+    // It runs AFTER every other branch's re-type is applied, so it reads final
+    // types: a source a cascade branch has just turned from a stale reference
+    // into an `int` is read as an `int`. A version is left ALONE when it is not
+    // a narrow integral, is a parameter (its Variable carries the signature —
+    // a parameter SOURCE contributes its declared type), when anything flowing
+    // into it is not a narrow integral (a wide/float/reference value: another
+    // branch's conflation), or when nothing typed flows in at all (constants
+    // only — the dexllm#86 / #88 passes decide those from their uses).
+    //
+    // TERMINATES: types only rise in a lattice of height 3 (⊥ < Z,B,C < S < I),
+    // so each version changes at most three times; the round cap is a work
+    // backstop for a crafted input, not needed for correctness.
+    {
+        auto is_nint = [](const std::string& t) {
+            return t.size() == 1 &&
+                   std::string("ZBSCI").find(t[0]) != std::string::npos;
+        };
+        auto is_bitwise = [](const std::string& op) {
+            return op == "|" || op == "&" || op == "^";
+        };
+        auto join = [](const std::string& a, const std::string& b) -> std::string {
+            if (a.empty()) return b;
+            if (b.empty() || a == b) return a;
+            if (a == "Z" || b == "Z") return "I";
+            const bool bs = (a == "B" || a == "S") && (b == "B" || b == "S");
+            return bs ? "S" : "I";
+        };
+        auto fits = [](const std::string& w, int64_t v) {
+            if (w == "Z") return v == 0 || v == 1;
+            if (w == "B") return v >= -128 && v <= 127;
+            if (w == "S") return v >= -32768 && v <= 32767;
+            if (w == "C") return v >= 0 && v <= 65535;
+            return true;
+        };
+        // A PARAMETER version with no def in the method IS the incoming
+        // argument, so its type is the DECLARED one. A write to the same
+        // register later in the method corrupts the shared Variable's type
+        // before SplitVariables copies it into the parameter version
+        // (`directMeasure(boolean p12)` with `and-int/2addr v12, v0` read
+        // `p12` as `int`, and `(p12 & 1)` could not be a boolean expression).
+        // Restored here for the narrow integrals this pass decides; the other
+        // widths are not this pass's business.
+        for (NodeBase* n : graph.nodes) {
+            auto* bb = dynamic_cast<BasicBlock*>(n);
+            if (!bb) continue;
+            for (auto& ins : bb->get_ins()) {
+                if (!ins) continue;
+                std::vector<IRForm*> forms{ins.get()};
+                auto rhs = ins->get_rhs();
+                if (!rhs.empty() && rhs[0]) forms.push_back(rhs[0].get());
+                for (IRForm* f : forms)
+                    for (auto& [id, v] : f->var_map) {
+                        auto* pv = dynamic_cast<Param*>(v.get());
+                        if (!pv || dynamic_cast<ThisParam*>(pv) || defs_of.count(id))
+                            continue;
+                        auto dp = declared_params.find(id);
+                        if (dp != declared_params.end() && is_nint(dp->second) &&
+                            is_nint(pv->get_type()) && pv->get_type() != dp->second)
+                            pv->set_type(dp->second);
+                    }
+            }
+        }
+        // One input to a version: a typed producer, a constant, a source
+        // version (a move), or a bitwise def over several of those.
+        struct In {
+            std::string type;              // typed producer (incl. a param)
+            std::vector<int64_t> consts;   // constants
+            std::vector<std::string> srcs; // source versions
+            bool bitwise = false;
+            IRForm* at = nullptr;          // the defining instruction
+        };
+        struct Node {
+            std::vector<In> ins;
+            bool foreign = false;
+        };
+        std::unordered_map<std::string, Node> nodes;
+        auto var_of = [&](const std::string& vid) -> IRForm* {
+            auto it = defs_of.find(vid);
+            if (it == defs_of.end() || it->second.empty()) return nullptr;
+            auto v = it->second[0]->var_map.find(vid);
+            return v == it->second[0]->var_map.end() ? nullptr : v->second.get();
+        };
+        // add one operand (of a move or a bitwise def) to `in`
+        auto operand = [&](In& in, IRForm* f, const std::string& id) -> bool {
+            if (auto* c = dynamic_cast<Constant*>(f)) {
+                if (!is_nint(c->get_type())) return false;
+                in.consts.push_back(c->get_int_value());
+                return true;
+            }
+            if (dynamic_cast<Param*>(f)) {
+                auto dp = declared_params.find(id);
+                if (dp == declared_params.end() || !is_nint(dp->second)) return false;
+                in.type = join(in.type, dp->second);
+                return true;
+            }
+            if (f && f->is_ident() && defs_of.count(id)) {
+                in.srcs.push_back(id);
+                return true;
+            }
+            return false;
+        };
+        for (auto& [vid, dvec] : defs_of) {
+            Node& nd = nodes[vid];
+            for (IRForm* d : dvec) {
+                auto r = d->get_rhs();
+                IRForm* rf = (!r.empty() && r[0]) ? r[0].get() : nullptr;
+                In in;
+                in.at = d;
+                bool ok = rf != nullptr;
+                if (!ok) {
+                } else if (auto* mv = dynamic_cast<MoveExpression*>(d)) {
+                    auto* rv = dynamic_cast<Variable*>(rf);
+                    if (rv && rv->invoke_result) {
+                        // a call result is typed by its call; a reference or
+                        // wide result is not this pass's business (foreign)
+                        in.type = rf->get_type();
+                        ok = is_nint(in.type);
+                    }
+                    else if (mv->move_kind() == MoveKind::Plain)
+                        ok = operand(in, rf, mv->rhs_id());
+                    else ok = false;                    // wide / object
+                } else if (auto* be = dynamic_cast<BinaryExpression*>(rf);
+                           be && is_bitwise(be->op())) {
+                    in.bitwise = true;
+                    for (const std::string& id : {be->arg1_id(), be->arg2_id()}) {
+                        auto vm = be->var_map.find(id);
+                        if (vm == be->var_map.end() || !vm->second ||
+                            !operand(in, vm->second.get(), id)) { ok = false; break; }
+                    }
+                } else if (auto* c = dynamic_cast<Constant*>(rf)) {
+                    ok = is_nint(c->get_type());
+                    if (ok) in.consts.push_back(c->get_int_value());
+                } else if (rf->is_ident()) {
+                    ok = false;
+                } else {
+                    in.type = rf->get_type();
+                    ok = is_nint(in.type);
+                }
+                if (!ok) { nd.foreign = true; break; }
+                nd.ins.push_back(std::move(in));
+            }
+        }
+        // The uses that rule out `Z` — Java needs a number there — as
+        // (version, instruction) POSITIONS: the int-required and non-boolean
+        // primitive positions the collection loop recorded (`num_pos`), plus
+        // an arithmetic / unary operand and an ordered comparison. Bitwise
+        // operands and `==`/`!=` are deliberately not among them.
+        std::unordered_map<std::string, std::vector<IRForm*>> z_pos = num_pos;
+        std::unordered_map<IRForm*, int> loc_of;
+        for (NodeBase* n : graph.nodes) {
+            for (auto& [loc, ins] : LocWithIns(n)) {
+                if (!ins) continue;
+                loc_of[ins.get()] = loc;
+                std::vector<IRForm*> forms{ins.get()};
+                auto rhs = ins->get_rhs();
+                if (!rhs.empty() && rhs[0]) forms.push_back(rhs[0].get());
+                auto at = [&](const std::string& v) {
+                    if (!v.empty()) z_pos[v].push_back(ins.get());
+                };
+                for (IRForm* f : forms) {
+                    if (auto* be = dynamic_cast<BinaryExpression*>(f)) {
+                        if (!is_bitwise(be->op()) && be->op() != "instanceof") {
+                            at(be->arg1_id());
+                            at(be->arg2_id());
+                        }
+                    } else if (auto* ue = dynamic_cast<UnaryExpression*>(f)) {
+                        at(ue->arg_id());
+                    } else if (auto* cz = dynamic_cast<ConditionalZExpression*>(f)) {
+                        const std::string& op = cz->op();
+                        if (op != "==" && op != "!=") at(cz->arg_id());
+                    } else if (auto* ce = dynamic_cast<ConditionalExpression*>(f)) {
+                        const std::string& op = ce->op();
+                        if (op != "==" && op != "!=") {
+                            at(ce->arg1_id());
+                            at(ce->arg2_id());
+                        }
+                    } else if (auto* ri = dynamic_cast<ReturnInstruction*>(f)) {
+                        // returned from a method whose return type is a
+                        // number: the counterpart of dexllm#86's `Z` return
+                        if (ri->arg() && !ret_type.empty() && ret_type != "Z")
+                            at(*ri->arg());
+                    }
+                }
+            }
+        }
+        // A position does NOT rule out `Z` when the only value reaching it is
+        // one constant: that is the Dalvik register's type AT THAT POINT (ART
+        // types a register per instruction, not per version), and the
+        // constant is what is rendered there — `const/4 v4, 0` passed to
+        // `performShortcut(…, I)` and the same register later holding the
+        // `Z` result that is returned (`ToolbarActionBar.onKeyShortcut`).
+        auto lone_const_at = [&](const std::string& vid, IRForm* ins) {
+            if (!ud) return false;
+            auto lit = loc_of.find(ins);
+            if (lit == loc_of.end()) return false;
+            auto it = ud->find(VarLocKey{vid, lit->second});
+            if (it == ud->end() || it->second.size() != 1) return false;
+            IRFormPtr d = graph.get_ins_from_loc(it->second[0]);
+            if (!d) return false;
+            auto r = d->get_rhs();
+            return !r.empty() && r[0] && dynamic_cast<Constant*>(r[0].get());
+        };
+        // The value of that lone constant, for the forward transfer.
+        auto lone_const_value = [&](const std::string& vid,
+                                    IRForm* ins) -> std::optional<int64_t> {
+            if (!lone_const_at(vid, ins)) return std::nullopt;
+            auto it = ud->find(VarLocKey{vid, loc_of.at(ins)});
+            auto* c = dynamic_cast<Constant*>(
+                graph.get_ins_from_loc(it->second[0])->get_rhs()[0].get());
+            return c->get_int_value();
+        };
+        auto z_forbidden = [&](const std::string& vid) {
+            auto it = z_pos.find(vid);
+            if (it == z_pos.end()) return false;
+            for (IRForm* ins : it->second)
+                if (!lone_const_at(vid, ins)) return true;
+            return false;
+        };
+        // A version that is not a narrow integral (or is a parameter) neither
+        // takes a type here nor gives one: a move out of it is foreign.
+        auto eligible = [&](const std::string& vid) {
+            IRForm* v = var_of(vid);
+            return v && !dynamic_cast<Param*>(v) && is_nint(v->get_type());
+        };
+        std::unordered_map<std::string, std::string> ty;   // computed type
+        std::unordered_set<std::string> bad;               // foreign inflow
+        for (auto& [vid, nd] : nodes)
+            if (nd.foreign || !eligible(vid)) bad.insert(vid);
+        // Every fixpoint below is a WORKLIST over the move/bitwise edges, not
+        // a round-robin over all versions: a round-robin resolves one link of
+        // a chain per round, so it is quadratic on a long chain and, under a
+        // round cap, stops part-way and leaves the two ends of a move with
+        // different types (a 300-diamond ladder came out half `boolean`, half
+        // `int`). Each transfer below is monotone over a finite lattice, so
+        // the worklist reaches the same least fixpoint in any order — the
+        // answer does not depend on the map's iteration order — and every
+        // version is re-evaluated only when an input of it moved.
+        std::vector<std::string> order;
+        order.reserve(nodes.size());
+        for (auto& [vid, nd] : nodes) order.push_back(vid);
+        std::sort(order.begin(), order.end());
+        std::unordered_map<std::string, std::vector<std::string>> users;
+        for (const std::string& vid : order)
+            for (const In& in : nodes[vid].ins)
+                for (const std::string& sv : in.srcs) users[sv].push_back(vid);
+        // a type a version must at least have, from outside the forward
+        // transfer (the consistency closure below)
+        std::unordered_map<std::string, std::string> floor_ty;
+        // the constant-like sources the assignment step below typed FROM a
+        // destination (dest -> sources). When that destination later rises,
+        // so must they, or the move between them stops type-checking
+        // (`boolean v3 = false; … int v2; … v2 = v3`).
+        std::unordered_map<std::string, std::vector<std::string>> typed_from;
+        auto forward = [&](std::deque<std::string> work) {
+            std::unordered_set<std::string> queued(work.begin(), work.end());
+            auto push_users = [&](const std::string& vid) {
+                auto u = users.find(vid);
+                if (u == users.end()) return;
+                for (const std::string& w : u->second)
+                    if (queued.insert(w).second) work.push_back(w);
+            };
+            while (!work.empty()) {
+                const std::string vid = work.front();
+                work.pop_front();
+                queued.erase(vid);
+                if (bad.count(vid)) continue;
+                const Node& nd = nodes[vid];
+                std::string t;
+                std::vector<int64_t> consts;
+                bool taint = false;
+                // A plain move whose only reaching def is a constant carries
+                // that CONSTANT: RegisterPropagation renders the literal
+                // there, and the source version may be an `int` elsewhere —
+                // d8 parks one `const/4 v7, 0` and moves it into every slot of
+                // a SafeParcelable reader, so joining `ty[v7]` demoted a
+                // boolean slot to `int` (adversarial review, weardrawers
+                // `zzbgr`). The source's TYPE is still the only hint when no
+                // input decides one (`ToolbarActionBar.onKeyShortcut`: a flag
+                // whose two defs are both moves of lone constants). Which case
+                // applies is decided by the node's SHAPE, never by what has
+                // resolved so far, so the transfer stays monotone.
+                bool decides = false;
+                for (const In& in : nd.ins) {
+                    decides = decides || !in.type.empty() || in.bitwise;
+                    if (!in.bitwise)
+                        for (const std::string& sv : in.srcs)
+                            decides = decides || !lone_const_at(sv, in.at);
+                }
+                for (const In& in : nd.ins) {
+                    std::string it = in.type;
+                    std::vector<int64_t> lone;
+                    for (const std::string& sv : in.srcs) {
+                        if (!in.bitwise && decides)
+                            if (auto c = lone_const_value(sv, in.at)) {
+                                lone.push_back(*c);
+                                continue;
+                            }
+                        if (bad.count(sv)) { taint = true; break; }
+                        it = join(it, ty[sv]);   // ⊥ (empty) is neutral
+                    }
+                    if (taint) break;
+                    if (in.bitwise) {
+                        // operands not resolved yet (⊥): no contribution yet.
+                        // Deciding now would make it `I` (a constant is
+                        // there), and the monotone join could never bring it
+                        // back to `Z` — UNLESS a constant already rules `Z`
+                        // out (`v | 2`): then it is `I` whatever the operands
+                        // turn out to be, and deferring could leave it
+                        // deferred for good, so a `Z` version stamped its node
+                        // `Z` with a 2 in it (hack-gate review).
+                        bool non_z_const = false;
+                        for (int64_t c : in.consts)
+                            non_z_const = non_z_const || !fits("Z", c);
+                        if (it.empty() && !in.srcs.empty() && !non_z_const)
+                            continue;
+                        // Z only when every operand is Z (constants 0/1 fit)
+                        bool z = it == "Z";
+                        for (int64_t c : in.consts) z = z && fits("Z", c);
+                        if (!it.empty() || !in.consts.empty())
+                            it = z ? std::string("Z") : std::string("I");
+                    } else {
+                        consts.insert(consts.end(), in.consts.begin(),
+                                      in.consts.end());
+                        consts.insert(consts.end(), lone.begin(), lone.end());
+                    }
+                    t = join(t, it);
+                }
+                if (taint) { bad.insert(vid); push_users(vid); continue; }
+                if (auto f = floor_ty.find(vid); f != floor_ty.end())
+                    t = join(t, f->second);
+                if (t.empty()) continue;                 // constants only
+                // widen to the narrowest type that holds every constant —
+                // `byte` + 200 is `short`, as ART merges it. Jumping straight
+                // to `int` made the answer depend on whether a source had
+                // reached `byte` or `short` first.
+                for (int64_t c : consts)
+                    if (!fits(t, c)) t = (t == "B" && fits("S", c)) ? "S" : "I";
+                if (t == "Z" && z_forbidden(vid)) t = "I";
+                // monotone: never move back down
+                const std::string j = join(ty[vid], t);
+                if (j != ty[vid]) {
+                    ty[vid] = j;
+                    push_users(vid);
+                    if (auto tf = typed_from.find(vid); tf != typed_from.end())
+                        for (const std::string& sv : tf->second)
+                            if (join(ty[sv], j) != ty[sv]) {
+                                floor_ty[sv] = join(floor_ty[sv], j);
+                                if (queued.insert(sv).second) work.push_back(sv);
+                            }
+                }
+            }
+        };
+        forward(std::deque<std::string>(order.begin(), order.end()));
+        // A version whose every def is a constant has no type of its own, so
+        // the forward pass leaves it. When its ONLY uses are plain moves into
+        // versions that all ended with one type T and its values fit T, it is
+        // a T: `int v2 = 1; … v2 = 0; … boolean v1_1 = v2` is the shape
+        // (SwitchCompat.stopDrag) — d8 parks a 0/1 in a register and moves it
+        // into the flag. Any other use (an arithmetic operand, an argument)
+        // leaves it as it is: those uses are what the version answers to — all
+        // but a use that only that one constant reaches, which is rendered as
+        // the literal (`if-ne v1, v2` right after `const/4 v2, 1`).
+        {
+            std::unordered_map<std::string, int> uses;
+            for (NodeBase* n : graph.nodes) {
+                for (auto& [loc, ins] : LocWithIns(n)) {
+                    if (!ins) continue;
+                    auto uv = ins->get_used_vars();
+                    std::sort(uv.begin(), uv.end());
+                    uv.erase(std::unique(uv.begin(), uv.end()), uv.end());
+                    for (const std::string& u : uv)
+                        if (!lone_const_at(u, ins.get())) ++uses[u];
+                }
+            }
+            // where the source's value is a lone constant the move renders as
+            // the literal (`move v0, v4` right after `const/4 v4, 0`), so that
+            // destination's type is no claim on the source either
+            std::unordered_map<std::string, std::vector<std::string>> into, from;
+            for (const std::string& vid : order)
+                for (const In& in : nodes[vid].ins)
+                    if (!in.bitwise)
+                        for (const std::string& sv : in.srcs)
+                            if (!lone_const_at(sv, in.at)) {
+                                into[sv].push_back(vid);
+                                from[vid].push_back(sv);
+                            }
+            // CONSTANT-LIKE: every def is a constant or a plain move out of
+            // another constant-like version (a 0/1 parked in one register,
+            // moved through a second, then into the flag) — its values are the
+            // constants that can reach it. Only whether they FIT a width is
+            // ever asked, and every width is an interval, so the RANGE of the
+            // values is the whole answer: a list of them doubles at every
+            // diamond of a move ladder (a 28-level one took 4 GB).
+            struct Range { int64_t lo, hi; };
+            std::unordered_map<std::string, Range> cvals;
+            {
+                std::deque<std::string> work(order.begin(), order.end());
+                while (!work.empty()) {
+                    const std::string vid = work.front();
+                    work.pop_front();
+                    const Node& nd = nodes[vid];
+                    if (bad.count(vid) || !ty[vid].empty() || nd.ins.empty() ||
+                        cvals.count(vid))
+                        continue;
+                    bool ok = true, any = false;
+                    Range r{0, 0};
+                    auto add = [&](int64_t lo, int64_t hi) {
+                        if (!any) { r = {lo, hi}; any = true; return; }
+                        r.lo = std::min(r.lo, lo);
+                        r.hi = std::max(r.hi, hi);
+                    };
+                    for (const In& in : nd.ins) {
+                        if (!in.type.empty() || in.bitwise) { ok = false; break; }
+                        for (int64_t c : in.consts) add(c, c);
+                        for (const std::string& sv : in.srcs) {
+                            auto c = cvals.find(sv);
+                            if (c == cvals.end()) { ok = false; break; }
+                            add(c->second.lo, c->second.hi);
+                        }
+                        if (!ok) break;
+                    }
+                    if (!ok || !any) continue;
+                    cvals[vid] = r;
+                    // a user may now have every source resolved
+                    if (auto u = users.find(vid); u != users.end())
+                        for (const std::string& w : u->second) work.push_back(w);
+                }
+            }
+            auto range_fits = [&](const std::string& t, const Range& r) {
+                return fits(t, r.lo) && fits(t, r.hi);
+            };
+            // assign each constant-like version the type its destinations
+            // agree on; setting one may complete the agreement for a version
+            // that moves INTO it, so those are re-examined
+            {
+                std::deque<std::string> work;
+                for (const std::string& vid : order)
+                    if (cvals.count(vid)) work.push_back(vid);
+                while (!work.empty()) {
+                    const std::string vid = work.front();
+                    work.pop_front();
+                    if (!ty[vid].empty()) continue;
+                    auto it = into.find(vid);
+                    if (it == into.end()) continue;
+                    std::string t;
+                    bool agree = true;
+                    for (const std::string& d : it->second) {
+                        if (bad.count(d) || ty[d].empty() ||
+                            (!t.empty() && ty[d] != t)) {
+                            agree = false; break;
+                        }
+                        t = ty[d];
+                    }
+                    if (!agree || t.empty()) continue;
+                    // a use that is not a move is a claim too — except, for
+                    // `Z`, one that does not rule `Z` out (an `== 0` test)
+                    if (static_cast<int>(it->second.size()) < uses[vid] &&
+                        (t != "Z" || z_forbidden(vid)))
+                        continue;
+                    if (!range_fits(t, cvals[vid])) continue;
+                    ty[vid] = t;
+                    for (const std::string& d : it->second)
+                        typed_from[d].push_back(vid);
+                    if (auto f = from.find(vid); f != from.end())
+                        for (const std::string& sv : f->second)
+                            if (cvals.count(sv)) work.push_back(sv);
+                }
+            }
+            // A source left ⊥ that is NOT constant-like (a cycle of
+            // constant-only versions: neither step can start it) keeps the
+            // type it already has, so a version it flows into must agree with
+            // THAT (ConstraintWidgetContainer.layout: otherwise the
+            // destination becomes `boolean` beside the `int` source it is
+            // assigned from). A constant-like source is its constants
+            // (neutral when they fit), and a move of a lone constant is
+            // rendered as the literal — no claim either way. A ⊥ source stays
+            // ⊥ from here on, so this is one pass; what it raises is then
+            // carried FORWARD to everything the raised version flows into, or
+            // a demoted flag would leave `boolean w = v` behind it.
+            std::deque<std::string> raised;
+            for (const std::string& vid : order) {
+                if (bad.count(vid) || ty[vid].empty()) continue;
+                // One pass is enough: a join only WIDENS the values a type
+                // admits (B+S=S, anything else is I), so a second pass would
+                // only re-join what this one joined. A constant-like source is
+                // skipped when its constants fit ty[vid] itself — never the
+                // partial `t`, or the answer would follow the ORDER of the
+                // version's defs (delta review: `short v0 = v5`, `int v5`).
+                std::string t;
+                for (const In& in : nodes[vid].ins)
+                    for (const std::string& sv : in.srcs) {
+                        if (bad.count(sv) || !ty[sv].empty()) continue;
+                        if (!in.bitwise && lone_const_at(sv, in.at)) continue;
+                        if (auto cv = cvals.find(sv);
+                            cv != cvals.end() && uses[sv] <= 1 &&
+                            range_fits(ty[vid], cv->second))
+                            continue;
+                        IRForm* sf = var_of(sv);
+                        std::string st = sf ? sf->get_type() : std::string("I");
+                        if (!is_nint(st) || (in.bitwise && st != "Z")) st = "I";
+                        t = join(t, st);
+                    }
+                if (t.empty() || join(ty[vid], t) == ty[vid]) continue;
+                floor_ty[vid] = t;
+                raised.push_back(vid);
+            }
+            if (!raised.empty()) forward(std::move(raised));
+        }
+        for (auto& [vid, t] : ty) {
+            if (t.empty() || bad.count(vid)) continue;
+            IRForm* v = var_of(vid);
+            if (v && v->get_type() != t) v->set_type(t);
+            // A `Z` version's bitwise defs ARE boolean expressions: DAD types a
+            // bitwise node by its opcode (`I`), so record the result type on
+            // the node itself, where both emitters read it (a 0/1 operand is
+            // then `false`/`true`; an `if-eqz` on it is `!x`). Only a `Z`
+            // version gets this, so `return (b ^ 1)` from an `int` method —
+            // where the return rules `Z` out — keeps its number.
+            if (t != "Z") continue;
+            for (const In& in : nodes[vid].ins) {
+                if (!in.bitwise || !in.at) continue;
+                auto r = in.at->get_rhs();
+                if (r.empty() || !r[0]) continue;
+                if (auto* be = dynamic_cast<BinaryExpression*>(r[0].get()))
+                    if (is_bitwise(be->op())) be->type = "Z";
+            }
+        }
+    }
     // MOVE-OPCODE ground truth (beyond-DAD) — a SEPARATE fixpoint pass AFTER the
     // cascade/mirror retypes are applied, so it reads FINAL types. A single-def
     // version whose def is a MoveExpression carries the KIND of the moved value
@@ -2177,10 +2779,74 @@ static void InferCascadeTypes(
     // deterministic (unseeded string-hash iteration + fixed cap), no crash, no
     // worse than DAD's baseline on that crafted input; same "no silent cap"
     // documented-GIGO posture as gt_budget / the emit-walk depth guard.
+    // dexllm#94 — the WIDTH half of the same ground truth. A plain `move`
+    // copies a 32-bit value, so a version every def of which is a plain `move`
+    // cannot be `long`/`double`, nor `float` when its sources are all ints (or
+    // the reverse). DAD types a move's DEST from the SOURCE register's type at
+    // BUILD time, which a later reuse of that register can change
+    // (`move/from16 v36, v1` built after `int-to-long v1` gives `long v36_2 =
+    // v1_8` where `v1_8` is `getMode()`; `float v22 = v1_6` after a float reuse
+    // of v1). Re-type to the sources' agreed FINAL type when its class differs;
+    // sources that disagree leave the version as it is. Multi-def is allowed
+    // here (unlike the kind branches) because every def carries the SAME proof.
+    // The integral narrow types share one class: their distinctions belong to
+    // the join and to dexllm#86's `Z` propagation, not to the move opcode.
+    //
+    // `move-wide` has no arm, deliberately. The first cut had one, and no
+    // fixture or corpus input could make it fire: a version all of whose defs
+    // are `move-wide` but typed 32-bit is, by argument rather than measurement,
+    // the prim→WIDER branch's case (its defs resolve through the moves to one
+    // wide width, and a wide value has no int-required use on verified Dalvik).
+    // An arm no input reaches is an arm no mutant can guard.
+    //
+    // A version re-types at most once (`width_retyped`): with the int/float
+    // class in the test, two versions that move into each other could
+    // otherwise trade classes every round, so the bound is explicit rather than
+    // a property of the widths, and the termination argument below holds.
+    auto width_class = [](const std::string& t) -> char {
+        if (t == "J") return 'j';
+        if (t == "D") return 'd';
+        if (t == "F") return 'f';
+        return 'i';
+    };
+    std::unordered_set<std::string> width_retyped;
+    auto move_width_type = [&](const std::vector<IRForm*>& dvec,
+                               const std::string& cur) -> std::string {
+        std::string agreed;
+        for (IRForm* d : dvec) {
+            auto* m = dynamic_cast<MoveExpression*>(d);
+            if (!m || m->move_kind() != MoveKind::Plain) return {};
+            auto r = m->get_rhs();
+            if (r.empty() || !r[0]) return {};
+            const std::string st = r[0]->get_type();
+            if (!is_prim_desc(st)) return {};
+            if (agreed.empty()) agreed = st;
+            else if (st != agreed) return {};
+        }
+        if (agreed.empty() || !is_prim_desc(cur)) return {};
+        if (width_class(agreed) == 'j' || width_class(agreed) == 'd') return {};
+        if (width_class(cur) == width_class(agreed)) return {};
+        return agreed;
+    };
     bool moved = true;
     for (int round = 0; moved && round < 32; ++round) {
         moved = false;
         for (auto& [vid, dvec] : defs_of) {
+            if (dvec.empty()) continue;
+            {
+                auto wit = dvec[0]->var_map.find(vid);
+                if (wit != dvec[0]->var_map.end() && wit->second &&
+                    !width_retyped.count(vid)) {
+                    const std::string w =
+                        move_width_type(dvec, wit->second->get_type());
+                    if (!w.empty()) {
+                        width_retyped.insert(vid);
+                        wit->second->set_type(w);
+                        moved = true;
+                        continue;
+                    }
+                }
+            }
             if (dvec.size() != 1) continue;
             auto* mv = dynamic_cast<MoveExpression*>(dvec[0]);
             if (!mv) continue;
@@ -2214,9 +2880,10 @@ static void InferCascadeTypes(
 // level in two def-anchored passes (docs/type-inference-design.md).
 void FixInitResultTypes(
     Graph& graph, const std::string& ret_type,
-    const std::unordered_map<std::string, std::string>& declared_params) {
+    const std::unordered_map<std::string, std::string>& declared_params,
+    const ChainMap* ud) {
     FixAllocationResultTypes(graph);  // design §1: allocation ground truth
-    InferCascadeTypes(graph, ret_type, declared_params);  // §2/§3 + use-bound
+    InferCascadeTypes(graph, ret_type, declared_params, ud);  // §2/§3 + use-bound
 }
 
 // Beyond-DAD: see dataflow.h. Materialise a reused receiver register as a local.
@@ -2852,6 +3519,13 @@ void SplitVariables(Graph& graph,
             // type (which can only make the version more object-like, never
             // wrongly primitive). An intrinsically-typed rhs (new-instance /
             // const / field / invoke / cast — non-ident) is always trusted.
+            // dexllm#94: a `move-result` rhs is ident but is NOT a move source —
+            // it is the invoke's own result temporary (Variable::invoke_result),
+            // created and written once by that invoke, so its type is the
+            // call's declared return type and cannot be stale. Trusting it only
+            // for a reference left a primitive result to the register's last
+            // write: `Math.min(II)I` into a register later reused for an
+            // `aget-float` rendered `float v0_3 = Math.min(...)`, then `a[v0_3]`.
             std::string def_type;
             auto is_ref = [](const std::string& t) {
                 return !t.empty() && (t.front() == 'L' || t.front() == '[');
@@ -2864,8 +3538,11 @@ void SplitVariables(Graph& graph,
                 auto rhs = ins->get_rhs();
                 if (!rhs.empty() && rhs[0]) {
                     std::string t = rhs[0]->get_type();
+                    const auto* rv = dynamic_cast<Variable*>(rhs[0].get());
+                    const bool invoke_result = rv && rv->invoke_result;
                     const bool trust =
-                        !t.empty() && (!rhs[0]->is_ident() || is_ref(t));
+                        !t.empty() &&
+                        (!rhs[0]->is_ident() || is_ref(t) || invoke_result);
                     if (trust &&
                         (def_type.empty() || (is_ref(t) && !is_ref(def_type)))) {
                         def_type = std::move(t);

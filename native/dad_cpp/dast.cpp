@@ -869,6 +869,9 @@ AstValue JSONWriter::write_inplace_if_possible(IRForm* lhs, IRForm* rhs) {
             if ((bop == "+" || bop == "-") && cst && cst->get_int_value() == 1) {
                 return UnaryPostfix(visit_expr(lhs), bop + bop);
             }
+            // dexllm#94: same boolean-constant spelling as the binary node
+            if (auto b = BitwiseBoolConstant(bop, bin->get_type(), exp_rhs))
+                return Assignment(visit_expr(lhs), LiteralBool(*b), bop);
             return Assignment(visit_expr(lhs),
                               visit_expr_fp_typed(exp_rhs, bin->get_type()), bop);
         }
@@ -970,8 +973,14 @@ AstValue JSONWriter::visit_expr(IRForm* op) {
         const std::string et = x->get_type();
         IRForm* a1 = MapGet(x, x->arg1_id());
         IRForm* a2 = MapGet(x, x->arg2_id());
-        AstValue expr = BinaryInfix(x->op(), visit_expr_fp_typed(a1, et),
-                                    visit_expr_fp_typed(a2, et));
+        // dexllm#94: a 0/1 operand of a boolean (`Z`-typed) bitwise op is
+        // `false`/`true` — the same rule as the text Writer.
+        auto operand = [&](IRForm* a) -> AstValue {
+            if (auto b = BitwiseBoolConstant(x->op(), et, a))
+                return LiteralBool(*b);
+            return visit_expr_fp_typed(a, et);
+        };
+        AstValue expr = BinaryInfix(x->op(), operand(a1), operand(a2));
         if (!dynamic_cast<BinaryCompExpression*>(op)) expr = Parenthesis(std::move(expr));
         return expr;
     }

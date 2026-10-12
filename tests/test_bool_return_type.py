@@ -449,9 +449,18 @@ def test_no_boolean_local_is_used_as_an_int(loadable_apks):
     # local ASSIGNED an int expression rather than as a bad use, and the use
     # scan is blind to that — measured: a mutant that propagates without
     # re-checking the def-anchor survived the use scan alone.
+    #
+    # A bitwise `&` / `|` / `^` is NOT an int expression by itself: on two
+    # booleans it is the boolean operator, which is how d8 writes `flag |=
+    # cond`, and dexllm#94 types those `boolean` on purpose (spelling a 0/1
+    # operand beside a boolean as `false`/`true`). It is counted only when an
+    # INTEGER LITERAL is an operand (`b | 4`, `b & 127`), which no boolean
+    # expression has. The left-operand alternative needs the literal to start
+    # a token, or the trailing digit of `v1` in `(v1 | v2)` would match.
     assign_arith = re.compile(
         r"^\s*(?:boolean\s+)?(v\d+(?:_\d+)?)\s*=\s*[^;]*?"
-        r"[\w)\]]\s*(?:[+\-*/%]|<<|>>|&|\|(?!\|)|\^)\s*[\w(]"
+        r"(?:[\w)\]]\s*(?:[+\-*/%]|<<|>>)\s*[\w(]"
+        r"|(?:&|\|(?!\|)|\^)\s*-?\d|(?<![\w.])\d+\s*(?:&|\|(?!\|)|\^))"
     )
     for dk in _ceiling_dexkits(loadable_apks):
         for c in dk.list_classes()[:1200]:

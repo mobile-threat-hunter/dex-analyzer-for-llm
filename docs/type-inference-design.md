@@ -496,6 +496,37 @@ pass risks the whole-corpus output. So:
   raw float bits in a float context goes 80 → 14, all 14 predicate false
   positives.
 
+- **Phase 2f — a version's width comes from what flows into it (dexllm#94, done).**
+  The reverse of 2e: an INT declared `float`/`double`/`long` because the register
+  held one elsewhere. (1) SplitVariables trusts a `move-result` def — its rhs is
+  the invoke's own result temporary (`Variable::invoke_result`), not a shared
+  register. (2) A `prim→NARROWER` branch beside `prim→WIDER` for the unsplit
+  register SplitVariables never visits. (3) The move-opcode fixpoint gains a WIDTH
+  half: an all-plain-`move` version is not wide, nor float-from-int. (4) Narrow
+  integral types (Z/B/S/C/I) as a FORWARD dataflow over plain moves and bitwise
+  ops, joined the way ART's `RegType::Merge` joins (`B∪S=S`, else `I`, `Z∪x=I`),
+  constants neutral unless they do not fit, `Z` refused per USE POSITION (a use
+  only one constant reaches does not count — ud chains), a constant-like version
+  taking the type of the versions it is moved into, and a final consistency
+  closure so a version agrees with a source left ⊥ (a cycle of constant-only
+  versions, a printed constant-like register). (5) The dataflow records `Z` on
+  a bitwise node whose version is boolean; both emitters read it (a 0/1 operand
+  is `false`/`true`, an `if-eqz` on it is `!x`), and a `return` from a non-`Z`
+  method rules `Z` out. Each rule of (4)/(5) is a corpus regression of the cut
+  before it. The dataflow runs as WORKLISTS with no round cap (the transfer is
+  monotone over a finite lattice, so its fixpoint does not depend on visiting
+  order), and a constant-like version is summarised as a RANGE rather than a
+  list of values — both from review: a 64-round cap stopped a 300-level ladder
+  part-way, and a list doubled per diamond (4 GB at 28 levels). A plain move whose
+  only reaching def is a constant carries that constant's VALUE, not its source
+  version's type, whenever another input decides one (d8 parks one `const/4 0`
+  and moves it into every field slot of a SafeParcelable reader); when every def
+  is such a move the source types are the only hint and are kept. Measured: 3,230
+  lines on 16 of 43 sources; the int-index census 12 → 0; javac type errors over
+  the 848 changed classes 23,096 → 21,024, with 3 unchanged lines rising (genuine
+  Z/int conflations) against 1,216 falling — and, method by method (514 of those
+  classes do not parse as a whole), 3,817 → 2,452 over 1,449 changed methods.
+
 - **Phase 3 — split on conflict.** Implement version splitting for genuinely
   conflated registers (the residual PR #12 leaves). This touches variable
   numbering + def/use rewiring — the highest-risk piece; gate behind the sound

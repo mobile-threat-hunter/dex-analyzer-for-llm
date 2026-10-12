@@ -801,7 +801,9 @@ std::unique_ptr<Graph> Construct(const MethodSnapshot& snap,
 IRFormPtr GenInvokeRetName::New() {
     // DAD: self.num += 1; self.ret = Variable('tmp%d' % self.num); return ret
     ++num_;
-    ret_ = std::make_shared<Variable>("tmp" + std::to_string(num_));
+    auto tmp = std::make_shared<Variable>("tmp" + std::to_string(num_));
+    tmp->invoke_result = true;  // beyond-DAD, dexllm#94 — see Variable
+    ret_ = tmp;
     return ret_;
 }
 

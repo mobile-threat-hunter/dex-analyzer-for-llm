@@ -611,12 +611,22 @@ public:
 
     void visit_binary_expression(std::string_view op, std::string_view etype,
                                   IRForm* arg1, IRForm* arg2) override {
+        // dexllm#94: a 0/1 operand of a bitwise op the dataflow typed `Z` is
+        // `false`/`true` (`flag |= cond` starts from `0 | …`, d8's `!b` is
+        // `b ^ 1`); `boolean | int` does not compile. Same rule as the AST.
+        auto operand = [&](IRForm* a) {
+            if (auto b = BitwiseBoolConstant(op, etype, a)) {
+                w_->Write(*b ? "true" : "false");
+                return;
+            }
+            if (!emit_fp_const_typed(a, etype)) visit_ins(a);
+        };
         w_->Write("(");
-        if (!emit_fp_const_typed(arg1, etype)) visit_ins(arg1);
+        operand(arg1);
         w_->Write(" ");
         w_->Write(op);
         w_->Write(" ");
-        if (!emit_fp_const_typed(arg2, etype)) visit_ins(arg2);
+        operand(arg2);
         w_->Write(")");
     }
     void visit_unary_expression(std::string_view op, IRForm* arg) override {
@@ -722,8 +732,12 @@ private:
                 w_->Write("= ");
                 // the binary op's own type is the F/D context for arg2 (a
                 // raw-bits int const in a double/float compound assign, e.g.
-                // `p2 *= 2.0`).
-                if (!emit_fp_const_typed(arg2, bin->get_type())) visit_ins(arg2);
+                // `p2 *= 2.0`). dexllm#94: a 0/1 operand of a bitwise op the
+                // dataflow typed `Z` is `true`/`false` here too (`v ^= true`),
+                // as in visit_binary_expression and the AST.
+                if (auto b = BitwiseBoolConstant(bin->op(), bin->get_type(), arg2))
+                    w_->Write(*b ? "true" : "false");
+                else if (!emit_fp_const_typed(arg2, bin->get_type())) visit_ins(arg2);
                 w_->EndIns();
                 return;
             }

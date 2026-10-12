@@ -1653,4 +1653,27 @@ std::string StaticExpression::ToString() const {
     return cls_ + "." + name_;
 }
 
+// Beyond-DAD (dexllm#94) — see instruction.h.
+namespace {
+bool IsBitwiseOp(const std::string& op) {
+    return op == "|" || op == "&" || op == "^";
+}
+const Constant* AsNarrowConst(const IRForm* f) {
+    auto* c = dynamic_cast<const Constant*>(f);
+    if (!c) return nullptr;
+    const std::string t = c->get_type();
+    return (t == "I" || t == "B" || t == "S" || t == "C") ? c : nullptr;
+}
+}  // namespace
+
+std::optional<bool> BitwiseBoolConstant(std::string_view op,
+                                        std::string_view expr_type,
+                                        const IRForm* operand) {
+    if (!IsBitwiseOp(std::string{op}) || expr_type != "Z") return std::nullopt;
+    const Constant* c = AsNarrowConst(operand);
+    if (!c || (c->get_int_value() != 0 && c->get_int_value() != 1))
+        return std::nullopt;
+    return c->get_int_value() == 1;
+}
+
 }  // namespace dexkit::dad

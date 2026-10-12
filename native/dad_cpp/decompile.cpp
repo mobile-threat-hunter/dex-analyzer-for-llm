@@ -147,11 +147,14 @@ bool DvMethod::BuildProcessedGraph() {
     // entry in `defs_of` for its incoming value, so the boolean def-anchor
     // cannot see it, and without this the pass could re-type an `int`
     // parameter and emit `p1 = true` under an `int p1` signature.
-    FixInitResultTypes(*graph_, m.ret_type, declared_params_);
+    // Recompute the chains BEFORE the type passes when the graph changed:
+    // dexllm#94's narrow-integral pass reads them (FixInitResultTypes itself
+    // changes no instruction and no loc, so they stay valid after it).
     if (mat_this) {
         graph_->number_ins();
         chains = BuildDefUse(*graph_, lparam_keys);
     }
+    FixInitResultTypes(*graph_, m.ret_type, declared_params_, &chains.ud);
     DeadCodeElimination(*graph_, chains.du, chains.ud);
     RegisterPropagation(*graph_, chains.du, chains.ud);
 

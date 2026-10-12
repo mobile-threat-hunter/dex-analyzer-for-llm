@@ -830,9 +830,322 @@ negative `static final` integers print UNSIGNED, so the value is wrong (1,076
 values, dexllm#91) — **FIXED in dexllm#91**; `long` literals lack the `L` suffix (896 lines, dexllm#92); a
 `float[]` fill-array payload renders its elements as int bits (216 lines,
 dexllm#93); an int `Math.min(II)I` result can be declared `float` when its
-register was earlier a float — the opposite direction, 10 lines (dexllm#94);
+register was earlier a float — the opposite direction, 10 lines (dexllm#94) — **FIXED in dexllm#94**;
 and DAD renders a `cmp` outside an `if` as `return v0 cmp p3;` (0 in the corpus,
 dexllm#95).
+
+### Production fix — a version's width comes from what flows into it, not the register's last write (dexllm#94, 2026-10-12)
+
+The opposite direction of dexllm#88. An INT value was declared `float` /
+`double` / `long` because its register held a float or a wide value at some
+other point, and was then used as an array index — uncompilable Java, and where
+the version also took an int CONSTANT, a wrong VALUE:
+
+```java
+float v0_3 = Math.min(((int) (((float) (v0_6.length - 1)) * p5)), (v0_6.length - 2));  // Math.min(II)I
+... v1_5[v0_3] ...                                    // LookupTableInterpolator
+double v4 = 0; … v0_2[v4] = 0;                        // QuantizerWu.createBoxes
+```
+
+**The issue's hypothesis (an int-required USE as the proof) was a quarter of
+the answer**, and the rest is what a corpus-wide javac oracle found every time
+a narrower fix looked done. Five pieces, all at the type-inference layer
+(SplitVariables / `InferCascadeTypes`); the emitters only READ what they
+record.
+
+1. **A `move-result` def is trusted.** SplitVariables types each split version
+   from its def's rhs but trusted an ident rhs only for a reference, because a
+   `move` source is the SHARED register whose type is its last write. A
+   `move-result`'s rhs is the invoke's own result temporary
+   (`GenInvokeRetName::New`, a fresh `tmpN` written once by that invoke), so
+   its type is the call's return type and cannot be stale: `v0_3` was `F`
+   straight out of SplitVariables. `Variable::invoke_result`, set only there.
+2. **prim→NARROWER**, the mirror of `prim→WIDER`: a J/F/D version used where
+   only an int is legal (`int_required_vids`) whose defs all resolve to one
+   narrow int width takes it (the unsplit `QuantizerWu` register).
+3. **The move-opcode fixpoint gains a WIDTH half:** a version every def of
+   which is a plain `move` copies 32 bits — not `long`/`double`, and not
+   `float` when its sources are ints (or the reverse). `ActionMenuView`'s
+   `long v36_2 = v1_8` and `ConstraintLayout`'s `float v22 = v1_6` were the
+   stale other end of a move whose first end piece 1 had fixed. No
+   `move-wide` arm: no input could make one fire.
+4. **NARROW-INTEGRAL typing as a FORWARD DATAFLOW** (boolean / byte / short /
+   char / int), after every other branch's re-type is applied. Each version's
+   type is the join ART's verifier uses (RegType::Merge) over what FLOWS INTO
+   it — its producers, and the versions it is plainly moved or bitwise-combined
+   FROM: `B ∪ S = S`, any other disagreement = `I`, `Z ∪ non-Z = I`; a bitwise
+   result is `Z` only when every operand is (Java promotes `byte | 1`); a
+   constant is untyped in Dalvik — NEUTRAL, widening only when its value does
+   not fit. `Z` is then refused at a version used where Java needs a number,
+   POSITION by position: a use only ONE constant reaches (ud chain) does not
+   count, because ART types a register per instruction and that is the value
+   rendered there. A constant-like version (constants, or moves out of
+   constant-like versions) whose remaining uses are all moves into versions of
+   one type takes that type — for `Z`, a use that does not rule `Z` out (an
+   `== 0` test) does not stop it (`ExoPlayerImplInternal.doSomeWork`). Last, a
+   CONSISTENCY closure: a source left ⊥ keeps the type it already has, so a
+   version it flows into joins that type in, and what that raises is carried
+   on to every version it flows into in turn — unless the source
+   is constant-like with at most one use (RegisterPropagation inlines it, so
+   it renders as its constant). A cycle of constant-only versions is the
+   first case (`ConstraintWidgetContainer.layout`'s `boolean v13_7 = v0_10`
+   with `int v0_10`), a constant-like register moved into a `boolean` AND an
+   index is the second (`FragmentTransition`). A bitwise def whose operands are all still
+   unresolved contributes NOTHING in that round: deciding it then makes it `I`
+   (its constant is there) and the monotone join can never bring it back to
+   `Z`, so the answer followed `unordered_map` iteration order — every fixture
+   passed by luck and `GridLayoutManager`'s `!b` arguments did not (a
+   12-version `manyNot` method pins it). A parameter version with NO def in the method is
+   restored to its DECLARED narrow type before the pass runs (the shared
+   `Param` is mutated by any write to its register, and a `boolean p2` read
+   unwritten would otherwise enter the join as `I`).
+5. **A bitwise node whose result is boolean is TYPED `Z`, on the node.** DAD
+   types every `and`/`or`/`xor` node by its opcode (`I`). When piece 4 types
+   the version a bitwise def defines `Z`, the dataflow records `Z` on that
+   node too, and both emitters read it through one shared rule
+   (`BitwiseBoolConstant`): a 0/1 operand of a `Z` bitwise node is `false` /
+   `true` (`flag |= cond` compiles to `0 | …`, d8's `!b` to `b ^ 1`, and
+   `boolean | int` does not compile), and an `if-eqz` on one is `!(a ^ b)`
+   rather than `(a ^ b) == 0`. A `return` from a method whose return type is
+   not `Z` is a position that rules `Z` out — the counterpart of dexllm#86's
+   `Z` return — so `TransitionSet.getOrdering()I`'s `b ? 0 : 1` stays
+   `(b ^ 1)`. **The first cut of this piece asked the OPERAND instead of the
+   node** ("is the other operand boolean?") and rendered that `int` return as
+   `return (this.mPlayTogether ^ true);` — caught by
+   `test_no_return_type_violations`, a guard from 2026-06 that nothing in this
+   change was aimed at. Asking the node is also what fixed the `== 0` line.
+
+**Each rule of piece 4 is a corpus regression of the cut before it**, measured
+with a javac oracle (below): one LUB per version in SplitVariables picked by
+def ORDER (`byte v = (v | x << 28)`, then `int v = (p instanceof T)`, then
+`Short.valueOf(int)`); a union over move-connected versions imposed a loop
+counter's int uses on the boolean it started from (196 lines worse); a
+per-version `Z` refusal counted the lone `0` passed at an `I` parameter
+(`ToolbarActionBar.onKeyShortcut`); moves out of a shared constant register
+needed the constant-like rule (`SwitchCompat.stopDrag`); and a move of a lone
+constant had to stop counting as a claim on its source (`BackStackRecord`).
+The chains are threaded in (`FixInitResultTypes(…, &chains.ud)`), and
+`decompile.cpp` now recomputes them BEFORE the type passes when
+`MaterializeReusedThis` changed the graph — the passes change no loc, so they
+stay valid. The position of each int-required / non-boolean-primitive use is
+recorded by the SAME inserts that build those two sets (`add_req` /
+`add_prim`), so what counts as such a use stays defined once.
+
+**Measured (a/b OFF=`c86ffd57…` — HEAD, bit-reproduced — vs ON=`c31aaaba…`,
+SAME script, both `.so` md5-verified, RE-CAPTURED on the shipped binary after
+the last review fix):** 43 sources / 2,317,871 decompiled lines → **3,230 lines
+changed on 16 sources (all corpus), 0 classes whose line count moved.** Census (a variable declared `float`/`double`/`long` used as an array
+index, method-scoped): **OFF 12 occurrences on 11 lines in 7 methods of 4
+classes → ON 0** (the issue's 10 / 2 was a narrower regex).
+
+**javac is the oracle.** Every changed class (848) is compiled OFF and ON
+against `android.jar` with `-XDshould-stop.ifError=FLOW` (otherwise a class
+with any syntax error is never type-checked) and with its PACKAGE kept (a
+first harness stripped it, and every self-qualified reference — common in
+decompiled output — then failed to resolve and stopped attribution of that
+statement; a correctness review caught it). Errors excluding unresolved
+symbols: **23,096 → 21,024; `incompatible types` 11,251 → 9,805.** The gate is
+per UNCHANGED line: an error count that rose on a line whose text is the same
+on both halves — a message-keyed count over-reports (one error swapped for
+another is not a regression), and a per-class total hides a real one. **3
+lines rise, 1,216 fall**, and all 3 are genuine boolean/int conflations no
+single Java type satisfies: `StaggeredGrid.appendVisibleItems` returns the
+register AND indexes with it (2), and `InputConnectionCompat` passes the flag
+at an `int` parameter where both a constant and the `Z` result reach. Every
+other line that rose during the work drove a rule above — the last four were
+`(v3_0 ^ v1) == 0` (piece 5), a cycle and a shared constant register (the
+closure), and a tested flag (the `Z` relaxation), each found by this gate.
+
+**And the gate has two blind spots, both measured.** (1) **514 of the 848
+changed classes are never type-checked at all**: one unparseable method
+anywhere in a class stops javac at the parser, before FLOW. A second harness
+therefore compiles EACH changed method on its own, inside a stub class of the
+same name, with member-lookup errors excluded: all 848 classes split cleanly,
+**1,449 changed methods, errors 3,817 → 2,452, and the only lines that rise
+are the same StaggeredGrid / InputConnectionCompat ones.** (2) Neither harness
+can see a call into APP code: `android.jar` does not carry it, so its return
+type is "cannot find symbol" and the assignment it feeds is never checked.
+That is exactly where the final review's HIGH (below) lived, and both
+harnesses were silent on it — the regression was found by a reviewer's
+construction, not by the oracle.
+
+parity **29/29**, pytest **1670 passed / 24 skipped**, TRUE corpus-less
+(`test_apk` MOVED aside, restore asserted) **1246 passed / 448 skipped / 0
+failed**, narrowed to `tests/data/multidex.apk` **1553 passed**, sweep
+**21,374-class / 180,879 method-block 0-crash 0-timeout, GATE: PASS**,
+determinism 3
+`PYTHONHASHSEED`s → one digest, lint trio clean,
+`scripts/check_dad_boundary.sh` clean.
+
+**The #86 ceiling moved, deliberately.** `tests/test_bool_return_type.py`
+counted a `boolean` local assigned ANY `&`/`|`/`^` expression as arithmetic;
+`(false | p2.isEmpty())` is boolean logic, so the regex now counts a bitwise op
+only with an integer-literal operand — the shape that is actually invalid.
+
+**Guards** — [tests/test_int_reuse_typing.py](tests/test_int_reuse_typing.py),
+64 cases, all but one on the committed `tests/data/int-reuse.dex`, the seventh
+authored fixture and the second in smali (register reuse and the bfs build
+order cannot be pinned from Java). 52 methods, one per rule; two of them
+(`containerMatch`, `stopDrag`) are a corpus method register for register. The
+AST is walked structurally for the declaration types AND for the bitwise
+`false`/`true` literal (each emitter calls the shared rule separately, so each
+has its own guard); the corpus case runs the
+census predicate over every method of the four classes; the `invoke_result`
+member write is pinned at SOURCE (exactly one, in `GenInvokeRetName::New`,
+headers and core_ext included). **47 mutants, each BUILT and RUN with a
+distinct `.so` md5, the control md5 asserted after: 45 killed, 2 proven
+equivalent** (re-run on the shipped binary after the third review round, which
+added O2 / L1 / L2 / L3; the closure-loop mutant N9 is no longer applicable
+because that loop was deleted). Four of them
+(a `Z` never refused by a numeric use, the constant-like step off, a lone
+constant move counted as a claim, `Z ∪ I` keeping the first) SURVIVED the
+first matrix and are why `zArith`, `stopDrag`, `containerMatch` and
+`zMergeEq{,Swap}` exist, and five more SURVIVED a later matrix: the param
+restore (once the bitwise node carried its own type nothing in the fixture
+read the corrupted `Param` — `paramCond`'s `if (!p1)` does) and the three
+branches of the shared spelling rule (`nestedFlag`, `constOnly`, `zAndTwo`).
+The two equivalents are explicit bounds: the move-width rule's at-most-once
+guard (updates are sequential, so a destination that took its sources' class
+gives them no reason to flip back) and the 0/1 check inside
+`BitwiseBoolConstant` (a node is typed `Z` only when its constants fit `Z`).
+
+**Two reviewers, and every CONFIRMED finding was in the dataflow's
+CONVERGENCE, not in a type rule.** An adversarial review built the inputs; a
+correctness review rebuilt both halves and re-derived the a/b, the census, the
+javac totals and the unchanged-line gate to the digit (3,233 / 12 -> 0 /
+23,114 -> 21,042 / worse 3, better 1,216), and checked text against AST over
+34,689 methods of the changed classes: 0 mismatches.
+
+* **HIGH (adversarial) — the constant-like summary was EXPONENTIAL.** It kept
+  the LIST of constants reaching a version, and a diamond ladder of
+  constant-only moves doubles that list at every level: a 28-level crafted
+  method took over 4 GB. It is a RANGE now (`lo`, `hi`), which is all the
+  fits-test needs. The same method takes 19 MB.
+* **MEDIUM (adversarial) — quadratic on a move chain, and capped short of
+  convergence.** The forward pass and the constant-like steps were round-robin
+  loops over a 64-round cap: 16 s on a 25,000-move chain, and a 300-level
+  boolean ladder stopped part-way, leaving `boolean` and `int` disagreeing
+  across a move. All three are WORKLISTS now (a version is revisited only when
+  something it reads changes), with NO cap: the transfer is monotone over a
+  finite lattice, so it terminates, and its least fixpoint does not depend on
+  the visiting order. The chain takes 1.55 s; the ladder is boolean throughout.
+* **MEDIUM (correctness) — a demotion did not travel.** The consistency closure
+  raised a version from `Z` to `I` and stopped there, so a version moved FROM it
+  kept `Z`: `boolean v3 = v2` beside `int v2`, a valid -> more-invalid change
+  on a crafted (strict-valid) input. The closure now hands what it raises back
+  to the forward pass.
+* **LOW (adversarial) — the COMPOUND form was not spelled.** `v0 ^= 1` takes a
+  separate branch in both emitters from `v0 = v0 ^ 1`, so it rendered
+  `boolean ^= 1`. Both call the shared rule now (`v0 ^= true`, `v0 &= false`).
+* **LOW (correctness) — a reference or wide call result entered the narrow
+  join** and could be set back on the version (3 corpus versions, 0 output
+  change). It is FOREIGN now, as every other non-narrow def already was.
+* **LOW (correctness) — the join was not monotone in one place:** a `byte`
+  beside 200 went straight to `int`, so the answer depended on whether a
+  source had reached `byte` or `short` first. It widens to the narrowest type
+  that holds the constant (`short`), as ART merges it.
+* **LOW (correctness) — a guard's comment was false**: the #86 ceiling's
+  relaxed regex counted `(v1 | v2)` as integer arithmetic (the trailing digit
+  of `v1` matched). It now requires the literal to start a token.
+
+**Accepted and recorded, not fixed:** `StaggeredGrid.appendVisibleItems` and
+`InputConnectionCompat` are the three unchanged lines that get worse. A
+reviewer traced them further than this section first did: in the bytecode only
+`const/4 v0, #0` reaches those uses, and the conflation comes from DAD's
+block-level exception edges giving the handler a multi-def chain. So they are
+conflations of the IR, not of the program. Also: a constant ladder whose last
+move goes to a DEAD destination stalls the agreement and stays `int` (d8
+removes dead moves, so this is crafted-only); a crafted 2,000-level ladder
+ends in the emit-depth `DECOMPILE ERROR` exactly as it does OFF; and `z_pos`
+does not cover `==` against a non-constant int or a bitwise with an int, both
+already invalid OFF.
+
+**And the matrix removed dead code.** The closure's local fixpoint loop had a
+comment saying "raising the type can make a constant-like source that fitted
+before stop fitting". That is false: a join only WIDENS the values a type
+admits, so a second pass re-joins exactly what the first did. Its mutant was
+EQUIVALENT, so the loop is gone.
+
+**A DELTA review of those responses found two more, both in the closure the
+responses had touched** [[review-responses-are-the-weak-spot]], each a new
+valid -> invalid line on a crafted strict-valid input that HEAD rendered right:
+
+* **MEDIUM — the closure's answer followed the ORDER of a version's defs.** A
+  constant-like source was skipped when its constants fit `join(ty[vid], t)`,
+  where `t` is what the sources visited EARLIER in the same loop had already
+  joined. With a `short` source first, a {0, 200} source was skipped and
+  `short v0 = v5` came out beside `int v5`; with the two branches swapped the
+  same method was `int`. The skip is tested against `ty[vid]` alone now.
+* **LOW — a source the assignment step typed from a destination did not rise
+  with it.** When the closure raised the destination from `Z` to `I`, the
+  constant-like source still read `boolean v3 = false; … v2 = v3`. The forward
+  worklist now raises such a source together with its destination (still
+  monotone, so it still terminates).
+
+It REFUTED the rest with its own instruments: termination (the lattice has
+height 3 and every step only rises), name-order independence (the whole
+fixture re-assembled with registers renumbered across `v10 < v2`: 0 diff lines
+of 3,580), text/AST agreement on the compound spelling, and the Range summary,
+which is EXACTLY equivalent to the list rather than merely conservative: every
+`fits` width is an interval. Both fixes leave the corpus byte-identical on all
+43 sources; the fixture gains `defOrder` and `raisedDest`, and reverting either
+fix is a killed mutant.
+
+**A third round — the hack gate ([docs/hack-gate.md](docs/hack-gate.md)) and a
+final adversarial review of the delta-fixed state — found two more, and one of
+them was REAL.** The hack gate passed HG1–HG4 and HG6 (no masking: every type
+is set in the dataflow and both emitters only read it) and failed HG7:
+
+* **HG7 — the claim the E3 equivalence rested on was FALSE.** "A node is typed
+  `Z` only when its constants fit `Z`" did not hold: a bitwise input whose
+  other operand stays ⊥ was DEFERRED, and deferred for good when that operand
+  never resolved, so its constant was never checked and a `Z` version stamped
+  its node `Z` with a 2 in it — `(false | 2)`, `(true ^ 7)` on a crafted
+  strict-valid dex. A constant that cannot be a boolean now decides the input
+  as `I` at once (whatever the operands turn out to be, it is `I`), so the
+  claim is TRUE and E3 is equivalent for a stated reason. `skipBit` /
+  `skipBit2` pin it; the corpus does not move.
+* **HIGH (adversarial) — a real-corpus valid -> invalid regression the
+  published gate did not list.** d8 parks ONE `const/4 v7, 0` in a GMS
+  SafeParcelable reader and `move`s it into each field slot; `v7` is an `int`
+  elsewhere (the same version), and the forward transfer joined `ty[v7]` into
+  every slot, so `boolean v5 = false` became `int v5 = 0` and the later
+  `v5 = zzbfn.zzc(…)` (a `Z` call) failed to compile — 3 lines on
+  `weardrawers` (`zzbgr` ×2, `zzbex`). At a move whose only reaching def is a
+  constant, RegisterPropagation renders the LITERAL: the value moved is the
+  constant, not the version. The consistency closure and the assignment step
+  already said so; the forward transfer did not. It carries the constant's
+  VALUE now — but only when another input DECIDES a type: when every def of a
+  version is such a move, the parked registers' type is still the only hint
+  there is (`ToolbarActionBar.onKeyShortcut`'s `setQwertyMode` flag, whose two
+  defs move a lone 1 and a lone 0), and the first cut of this fix, which
+  dropped the hint unconditionally, turned 25 corpus `boolean` slots back into
+  `int`. Which case applies is decided by the node's SHAPE, never by what has
+  resolved, so the transfer stays monotone. Against the previous capture
+  exactly those 3 lines move; `parkedConst`, `parkedTwo` and `loneHint` pin
+  the three halves (the value is carried, it is still CHECKED, the hint
+  survives), each killed by its own mutant.
+* **MEDIUM (adversarial, crafted) — `z_pos` misses a bitwise operand whose
+  partner is not `Z`.** A {0,1} constant-like version moved into a flag and
+  also `and-int`ed with an `int` parameter is typed `boolean`, so an unchanged
+  `return (v2 & p5);` stops compiling. Strict-valid, 0 in the corpus — the
+  same uncovered-position family as the `==` cases below. Recorded and filed,
+  not fixed.
+
+It REFUTED the rest with its own instruments: a 4,000-level diamond ladder
+costs the same time and memory ON as HEAD (both end in the emit-depth error),
+three `PYTHONHASHSEED`s give one digest, and text and AST agree on 65 crafted
+and fixture methods.
+
+**Adjacent, pre-existing, NOT fixed here:** a `cmp-*` result is typed with its
+OPERAND width (DAD; the Writer's fp-constant rendering of the operands depends
+on it), so it renders `double v1 = p6 cmp p6` — dexllm#95's family — and it is
+what made `QuantizerWu`'s source register stale in the first place; a `Z` parameter given an int constant renders
+`getBooleanExtra("…", 1)`; an UNSPLIT register never reaches SplitVariables' def typing
+(`byte v0 = 200`); and `GenInvokeRetName::Last()` follows bfs BUILD order, so a
+crafted handler built between an invoke and its `move-result` binds the wrong
+temporary (pre-existing value binding; this change trusts the type of what it
+binds).
 
 ### Production fix — reused `this` register materialised as a local (`this = X` → valid, 2026-07-03)
 

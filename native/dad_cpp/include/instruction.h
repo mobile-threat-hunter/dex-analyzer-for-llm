@@ -299,6 +299,13 @@ public:
     // Public-ish state (matches Python free attribute access).
     bool declared = false;
     std::string name;  // DAD: same as v at construction
+    // Beyond-DAD (dexllm#94): true for the `tmpN` an invoke assigns its result
+    // to (GenInvokeRetName::New). Such a Variable is created once per invoke and
+    // written once, by that invoke, so its type is the call's own return type —
+    // unlike a REGISTER Variable, which is shared across every write to the
+    // register and whose type is the last one. SplitVariables reads it to trust
+    // a `move-result` def's type.
+    bool invoke_result = false;
 
     const std::string& v() const noexcept { return v_; }
     std::string Vid() const override { return v_; }
@@ -1148,5 +1155,14 @@ private:
     std::string clsdesc_;
     void Accept(Visitor& v) override;
 };
+
+// Beyond-DAD (dexllm#94). DAD types every bitwise node by its opcode (`I`);
+// the narrow-integral dataflow records `Z` on a node whose result is boolean.
+// The `false`/`true` a 0/1 narrow-int Constant stands for when it is an operand
+// of a bitwise `op` whose result type `expr_type` is `Z`; nullopt otherwise.
+// Shared by the text Writer and the AST emitter — the one place both must agree.
+std::optional<bool> BitwiseBoolConstant(std::string_view op,
+                                        std::string_view expr_type,
+                                        const IRForm* operand);
 
 }  // namespace dexkit::dad
