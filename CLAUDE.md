@@ -4289,6 +4289,89 @@ Discarded and re-run clean (1230 / 24 / 0). **Nothing may touch the tree while a
 suite runs** — the same shape as the concurrent-reviewer trap this file already
 records, reached from the other direction.
 
+### The indicator xref is one batched pass, not one scan per indicator (dexllm#98, 2026-10-13)
+
+`extract_iocs` and `detect_content_providers` attached "where in the code" by running
+one `find_methods_using_strings` query PER VALUE — a full method scan each, and one the
+core's trie never helps: `DexItem::FindMethod`'s ACDAT prefilter is gated on
+`HasComposite(matcher)`, which is unconditionally false for a plain `using_strings`
+list (`analyze.cpp`), so every query falls to a per-method `IsStringMatched`. Both now
+call ONE shared helper, [src/dexllm/_xref.py](src/dexllm/_xref.py)
+`methods_loading_each`, which issues a single `batch_find_methods_using_strings` (one
+Aho-Corasick trie for every value). Pure Python; no binding or C++ changed.
+
+* **Keyed by POSITION, not value.** A batch KEY is a caller label that is not
+  MUTF-8-encoded (dexllm#29), so a value-keyed call raises on a lone-surrogate value,
+  and a repeated value would collapse to one key.
+* **First-wins dedupe, which the raw batch does not do.** `DexKit::FindMethod` drops a
+  descriptor it has already seen (`declared_set`, dex_id order); `DexKit::BatchFindMethodUsingStrings`
+  concatenates every dex's hits. So when a class is declared in more than one loaded dex
+  — an `add_dumped_dexes` packer session, an overlapping multi-source load — the raw
+  batch lists each method ONCE PER DECLARING DEX. The helper applies the same first-wins
+  rule. **Both reviewers found this independently** (40 of 40 values differed on the
+  fixture loaded twice; a2dp under `add_dumped_dexes` reported `ProviderList.<clinit>`
+  twice): the first cut's a/b loaded ONE source per session, and no corpus sample
+  declares a class twice, so "byte-identical" was true only of that population. The
+  raw `batch_find_*` binding keeps its per-dex shape (a vendor-side divergence from the
+  single path, left alone here).
+* **The containment survives as a fallback.** If the batch raises, the old per-value
+  loop runs, with its dexllm#55 rule intact: a failure before any query has worked
+  propagates (the xref layer is unavailable), a later one is one bad query. An EMPTY
+  value never reaches the batch — its keyword path `DEXKIT_CHECK`s that `""` is an
+  `Equal` matcher, which ABORTS in a non-NDEBUG build (the ASan recipe) where no
+  fallback can contain it; unreachable from both callers, guarded anyway.
+* **Equivalent, measured rather than argued.** For `contains` the batch does not
+  interpret `^`/`$` (only `SimilarRegex` does), and the orders coincide: the single path
+  walks `method_ids` in index order (sorted by class — a verifier-enforced ordering),
+  the batch walks classes by type_idx and each class's sorted `class_method_ids`, both
+  merging dexes in dex_id order. Over 39 sources / 7,419 values / 58,889 hits (6
+  multidex) **0 values differ in set and 0 in ORDER**.
+* `declared_in` (`find_classes_declaring_strings`) stays per indicator — served from the
+  lazy declaration index, never the cost. `xref_limit` (default 300) is unchanged and is
+  spent by `_xref.budgeted`, which IS the old countdown (`while budget > 0: budget -= 1`),
+  so a fractional limit still rounds UP, `inf` covers everything and `nan` nothing. A
+  first cut used `int()` and called that "as before"; a delta reviewer showed it
+  truncates (1.5 → 1 where HEAD gave 2), and the guard had pinned the wrong value.
+  It now bounds rows carrying a location and those lookups rather than N full scans.
+
+**Measured (a/b, pre-#98 `ioc.py`/`providers.py` exec'd as modules beside the working
+tree in ONE process, same `.so`):** 54 sources (bundled corpus, fixtures, the 10 largest
+voice-phishing APKs) x {loaded once, loaded twice} x 10 `xref_limit` values (300, 0, 1,
+1.5, 2.5, 0.5, -2, inf, nan, 10**9) x both scanners = **2,160 comparisons, 0 differ**
+(exceptions compared by type). Earlier: the bundled corpus + fixtures + the 30 largest
+voice-phishing APKs (74 loading sources / 580 indicators), each loaded once AND loaded
+twice (every class declared in two dexes) — `extract_iocs` and `detect_content_providers`
+**byte-identical on every source in both modes**; a first-cut run over 90 voice-phishing
+APKs / 1,430 indicators was identical too. The xref step alone
+(`~/Project/ioc98-eval/xref_time.py`, best of 5): 121 indicators 53.0 → 5.0 ms (x10.7),
+57 → x8.8, 28 → x5.0; a single value is 0.3 → 1.1 ms, accepted (absolute noise). Whole
+`extract_iocs` over those 74 sources 1.34 → 1.17 s — the rest is the value-string scan;
+`detect_content_providers` moves +11 ms over 74 sources, since a provider list is
+usually 0-2 URIs and one batch pass costs more than one query.
+
+Guards: [tests/test_xref_batch.py](tests/test_xref_batch.py) (30 cases, all on
+committed fixtures, corpus-less): one batch and zero single queries, per-value set AND
+order equal to the loop, the fixture loaded TWICE and an `add_dumped_dexes` session,
+the same class declared in two dexes with DIFFERENT bodies (a crafted variant whose
+const-string operands are repointed, strict-verify-valid, in three session shapes —
+loading one file twice gives identical bodies, where dex-0-only, last-wins and
+sorted-set dedupe all coincide with the right rule and each SURVIVED the delta review),
+two different fixtures in one session, the budget countdown incl. fractional / inf /
+nan, repeats, a lone-surrogate value, an empty value, the
+fallback and the dexllm#55 propagation through it, the `xref_limit` budget on both
+scanners (the declaration lookups are COUNTED — the fixture declares none of the
+indicators, so an over-spent budget is invisible in the rows), a float budget, and a
+ROW-ALIGNMENT case per scanner that feeds the fixture's own code-hitting strings through
+the classifier — without it a reversed `method_hits[n - 1 - i]` passed 166 tests
+(both reviewers), because every injected indicator occurs in no code and its row is
+`[]` under any pairing. 21 mutants, each applied and run, each killed — including the
+delta reviewer's four survivors. A delta review of the shipped fix also re-derived the
+dedupe rule against 192 crafted differing-body sessions (0 differences) and confirmed
+`FindMethod`'s `declared_set` is first-wins over MATCHED beans, which is what the
+batch-then-dedupe reproduces. **Not done
+here:** the native `ExtractIocs` the issue cites lives on a `feat/jadx-backend`
+branch / dexllm-web, not in this repo.
+
 ### Typed API — `dexllm.sdk` (ports & adapters over the raw binding)
 
 For embedding, `dexllm.sdk` wraps this whole raw surface in a typed ports-and-adapters layer ([src/dexllm/sdk/](src/dexllm/sdk/) — `model.py` frozen dataclasses / `ports.py` `@runtime_checkable` Protocols / `adapter.py` `DexKitAdapter`; component reference in [docs/sdk.md](docs/sdk.md)). `open_apk(sources) → DexKitAdapter` satisfies the composite `DexAnalysisUseCase`, which composes **thirteen session-bound ports** — `Decompilation` (incl. `render_*_smali`), `Enumeration` (classes/methods/fields/value-strings/external-{method,field,type}-refs, per-dex + all-dex, plus `list_class_headers` — every class_def's supertypes in one crossing), `DexExtraction` (`extract_dex` → `ExtractedDex`), `ClassInspection` (`class_info`/`class_fields`/`class_methods`/`locate_class_dex` — the god-object `get_class_summary` decomposed by ISP), `CrossReference` (call-sites/args/field-read-write/type-refs), `Search` (the L1–L7 family, `match_type: Literal`), `PermissionAnalysis`, `IndicatorExtraction`, `Capability`, `ContentProvider`, `TlsTrust`, `ComponentSubclass` (`find_component_subclasses` — every class that CAN be used as a component, chain included), and `CacheControl` (the operational cache/lifecycle knobs) — plus the load-free `ContainerProbePort` (`identify`). `.raw` is the escape hatch to the underlying `DexKit`. This is the boundary a consumer programs against instead of the dict/struct raw returns; the audit invariant is **every session-bound port fully implemented, isinstance-conformant, and 0 adapter-method-without-a-port drift apart from an explicit allow-list** — the documented `.raw` escape hatch plus the enumerated dexllm#21 back-compat aliases (now none — stage 4 removed them, and the allow-list is an empty declaration) (locked by `tests/test_sdk.py::test_adapter_public_surface_has_no_undeclared_drift`, which asserts the set equality; before 2026-08-05 the "locked by tests" half was overstated — the isinstance test only checked ports ⊆ adapter, never the reverse). **The raw ↔ port axis is locked too** (`test_raw_and_port_share_one_spelling_per_operation`): a raw `DexKit` method and its port method must share a NAME — the dexllm#21 series existed because `find_call_sites_to_api` (raw) and `find_call_sites` (port) were one operation under two names for three releases and nothing noticed. Set EQUALITY both ways against three declared exception kinds: `_RAW_DEPRECATED_ALIASES` (alias→canonical, and the canonical must itself be unified, so a new raw method cannot be hidden by listing it), `_RAW_DECOMPOSED` (`get_class_summary` → `class_info` + `class_fields` + `class_methods`, an ISP split = a genuinely different operation), and `_PORT_FROM_MODULE_FUNCTION` (`identify`/`verify`/`extract_iocs`/… are module-level `dexllm` functions, a location difference not a naming drift). Verified to catch a port-side rename, a stale exception entry, an alias claiming a non-unified canonical, and a bogus module-function claim. **Adding a raw binding now requires either the matching port name or a conscious edit to one of those three lists.** **The TYPE axis is locked too since dexllm#37** (`test_raw_and_sdk_share_one_spelling_per_record_type`): a record type present on both layers uses ONE name — `ClassMemberField` (raw) and `FieldInfo` (SDK) were one field-for-field identical record under two names, the exact defect #21 removed, on an axis nothing checked (reverting a type rename in `model.py` passed every existing assertion). Set equality both ways against `_SDK_ONLY_MODELS` (a composite, or a raw dict/tuple return given a type) and `_RAW_ONLY_MODELS` (`ClassSummary`, the god object the SDK decomposes). An exception must be JUSTIFIED, not merely listed: a raw-only type field-identical to an SDK-only model is rejected, because otherwise the cheapest way past a failure is to add BOTH names to the two lists — which absorbs the very defect (constructed: renaming SDK `MethodRef` to `MethodHit` goes green that way). **The MCP tool-NAME axis is locked too** (`test_every_mcp_tool_name_exists_on_another_layer`): every advertised tool must carry the name THAT operation already has on the raw `DexKit`, on a port, or as a module-level `dexllm` function. Two assertions, because name-existence alone is the weaker claim "the name SOME operation has" — under which renaming the `get_class_summary` tool to `class_info` passes silently, the mirror defect (one name, two operations); the second ties each tool to `_t_<name>` and requires that impl to CALL an identically-named operation (`safe_`-wrapped counts, for the two decompile tools). **The ARGUMENT axis is locked too since dexllm#44** (its own paragraph below). It was the last unlocked NAME axis and it had drifted — `capability_report` was `summarize_capabilities` under a second name; renamed outright (the MCP surface has no consumers yet, so it takes no alias), and the exception list is an empty declaration. **A shared NAME can still carry a shared KEY with two meanings**, which assertion (2) cannot see (the impl does call the same-named operation). The one such case — MCP `identify` overwriting `dex_count` with the count of all LOADED dexes while `dexllm.identify(path)` reports one container's own — was fixed in dexllm#38 by making every shared key mean the same thing, moving that total to `loaded_dex_count` and adding `source` (WHICH source the shared keys describe: `add_dumped_dexes` puts the dump first, so a packer session probes a bare dex — dexllm#26's lesson for `extract_dex`). Rename to `session_info` was the alternative and was REJECTED for a stated reason: no such name exists on raw/port/module, so it would have taken the first entry in `_MCP_ONLY_TOOLS` and weakened the audit being locked in the same change. Guard `test_identify_means_the_same_thing_on_every_layer` is driven by a CRAFTED concatenated dex — a packer dump is ONE source that splits, so the earlier belief that only a multi-source session diverges was false, and the crafted fixture also removes the skip and the second-source-fails-to-load hazard. Two legs, because on a single source `identify(apk_path())` and `identify(sources()[-1])` are the same call: 5 of 6 mutants die (the survivor swaps `dex_count()` for `len(verify_report())`, which coincide unless a dex is rejected). Distinct from the *internal* `IDexCodeSource` hexagonal boundary above (that isolates `dad_cpp` from DexKit; this one is the outward Python API).

@@ -731,9 +731,12 @@ collisions where a Java path's tail is a dictionary-word gTLD (`os.name`,
 `Matcher.group`, `*.support` — `.name`/`.group`/`.support` are real TLDs). A
 scheme-qualified URL keeps its host regardless. The classifier regexes are
 hand-bounded (ReDoS-safe) and each string is length-capped — important because dex
-value-strings include multi-MB blobs. Set `with_xref=False` to skip the per-indicator
-L7 cross-reference, or lower `xref_limit` on string-heavy apps. Also the `extract_iocs`
-MCP tool (returns `{indicators, counts}`).
+value-strings include multi-MB blobs. The method cross-reference is ONE batched
+Aho-Corasick pass over every indicator (`batch_find_methods_using_strings`, dexllm#98),
+so its cost is flat in the indicator count rather than one full scan per indicator;
+`with_xref=False` skips it, and `xref_limit` caps how many indicators carry a location
+(and the per-indicator `declared_in` lookups). Also the `extract_iocs` MCP tool
+(returns `{indicators, counts}`).
 
 > Note: the indicator extraction is in-tree and ReDoS-bounded by design —
 > `iocextract` was evaluated but its regexes backtrack catastrophically on the dotted

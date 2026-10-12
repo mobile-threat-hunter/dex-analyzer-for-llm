@@ -13,7 +13,7 @@ Redesign (2026-06, scaffold). Pipeline:
     -> our bounded regexes                 # URLs / IPs / emails / onion, ReDoS-safe
     -> _HOST_CANDIDATE + tldextract/PSL    # bare domains, validated against the PSL
     -> denoise (dex packages + xmlns URIs) # residual identifier false-positives
-    -> per-indicator method xref (L7)      # "where in the code", budgeted
+    -> batched method xref (L7, one pass)  # "where in the code", budgeted
 
 **Why our own regexes, not iocextract:** iocextract's URL/email/refang regexes
 backtrack CATASTROPHICALLY on long dotted blobs (`"a.a.a…"` 32KB → ~10s URL extract;
@@ -35,6 +35,8 @@ from __future__ import annotations
 
 import re
 from typing import TYPE_CHECKING, Any
+
+from ._xref import budgeted, methods_loading_each
 
 if TYPE_CHECKING:
     import tldextract as _tldextract_mod
@@ -343,8 +345,10 @@ def extract_iocs(
     Args:
         dk: A loaded ``dexllm.DexKit`` instance.
         with_xref: If True, attach each indicator's location: the referencing
-            method descriptors AND the classes declaring it as a constant. Two L7
-            searches per indicator (a const-string xref and a declaration xref).
+            method descriptors AND the classes declaring it as a constant. The
+            const-string xref is ONE batched search for every indicator; the
+            declaration xref is one lookup per indicator, served from a lazily
+            built index.
         denoise: If True, drop residual identifier hosts (dex packages, xmlns URIs)
             that survive into the candidate set.
         xref_limit: Cap on indicators cross-referenced, spent highest-signal first.
@@ -365,56 +369,37 @@ def extract_iocs(
 
     buckets = _scan_value_strings(dk.list_value_strings(), denoise, dex_packages)
 
-    xref_budget = xref_limit
-    xref_ever_worked = False
-    result: dict[str, list[dict[str, Any]]] = {}
-    for cat in _XREF_PRIORITY:
-        rows: list[dict[str, Any]] = []
-        for value in sorted(buckets[cat]):
-            methods: list[str] = []
-            declared_in: list[str] = []
-            if with_xref and xref_budget > 0:
-                try:
-                    hits = dk.find_methods_using_strings(
+    # The budget is spent highest-signal first: the first `xref_limit` values in
+    # category priority order are cross-referenced, the rest are not.
+    ordered = [(cat, value) for cat in _XREF_PRIORITY for value in sorted(buckets[cat])]
+    n_xref = budgeted(xref_limit, len(ordered)) if with_xref else 0
+    xref_values = [value for _, value in ordered[:n_xref]]
+    # One Aho-Corasick pass for the whole method xref (dexllm#98) — see _xref.
+    method_hits = methods_loading_each(dk, xref_values)
+
+    result: dict[str, list[dict[str, Any]]] = {cat: [] for cat in _XREF_PRIORITY}
+    for i, (cat, value) in enumerate(ordered):
+        methods: list[str] = []
+        declared_in: list[str] = []
+        if i < n_xref:
+            methods = method_hits[i]
+            # dexllm#20 — the method xref searches the const-string BYTECODE index,
+            # so an indicator kept only as a `static final String` constant (never
+            # loaded by code) would get no location at all. The declaration side
+            # covers that. Queried unconditionally, not just when `methods` is
+            # empty, so the field always means "classes declaring this string"
+            # rather than something that silently depends on the other field —
+            # and it is ~free next to the method xref (the lazy declaration index).
+            try:
+                declared_in = [
+                    m.descriptor
+                    for m in dk.find_classes_declaring_strings(
                         [value], match_type="contains", ignore_case=False
                     )
-                    methods = [
-                        m.descriptor if hasattr(m, "descriptor") else str(m)
-                        for m in hits
-                    ]
-                    xref_ever_worked = True
-                except Exception:  # noqa: BLE001
-                    # One bad query must not abort the report — but a failure
-                    # before ANY query has ever worked is not one bad query, it
-                    # is the whole cross-reference layer being unavailable
-                    # (dexllm#55: a dex whose cache init fails now RAISES here
-                    # instead of hanging). Swallowing that would hand back every
-                    # indicator with `methods: []` and no error, which reads as
-                    # "this indicator appears in no code" — the exact ambiguity
-                    # `declared_in` was added to remove.
-                    if not xref_ever_worked:
-                        raise
-                    methods = []
-                # dexllm#20 — the method xref searches the const-string BYTECODE index,
-                # so an indicator kept only as a `static final String` constant (never
-                # loaded by code) would get no location at all. The declaration side
-                # covers that. Queried unconditionally, not just when `methods` is
-                # empty, so the field always means "classes declaring this string"
-                # rather than something that silently depends on the other field —
-                # and it is ~free next to the method xref (0 ms vs 3-4 ms per 9
-                # indicators, thanks to the lazy declaration index).
-                try:
-                    declared_in = [
-                        m.descriptor
-                        for m in dk.find_classes_declaring_strings(
-                            [value], match_type="contains", ignore_case=False
-                        )
-                    ]
-                except Exception:  # noqa: BLE001 — same containment as above
-                    declared_in = []
-                xref_budget -= 1
-            rows.append(
-                {"value": value, "methods": methods, "declared_in": declared_in}
-            )
-        result[cat] = rows
+                ]
+            except Exception:  # noqa: BLE001 — one bad query must not abort the report
+                declared_in = []
+        result[cat].append(
+            {"value": value, "methods": methods, "declared_in": declared_in}
+        )
     return {cat: result[cat] for cat in IOC_CATEGORIES}

@@ -36,6 +36,7 @@ import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from ._xref import budgeted, methods_loading_each
 from .datadir import load_data_json
 
 if TYPE_CHECKING:
@@ -116,8 +117,8 @@ def detect_content_providers(
 
     Args:
         dk: a loaded ``dexllm.DexKit`` instance.
-        with_xref: attach referencing method descriptors to each hit (one L7 search
-            per hit), the "where in the code" view.
+        with_xref: attach referencing method descriptors to each hit (one batched
+            L7 search for all of them), the "where in the code" view.
         xref_limit: cap on the number of hits cross-referenced (sorted by URI).
         data_dir: directory holding a replacement ``content_uris.json`` (else
             ``$DEXLLM_DATA_DIR``, else the bundled dataset) — see
@@ -130,28 +131,11 @@ def detect_content_providers(
     """
     hits = match_content_uris(dk.list_value_strings(), data_dir=data_dir)
 
-    budget = xref_limit
-    xref_ever_worked = False
+    n_xref = budgeted(xref_limit, len(hits)) if with_xref else 0
+    # One Aho-Corasick pass for every cross-referenced URI (dexllm#98) — see _xref.
+    method_hits = methods_loading_each(dk, [uri for uri, _ in hits[:n_xref]])
     result: list[dict[str, Any]] = []
-    for uri, family in hits:  # already sorted by URI
-        methods: list[str] = []
-        if with_xref and budget > 0:
-            try:
-                found = dk.find_methods_using_strings(
-                    [uri], match_type="contains", ignore_case=False
-                )
-                methods = [
-                    m.descriptor if hasattr(m, "descriptor") else str(m) for m in found
-                ]
-                xref_ever_worked = True
-            except Exception:  # noqa: BLE001
-                # See ioc.py: one bad query is swallowed, but a failure before
-                # any query has ever worked means the cross-reference layer is
-                # unavailable (dexllm#55) and every row would silently claim the
-                # URI is referenced nowhere.
-                if not xref_ever_worked:
-                    raise
-                methods = []
-            budget -= 1
+    for i, (uri, family) in enumerate(hits):  # already sorted by URI
+        methods = method_hits[i] if i < n_xref else []
         result.append({"uri": uri, "family": family, "methods": methods})
     return result
