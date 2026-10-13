@@ -592,6 +592,14 @@ class CallSite:
                  caller_dex_id=0, caller_method_idx=278,
                  callee_descriptor='Landroid/util/Log;->d(...)I',
                  bytecode_offset=14, invoke_opcode=113)
+
+    ``shadowed`` (dexllm#107) is True when the caller's class is declared in
+    more than one loaded dex and resolves to ANOTHER one (first-wins — the copy
+    ``locate_class_dex`` and ``decompile_*`` answer for), so this copy of the
+    method never executes under the session's resolution order (earlier sources
+    win). The site is still reported because the copies can
+    differ (a partial dump, an undecrypted original); ``summarize_capabilities``
+    leaves it out of its counts. Always False outside such a session.
     """
 
     caller_descriptor: str
@@ -600,6 +608,7 @@ class CallSite:
     callee_descriptor: str
     bytecode_offset: int
     invoke_opcode: int
+    shadowed: bool = False
 
 
 @dataclass(frozen=True)
@@ -637,6 +646,14 @@ class FieldAccessSite:
             dex_id=0, method_idx=3326,
             field_descriptor='Landroid/app/Notification;->flags:I',
             bytecode_offset=8, opcode=82)
+
+    ``shadowed`` (dexllm#107) is True when the accessing method's class is declared in
+    more than one loaded dex and resolves to ANOTHER one (first-wins — the copy
+    ``locate_class_dex`` and ``decompile_*`` answer for), so this copy of the
+    method never executes under the session's resolution order (earlier sources
+    win). The site is still reported because the copies can
+    differ (a partial dump, an undecrypted original); ``summarize_capabilities``
+    leaves it out of its counts. Always False outside such a session.
     """
 
     method_descriptor: str
@@ -645,6 +662,7 @@ class FieldAccessSite:
     field_descriptor: str
     bytecode_offset: int
     opcode: int
+    shadowed: bool = False
 
 
 @dataclass(frozen=True)
@@ -663,6 +681,14 @@ class ResolvedCallSite:
                          bytecode_offset=14, invoke_opcode=113,
                          args=(ResolvedArg(kind='ConstString', register_index=1,
                                          string_value='A2DP Volume'), ...))
+
+    ``shadowed`` (dexllm#107) is True when the caller's class is declared in
+    more than one loaded dex and resolves to ANOTHER one (first-wins — the copy
+    ``locate_class_dex`` and ``decompile_*`` answer for), so this copy of the
+    method never executes under the session's resolution order (earlier sources
+    win). The site is still reported because the copies can
+    differ (a partial dump, an undecrypted original); ``summarize_capabilities``
+    leaves it out of its counts. Always False outside such a session.
     """
 
     caller_descriptor: str
@@ -672,6 +698,7 @@ class ResolvedCallSite:
     bytecode_offset: int
     invoke_opcode: int
     args: tuple[ResolvedArg, ...]
+    shadowed: bool = False
 
 
 @dataclass(frozen=True)
@@ -919,6 +946,8 @@ class CapabilityReport:
     # `only_categories` tag, so emitting it here would contradict that stance.
     dropped_touches: int = 0
     dropped_apis: int = 0
+    # Sites in a shadowed copy of their method, never counted (dexllm#107).
+    shadowed_touches: int = 0
 
     def __post_init__(self) -> None:
         """Wrap the mapping fields in read-only views so the model is immutable."""

@@ -4422,7 +4422,8 @@ values, classes 87 → 0.
 `find_call_sites_to` 9 → 18, `find_field_read_sites` 272 → 544, `resolve_call_args`
 9 → 18 on a2dp loaded twice, and so `summarize_capabilities` counts double. Those
 records carry `caller_dex_id` and name an instruction in a specific dex, so whether a
-site in a shadowed copy should be dropped is a different decision. The index-refused
+site in a shadowed copy should be dropped is a different decision — **decided in
+dexllm#107** (the next section): kept, and marked `shadowed`. The index-refused
 fallback path of `FindClassesDeclaringStrings` (crafted amplification only) carries the
 dedupe and only a SOURCE pin — a reviewer's mutant removing it there survived every
 behavioural case. The pin's first cut was a 120-character substring window, which a
@@ -8607,6 +8608,94 @@ while MIXED, which the guard omitted, did.
 "46 sources" is 46 ENUMERATED entries, of which **45 are files** - `test_apk/APK/
 apksig` is a DIRECTORY - and **40 load**. The 6 non-loaders are that directory,
 two certificates, a `.jar`, a resources-only APK and a `.apksig`.
+
+### A site in a shadowed copy is reported and marked, never counted (dexllm#107, 2026-10-13)
+
+dexllm#106 made every SEARCH answer one row per descriptor in a session that
+declares a class in more than one loaded dex (an `add_dumped_dexes` packer session,
+or any overlapping multi-source load). It deliberately left the per-INSTRUCTION
+APIs alone, and they still reported a site in each dex's copy: on a2dp loaded twice
+`find_call_sites_to(Log.d)` 40 → 80, `find_field_read_sites(SDK_INT)` 272 → 544,
+`resolve_call_args` 40 → 80, and `summarize_capabilities` counted everything twice
+(`total_call_sites` 41 → 82 at the default `app_only=True`), on the report an LLM is
+told to read first.
+
+**The decision was the user's (option 2 of three):** keep every site, MARK it. A
+site record names an instruction in a specific dex, and the copies are not always
+identical — in a packer session the dump can be partial and the original
+undecrypted, so a site present only in the copy that does not resolve is real
+evidence about the app. Dropping it (option 1) would lose that silently;
+documenting the doubling (option 3) would leave the counts wrong.
+
+**`shadowed`** is a new field on `CallSite` / `FieldAccessSite` /
+`ResolvedCallSite`, on all four layers (C++ `api_ref.h`, pybind, `.pyi`, SDK model +
+adapter, MCP rows). It is set where the dex copy is KNOWN — the three site
+producers in `core_ext` (`FindCallSitesToApi`, `ResolveCallArgs`,
+`FieldAccessSites`) — by one helper, `IsShadowedMethod`: the site's method's class
+resolves through `GetClassDeclaredPair`, the first-wins resolver `locate_class_dex`
+and `decompile_*` already use (D13), to a DIFFERENT dex than the site's. The field
+path judges an accessor in its ORIGIN dex, not the declaring dex the core aggregates
+it into. `find_call_sites_from` resolves its method first-wins and is never
+shadowed.
+
+**Every consumer that answers what the app DOES leaves a shadowed site out**, so
+they agree with the body `decompile_method` renders (HG3): `summarize_capabilities`
+(new `CapabilityReport.shadowed_touches`, on the SDK model and the MCP payload too;
+the filter runs BEFORE `app_only`, so `dropped_touches` counts library callers among
+executable sites only), C++ `PermissionCallers`, both `dangerous_api` joins, and the
+`constructed_in` of `detect_permissive_tls` / `find_component_subclasses`. Those five
+descriptor joins were the HG2 finding: they collapse identical copies by descriptor,
+so a twice session never doubled them, but with DIFFERING copies they would have
+named a caller whose resolving body makes no such call.
+
+**Deliberately NOT filtered, and stated:** `dangerous_permission_apis` is a
+REFERENCE census (an API counts when any loaded dex references it, invoke site or
+not — it always reported refs with no call site), so an API referenced only by the
+copy that does not resolve is listed there with no caller in the joins; the SEARCH
+APIs keep #106's first-MATCHING rule; and `find_type_references` still lists a
+descriptor once per declaring dex (pre-existing, adversarial-review finding, not a
+site API — recorded here, not filed). **"Never executes" is relative to the session's ORDER**
+(earlier sources win, how `add_dumped_dexes(prefer=True)` makes the dump win); a
+runtime whose class loader orders the dexes differently resolves differently. The
+first cut said that bound in api.md only and "never runs" bare elsewhere; a delta
+review found five unqualified sites (MCP, three code comments, sdk.md), all fixed.
+
+**Measured (a/b OFF = v0.24.0 `cce20ca0` + HEAD source via a meta_path shim, ON =
+`61bf0230`, SAME script):** 44 sources x {loaded once, loaded twice} x 16 axes. Loaded
+once, every existing axis — call sites, resolve args, field sites, both capability
+modes, `permission_callers`, `dangerous_permission_api_callers`, TLS, components — is
+**identical on all 44**; the only change is the new `shadowed_touches` key. Loaded
+twice, the raw site rows (dex ids included) are identical, capability totals stop
+doubling on 19 sources (`total_call_sites`, twice → fixed: a2dp 82 → 41 at
+`app_only=True` and 198 → 99 at `False`; tvleanback 312 → 156 and multiple_locale
+602 → 301 at `app_only=False`, where their default-mode counts are 8 and 0), and **ON's live rows equal the single-source answer on all 8 consumer
+axes, 0 mismatches**, where OFF mismatched on capability (19 sources), call sites
+(44) and field sites (35). parity 29/29, pytest 1745 passed / 24 skipped before the
+review additions, lint trio clean.
+
+**Guards:** [tests/test_shadowed_sites.py](tests/test_shadowed_sites.py) (27). The
+oracle for "first declaring dex" is `list_class_headers()`, which walks class_defs
+and does not read the core's declared-class map. Three sessions — twice,
+`add_dumped_dexes`, and `[multidex.apk, fixture, fixture]` so the resolving copy is
+dex 2 and a `dex_id != 0` predicate fails. A DIFFERING-copies craft (three nop code
+units over `LTestBase;->fail()V`'s only `Thread.dumpStack()` call, length-preserving,
+verify-asserted) shows the site kept, marked, excluded from capability, and absent
+from `decompile_method`; the same craft drives the TLS and component
+`constructed_in`. Capability is checked on a METHOD key and a FIELD key (they take
+different lookups). **23 mutants, each applied and run (7 C++ BUILT with distinct
+`.so` md5s, control `61bf0230` asserted before and after): all killed.** Two of them
+were the adversarial reviewer's and SURVIVED the first file: the field-path
+cross-dex mutant (`*item` for `*owner`) and `app_only` applied before the shadowed
+filter; a third (the field-key capability filter) was already closed by then. The
+cross-dex case is corpus-gated (no committed fixture has a cross-dex accessor) and
+the C++ / `dangerous_api` permission joins are SOURCE-pinned for the CI leg, since no
+committed fixture calls a permission-gated API — both weaker, and the tests say so.
+**The pin's first cut was satisfied by dead code**: a delta review wrapped the
+filter in `if (false) {…}` / `if False:` and respelled one loop so the pin saw only
+the other, and all of it passed corpus-less. It now requires the filter to be the
+FIRST statement of every caller loop and pins the loop count (1 in `analysis.cpp`, 2
+in `dangerous_api.py`); those four shapes plus a filter moved after the collect are
+each killed by the pin alone.
 
 ### Every class that CAN be used as a component, with its chain (`find_component_subclasses`, 2026-10-02)
 

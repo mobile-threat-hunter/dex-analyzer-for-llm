@@ -302,6 +302,9 @@ def _t_find_call_sites_to(
                 "caller": s.caller_descriptor,
                 "callee": s.callee_descriptor,
                 "bytecode_offset": s.bytecode_offset,
+                # dexllm#107: these rows carry no dex_id, so without it a class
+                # declared in two loaded dexes would show two IDENTICAL rows.
+                "shadowed": s.shadowed,
             }
         )
     return _paginate(items, offset, limit)
@@ -403,6 +406,9 @@ def _t_summarize_capabilities(
         # model to start here to orient, so a bare zero is the worst answer.
         "dropped_touches": rep.dropped_touches,
         "dropped_apis": rep.dropped_apis,
+        # Sites in a shadowed copy of their method (dexllm#107) — never counted,
+        # so a packer session's numbers are not doubled; nonzero says why.
+        "shadowed_touches": rep.shadowed_touches,
         "total_call_sites": rep.total_call_sites,
         # Separate, not folded into the line above: a call site is an invoke
         # instruction and a field access is a reading method (dexllm#36).
@@ -549,6 +555,7 @@ def _t_resolve_call_args(
             "caller": s.caller_descriptor,
             "callee": s.callee_descriptor,
             "bytecode_offset": s.bytecode_offset,
+            "shadowed": s.shadowed,
             "args": [_arg_to_compact(i, a) for i, a in enumerate(s.args)],
         }
         for s in sites
@@ -566,6 +573,7 @@ def _t_find_call_sites_from(
             "caller": s.caller_descriptor,
             "callee": s.callee_descriptor,
             "bytecode_offset": s.bytecode_offset,
+            "shadowed": s.shadowed,
         }
         for s in sites
     ]
@@ -575,8 +583,8 @@ def _t_find_call_sites_from(
 def _field_site_rows(sites: object) -> list[dict]:
     """Compact one FieldAccessSite per row, the way _t_find_call_sites_to does.
 
-    Same shape as that sibling — both descriptors plus the offset — and the same
-    omission: `opcode` is dropped for context size, exactly as `invoke_opcode` is
+    Same shape as that sibling — both descriptors, the offset and ``shadowed``
+    (dexllm#107) — and the same omission: `opcode` is dropped for context size, exactly as `invoke_opcode` is
     there. The offset is what dexllm#84 added; without it these rows repeated one
     identical string per access.
     """
@@ -585,6 +593,7 @@ def _field_site_rows(sites: object) -> list[dict]:
             "method": s.method_descriptor,
             "field": s.field_descriptor,
             "bytecode_offset": s.bytecode_offset,
+            "shadowed": s.shadowed,
         }
         for s in sites  # type: ignore[attr-defined]
     ]
@@ -1154,7 +1163,12 @@ TOOL_DEFINITIONS: list[dict] = [
             "The CALLER direction (reverse of find_call_sites_from): the "
             "callee is the API you asked about, so what varies per row is the "
             "caller and its bytecode_offset. Use this to trace usage of "
-            "sensitive APIs (PII, crypto, network, file IO)."
+            "sensitive APIs (PII, crypto, network, file IO). When a class is "
+            "declared in more than one loaded dex (a packer dump plus the "
+            "original), each copy's site is a row; `shadowed` is true on a row "
+            "from a copy that does NOT resolve (under the session's load order, "
+            "earlier sources win), i.e. code that never runs. The resolving "
+            "copy's rows have `shadowed` false."
         ),
         "input_schema": {
             "type": "object",
@@ -1183,7 +1197,8 @@ TOOL_DEFINITIONS: list[dict] = [
             "DISCARDED at a merge — treat it as unproven, not as absent. "
             "`depth` bounds the search to the call's own basic block plus that "
             "many predecessor levels above it (0 = that block alone); raise it "
-            "when arguments come back Unknown, at proportionate cost."
+            "when arguments come back Unknown, at proportionate cost. Each row "
+            "carries `shadowed`, as in find_call_sites_to."
         ),
         "input_schema": {
             "type": "object",
@@ -1201,7 +1216,7 @@ TOOL_DEFINITIONS: list[dict] = [
         "description": (
             "The CALLEE direction: every method the given method invokes (the "
             "forward edge of find_call_sites_to). Returns {caller, callee, "
-            "bytecode_offset} per invoke — 'caller' is the SAME on every row (it "
+            "bytecode_offset, shadowed} per invoke — 'caller' is the SAME on every row (it "
             "is the method you asked about); 'callee' and the offset are what "
             "vary. Use to see what a suspicious method actually does."
         ),
@@ -1221,7 +1236,10 @@ TOOL_DEFINITIONS: list[dict] = [
             "Sites that READ a field (iget/sget). Pass the field descriptor "
             "'Lcom/foo/Bar;->f:I'. One row per read INSTRUCTION, each with the "
             "accessing method and its bytecode offset - a method reading it "
-            "twice yields two rows with DIFFERENT offsets."
+            "twice yields two rows with DIFFERENT offsets. "
+            "Each row carries `shadowed`: true for a site in a copy of a class "
+            "that does not resolve (a class declared in two loaded dexes — see "
+            "find_call_sites_to)."
         ),
         "input_schema": {
             "type": "object",
@@ -1239,7 +1257,10 @@ TOOL_DEFINITIONS: list[dict] = [
             "Sites that WRITE a field (iput/sput). Pass the field descriptor "
             "'Lcom/foo/Bar;->f:I'. One row per write INSTRUCTION, each with the "
             "accessing method and its bytecode offset - a method writing it "
-            "twice yields two rows with DIFFERENT offsets."
+            "twice yields two rows with DIFFERENT offsets. "
+            "Each row carries `shadowed`: true for a site in a copy of a class "
+            "that does not resolve (a class declared in two loaded dexes — see "
+            "find_call_sites_to)."
         ),
         "input_schema": {
             "type": "object",
@@ -1353,7 +1374,9 @@ TOOL_DEFINITIONS: list[dict] = [
             "do'. `dropped_touches` / `dropped_apis` report what that filter "
             "removed, so an all-zero result with a nonzero `dropped_touches` "
             "means only bundled libraries reach these APIs — NOT that the app "
-            "does none of this."
+            "does none of this. `shadowed_touches` counts sites in a copy of a "
+            "class that does not resolve (a class declared in two loaded dexes); "
+            "they are never counted, so a packer session is not reported twice."
         ),
         "input_schema": {
             "type": "object",
@@ -1408,7 +1431,10 @@ TOOL_DEFINITIONS: list[dict] = [
             "framework API calls (not just <uses-permission> claims). Joins AOSP's "
             "@RequiresPermission permission->API map against the APK's referenced "
             "APIs. Returns {permission: [pkg.Class#method, ...]} for the gated APIs "
-            "actually used. Strong behavioural signal for triage."
+            "actually used. Strong behavioural signal for triage. It counts a "
+            "REFERENCE, so in a session declaring a class in two loaded dexes an "
+            "API referenced only by the copy that does not resolve is listed here "
+            "but has no caller in dangerous_permission_api_callers."
         ),
         "input_schema": {"type": "object", "properties": {}},
     },

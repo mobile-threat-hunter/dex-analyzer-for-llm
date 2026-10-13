@@ -293,6 +293,17 @@ class CapabilityReport:
     # `total_field_accesses`, the hazard the comment above records.
     dropped_touches: int = 0
     dropped_apis: int = 0
+    # Touches that sit in a SHADOWED copy of their method (dexllm#107): a class
+    # declared in more than one loaded dex resolves to one of them, and a site in
+    # any other copy never executes under the session's load order, so it is not
+    # counted. Always applied, before
+    # `app_only`, so `dropped_touches` counts only library callers among the
+    # executable sites. Same unit as `dropped_touches`. 0 outside a session that
+    # declares a class twice (an add_dumped_dexes packer session, an overlapping
+    # multi-source load, or one container declaring it in two classesN.dex). An
+    # API whose every touch is shadowed leaves `api_usages`; this count is what
+    # keeps that from reading as "unused".
+    shadowed_touches: int = 0
 
     def top_permissions(self, n: int = 10) -> List[tuple]:
         """Return the n most-touched permissions as (permission, count) pairs.
@@ -394,6 +405,7 @@ def summarize_capabilities(
     total_field_accesses = 0
     dropped_touches = 0
     dropped_apis = 0
+    shadowed_touches = 0
 
     for api_desc, meta in entries.items():
         # dict.fromkeys dedupes while preserving order: a tag repeated inside one
@@ -408,10 +420,19 @@ def summarize_capabilities(
         # `(`, so a field key is unambiguous and needs no schema flag to say so
         # (dexllm#36). A field entry resolves to the METHODS that read it.
         is_field = _is_field_key(api_desc)
+        # A site in a SHADOWED copy of its method never executes under the
+        # session's load order (dexllm#107): the
+        # class resolves to another loaded dex. Without this a packer session —
+        # the dump plus the original, every class declared twice — reports every
+        # count doubled, on the report an LLM reads first.
         if is_field:
-            touches = [s.method_descriptor for s in dk.find_field_read_sites(api_desc)]
+            reads = dk.find_field_read_sites(api_desc)
+            touches = [s.method_descriptor for s in reads if not s.shadowed]
+            shadowed_touches += len(reads) - len(touches)
         else:
-            touches = [s.caller_descriptor for s in dk.find_call_sites_to(api_desc)]
+            calls = dk.find_call_sites_to(api_desc)
+            touches = [s.caller_descriptor for s in calls if not s.shadowed]
+            shadowed_touches += len(calls) - len(touches)
         # Per TOUCH, not per API: a register of callers mixes both kinds (18 of
         # tvleanback's 20 `Class.forName` sites are androidx), so dropping the API
         # only when EVERY caller is a library would still count the 18 — and
@@ -483,4 +504,5 @@ def summarize_capabilities(
         matched_apis=len(api_usages),
         dropped_touches=dropped_touches,
         dropped_apis=dropped_apis,
+        shadowed_touches=shadowed_touches,
     )

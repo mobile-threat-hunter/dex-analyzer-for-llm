@@ -1012,6 +1012,7 @@ def test_tool_catalog_carries_no_aliases(dk):
 class _KeySite:
     def __init__(self, caller):
         self.caller_descriptor = caller
+        self.shadowed = False
         self.callee_descriptor = ""
         self.caller_dex_id = 0
         self.caller_method_idx = 0

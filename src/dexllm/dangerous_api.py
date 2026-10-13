@@ -473,7 +473,14 @@ def dangerous_permission_apis(
     For each dangerous permission whose gated APIs appear among the APK's external
     method refs, return the list of those used APIs as full signatures
     (``pkg.Class#method(params)``). A permission with no referenced API is omitted —
-    this reflects real API usage, not ``<uses-permission>`` declarations.
+    this reflects the API references in the code, not ``<uses-permission>``
+    declarations.
+
+    It is a REFERENCE census: an API counts when some loaded dex references it,
+    whether or not an invoke site reaches it. So it is not filtered for shadowed
+    copies (dexllm#107) the way :func:`dangerous_permission_api_callers` is — in a
+    session declaring a class twice, an API referenced only by the copy that does
+    not resolve is listed here and has no caller there.
 
     Args:
         dk: A loaded ``dexllm.DexKit`` instance.
@@ -560,6 +567,9 @@ def dangerous_permission_api_callers(
                 desc = f"{ref.class_descriptor}->{ref.name}{ref.proto}"
                 descriptors.append(desc)
                 for site in dk.find_call_sites_to(desc):
+                    # dexllm#107: that copy never runs under the session's load order
+                    if site.shadowed:
+                        continue
                     caller = site.caller_descriptor
                     if app_only and _is_framework_caller(caller):
                         continue
@@ -609,6 +619,12 @@ def _rows_for_perm(
             desc = f"{ref.class_descriptor}->{ref.name}{ref.proto}"
             descriptors.append(desc)
             for site in dk.find_call_sites_to(desc):
+                # A site in a SHADOWED copy of its method never executes under
+                # the session's load order (dexllm#107). With identical copies the live copy's own site
+                # supplies the same caller; what this drops is a call present ONLY
+                # in a copy that does not resolve.
+                if site.shadowed:
+                    continue
                 caller = site.caller_descriptor
                 if app_only and _is_framework_caller(caller):
                     continue

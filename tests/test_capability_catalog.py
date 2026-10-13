@@ -292,6 +292,7 @@ class _Site:
 
     def __init__(self, caller):
         self.caller_descriptor = caller
+        self.shadowed = False
 
 
 class _FieldSite:
@@ -304,6 +305,7 @@ class _FieldSite:
 
     def __init__(self, method):
         self.method_descriptor = method
+        self.shadowed = False
 
 
 class _StubDk:

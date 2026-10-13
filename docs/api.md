@@ -766,7 +766,9 @@ not first *declaring*: when the copies differ, the row can carry `dex_id` 1 whil
 descriptor-keyed call (`decompile_class`, `render_class_smali`) resolves the class to
 the first dex that DECLARES it — use the row's `dex_id` to tell which copy matched.
 The per-instruction APIs (`find_call_sites_to`, `find_field_read_sites`,
-`resolve_call_args`, …) still report a site in each dex's copy of a class.
+`resolve_call_args`, …) still report a site in each dex's copy of a class, and mark
+every copy but the one that resolves `shadowed` (dexllm#107 — see
+[Shadowed copies](#shadowed-copies-in-a-multi-source-session)).
 
 ### Call sites → `list[CallSite]`
 Every invoke of a specific API descriptor (internal or external) — the target's
@@ -1455,11 +1457,52 @@ Field: class/name/type descriptors + `descriptor`. Type: `descriptor` +
 | `caller_method_idx` | `int` | **dex-local** `method_ids` index — only meaningful paired with `caller_dex_id`, not a stable global id |
 | `bytecode_offset` | `int` | byte offset of the invoke, always **inside the caller** |
 | `invoke_opcode` | `int` | Dalvik opcode — one of `0x6E`–`0x72` (invoke-kind), `0x74`–`0x78` (…/range), or `0xFA`/`0xFB` (`invoke-polymorphic`, i.e. a `MethodHandle`/`VarHandle` call — reported since dexllm#61). `invoke-custom` is NOT among them: its operand is a `call_site` index, not a method reference |
+| `shadowed` | `bool` | the caller's class is declared in more than one loaded dex and resolves to ANOTHER one, so this copy never executes under the session's resolution order — see [Shadowed copies](#shadowed-copies-in-a-multi-source-session) (dexllm#107). Always `False` from `find_call_sites_from` and outside such a session |
 
 **Which half is fixed depends on the producing direction** — `find_call_sites_to(X)`
 fixes `callee_descriptor` and varies `caller_*` ("who calls X");
 `find_call_sites_from(M)` fixes `caller_*` and varies `callee_descriptor`
 ("what M calls"), so the repeated caller on every element is the queried method.
+
+### Shadowed copies in a multi-source session
+
+An `add_dumped_dexes` packer session — or any multi-source load whose sources
+overlap, or a single container whose `classes.dex` and `classes2.dex` both declare a
+class — declares one class in more than one dex. The class resolves to ONE of
+them: the first-wins declaring dex, i.e. what `locate_class_dex` and `decompile_*`
+answer for (earlier sources win, which is how `add_dumped_dexes(prefer=True)` makes
+the dump win). A method body in any OTHER copy never executes under that order, so
+an invoke or field access inside it is **shadowed**.
+
+The per-instruction APIs — `find_call_sites_to`, `resolve_call_args`,
+`find_field_read_sites`, `find_field_write_sites` — still REPORT such a site,
+because the copies can differ (a partial dump, an undecrypted original) and a site
+present only in the shadowed copy is real evidence about the app. They mark it
+`shadowed=True`. Every consumer that answers what the app DOES leaves it out:
+`summarize_capabilities` (and reports how many it left out as `shadowed_touches`),
+`permission_callers`, `dangerous_permission_api_callers`, `permission_api_callers`,
+and the `constructed_in` of `detect_permissive_tls` / `find_component_subclasses`.
+So those agree with the body `decompile_method` renders. `dangerous_permission_apis`
+is NOT filtered: it is a reference census (an API counts when any loaded dex
+references it, invoke site or not), so an API referenced only by the copy that does
+not resolve is listed there and has no caller in the joins. Before dexllm#107 a
+session loading one APK twice reported every `summarize_capabilities` count doubled;
+the five joins already collapsed identical copies by caller descriptor, so for them
+the change shows only when the copies DIFFER — they could name a caller whose
+resolving body makes no such call.
+
+"Never executes" is relative to the session's ORDER, which is the model dexllm
+has: a runtime that orders the dexes differently (a packer that does not put its
+dump first) resolves differently, and so would the right answer. The SEARCH APIs
+(`find_methods_using_strings` and the batch forms, and so `extract_iocs`' `methods`)
+are not affected — they answer "which methods", one row per descriptor taken from
+the first MATCHING copy (dexllm#106).
+
+```python
+dk = dexllm.DexKit([apk, apk])          # every class declared twice
+sites = dk.find_call_sites_to(target)
+live = [s for s in sites if not s.shadowed]   # == DexKit(apk).find_call_sites_to(target)
+```
 
 ### `ResolvedCallSite`
 All `CallSite` fields plus `args: list[ResolvedArg]`. Only `resolve_call_args` produces
@@ -1528,7 +1571,9 @@ descriptor → the catalog API descriptors it invokes — dexllm#35; it was
 (invoke instructions), `catalog_version: str`, `catalog_size: int`,
 `matched_apis: int`, `dropped_touches: int` / `dropped_apis: int` (what
 `app_only=True` filtered out — 0 under `app_only=False`; see above),
-`total_field_accesses: int` (READ INSTRUCTIONS against a
+`shadowed_touches: int` (sites in a SHADOWED copy of their method, never
+counted — see [Shadowed copies](#shadowed-copies-in-a-multi-source-session);
+dexllm#107), `total_field_accesses: int` (READ INSTRUCTIONS against a
 field-descriptor entry — dexllm#36; `find_field_read_sites` is not
 deduplicated, so this is the same unit as the line above and summing them is
 meaningful. The two are kept apart only so `total_call_sites`' released meaning

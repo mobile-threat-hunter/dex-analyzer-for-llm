@@ -1365,6 +1365,7 @@ def _descriptor_valued_attrs(source):
 class _CapSite:
     def __init__(self, caller):
         self.caller_descriptor = caller
+        self.shadowed = False
 
 
 class _CapStubDk:

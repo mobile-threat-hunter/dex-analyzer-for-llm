@@ -384,6 +384,10 @@ def _constructed_in(dk: DexKit, hdr: dict[str, Any], desc: str) -> list[str]:
         if "-><init>(" not in m:
             continue
         for site in dk.find_call_sites_to(m):
+            # A construction only in a SHADOWED copy never runs under the session's load order
+            # (dexllm#107).
+            if site.shadowed:
+                continue
             caller = site.caller_descriptor
             caller_cls, _, member = caller.partition("->")
             if member.startswith("<init>("):

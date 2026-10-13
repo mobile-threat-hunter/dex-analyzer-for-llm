@@ -973,6 +973,7 @@ PYBIND11_MODULE(_dexkit_core, m) {
         .def_readonly("bytecode_offset",   &dexkit::ext::ResolvedCallSite::bytecode_offset)
         .def_readonly("invoke_opcode",     &dexkit::ext::ResolvedCallSite::invoke_opcode)
         .def_readonly("args",              &dexkit::ext::ResolvedCallSite::args)
+        .def_readonly("shadowed",          &dexkit::ext::ResolvedCallSite::shadowed)
         .def("__repr__", [](const dexkit::ext::ResolvedCallSite& c) {
             return "ResolvedCallSite(" + DecodeMutf8ForPy(c.caller_descriptor) +
                    " -> " + DecodeMutf8ForPy(c.callee_descriptor) + ", args=" +
@@ -992,6 +993,7 @@ PYBIND11_MODULE(_dexkit_core, m) {
             })
         .def_readonly("bytecode_offset", &dexkit::ext::CallSite::bytecode_offset)
         .def_readonly("invoke_opcode", &dexkit::ext::CallSite::invoke_opcode)
+        .def_readonly("shadowed", &dexkit::ext::CallSite::shadowed)
         .def("__repr__", [](const dexkit::ext::CallSite& c) {
             return "CallSite(" + DecodeMutf8ForPy(c.caller_descriptor) + " -> " +
                    DecodeMutf8ForPy(c.callee_descriptor) + ")";
@@ -1014,6 +1016,7 @@ PYBIND11_MODULE(_dexkit_core, m) {
             })
         .def_readonly("bytecode_offset", &dexkit::ext::FieldAccessSite::bytecode_offset)
         .def_readonly("opcode", &dexkit::ext::FieldAccessSite::opcode)
+        .def_readonly("shadowed", &dexkit::ext::FieldAccessSite::shadowed)
         .def("__repr__", [](const dexkit::ext::FieldAccessSite& f) {
             return "FieldAccessSite(" + DecodeMutf8ForPy(f.method_descriptor) +
                    " @" + std::to_string(f.bytecode_offset) + " -> " +

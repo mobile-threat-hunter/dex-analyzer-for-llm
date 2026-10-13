@@ -174,17 +174,22 @@ other spelling, and the reason `MethodInfo` exposes the bits instead.
   catch handler, which is entered empty at every depth (see docs/api.md §"Intra-method
   arg resolution").
 - **`CallSite`** `(caller_descriptor, caller_dex_id, caller_method_idx,
-  callee_descriptor, bytecode_offset, invoke_opcode)` — one invoke edge. Returned by
+  callee_descriptor, bytecode_offset, invoke_opcode, shadowed)` — one invoke edge. Returned by
   both `find_call_sites_to` (a target's CALLERS — callee fixed, `caller_*` vary) and
   `find_call_sites_from` (a method's CALLEES — `caller_*` fixed, callee varies); the two are
   the reverse and forward of the same edge, so **which half is constant depends on
   which method produced the list**. `bytecode_offset` is always an offset inside the
   CALLER; `caller_method_idx` is a **dex-local** `method_ids` index, meaningful only
-  paired with `caller_dex_id` (not a stable global id).
-- **`ResolvedCallSite`** — a `CallSite` plus `args: tuple[ResolvedArg, ...]`. Only the
+  paired with `caller_dex_id` (not a stable global id). `shadowed` is True when the
+  caller's class is declared in more than one loaded dex and resolves to another one,
+  so under the session's load order this copy never executes (dexllm#107; see docs/api.md §"Shadowed copies in a
+  multi-source session"). Such a site is still returned; the capability and
+  permission joins leave it out.
+- **`ResolvedCallSite`** — a `CallSite` plus `args: tuple[ResolvedArg, ...]` (and
+  `shadowed`, which follows `args`). Only the
   reverse direction produces it (`resolve_call_args`), so callee is the fixed half.
 - **`FieldAccessSite`** `(method_descriptor, dex_id, method_idx, field_descriptor,
-  bytecode_offset, opcode)` — one `iget*`/`iput*`/`sget*`/`sput*` INSTRUCTION.
+  bytecode_offset, opcode, shadowed)` — one `iget*`/`iput*`/`sget*`/`sput*` INSTRUCTION.
   `find_field_read_sites` / `find_field_write_sites` return
   `tuple[FieldAccessSite, ...]` for a `Lcls;->name:Type` field, from dexkit's L2.5
   reverse index. **One row per access INSTRUCTION, not per method** (like
@@ -233,7 +238,7 @@ other spelling, and the reason `MethodInfo` exposes the bits instead.
   is untouched.
 - **`CapabilityReport`** `(catalog_version, catalog_size, matched_apis,
   total_call_sites, permissions, categories, flags, api_usages, by_caller,
-  total_field_accesses, dropped_touches, dropped_apis)` — the
+  total_field_accesses, dropped_touches, dropped_apis, shadowed_touches)` — the
   app's capability profile (holds `Mapping`s → immutable, **not hashable**).
   `categories` is one axis (domain / behaviour), so one call site is never counted
   twice under two names for the same concern — an API that genuinely spans two

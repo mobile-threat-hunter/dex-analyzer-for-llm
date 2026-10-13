@@ -83,6 +83,7 @@ def _to_field_access_site(s: object) -> FieldAccessSite:
         field_descriptor=s.field_descriptor,  # type: ignore[attr-defined]
         bytecode_offset=s.bytecode_offset,  # type: ignore[attr-defined]
         opcode=s.opcode,  # type: ignore[attr-defined]
+        shadowed=s.shadowed,  # type: ignore[attr-defined]
     )
 
 
@@ -447,6 +448,7 @@ class DexKitAdapter:
                 callee_descriptor=s.callee_descriptor,
                 bytecode_offset=s.bytecode_offset,
                 invoke_opcode=s.invoke_opcode,
+                shadowed=s.shadowed,
             )
             for s in self._dk.find_call_sites_to(method_descriptor)
         )
@@ -465,6 +467,7 @@ class DexKitAdapter:
                 callee_descriptor=s.callee_descriptor,
                 bytecode_offset=s.bytecode_offset,
                 invoke_opcode=s.invoke_opcode,
+                shadowed=s.shadowed,
             )
             for s in self._dk.find_call_sites_from(method_descriptor)
         )
@@ -487,6 +490,7 @@ class DexKitAdapter:
                 bytecode_offset=s.bytecode_offset,
                 invoke_opcode=s.invoke_opcode,
                 args=tuple(_to_arg(a) for a in s.args),
+                shadowed=s.shadowed,
             )
             for s in self._dk.resolve_call_args(method_descriptor, depth)
         )
@@ -826,6 +830,7 @@ class DexKitAdapter:
             total_field_accesses=c.total_field_accesses,
             dropped_touches=c.dropped_touches,
             dropped_apis=c.dropped_apis,
+            shadowed_touches=c.shadowed_touches,
         )
 
     # -- ContentProviderPort --

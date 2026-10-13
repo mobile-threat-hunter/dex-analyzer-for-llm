@@ -375,6 +375,16 @@ class CallSite:
     def bytecode_offset(self) -> int: ...
     @property
     def invoke_opcode(self) -> int: ...
+    @property
+    def shadowed(self) -> bool:
+        """The method's class resolves to ANOTHER loaded dex, so this copy is dead.
+
+        "Dead" under the session's resolution order (earlier sources win, as
+        ``locate_class_dex`` and ``decompile_*`` answer); a runtime that orders the
+        dexes differently would resolve differently. Only a session declaring one
+        class in two dexes (a packer dump plus the original) has any; the site is
+        still reported, since the copies can differ.
+        """
 
 class FieldAccessSite:
     """One field-access INSTRUCTION — an ``iget*``/``iput*``/``sget*``/``sput*``.
@@ -412,6 +422,17 @@ class FieldAccessSite:
     def opcode(self) -> int:
         """0x52..0x6D. Says the direction AND whether the access is static."""
 
+    @property
+    def shadowed(self) -> bool:
+        """The method's class resolves to ANOTHER loaded dex, so this copy is dead.
+
+        "Dead" under the session's resolution order (earlier sources win, as
+        ``locate_class_dex`` and ``decompile_*`` answer); a runtime that orders the
+        dexes differently would resolve differently. Only a session declaring one
+        class in two dexes (a packer dump plus the original) has any; the site is
+        still reported, since the copies can differ.
+        """
+
 class ResolvedCallSite:
     """A CallSite plus a resolved origin per argument.
 
@@ -435,6 +456,16 @@ class ResolvedCallSite:
     def invoke_opcode(self) -> int: ...
     @property
     def args(self) -> list[ResolvedArg]: ...
+    @property
+    def shadowed(self) -> bool:
+        """The method's class resolves to ANOTHER loaded dex, so this copy is dead.
+
+        "Dead" under the session's resolution order (earlier sources win, as
+        ``locate_class_dex`` and ``decompile_*`` answer); a runtime that orders the
+        dexes differently would resolve differently. Only a session declaring one
+        class in two dexes (a packer dump plus the original) has any; the site is
+        still reported, since the copies can differ.
+        """
 
 class TypeReferences:
     @property

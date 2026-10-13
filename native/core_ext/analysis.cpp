@@ -164,6 +164,12 @@ std::vector<PermCallerGroup> PermissionCallers(DexKitExt& ext, bool app_only) {
                 ref.class_descriptor + "->" + ref.name + ref.proto;
             descriptors.insert(desc);
             for (const auto& site : ext.FindCallSitesToApi(desc)) {
+                // A site in a SHADOWED copy of its method never executes under
+                // the session's load order (dexllm#107). With identical copies the live copy's own site
+                // supplies the same caller; what this drops is a call present ONLY
+                // in a copy that does not resolve, which the descriptor would
+                // otherwise attribute to a body that does not make it.
+                if (site.shadowed) continue;
                 if (app_only && IsFrameworkCaller(site.caller_descriptor))
                     continue;
                 callers.insert(site.caller_descriptor);

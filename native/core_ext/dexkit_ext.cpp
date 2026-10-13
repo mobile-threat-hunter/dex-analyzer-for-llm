@@ -1082,6 +1082,33 @@ std::string BuildMethodDescriptor(const dexkit::DexItem& item, uint32_t method_i
     return out;
 }
 
+// dexllm#107 — is the method at (item, method_idx) a SHADOWED copy? When a class is
+// declared in more than one loaded dex (an add_dumped_dexes packer session, or any
+// multi-source load whose sources overlap), it resolves to ONE of them: the
+// first-wins declaring dex, i.e. what LocateClassDex / decompile_* answer. A
+// method body in any other dex's copy never executes under that order, so a site
+// inside it is shadowed. "Under that order" is the bound: dexllm models runtime
+// resolution as load order (add_dumped_dexes(prefer=True) puts the dump first);
+// a runtime whose class loader orders the dexes differently resolves differently.
+// It is still REPORTED — the copies can differ (a partial dump, an undecrypted
+// original), so a site present only in the shadowed copy is real evidence about
+// the app — and marked, so a consumer that counts executable sites
+// (summarize_capabilities) can leave it out.
+//
+// The caller has a body in `item`, so its class is declared there; a dex with no
+// declaring entry at all (nullptr) cannot shadow it, so that answers false.
+bool IsShadowedMethod(dexkit::DexKit& core, const dexkit::DexItem& item,
+                      uint32_t method_idx) {
+    const auto& ids = item.GetReader().MethodIds();
+    if (method_idx >= ids.size()) return false;
+    const auto& type_names = item.GetTypeNames();
+    const uint32_t cls = ids[method_idx].class_idx;
+    if (cls >= type_names.size()) return false;
+    auto [owner, type_idx] = core.GetClassDeclaredPair(type_names[cls]);
+    (void)type_idx;
+    return owner != nullptr && owner->GetDexId() != item.GetDexId();
+}
+
 }  // namespace
 
 namespace {
@@ -2145,6 +2172,7 @@ DexKitExt::ResolveCallArgs(std::string_view api_descriptor, uint32_t depth) {
         const auto& item = *cr.item;
         auto sites = AnalyzeInvokesOf(item, cr.caller_idx, depth);
         std::string caller_desc = BuildMethodDescriptor(item, cr.caller_idx);
+        const bool shadowed = IsShadowedMethod(*core_, item, cr.caller_idx);
         for (const auto& s : sites) {
             if (s.method_idx != cr.local_target) continue;
             ResolvedCallSite cs;
@@ -2154,6 +2182,7 @@ DexKitExt::ResolveCallArgs(std::string_view api_descriptor, uint32_t depth) {
             cs.callee_descriptor = std::string(api_descriptor);
             cs.bytecode_offset = static_cast<int32_t>(s.bytecode_offset);
             cs.invoke_opcode = s.opcode;
+            cs.shadowed = shadowed;
             cs.args.reserve(s.args.size());
             for (const auto& a : s.args) {
                 cs.args.push_back(ConvertArg(item, a));
@@ -2186,6 +2215,7 @@ DexKitExt::FindCallSitesToApi(std::string_view api_descriptor) {
         const auto& item = *cr.item;
         auto sites = ext::EnumerateInvokeSites(item.GetMethodCode(cr.caller_idx));
         std::string caller_desc = BuildMethodDescriptor(item, cr.caller_idx);
+        const bool shadowed = IsShadowedMethod(*core_, item, cr.caller_idx);
         for (const auto& s : sites) {
             if (s.method_idx != cr.local_target) continue;
             CallSite cs;
@@ -2195,6 +2225,7 @@ DexKitExt::FindCallSitesToApi(std::string_view api_descriptor) {
             cs.callee_descriptor = std::string(api_descriptor);
             cs.bytecode_offset = static_cast<int32_t>(s.bytecode_offset);
             cs.invoke_opcode = s.opcode;
+            cs.shadowed = shadowed;
             out.push_back(std::move(cs));
         }
     }
@@ -2483,6 +2514,7 @@ std::vector<FieldAccessSite> FieldAccessSites(DexKitExt& ext, std::string_view f
             const auto local = local_field.find(origin_dex);
             if (local == local_field.end()) continue;  // no field_id there to match
             std::string method_desc = BuildMethodDescriptor(*owner, m_idx);
+            const bool shadowed = IsShadowedMethod(ext.core(), *owner, m_idx);
             for (const auto& s : EnumerateFieldAccessSites(*owner, m_idx)) {
                 if (s.field_idx != local->second) continue;
                 // The index only says the method reads (or writes) the field; the
@@ -2495,6 +2527,7 @@ std::vector<FieldAccessSite> FieldAccessSites(DexKitExt& ext, std::string_view f
                 fs.field_descriptor = std::string(fd);
                 fs.bytecode_offset = static_cast<int32_t>(s.bytecode_offset);
                 fs.opcode = s.opcode;
+                fs.shadowed = shadowed;
                 out.push_back(std::move(fs));
             }
         }

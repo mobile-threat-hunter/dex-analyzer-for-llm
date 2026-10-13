@@ -38,6 +38,12 @@ struct CallSite {
     std::string callee_descriptor;         // resolved full API signature
     int32_t bytecode_offset = -1;          // L2.5
     uint8_t invoke_opcode = 0;             // L2.5: 0x6E~0x72, 0x74~0x78, 0xFA/0xFB
+    // dexllm#107: the caller's class resolves to ANOTHER loaded dex (first-wins),
+    // so under the session's resolution order (earlier sources win) this copy of
+    // the method never executes. Still reported — the copies
+    // may differ — but summarize_capabilities does not count it. Always false
+    // outside a session that declares one class in two dexes.
+    bool shadowed = false;
 };
 
 // dexllm#84 — a single FIELD ACCESS site: one `iget*`/`iput*`/`sget*`/`sput*`
@@ -78,6 +84,12 @@ struct FieldAccessSite {
     // (iget*/sget* read, iput*/sput* write) and whether the access is static,
     // without resolving the field.
     uint8_t opcode = 0;
+    // dexllm#107: the accessing method's class resolves to ANOTHER loaded dex (first-wins),
+    // so under the session's resolution order (earlier sources win) this copy of
+    // the method never executes. Still reported — the copies
+    // may differ — but summarize_capabilities does not count it. Always false
+    // outside a session that declares one class in two dexes.
+    bool shadowed = false;
 };
 
 // L1.5 — convenience summary of a single class, suitable for source-style
@@ -211,6 +223,12 @@ struct ResolvedCallSite {
     int32_t bytecode_offset = -1;
     uint8_t invoke_opcode = 0;
     std::vector<ResolvedArg> args;
+    // dexllm#107: the caller's class resolves to ANOTHER loaded dex (first-wins),
+    // so under the session's resolution order (earlier sources win) this copy of
+    // the method never executes. Still reported — the copies
+    // may differ — but summarize_capabilities does not count it. Always false
+    // outside a session that declares one class in two dexes.
+    bool shadowed = false;
 };
 
 }  // namespace dexkit::ext

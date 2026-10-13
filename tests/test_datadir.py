@@ -50,6 +50,7 @@ class _Site:
 
     def __init__(self, caller):
         self.caller_descriptor = caller
+        self.shadowed = False
 
 
 class _StubDk:
