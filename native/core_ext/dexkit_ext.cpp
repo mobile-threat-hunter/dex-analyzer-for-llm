@@ -52,7 +52,35 @@ dexkit::schema::StringMatchType ParseStringMatchType(std::string_view s) {
     return dexkit::schema::StringMatchType::Contains;  // default
 }
 
+// One entry per DESCRIPTOR, the first one wins (dexllm#106). A class declared in
+// more than one loaded dex — an `add_dumped_dexes` packer session, an overlapping
+// multi-source load — is one class to the analyst, and every descriptor-keyed API
+// resolves it first-wins in dex_id order (DexKit::PutDeclaredClass). The core
+// agrees for two of its five searches: DexKit::FindMethod and DexKit::FindField
+// drop a descriptor they have already seen (`declared_set`), while
+// DexKit::FindClass and both BatchFind*UsingStrings concatenate every dex's hits,
+// so they listed such a class (or its methods) once per declaring dex. Applied to
+// MATCHED results in result order, which is dex_id order, exactly as FindMethod's
+// declared_set is — a dex whose copy of the class does not match contributes
+// nothing, so the winner is the first dex whose copy DOES. An empty descriptor
+// (never produced for a resolvable id) is kept rather than collapsed.
+template <class Ref>
+void KeepFirstPerDescriptor(std::vector<Ref>& refs) {
+    std::unordered_set<std::string> seen;
+    size_t w = 0;
+    for (size_t r = 0; r < refs.size(); ++r) {
+        if (!refs[r].descriptor.empty() && !seen.insert(refs[r].descriptor).second)
+            continue;
+        if (w != r) refs[w] = std::move(refs[r]);
+        ++w;
+    }
+    refs.resize(w);
+}
+
 // Parse a flatbuffer ClassMetaArrayHolder result into POD ClassRef vector.
+// Every FindClass-backed search goes through here, so the dexllm#106 dedupe is
+// applied once for all of them (by name / super / interface / annotation /
+// using strings).
 std::vector<ClassRef> ParseClassMetaArray(
     const dexkit::schema::ClassMetaArrayHolder* holder) {
     std::vector<ClassRef> out;
@@ -64,6 +92,7 @@ std::vector<ClassRef> ParseClassMetaArray(
         if (cls->dex_descriptor()) m.descriptor = cls->dex_descriptor()->str();
         out.push_back(std::move(m));
     }
+    KeepFirstPerDescriptor(out);
     return out;
 }
 
@@ -1383,6 +1412,7 @@ DexKitExt::FindClassesDeclaringStrings(const std::vector<std::string>& strings,
             for (const auto& entry : declared_string_index_[d])
                 consider(*item, entry.type_idx, entry.string_ids);
         }
+        KeepFirstPerDescriptor(out);  // dexllm#106 — one row per declared class
         return out;
     }
     // Index refused (crafted amplification) — scan per query instead, discarding each
@@ -1399,6 +1429,7 @@ DexKitExt::FindClassesDeclaringStrings(const std::vector<std::string>& strings,
             consider(*item, class_defs[ci].class_idx, ids);
         }
     }
+    KeepFirstPerDescriptor(out);
     return out;
 }
 
@@ -1474,6 +1505,35 @@ DexKitExt::BatchFindClassesUsingStrings(
         }
         out.emplace(std::move(key), std::move(ms));
     }
+    // Same ORDER as find_classes_using_strings (dexllm#106). DexKit::FindClass walks
+    // each dex's class_defs in index order; DexItem::BatchFindClassUsingStrings walks
+    // type_idx order instead, and the two differ wherever a class_def precedes a
+    // lower type_idx (a superclass must be defined before its subclasses, so
+    // class_defs are not sorted by type). Re-key each hit by (dex_id, class_def
+    // position) — a stable sort, so equal keys keep their order — then apply the
+    // same first-wins dedupe as the single path.
+    std::map<uint32_t, std::vector<uint32_t>> class_def_pos;  // dex_id -> by type_idx
+    auto pos_of = [&](const ClassRef& c) -> uint32_t {
+        auto it = class_def_pos.find(c.dex_id);
+        if (it == class_def_pos.end()) {
+            std::vector<uint32_t> pos;
+            if (auto* item = core_->GetDexItem(static_cast<uint16_t>(c.dex_id))) {
+                pos.assign(item->GetTypeNames().size(), UINT32_MAX);
+                const auto defs = item->GetReader().ClassDefs();
+                for (uint32_t i = 0; i < defs.size(); ++i)
+                    if (defs[i].class_idx < pos.size()) pos[defs[i].class_idx] = i;
+            }
+            it = class_def_pos.emplace(c.dex_id, std::move(pos)).first;
+        }
+        return c.class_idx < it->second.size() ? it->second[c.class_idx] : UINT32_MAX;
+    };
+    for (auto& [key, ms] : out) {
+        std::stable_sort(ms.begin(), ms.end(), [&](const ClassRef& a, const ClassRef& b) {
+            if (a.dex_id != b.dex_id) return a.dex_id < b.dex_id;
+            return pos_of(a) < pos_of(b);
+        });
+        KeepFirstPerDescriptor(ms);
+    }
     return out;
 }
 
@@ -1519,6 +1579,10 @@ DexKitExt::BatchFindMethodsUsingStrings(
                 ms.push_back(std::move(mm));
             }
         }
+        // dexllm#106: FindMethod drops an already-seen descriptor, the batch does
+        // not. Its ORDER already matches (method_ids are sorted by class, which is
+        // the order class_method_ids walks), so only the dedupe is needed.
+        KeepFirstPerDescriptor(ms);
         out.emplace(std::move(key), std::move(ms));
     }
     return out;

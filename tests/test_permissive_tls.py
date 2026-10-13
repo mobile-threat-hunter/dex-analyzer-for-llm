@@ -166,17 +166,18 @@ def test_rows_are_sorted_by_class_then_method(fdk):
 def test_a_class_declared_in_two_dexes_is_reported_once(fdk):
     """A descriptor can be DECLARED more than once, and the report is per class.
 
-    `find_classes_implementing` answers per DECLARATION, so a multidex app — or
-    any packer session, where the dump and the original both carry the class —
-    would otherwise report N identical rows for one component and the MCP `count`
-    would say N.
+    `find_classes_implementing` answered per DECLARATION until dexllm#106, so a
+    multidex app — or any packer session, where the dump and the original both
+    carry the class — reported N identical rows for one component and the MCP
+    `count` said N. The search is first-wins per descriptor now; the report keeps
+    its own dedupe as defence in depth, and this pins the end-to-end property.
     """
     twice = dexllm.DexKit([str(FIXTURE), str(FIXTURE)])
     assert twice.dex_count() == 2
-    # the premise: the raw search answers per DECLARATION — 3 implementors x 2 dexes
-    assert (
-        len(twice.find_classes_implementing("Ljavax/net/ssl/X509TrustManager;")) == 14
-    )
+    # The raw search answered per DECLARATION (7 implementors x 2 dexes = 14) until
+    # dexllm#106 made every FindClass-backed search first-wins per descriptor; it
+    # is pinned at 7 so the row dedupe below is known to be defence in depth now.
+    assert len(twice.find_classes_implementing("Ljavax/net/ssl/X509TrustManager;")) == 7
     assert [
         r["class_descriptor"] for r in detect_permissive_tls(twice, with_xref=False)
     ] == [r["class_descriptor"] for r in detect_permissive_tls(fdk, with_xref=False)]

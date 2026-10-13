@@ -9,16 +9,14 @@ prefilter plan is gated on a composite matcher, which a plain ``using_strings``
 list never is). ``batch_find_methods_using_strings`` builds ONE trie for every
 value and walks the methods once (dexllm#98).
 
-The two shapes return the same methods in the same order, given one step the
-batch path lacks: ``DexKit::FindMethod`` drops a descriptor it has already seen
-(first wins, in dex_id order), while ``BatchFindMethodUsingStrings`` concatenates
-every dex's hits — so when a class is declared in more than one loaded dex (a
-packer session built by ``add_dumped_dexes``, an overlapping multi-source load)
-the raw batch lists each method once per declaring dex. ``methods_loading_each``
-applies the same first-wins dedupe. With it, measured over 39 single-source
-sessions / 7,419 values / 58,889 hits (six multidex) and over duplicate-declaration
-sessions, 0 values differ in their set and 0 in their order. The orders coincide
-because the single path walks ``method_ids`` in index order — sorted by class, a
+The two shapes return the same methods in the same order. The batch used to
+lack one step — ``DexKit::FindMethod`` drops a descriptor it has already seen,
+while ``BatchFindMethodUsingStrings`` concatenated every dex's hits, so a class
+declared in several loaded dexes (an ``add_dumped_dexes`` packer session) had
+its methods listed once per dex. That first-wins dedupe lived here until
+dexllm#106 moved it into ``DexKitExt``, so every batch caller (raw, SDK, MCP)
+gets it; this helper no longer repeats it. The orders coincide because the
+single path walks ``method_ids`` in index order — sorted by class, a
 verifier-enforced ordering — while the batch walks classes by type_idx and each
 class's sorted ``class_method_ids``, both merging dexes in dex_id order.
 """
@@ -56,9 +54,7 @@ def methods_loading_each(dk: Any, values: list[str]) -> list[list[str]]:
     One batch call does the work. The batch is keyed by POSITION, not by value:
     a batch key is a caller label that is not MUTF-8-encoded (dexllm#29), so a
     value carrying a lone surrogate would make a value-keyed call raise, and a
-    value repeated in ``values`` gets an answer per occurrence either way. Each
-    answer keeps a descriptor's FIRST occurrence only, as ``find_methods`` does —
-    the raw batch repeats a method once per dex that declares its class.
+    value repeated in ``values`` gets an answer per occurrence either way.
 
     If the batch call raises, the per-value loop runs instead. That keeps the
     containment the loop always had — one bad query must not abort a report —
@@ -80,10 +76,7 @@ def methods_loading_each(dk: Any, values: list[str]) -> list[list[str]]:
             match_type="contains",
             ignore_case=False,
         )
-        return [
-            list(dict.fromkeys(_descriptor(m) for m in found[str(i)]))
-            for i in range(len(values))
-        ]
+        return [[_descriptor(m) for m in found[str(i)]] for i in range(len(values))]
     except Exception:  # noqa: BLE001 — fall back to the per-value loop below
         return _one_by_one(dk, values)
 

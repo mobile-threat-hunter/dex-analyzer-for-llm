@@ -662,7 +662,8 @@ dk.find_methods_using_strings(["AES/CBC/PKCS5Padding"])
 dk.list_method_strings("Lcom/x/Net;->beacon()V")   # its const-string operands
 dk.list_class_strings("Lcom/x/Net;")               # declared methods ∪ static init
 
-# Batch (Aho-Corasick) — multiple keys at once, much faster than N separate scans
+# Batch (Aho-Corasick) — multiple keys at once, much faster than N separate scans;
+# a group of non-empty strings gets exactly the single-query call's list (dexllm#106)
 dk.batch_find_classes_using_strings({
     "ROOT_CHECK": ["/system/bin/su", "/system/xbin/su"],
     "REFLECTION": ["java.lang.reflect.Method"],

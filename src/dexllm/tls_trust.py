@@ -251,10 +251,11 @@ def detect_permissive_tls(
     for kind, (interface, member, proto) in _COMPONENTS.items():
         # A descriptor can be DECLARED in more than one loaded dex — an ordinary
         # multidex app, and the norm for a packer session, where the dump and the
-        # original both carry it. `find_classes_implementing` reports one hit per
-        # DECLARATION, while everything downstream is descriptor-keyed and
-        # resolves first-wins, so without this the report would carry N identical
-        # rows for one component and the MCP `count` would say N.
+        # original both carry it. `find_classes_implementing` reported one hit
+        # per DECLARATION until dexllm#106 made it first-wins per descriptor;
+        # everything downstream is descriptor-keyed, so a repeat would be N
+        # identical rows for one component. Kept as defence in depth — the search
+        # now guarantees it, and this costs one set lookup per row.
         seen: set[str] = set()
         for cls in dk.find_classes_implementing(interface):
             cd = cls.descriptor

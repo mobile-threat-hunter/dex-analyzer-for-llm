@@ -235,7 +235,9 @@ def test_a_class_declared_twice_is_reported_once_like_the_loop(dk_twice, values)
     raw = dk_twice.batch_find_methods_using_strings(
         {"k": [values[0]]}, match_type="contains", ignore_case=False
     )["k"]
-    assert len({m.dex_id for m in raw}) == 2, "premise: the raw batch repeats per dex"
+    # dexllm#106: the raw batch itself is one-per-descriptor now (it repeated a
+    # method once per declaring dex until then), and the first dex wins.
+    assert [m.dex_id for m in raw] == [0] * len(raw) and raw, raw
     got = methods_loading_each(dk_twice, values)
     assert got == _one_by_one(dk_twice, values)
     assert all(len(ms) == len(set(ms)) for ms in got)

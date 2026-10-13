@@ -747,6 +747,26 @@ dk.batch_find_methods_using_strings({'grpA': ['entry'], 'grpB': ['density']},
 # {'grpA': [<14 MethodRef>], 'grpB': [<3 MethodRef>]}
 dk.batch_find_classes_using_strings({...})   # dict[str, list[ClassRef]]
 ```
+For a group of non-empty strings, its list is **the same list, in the same order**,
+that the single-query `find_methods_using_strings` / `find_classes_using_strings`
+returns — so batching is a performance choice (dexllm#106). Two group shapes are the
+exception, and predate it: an EMPTY group (`[]`) and a group holding the empty string
+(`[""]`) go through the batch's keyword path, where an empty group matches only
+classes that hit some OTHER group's keyword, so their answer depends on what else is
+in the batch. Query them with the single-query call.
+
+**One result per descriptor across loaded dexes.** In a session where a class is
+declared in more than one dex — an `add_dumped_dexes` packer session, or any
+multi-source load whose sources overlap — every class search, both batch searches
+and the method/field searches return that class (or each of its methods) **once**:
+the row from the FIRST dex, in dex_id order, whose copy MATCHES. That is the rule the
+method and field searches always applied; until dexllm#106 the class searches and
+both batch searches listed it once per declaring dex. Note it is first *matching*,
+not first *declaring*: when the copies differ, the row can carry `dex_id` 1 while a
+descriptor-keyed call (`decompile_class`, `render_class_smali`) resolves the class to
+the first dex that DECLARES it — use the row's `dex_id` to tell which copy matched.
+The per-instruction APIs (`find_call_sites_to`, `find_field_read_sites`,
+`resolve_call_args`, …) still report a site in each dex's copy of a class.
 
 ### Call sites → `list[CallSite]`
 Every invoke of a specific API descriptor (internal or external) — the target's

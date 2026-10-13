@@ -4307,13 +4307,13 @@ Aho-Corasick trie for every value). Pure Python; no binding or C++ changed.
   descriptor it has already seen (`declared_set`, dex_id order); `DexKit::BatchFindMethodUsingStrings`
   concatenates every dex's hits. So when a class is declared in more than one loaded dex
   — an `add_dumped_dexes` packer session, an overlapping multi-source load — the raw
-  batch lists each method ONCE PER DECLARING DEX. The helper applies the same first-wins
-  rule. **Both reviewers found this independently** (40 of 40 values differed on the
+  batch listed each method ONCE PER DECLARING DEX. The helper applied the same
+  first-wins rule (since dexllm#106, `DexKitExt` does, for every caller). **Both reviewers found this independently** (40 of 40 values differed on the
   fixture loaded twice; a2dp under `add_dumped_dexes` reported `ProviderList.<clinit>`
   twice): the first cut's a/b loaded ONE source per session, and no corpus sample
   declares a class twice, so "byte-identical" was true only of that population. The
-  raw `batch_find_*` binding keeps its per-dex shape (a vendor-side divergence from the
-  single path, left alone here).
+  raw `batch_find_*` binding kept its per-dex shape at the time; **dexllm#106 moved the
+  dedupe into `DexKitExt`** (section below), so `_xref` no longer repeats it.
 * **The containment survives as a fallback.** If the batch raises, the old per-value
   loop runs, with its dexllm#55 rule intact: a failure before any query has worked
   propagates (the xref layer is unavailable), a later one is one bad query. An EMPTY
@@ -4371,6 +4371,101 @@ dedupe rule against 192 crafted differing-body sessions (0 differences) and conf
 batch-then-dedupe reproduces. **Not done
 here:** the native `ExtractIocs` the issue cites lives on a `feat/jadx-backend`
 branch / dexllm-web, not in this repo.
+
+### One result per descriptor across loaded dexes, on every search (dexllm#106, 2026-10-13)
+
+dexllm#98 put a first-wins dedupe in a PRIVATE helper, so only its two callers had it;
+the raw binding, the SDK port and an advertised MCP tool still double-reported a packer
+session. Re-measuring #106 on master found it was wider than the issue said: in the
+vendored core `DexKit::FindMethod` (dexkit.cpp:755) and `DexKit::FindField` (:873) drop
+an already-seen descriptor (`declared_set`), but **`DexKit::FindClass` (:556) does not**,
+so EVERY class search — `find_classes_by_name` / `by_super` / `implementing` /
+`by_annotation` / `using_strings` — listed a class once per declaring dex too (a2dp
+loaded twice: `by_name("Vol")` 127 → 254, `by_super(Activity)` 7 → 14,
+`implementing(Runnable)` 41 → 82), and so did dexllm's own
+`find_classes_declaring_strings` (`["http"]` 4 → 8 on weardrawers; a reviewer's
+every-value sweep there 3,945 → 7,890), whose leak reached
+`extract_iocs`' `declared_in`.
+
+**Fixed in `core_ext`, not the vendored core** (user decision — it would add a vendor
+divergence): one `KeepFirstPerDescriptor` helper in
+[dexkit_ext.cpp](native/core_ext/dexkit_ext.cpp), applied in `ParseClassMetaArray`
+(which every FindClass-backed wrapper goes through), both return paths of
+`FindClassesDeclaringStrings`, and both `BatchFind*UsingStrings`. Applied to MATCHED
+results in result order (dex_id order) — exactly `FindMethod`'s `declared_set`, so the
+winner is the first dex whose copy of the class MATCHES, not merely the first that
+declares it. `_xref.py`'s copy was removed: one rule, one place.
+
+**The batch CLASS variant also had a different ORDER on any session** (the issue's
+finding 2; 87 of 2,041 values on the bundled corpus, single source): `DexKit::FindClass`
+walks each dex's class_defs in index order, `DexItem::BatchFindClassUsingStrings` walks
+type_idx order, and class_defs are not type-sorted (a superclass is defined first).
+`BatchFindClassesUsingStrings` now stable-sorts each group by (dex_id, class_def
+position). The METHOD variant's order already matched (method_ids are class-sorted).
+
+**Measured (a/b OFF = v0.23.0 `c31aaaba`, ON = `cce20ca0`, SAME capture script, the
+pre-fix mutant reproducing the OFF md5 exactly):** 44 sources x {loaded once, loaded
+twice} = 88 sessions x 18 axes (every class search, `find_classes_declaring_strings`,
+both batches as lists AND as sets, method/field searches, IOCs, providers, components,
+TLS, capabilities, a decompile digest) = 1,584 records. **Loaded once: the ONLY change
+is `batch_find_classes_using_strings`' order on 15 sessions — its set is unchanged.**
+Loaded twice: every search axis now equals the loaded-once answer (class-search hits
+7,280 → 3,640 = the single-source 3,640); OFF had 10 axes where twice ≠ once (every
+class search, both batches, and the IOCs via `declared_in` — the method and field
+searches were already single), ON has none. The two that still
+differ on both halves are the per-instruction capability count (below) and the
+decompile digest, a harness artefact (`list_classes()[:30]` lists a class per
+declaration, so the sampled classes differ). #106's own table, re-run: methods-twice 2,039 → 0 differing
+values, classes 87 → 0.
+
+**NOT fixed, and recorded:** the per-INSTRUCTION APIs keep a site per dex copy —
+`find_call_sites_to` 9 → 18, `find_field_read_sites` 272 → 544, `resolve_call_args`
+9 → 18 on a2dp loaded twice, and so `summarize_capabilities` counts double. Those
+records carry `caller_dex_id` and name an instruction in a specific dex, so whether a
+site in a shadowed copy should be dropped is a different decision. The index-refused
+fallback path of `FindClassesDeclaringStrings` (crafted amplification only) carries the
+dedupe and only a SOURCE pin — a reviewer's mutant removing it there survived every
+behavioural case. The pin's first cut was a 120-character substring window, which a
+delta reviewer passed with `if (false) KeepFirstPerDescriptor(out);`, a size-gated
+call and a copy-then-restore; it now requires the call as its own statement directly
+before each non-empty `return out;` (all four shapes fail it, a reformat passes).
+
+Guards: [tests/test_first_declaration_wins.py](tests/test_first_declaration_wins.py)
+(22 cases, committed fixtures, corpus-less): every class search + both batches on a
+fixture loaded twice AND an `add_dumped_dexes` session equal the single-source answer
+with dex 0 winning; `find_classes_declaring_strings` on the authored
+`literal-escapes.dex` (`invoke-custom.dex` declares no String constant); the batch class
+order pinned on `", "` in `invoke-custom.dex` (class_def order ≠ type order there) and
+over every value AND across two different dexes (a sort that drops the dex key
+interleaves them — a reviewer's mutant, killed only there and by the variant); two
+DIFFERENT dexes keep all their classes; a crafted variant whose
+dex-0 copy of `LTestBase;` no longer loads the string, so the dex-1 copy must win; and
+the SDK + MCP batch answers. 11 C++ mutants, each BUILT with a distinct `.so` md5 and
+the control asserted after: pre-fix (27 fail, `.so` = v0.23.0's `c31aaaba` exactly),
+no dedupe in `ParseClassMetaArray`, either declaring path, batch classes unsorted /
+undeduped / sorted by type_idx / sorted without the dex key, batch methods undeduped,
+last-wins, dex-0-only — all killed.
+
+**A RELEASE BLOCKER the delta review caught:** the new test file imported its helpers
+as `from tests.test_xref_batch import …`. `tests/` has no `__init__.py`, so that
+resolves only under `python -m pytest` (which puts the cwd on `sys.path`) — CI runs
+the bare `pytest tests`, where it is a `ModuleNotFoundError`: 1 failed + 1 error on
+both CI legs, while every local run here (all `python -m pytest`) was green. Every
+other file uses the bare `from test_xref_batch import …`; fixed to match, and the
+final gates were re-run through the `pytest` entry point.
+
+**One INHERITED guard was INVERTED, and both reviewers caught it before the author
+did:** dexllm#53's `test_a_class_declared_in_two_dexes_is_reported_once` asserted
+the raw `find_classes_implementing` returns 14 (7 implementors x 2 dexes) as its
+premise — exactly the shape this removes — so the suite went red with only the new
+guard file in the mutation matrix. It now pins 7, and `tls_trust`'s own row dedupe is
+documented as defence in depth. **Documented divergences, pre-existing:** an empty
+group (`[]`) or a `[""]` group in a batch goes through the keyword path and its answer
+depends on the other groups (a correctness reviewer: 0 mismatches outside those two
+shapes over 10 APKs x 4 match types x ignore_case); and a row is the first MATCHING
+copy, which can differ from the first DECLARING one a descriptor-keyed call resolves —
+both stated in docs/api.md. Reviewers measured no perf change (batch classes 3,000 keys
+0.769 → 0.780 s).
 
 ### Typed API — `dexllm.sdk` (ports & adapters over the raw binding)
 
