@@ -8654,7 +8654,7 @@ not — it always reported refs with no call site), so an API referenced only by
 copy that does not resolve is listed there with no caller in the joins; the SEARCH
 APIs keep #106's first-MATCHING rule; and `find_type_references` still lists a
 descriptor once per declaring dex (pre-existing, adversarial-review finding, not a
-site API — recorded here, not filed). **"Never executes" is relative to the session's ORDER**
+site API — filed as dexllm#108). **"Never executes" is relative to the session's ORDER**
 (earlier sources win, how `add_dumped_dexes(prefer=True)` makes the dump win); a
 runtime whose class loader orders the dexes differently resolves differently. The
 first cut said that bound in api.md only and "never runs" bare elsewhere; a delta
