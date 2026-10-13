@@ -8654,7 +8654,7 @@ not — it always reported refs with no call site), so an API referenced only by
 copy that does not resolve is listed there with no caller in the joins; the SEARCH
 APIs keep #106's first-MATCHING rule; and `find_type_references` still lists a
 descriptor once per declaring dex (pre-existing, adversarial-review finding, not a
-site API — filed as dexllm#108). **"Never executes" is relative to the session's ORDER**
+site API — filed and fixed as dexllm#108, the next section). **"Never executes" is relative to the session's ORDER**
 (earlier sources win, how `add_dumped_dexes(prefer=True)` makes the dump win); a
 runtime whose class loader orders the dexes differently resolves differently. The
 first cut said that bound in api.md only and "never runs" bare elsewhere; a delta
@@ -8696,6 +8696,76 @@ the other, and all of it passed corpus-less. It now requires the filter to be th
 FIRST statement of every caller loop and pins the loop count (1 in `analysis.cpp`, 2
 in `dangerous_api.py`); those four shapes plus a filter moved after the collect are
 each killed by the pin alone.
+
+### `find_type_references` lists each descriptor once (dexllm#108, 2026-10-14)
+
+Filed from #107's adversarial review as a packer-session doubling, and it was
+WIDER than filed: `FindTypeReferences` walks every loaded dex's REFERENCE tables
+(`field_ids` / `method_ids`) and concatenates, so ANY two dexes that both reference
+a member each contribute it — **ordinary single-source multidex** included, not
+only a class declared twice. Measured at `e385965` over every type that appears in a
+signature position (classes, primitives and arrays — almost all repeats are on `I`
+/ `V` / `Z` and array types): **3,954 repeated rows in 6 single-source paths** (5
+distinct files — `test_apk/APK/multidex.apk` is the committed fixture's twin):
+multiple_locale 2,274, app-prod-debug 1,037, weardrawers 632, the committed
+`tests/data/multidex.apk` 4 (and its twin 4), where both dexes reference
+`Foobar.somemethod(String)`, and the committed v41 container
+`tests/data/multidex-container.dex` 3.
+In a session loading one source twice every list doubled.
+
+**Fixed in the producer, not decided.** A row is a bare descriptor with no dex id,
+so a repeat carries nothing; each list is now the distinct descriptors in
+first-occurrence (dex_id, then table) order. That also dissolves the question the
+issue left open (a member only a non-resolving copy references): de-duplicating by
+descriptor keeps every descriptor any dex references, the reference-census reading
+`dangerous_permission_apis` got in #107. `list_fields()` / `list_methods()`
+deliberately keep repeating (documented as the raw tables); the SDK passes the
+lists through, and the MCP tool's `total` is `len(list)`, so it now counts distinct
+descriptors — release-note material, no in-repo consumer read the old count.
+
+**Cost, and why single-dex pays nothing.** One dex cannot repeat a descriptor (its
+`field_ids` / `method_ids` are sorted and unique, enforced by the verifier in both
+modes), so the dedupe runs only when two or more dexes contributed, in place over
+the collected vectors. The first cut hashed into a per-list `unordered_set<string>`
+on every call, which a reviewer timed at 1.6–1.8x even on single-dex sessions.
+Measured on the shipped form (best of 7, five queries, HEAD `.so` vs ON): single-dex
+tvleanback 5.0 → 4.9 ms; multidex / twice sessions 1.3–1.45x (e.g. multiple_locale
+twice 13.3 → 18.2 ms).
+
+**Measured (a/b over every signature type, OFF reconstructed as the per-dex
+concatenation from `list_fields_in_dex` / `list_methods_in_dex`, ON = `5c4e66c6`):**
+44 sources x {once, twice} = **104,502 lists, ON equals `dict.fromkeys(OFF)` on every
+one, 0 exceptions**; rows 2,051,490 → 1,359,752; single-source output changes only on
+the 6 multidex paths. An earlier capture against the real HEAD `.so` over class
+types only (219,750 records) agreed. **The first cut of this record published 63
+repeated rows from that class-only scope while calling it "every referenced or
+declared type"** — the adversarial review caught it, and the guards had the same
+blind spot.
+
+**Guards:** [tests/test_type_references.py](tests/test_type_references.py) (10, all on
+committed fixtures). The oracle re-derives each list from
+`list_fields_in_dex` / `list_methods_in_dex`, parsing the type positions itself, and
+the type scope includes primitives and arrays (a pinned case asserts it). **9
+mutants of the shipped form, each BUILT with a distinct `.so` md5 and killed**
+(control asserted after): no dedupe, the multi-dex threshold raised to 3, the
+contributing count never incremented, each of the three lists left undeduped, the
+output sorted, a method that both returns and takes the type losing its second
+copy to a move, and **a view taken BEFORE the element is moved** — which SURVIVED
+the first run: every descriptor in the earlier fixtures was long enough to live on
+the heap, where a move hands the buffer over and the dangling-looking view still
+reads right. `LMain;->fail()V` (15 bytes, inside the small-string buffer) in a
+`[multidex.apk, fixture, fixture]` session, ordered so it is moved and then repeated,
+kills it; obfuscated apps are full of descriptors that short. **One mutant is
+EQUIVALENT for output and guarded by timing only**: running the dedupe on every
+call (`if (true)`) gives identical lists and re-introduces the single-dex cost, so
+only a benchmark sees it. A delta review built 15 more mutants of the shipped form,
+14 killed in both legs, the 15th being that one; it also ran the dedupe lambda
+under ASan + UBSan + `_GLIBCXX_DEBUG` over 300,000 random vectors (0 reports) and
+confirmed the single-dex premise holds in lenient mode (`check_insns_` gates only
+`VerifyInsns`; the id-table ordering checks always run). The reviewer's six
+mutants ran on the first cut (a per-list `unordered_set<string>`); sharing the FIELD
+set with a method set is equivalent there, since a field descriptor holds `:` and no
+`(`.
 
 ### Every class that CAN be used as a component, with its chain (`find_component_subclasses`, 2026-10-02)
 

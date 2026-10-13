@@ -2576,7 +2576,16 @@ TypeReferences DexKitExt::FindTypeReferences(std::string_view type_descriptor) {
     // (fields OF the type, methods RETURNING it, methods TAKING it as a param). Scans
     // every dex — a type is referenced from other dexes too. Uses the shared
     // BuildFieldDescriptor / BuildMethodDescriptor so descriptors match every other API.
+    //
+    // Each descriptor is listed ONCE, in first-occurrence (dex_id) order (dexllm#108).
+    // The scan walks every dex's REFERENCE tables (field_ids / method_ids), and any
+    // two dexes that both reference a member — ordinary multidex, or a class
+    // declared in two loaded dexes — each carry an entry for it, so the lists used
+    // to repeat the same string. A row carries no dex id, so a repeat said nothing;
+    // dropping it loses no descriptor, including one only a non-resolving copy
+    // references.
     TypeReferences out;
+    int contributing = 0;
     const int dex_num = core_->GetDexNum();
     for (int d = 0; d < dex_num; ++d) {
         auto* item = core_->GetDexItem(static_cast<uint16_t>(d));
@@ -2587,6 +2596,7 @@ TypeReferences DexKitExt::FindTypeReferences(std::string_view type_descriptor) {
             if (type_names[i] == type_descriptor) { type_idx = i; break; }
         }
         if (type_idx == dex::kNoIndex) continue;
+        ++contributing;
         const auto& reader = item->GetReader();
         const auto field_ids = reader.FieldIds();
         for (uint32_t fid = 0; fid < field_ids.size(); ++fid) {
@@ -2607,9 +2617,32 @@ TypeReferences DexKitExt::FindTypeReferences(std::string_view type_descriptor) {
             }
             if (!returns && !param) continue;
             std::string sig = BuildMethodDescriptor(*item, mid);
-            if (returns) out.methods_returning.push_back(sig);
+            if (returns && param) out.methods_returning.push_back(sig);
+            else if (returns) out.methods_returning.push_back(std::move(sig));
             if (param) out.methods_with_param.push_back(std::move(sig));
         }
+    }
+    // One dex cannot repeat a descriptor: its field_ids / method_ids are sorted and
+    // unique, which the structural verifier enforces in both modes. So the
+    // de-duplication runs only when two or more dexes contributed, and a single-dex
+    // session pays nothing for it. In place, first occurrence kept: a view is taken
+    // of an element only once it is in its final slot, which nothing moves again.
+    if (contributing > 1) {
+        auto dedupe = [](std::vector<std::string>& v) {
+            std::unordered_set<std::string_view> seen;
+            seen.reserve(v.size());
+            size_t w = 0;
+            for (size_t r = 0; r < v.size(); ++r) {
+                if (seen.count(v[r])) continue;
+                if (w != r) v[w] = std::move(v[r]);
+                seen.insert(v[w]);
+                ++w;
+            }
+            v.resize(w);
+        };
+        dedupe(out.fields);
+        dedupe(out.methods_returning);
+        dedupe(out.methods_with_param);
     }
     return out;
 }

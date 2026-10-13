@@ -934,7 +934,9 @@ it repeats a descriptor once per dex carrying the entry; `set()` before counting
 ### Type references → `TypeReferences`
 Signature-position uses of a `Lpkg/Cls;` type — where it appears as a field type, a
 method return type, or a method parameter (NOT call/instruction xref). Empty lists if
-the type isn't referenced.
+the type isn't referenced. Each list holds a descriptor ONCE, in first-occurrence
+(dex_id) order, however many loaded dexes reference the member — ordinary multidex
+and a class declared in two loaded dexes used to repeat it once per dex (dexllm#108).
 ```python
 tr = dk.find_type_references('Landroid/content/Intent;')
 tr.fields              # fields OF this type          len 4    e.g. '…ShareCompat$IntentBuilder;->mIntent:Landroid/content/Intent;'
