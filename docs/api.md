@@ -408,6 +408,26 @@ instruction boundary. The first is NOT — the unmodified AOSP file
 `art/tools/fuzzer/class-verifier-corpus/b391844326.dex` carries a method with a
 code item and no decodable instruction, and it is where dexllm#73 was found.
 
+**A constant takes the type of the position it lands in (dexllm#102).** A
+Dalvik `const*` is untyped — `const/4 v0, #1` is how `true` is written and `0` is
+how `null` is — so the literal depends on the DECLARED type of the position: a
+parameter, a field, an array element, a return value, a local, a `throw` or a
+check-cast. Text and AST read one definition (`ConstantAt`), so they agree.
+
+| position type | value | rendered |
+|---|---|---|
+| `boolean` | 0 / 1 | `false` / `true` |
+| a reference or array | 0 | `null` |
+| `byte` / `short` / `char` **argument** | fits the type | `((char) 125)` — Java does not narrow a constant in an invocation, so `append(125)` would call `append(int)` |
+| `float` / `double` | the raw bits | the IEEE-754 literal (`1f`, `Double.NaN`) |
+| any of the above | a value the type cannot hold (`takeZ(2)`, `takeRef(1)`, `takeB(200)`) | the integer, unchanged — ART checks only the category at a narrow position, so such a dex is legal and a cast or a `true` would assert a value the callee does not receive |
+
+A boolean flag held in a register is typed the same way: a version reaching a
+`boolean` parameter, field, array element or return is declared `boolean` when
+every def is 0/1 and no use needs a number, together with every version it is
+moved to or from, or not at all. A constant built from an invoke-custom
+bootstrap argument states its own type and is never re-typed.
+
 ### `dk.decompile_method_with_pc_map(method_descriptor: str) -> dict`
 **D-3** — Java text + a source-line ↔ dex bytecode-offset map for smali sync.
 ```python

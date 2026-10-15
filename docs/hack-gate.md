@@ -245,3 +245,263 @@ belongs in its own issue.
   RatingCompat's `v0 = 1065353216;` (= `1.0f`), in at least 129 places. That is a
   type-inference defect in a different reader, and the cross-view test cannot
   see it: it compares values, not types.
+
+## Applied: dexllm#102 (an untyped constant at a declared position)
+
+The defect as filed: `getBooleanExtra("…", 1)` — an integer constant passed at a
+`boolean` parameter, 179 lines. A Dalvik `const*` is UNTYPED; every handler
+builds an INT-typed `Constant` (DAD), and the type comes from the position that
+consumes it. The issue proposed rendering `true`/`false` at a `Z` argument in
+both emitters.
+
+### What the gate measured first
+
+**HG2 — every position, not the one in the title.** A census over the AST of
+the whole corpus (201,607 methods), by the DECLARED type of the position an
+integer literal lands in:
+
+| position | OFF | ON |
+|---|---:|---:|
+| invoke / constructor argument at `Z`, value 0/1 | 11,925 | 1 |
+| invoke / constructor argument at a reference type, value 0 | 9,064 | 0 |
+| invoke / constructor argument at `B`/`S`/`C` | 968 | 3 |
+| field store into a `Z` field, value 0/1 | 13,026 | 0 |
+| field store into a reference field, value 0 | 5,497 | 0 |
+| `aput-boolean` / `aput-object` of 0/1 / 0 | 484 | 0 |
+| an `int` LOCAL passed at a `Z` parameter | 1,878 | 321 |
+
+So the issue's 179 was a regex over two framework methods; the defect class is
+~40,000 sites across SIX position kinds, plus the same fact for a VARIABLE. The
+residual 1 + 3 are the deliberately unprojected call-site arguments of
+`invoke-custom.dex`'s `TestBadBootstrapArguments` (encoded values, see HG4).
+
+`B`/`S`/`C` at an argument is the sharpest one: Java does not narrow a constant
+in an INVOCATION context (JLS 5.3), so `sb.append(125)` compiles — to
+`append(int)`, appending `"125"` where the bytecode appends `'}'`.
+
+**HG5 — the rule already existed, six times.** Before the change the
+"untyped constant at a typed position" projection was spelled in `visit_return`
+(text), the ReturnStatement branch (AST), `write_inplace_if_possible` (text, Z
+and null), `typed_rhs_expr` (AST), `emit_fp_const_typed` (text, F/D) and
+`visit_expr_fp_typed` (AST, F/D) — and applied at return, local assignment and
+F/D operands only. The issue's direction would have added a seventh copy at
+one more position.
+
+### The designs
+
+| design | HG1 | HG2 | HG3 | HG4 | HG5 | HG6 | verdict |
+|---|---|---|---|---|---|---|---|
+| **A** the issue's: `true`/`false` at a `Z` argument, both emitters | PASS | **FAIL** — 5 of 6 positions and the variable half left | — | PASS | **FAIL** — a seventh copy | PASS | fails |
+| **B** A at every position, each spelled in place | PASS | PASS (literals) | PASS | PASS | **FAIL** — ~14 copies | PASS | fails |
+| **C** retype the `Constant` NODE in the IR at RegisterPropagation | PASS | PASS | PASS | PASS | PASS | PASS | **structurally unsound** — see below |
+| **D** one projection `ConstantAt(context, position type, operand)` read by both emitters at every declared position, plus the variable half in the type-inference pass (**chosen**) | PASS | PASS | PASS | PASS | PASS | PASS | passes |
+
+**C fails on the IR's own keying.** An `IRForm` keys its operands by `Vid()`,
+and a `Constant`'s id is value-derived (`c1`), so `takeZI(true, 1)` — one
+register, two declared types in ONE call (d8 emits exactly that) — holds ONE
+node for both arguments; RegisterPropagation also shares a constant node across
+uses. The type of a constant use is a property of the (node, position) edge,
+and the position's declared type is already in the IR (`ptype()`, the field
+type, the aput opcode, `ret_type`). The IR is complete; the emitters were
+ignoring a fact it carries. The fixture's `mixed` method pins this.
+
+**HG1 for D.** The two facts have two producers, and each is fixed where it is
+produced:
+
+* the LITERAL kind of an inlined constant is produced where the constant meets
+  its position — the emitter's projection — and both emitters now read one
+  definition (`ConstantAt`, `instruction.h`). Nothing downstream re-reads
+  rendered text.
+* the TYPE of a variable is produced by the type-inference pass:
+  `bool_use_vids` (#86's `Z`-return channel) gains the `Z` parameter, `Z` field
+  store and `aput-boolean` sources, and a re-typed version's whole MOVE
+  COMPONENT is re-typed or none of it.
+
+**HG4.** The decision reads the position's DECLARED type and the constant's
+provenance, never its value. The value guards refuse what Java cannot spell,
+and say so by ART's rules rather than by a heuristic: ART accepts only its Zero
+constant at a reference position (so `takeRef(1)` is a dex no VM loads, left
+as `1`), and checks only the CATEGORY at a narrow-integral parameter, field or
+array store (`VerifyInvocationArgsFromIterator`, `VerifyPrimitivePut`), so
+`takeZ(2)` is legal and left as `2`. A `Constant` built from an encoded_value
+(a call-site argument, dexllm#67) states its own type and is never projected —
+an encoded INT `0` at a `String...` vararg is the integer 0, not `null`
+(`Constant::encoded_type`).
+
+**HG6.** The output forms are not new: `true`/`false`/`null` are the
+existing literals, and the argument cast `((char) 125)` is the spelling the
+Writer already gives a `CastExpression` (the AST node is the existing
+`Parenthesis(Cast(...))`). No in-tree code parses decompiled Java
+(`tls_trust.py` parses SMALI, unchanged).
+
+**HG7 — three incidental guarantees the first cut leaned on, each found by a
+measurement and each now pinned.**
+
+1. **#86's soundness claim was false.** It said "in verified Dalvik `return v`
+   in a `Z` method requires v to hold a boolean". ART's `return` takes an
+   Integer for a boolean, and invocation / field / array positions check only
+   the category. The re-type was sound anyway because of its DEF-anchor
+   (`all_defs_boolean_valued`); the comment now says so, and the def-anchor is
+   what carries the new sources too.
+2. **A per-VERSION numeric-use guard.** #86 refused a version used as an int
+   anywhere, but a use only ONE constant reaches renders that constant
+   (RegisterPropagation): `AdapterHelper.onItemRangeInserted` compares `p6 >= 1`
+   and passes `1` at an int parameter through the very register it later
+   returns as the flag. The guard is now per POSITION, read through #94's own
+   rule (`OnlyAConstantReaches`, hoisted to one definition). This cut `boolean`
+   methods returning an `int` local from 652 to 220.
+3. **#94's move width rule compared exact types.** A destination SplitVariables
+   typed from a register's last write (`int-to-float`) is corrected to its
+   sources' class — but `{I, Z}` sources compared unequal, so once #102 typed
+   one source `Z` the destination stayed `float`
+   (`Tx3gDecoder.decodeInitializationData`, `float v3_25 = 0f` stored into a
+   boolean field). Sources of one CLASS now join to `I`, as ART's merge does.
+   **That stopped at `int`, and the review caught it**: nothing after the
+   width rule refines its `I` (the narrow-integral pass has already run), so
+   the destination read `int v3_25; … this.customVerticalPlacement = v3_25;`
+   — an int stored into a boolean field, the very position #102 is about.
+   The rule now takes `Z` when the destination is a boolean (a `Z` use, no
+   numeric or object use, every def 0/1) AND every source flowing into it is
+   already `Z` or renders as its literal.
+
+**Two regressions the first cuts created, both caught by measurement, not by
+reasoning.** Widening the `Z` sources seeded flags whose move partners were
+ints: `boolean v0 … int v2; v2 = v0;` (`int-reuse.dex` `sharedConst`) and, in
+the other direction, `int v0_5 = v14` beside `boolean v14`
+(`CoordinatorLayout.offsetChildToAnchor`). #86's propagation went backwards
+only and LEFT a source that failed a guard. The fix is the component rule: the
+move-connected component (excluding moves only a constant reaches) is typed
+whole or not at all. A scanner for `boolean`/number assignments between locals
+is what found the second shape — the text a/b's normaliser maps `boolean` to
+`int` and was blind to it.
+
+### Measured
+
+a/b OFF = v0.25.0 (`5c4e66c6`) vs ON (`78ba1bcf`), SAME capture script, both
+`.so` md5-asserted: 44 sources / 2,348,601 decompiled lines, **46,233 lines
+changed on 25 sources, line counts equal on every source**; every changed line
+is one of the intended substitutions (`0`/`1` → `false`/`true`, `0` → `null`, a
+narrowing cast, `int` → `boolean` declarations and the `v == 0` → `!v` spelling
+that follows) except 2 `byte` → `boolean` declarations of values stored into
+`boolean` fields, both correct. AST: 24,048 changed methods, every changed node
+classified, none outside those kinds. Invalid-Java axes, OFF → ON: `boolean`
+method returns an `int` local 652 → 220; `boolean`/number assignment between
+locals 41 → 27; `boolean` local used numerically 25 → 25; `boolean v = <int>`
+1 → 1.
+
+**HG3 — an oracle that never reads the IR.** From the SMALI listing and the
+callee / field DESCRIPTOR only: every argument / field store / aput whose
+straight-line reaching def is a `const`, and the literal Java needs there. Over
+the corpus: `Z` positions **17,155 disagreements OFF → 0 ON** (17,175 agree),
+reference positions **11,520 → 0** (11,899 agree), `B`/`S`/`C` **750 → 0** (763
+agree). Text and AST: per-method literal counts agree on all 24,048 changed
+methods (2 counter artefacts — a `byte[][]` check-cast of `null`).
+
+**javac**, class-level over the 7,661 changed classes: errors excluding
+unresolved symbols **64,033 → 43,261**, `incompatible types` **25,325 →
+5,026**. Per UNCHANGED line: 1,229 better, 21 worse — all 21 are
+`unreported exception RemoteException` on a pre-existing `throw v1_0;`, which
+javac reaches only because the same method stopped failing attribution
+(`transact(1, v0, 0, 1)` → `transact(1, v0, null, 1)`). **19 new
+`reference to X is ambiguous`** errors: a `null` argument where the callee has
+several reference overloads (`putExtra("…", null)`, `this(p2, null)`). OFF's
+`0` there either failed to compile or silently resolved to the `int` overload;
+choosing the overload needs a cast, which needs overload resolution — recorded,
+not fixed (see the residuals).
+
+**HG8.** 24 mutants, each BUILT with its own `.so` md5 and run against six
+guard files, control md5 asserted before and after: **24 killed**. Four
+survived the first matrix and each became a fixture method or a pin: the
+forward half of the propagation (the fixture's destination was inlined away —
+`forwardKeep` keeps one), the `== <nonzero>` position (`eqneLone`), and two
+lines no dex can reach, pinned at SOURCE level and saying so (a numeric use
+recorded without a position refuses; a `ThisParam` lhs keeps the Operand
+context).
+
+### What the two reviewers found
+
+Two independent reviewers (adversarial + correctness), each in a private copy
+with its own build, each constructing inputs. **Neither found a defect in the
+projection itself**: every removed branch maps 1:1 onto a `ConstantAt` context,
+text and AST agree on every changed method, the shared-node case
+(`takeZI(v0, v0)` → `takeZI(true, 1)`) holds, and the HG2 census re-derived
+(11,929 / 9,072 / 971 with the fixture included). Everything they found was in
+the VARIABLE half's convergence or in the guards — the pattern this repo keeps
+recording.
+
+* **CONFIRMED by BOTH, MEDIUM — a component typed half `boolean`, half `int`.**
+  `component_ok` was asked once per seed and re-walked the whole component per
+  member, each walk re-running `all_defs_boolean_valued`: roughly O(N³) on a
+  flag move chain, which drained the shared `bv_budget` part-way. Seeds decided
+  before exhaustion were typed `Z`, later ones refused — `boolean v5 = v4`
+  beside `int v4`, the exact shape the component rule exists to forbid, on a
+  strict-valid dex (OFF: all `boolean`). Fixed by deciding the component ONCE
+  and recording the verdict for every member, and by memoising
+  `all_defs_boolean_valued` per version (its answer is a function of the
+  version alone). Pinned by `flagChain`, a 200-link chain.
+* **CONFIRMED by BOTH, LOW-MED — a narrowing cast that changes the value.**
+  `takeB(((byte) 200))` says -56 where the callee's register holds 200 (ART
+  checks only the category there). A B/S/C argument is cast only when the
+  value fits; otherwise it stays the integer, like `takeZ(2)` and
+  `takeRef(1)`. 0 of the 967 corpus casts were out of range.
+* **CONFIRMED, LOW — HG7 item 3 above was only half done** (see the note
+  there): the width-joined destination stayed `int` beside a boolean field
+  store. Fixed; `mixedWidthSources` now asserts `boolean`, and
+  `mixedWidthIntSource` pins the other side (a real int source keeps it int).
+* **CONFIRMED, guard holes, each a mutant that passed the whole suite:** the
+  component member guard checking only the seed (`compNum` — a member used as
+  a number must refuse the whole component; under the mutant `int v1_0 = v0`
+  with a boolean `v0`), and `sput-boolean` as a source (`sputSeed`; the
+  fixture covered `iput` only).
+* **PLAUSIBLE → fixed, LOW — a number RETURN type was not a numeric position.**
+  #94's `z_pos` already treats `return v` in an `int` method as ruling `Z` out;
+  #102's `numeric_use` did not, so a flag passed at a `Z` parameter and
+  returned from an `int` method became `boolean v0 … return v0;`. The two
+  passes now agree (`zThenIntReturn`). OFF was invalid there too
+  (`takeZ(int)`), so the invalid line moved rather than appeared; 0 corpus
+  impact.
+* **Stale prose**, all fixed: a comment saying the narrow-integral pass refines
+  the joined `I` later (it runs earlier), the CLAUDE.md #86 soundness claim
+  this change corrects in the source, and three helper names the change
+  deleted.
+
+**Re-measured on the fixed build (`7fcb3cc5`), same scripts:** vs the pre-review
+build the corpus moves on exactly 3 lines (Tx3gDecoder, `int` → `boolean` and
+its two literals) and 1 AST method; vs OFF, 46,236 lines on 25 corpus sources
+(the new fixture excluded — OFF's capture predates it), line counts equal on
+every source. Oracle: Z 17,183 agree / 0 disagree, REF 11,906 / 0, B/S/C
+766 / 0 (+3 out-of-range values correctly left as integers). Invalid-Java
+axes unchanged (`boolean` method returns an `int` local 652 → 220; boolean /
+number assignment between locals 41 → 27). Mutation matrix **35 mutants, 32
+killed, 3 equivalent individually**: the two memos MASK EACH OTHER (either
+alone keeps the cost bounded), so removing one is output-equivalent; removing
+BOTH fails `flagChain` — killed.
+
+### Residuals, recorded
+
+* **An `int` local at a `Z` parameter: 1,878 → 321.** The remaining ones are
+  #86-class refusals — a version whose def closure is path-insensitively
+  non-boolean, or whose component holds a genuine int. No wrong output: they
+  stay as OFF rendered them. Filed as dexllm#110.
+* **A `null` argument at an overloaded callee: 19 new javac ambiguity
+  errors.** jadx casts such a `null`. The first version of this bullet said
+  that needs the callee's overload set; an adversarial reviewer showed it does
+  NOT: casting to the DECLARED parameter type (which `ConstantAt` already
+  receives) always selects that exact method, the most specific applicable
+  one (`putExtra("a", (String) null)` compiles against android-36). Filed as
+  dexllm#109.
+* **Two numeric positions `numeric_use` still does not record**, both shared
+  with #94's `z_pos`: `==` against a non-constant int and a bitwise op with an
+  int. A flag seeded by a `Z` parameter can be typed `boolean` there; OFF was
+  invalid at the same site (`takeZ(int)`), so the invalid line moves rather
+  than appears, and corpus boolean/number moves fall (41 → 27). One corpus
+  method gains an `int == boolean` (`GridLayoutManager.onFocusSearchFailed`,
+  already invalid OFF).
+* **`filled-new-array` elements do not go through `ConstantAt`**:
+  `new Object[] {0}` stays an autoboxed `Integer` where the bytecode stores
+  `null`. Pre-existing and identical OFF — the #96 / #97 family.
+* **A char / byte / short VARIABLE at a narrowing parameter** (`int v6_20`
+  passed to `append(C)`): the type-inference pass has no `C` use source.
+* Adjacent, pre-existing, unchanged (164 lines OFF and ON): a reference
+  PARAMETER whose register is later reused renders `p1 == 0`, because the
+  write corrupts the `Param`'s type.

@@ -91,7 +91,7 @@ void MoveResultExpression::Accept(Visitor& v) {
 // =============================================================================
 void ArrayStoreInstruction::Accept(Visitor& v) {
     v.visit_astore(MapGet(*this, array_), MapGet(*this, index_),
-                   MapGet(*this, rhs_));
+                   MapGet(*this, rhs_), type);
 }
 
 void StaticInstruction::Accept(Visitor& v) {

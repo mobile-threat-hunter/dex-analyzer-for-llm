@@ -121,7 +121,13 @@ def test_the_declaration_and_the_inlined_read_agree(fixture_decls) -> None:
         "LNegativeStatics;->all()[Ljava/lang/Object;"
     )
     # `L?`: dexllm#92 will suffix long literals, and that must not blind this.
-    inlined = re.findall(r"\.valueOf\((-?\d+)L?\)", body)
+    # The narrowing cast: since dexllm#102 a constant at a byte / short / char
+    # PARAMETER renders `Short.valueOf(((short) -1))` (Java does not narrow an
+    # invocation argument implicitly) — the value inside is the one compared.
+    inlined = re.findall(
+        r"\.valueOf\((?:\(\((?:byte|short|char)\) (-?\d+)\)|(-?\d+)L?)\)", body
+    )
+    inlined = [a or b for a, b in inlined]
     assert len(inlined) == len(_ALL_ORDER), body
     for name, val in zip(_ALL_ORDER, inlined):
         decl = fixture_decls[name].removesuffix("L")

@@ -127,7 +127,10 @@ def scanned():
                     elif rt in ("I", "C"):
                         if bare:
                             found["int_num"] += 1
-                        if "true" in s or "false" in s or s == "return null;":
+                        # the RETURNED value, not a substring: since
+                        # dexllm#102 an int method may legitimately return
+                        # `this.commitInternal(false)`
+                        if s in ("return true;", "return false;", "return null;"):
                             violations.append((f"{rt}-rewritten", ml, s))
                     # non-finite rendering (any type)
                     if re.search(

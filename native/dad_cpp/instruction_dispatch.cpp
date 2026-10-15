@@ -204,6 +204,9 @@ IRFormPtr CallSiteArgToIr(const IDexCodeSource::CallSiteArg& a,
         }
     }
     node->set_synthetic_vid(vid);
+    // dexllm#102: an encoded_value states its own type — never re-typed by the
+    // parameter it lands in (a vararg INT 0 at `Object...` is not `null`).
+    if (auto* c = dynamic_cast<Constant*>(node.get())) c->set_encoded_type();
     return node;
 }
 

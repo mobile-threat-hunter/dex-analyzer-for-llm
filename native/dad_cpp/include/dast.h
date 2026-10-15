@@ -150,11 +150,11 @@ private:
     // path (which bypasses write_inplace) so BOTH forms match the text.
     AstValue typed_rhs_expr(IRForm* lhs, IRForm* rhs);
     AstValue visit_expr(IRForm* op);
-    // visit_expr, but if `operand` is an integer Constant in an F/D `target`
-    // context (a raw-IEEE-bits float/double const), emit the reinterpreted
-    // literal — mirrors writer.cpp emit_fp_const_typed so the AST agrees with
-    // the text path.
-    AstValue visit_expr_fp_typed(IRForm* operand, std::string_view target);
+    // visit_expr, but an untyped integer Constant at a position of declared
+    // type `target` becomes the literal `ConstantAt` says it is (dexllm#102) —
+    // the rule writer.cpp emit_const_at shares, so the AST agrees with the text.
+    AstValue visit_const_at(ConstContext ctx, std::string_view target,
+                            IRForm* operand);
     AstValue visit_arr_data(const std::vector<int64_t>& value);
     AstValue visit_decl(Variable* var, AstValue init = AstValue::Null());
 

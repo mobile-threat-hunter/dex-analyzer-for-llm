@@ -245,7 +245,17 @@ public:
     }
     const std::string& clsdesc() const noexcept { return clsdesc_; }
 
+    // Beyond-DAD, inert unless set (dexllm#102). A `const*` opcode's Constant
+    // is UNTYPED — its `I`/`J` type is a placeholder and the consuming position
+    // decides what the bits mean (`ConstantAt`). A Constant built from an
+    // encoded_value (a call-site argument, dexllm#67) is the opposite: the
+    // encoding states its type, so an encoded INT 0 passed at an `Object`
+    // parameter is the boxed integer 0, never `null`. Only those set this.
+    void set_encoded_type() noexcept { encoded_type_ = true; }
+    bool encoded_type() const noexcept { return encoded_type_; }
+
 private:
+    bool encoded_type_ = false;
     std::string v_;          // DAD: 'c%s' % value
     ConstantValue cst_;      // raw value
     int64_t cst2_ = 0;       // int_value if given, else int(value) if numeric
@@ -1164,5 +1174,59 @@ private:
 std::optional<bool> BitwiseBoolConstant(std::string_view op,
                                         std::string_view expr_type,
                                         const IRForm* operand);
+
+// Beyond-DAD (dexllm#102). A Dalvik `const*` is UNTYPED: every handler builds an
+// integer-typed Constant (DAD opcode_ins.py:263+), and what the bits MEAN is
+// decided by the position that consumes them — the declared type of the
+// parameter, field, array element, return value or local it lands in. This is
+// the ONE definition of that projection; both emitters (the text Writer and the
+// AST JSONWriter) call it at every position whose type is DECLARED, and render
+// the result their own way. A rule read a second time drifts (dexllm#63, #70,
+// #83), and before #102 this one was spelled six times and applied at three of
+// the positions.
+//
+// The context decides which projections apply:
+//   Operand   — a numeric operand of a float/double operation: F / D only.
+//   Value     — an assignment context (return, local, field, array element,
+//               check-cast, throw): + Z (0/1 -> false/true) and a reference
+//               type (0 -> null).
+//   Argument  — an invocation context: + B / S / C, which Java does NOT narrow
+//               implicitly for a method argument (JLS 5.3), so `append(125)` at
+//               `append(C)` would resolve to `append(int)` or fail to compile;
+//               it is rendered as an explicit narrowing cast.
+//               Only when the value FITS the type: a cast that changed
+//               it (`(byte) 200` is -56) would assert a value the callee
+//               does not receive, so such a value stays the integer.
+// The value guards are not heuristics: ART's verifier accepts only its Zero
+// constant at a reference position, so a nonzero integer there is a dex no VM
+// loads and is left as the integer; at a `Z` position ART checks only the
+// CATEGORY (art/runtime/verifier/method_verifier.cc VerifyInvocationArgs /
+// VerifyPrimitivePut, and `return` takes an Integer for a boolean), so an int
+// other than 0/1 there is a legal but genuinely non-boolean value Java cannot
+// spell, and is left as the integer too.
+//
+// Only an UNTYPED integer constant (type I/J/B/S/C) is projected. A Constant
+// whose type was set by an encoded_value (a call-site argument, dexllm#67) or a
+// typed reference constant (const-string / const-class) is never touched.
+enum class ConstContext { Operand, Value, Argument };
+struct ConstLiteral {
+    enum class Kind { Bool, Null, Float, Double, NarrowCast };
+    Kind kind;
+    int64_t raw = 0;     // the constant's integer value (the bits for F/D)
+    char narrow = 0;     // 'B' / 'S' / 'C' for NarrowCast
+};
+std::optional<ConstLiteral> ConstantAt(ConstContext ctx,
+                                       std::string_view position_type,
+                                       const IRForm* operand);
+
+// The declared type of an array-store position, for `ConstantAt`. The aput
+// OPCODE states the element kind for boolean / byte / char / short / object
+// (`kind` is the ArrayStoreInstruction's marker: "Z" "B" "C" "S" "O"); plain
+// `aput` / `aput-wide` ("" / "W") is int-or-float / long-or-double, and only the
+// ARRAY's type can tell which — so only an F/D element is taken from it, as
+// before dexllm#102. An `aput-object` element whose array is typed more
+// precisely keeps that type; otherwise it is any reference.
+std::string ArrayStorePositionType(std::string_view kind,
+                                   std::string_view array_type);
 
 }  // namespace dexkit::dad

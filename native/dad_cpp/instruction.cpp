@@ -1676,4 +1676,54 @@ std::optional<bool> BitwiseBoolConstant(std::string_view op,
     return c->get_int_value() == 1;
 }
 
+// Beyond-DAD (dexllm#102) — see instruction.h.
+std::optional<ConstLiteral> ConstantAt(ConstContext ctx,
+                                       std::string_view pt,
+                                       const IRForm* operand) {
+    auto* c = dynamic_cast<const Constant*>(operand);
+    if (!c || !c->is_const() || c->encoded_type() || pt.empty())
+        return std::nullopt;
+    const std::string ct = c->get_type();
+    if (ct != "I" && ct != "J" && ct != "B" && ct != "S" && ct != "C")
+        return std::nullopt;
+    const int64_t v = c->get_int_value();
+    using K = ConstLiteral::Kind;
+    if (pt == "F") return ConstLiteral{K::Float, v};
+    if (pt == "D") return ConstLiteral{K::Double, v};
+    if (ctx == ConstContext::Operand) return std::nullopt;
+    if (pt == "Z") {
+        if (v == 0 || v == 1) return ConstLiteral{K::Bool, v};
+        return std::nullopt;
+    }
+    if (pt.front() == 'L' || pt.front() == '[') {
+        if (v == 0) return ConstLiteral{K::Null, v};
+        return std::nullopt;
+    }
+    // The cast must not CHANGE the value: ART checks only the category at a
+    // narrow parameter, so `takeB(200)` is legal dex and the callee's register
+    // holds 200, which `(byte) 200` (= -56) does not say. Like `takeZ(2)` and
+    // `takeRef(1)` above, a value the type cannot hold stays the integer.
+    if (ctx == ConstContext::Argument && ct == "I") {
+        if ((pt == "B" && v >= -128 && v <= 127) ||
+            (pt == "S" && v >= -32768 && v <= 32767) ||
+            (pt == "C" && v >= 0 && v <= 65535))
+            return ConstLiteral{K::NarrowCast, v, pt.front()};
+    }
+    return std::nullopt;
+}
+
+std::string ArrayStorePositionType(std::string_view kind,
+                                   std::string_view array_type) {
+    const std::string_view elem =
+        (array_type.size() >= 2 && array_type[0] == '[') ? array_type.substr(1)
+                                                         : std::string_view();
+    if (kind == "Z" || kind == "B" || kind == "C" || kind == "S")
+        return std::string(kind);
+    if (kind == "O")
+        return (!elem.empty() && (elem[0] == 'L' || elem[0] == '['))
+                   ? std::string(elem) : std::string("Ljava/lang/Object;");
+    if (elem == "F" || elem == "D") return std::string(elem);
+    return {};
+}
+
 }  // namespace dexkit::dad

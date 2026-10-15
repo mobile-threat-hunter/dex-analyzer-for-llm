@@ -237,19 +237,18 @@ public:
     }
 
     // ─── visit_astore: DAD writer.py:509 ─────────────────────────────────
-    void visit_astore(IRForm* array, IRForm* index, IRForm* rhs) override {
+    void visit_astore(IRForm* array, IRForm* index, IRForm* rhs,
+                      std::string_view kind) override {
         w_->WriteIndent();
         visit_ins(array);
         w_->Write("[");
         visit_ins(index);
         w_->Write("] = ");
-        // `dArr[i] = <raw-bits int const>` → the element type (array type minus
-        // one `[`) gives the F/D context.
+        // `dArr[i] = <raw-bits int const>` → `= 0.5`; dexllm#102: `flags[i] =
+        // true` (aput-boolean), `arr[i] = null` (aput-object).
         const std::string at = array ? array->get_type() : std::string();
-        const std::string_view comp =
-            (at.size() >= 2 && at[0] == '[') ? std::string_view(at).substr(1)
-                                             : std::string_view();
-        if (!emit_fp_const_typed(rhs, comp)) visit_ins(rhs);
+        if (!emit_const_at(ConstContext::Value, ArrayStorePositionType(kind, at), rhs))
+            visit_ins(rhs);
         w_->EndIns();
     }
 
@@ -261,7 +260,7 @@ public:
         w_->Write(".");
         w_->Write(name);
         w_->Write(" = ");
-        if (!emit_fp_const_typed(rhs, ftype)) visit_ins(rhs);
+        if (!emit_const_at(ConstContext::Value, ftype, rhs)) visit_ins(rhs);
         w_->EndIns();
     }
 
@@ -274,8 +273,9 @@ public:
         w_->Write(".");
         w_->Write(name);
         w_->Write(" = ");
-        // `this.doubleField = <raw-bits int const>` → `= 0.5`.
-        if (!emit_fp_const_typed(rhs, ftype)) visit_ins(rhs);
+        // `this.doubleField = <raw-bits int const>` → `= 0.5`; dexllm#102:
+        // `this.flag = true`, `this.listener = null`.
+        if (!emit_const_at(ConstContext::Value, ftype, rhs)) visit_ins(rhs);
         w_->EndIns();
     }
 
@@ -382,7 +382,9 @@ public:
                 w_->Write(")");
                 continue;
             }
-            if (!emit_fp_const_typed(args[i], pt)) visit_ins(args[i]);
+            // dexllm#102: an invocation context — Z / reference / F / D, and an
+            // explicit narrowing cast at a B / S / C parameter.
+            if (!emit_const_at(ConstContext::Argument, pt, args[i])) visit_ins(args[i]);
         }
         w_->Write(")");
         // dexllm#67 (beyond-DAD): an invoke-custom's bootstrap chain is a
@@ -420,52 +422,14 @@ public:
         // parity suites don't assert return emission; e2e improves where DAD
         // was invalid). Non-constant returns and type-matched returns fall
         // through to normal emission.
+        // One rule for every typed position: `ConstantAt` (dexllm#102), shared
+        // with the AST's ReturnStatement.
         static const std::string kEmptyRet;
         const std::string& rt =
             w_->snap_ ? w_->snap_->meta.ret_type : kEmptyRet;
-        // Only a genuine INTEGER constant (const/const-wide → type I/J/…)
-        // carries a type-less raw value that the return type reinterprets. A
-        // typed reference constant — const-class (`Ljava/lang/Class;`, a Class
-        // literal) or const-string — is NOT null and must emit normally; its
-        // get_int_value() is 0, so without this guard a `Ljava/lang/Class;`
-        // method returning `Foo.class` would be wrongly rewritten to `null`.
-        auto is_int_const = [](const std::string& ct) {
-            return ct == "I" || ct == "J" || ct == "B" || ct == "S" ||
-                   ct == "C" || ct == "Z";
-        };
-        if (auto* c = dynamic_cast<Constant*>(arg);
-            c && c->is_const() && !rt.empty() && is_int_const(c->get_type())) {
-            const int64_t iv = c->get_int_value();
-            // boolean: Dalvik boolean is int 0/1
-            if (rt == "Z" && (iv == 0 || iv == 1)) {
-                w_->Write(iv ? "true" : "false");
-                w_->EndIns();
-                return;
-            }
-            // reference / array: a 0 in an object register is the null reference
-            if ((rt.front() == 'L' || rt.front() == '[') && iv == 0) {
-                w_->Write("null");
-                w_->EndIns();
-                return;
-            }
-            // float: the int holds the raw IEEE-754 binary32 bit pattern
-            if (rt == "F") {
-                const uint32_t bits = static_cast<uint32_t>(iv);
-                float f;
-                std::memcpy(&f, &bits, sizeof(f));
-                w_->Write(FormatFloatLiteral(f));
-                w_->EndIns();
-                return;
-            }
-            // double: the long holds the raw IEEE-754 binary64 bit pattern
-            if (rt == "D") {
-                const uint64_t bits = static_cast<uint64_t>(iv);
-                double d;
-                std::memcpy(&d, &bits, sizeof(d));
-                w_->Write(FormatDoubleLiteral(d));
-                w_->EndIns();
-                return;
-            }
+        if (emit_const_at(ConstContext::Value, rt, arg)) {
+            w_->EndIns();
+            return;
         }
         visit_ins(arg);
         w_->EndIns();
@@ -478,7 +442,10 @@ public:
         w_->Write("((");
         w_->Write(atype);
         w_->Write(") ");
-        visit_ins(arg);
+        // dexllm#102: a check-cast's target is always a reference type, so an
+        // untyped constant there is the null reference — `(Void[]) null`.
+        if (!emit_const_at(ConstContext::Value, "Ljava/lang/Object;", arg))
+            visit_ins(arg);
         w_->Write(")");
     }
 
@@ -576,35 +543,43 @@ public:
     void visit_throw(IRForm* ref) override {
         w_->WriteIndent();
         w_->Write("throw ");
-        visit_ins(ref);
+        // dexllm#102: only a reference is throwable — `throw null`.
+        if (!emit_const_at(ConstContext::Value, "Ljava/lang/Throwable;", ref))
+            visit_ins(ref);
         w_->EndIns();
     }
 
-    // Beyond-DAD: in a Dalvik float/double binary op (add/sub/mul/div/rem/cmp-
-    // float|double) BOTH operands are the same F/D type, so an integer-typed
-    // Constant operand here is the raw IEEE bit pattern (const-wide loads it as
-    // "J"; const as "I"). DAD emits the raw int — invalid VALUE (Java widens the
-    // long to double, e.g. `* 4611686018427387904` instead of `* 2.0`). When the
-    // SIBLING operand is F/D-typed, reinterpret the constant to the spec-correct
-    // literal. Same precedent/formatters as the return fix. Returns true if it
-    // emitted; the integer-type guard leaves typed-reference constants alone.
-    bool emit_fp_const_typed(IRForm* operand, std::string_view target) {
-        if (target != "F" && target != "D") return false;
-        auto* c = dynamic_cast<Constant*>(operand);
-        if (!c || !c->is_const()) return false;
-        const std::string ct = c->get_type();
-        if (ct != "I" && ct != "J" && ct != "B" && ct != "S" && ct != "C") {
-            return false;
-        }
-        const int64_t iv = c->get_int_value();
-        if (target == "F") {
-            const uint32_t bits = static_cast<uint32_t>(iv);
-            float f; std::memcpy(&f, &bits, sizeof(f));
-            w_->Write(FormatFloatLiteral(f));
-        } else {
-            const uint64_t bits = static_cast<uint64_t>(iv);
-            double d; std::memcpy(&d, &bits, sizeof(d));
-            w_->Write(FormatDoubleLiteral(d));
+    // Beyond-DAD (dexllm#102): render an untyped integer Constant in the
+    // declared type of the position that consumes it. WHAT it means is decided
+    // by `ConstantAt` (instruction.h) — the one definition the AST emitter
+    // shares; this only spells the answer. Returns true if it emitted.
+    bool emit_const_at(ConstContext ctx, std::string_view target,
+                       IRForm* operand) {
+        const auto lit = ConstantAt(ctx, target, operand);
+        if (!lit) return false;
+        using K = ConstLiteral::Kind;
+        switch (lit->kind) {
+            case K::Bool: w_->Write(lit->raw ? "true" : "false"); break;
+            case K::Null: w_->Write("null"); break;
+            case K::Float: {
+                const uint32_t bits = static_cast<uint32_t>(lit->raw);
+                float f; std::memcpy(&f, &bits, sizeof(f));
+                w_->Write(FormatFloatLiteral(f));
+                break;
+            }
+            case K::Double: {
+                const uint64_t bits = static_cast<uint64_t>(lit->raw);
+                double d; std::memcpy(&d, &bits, sizeof(d));
+                w_->Write(FormatDoubleLiteral(d));
+                break;
+            }
+            case K::NarrowCast:
+                // the spelling visit_cast gives a CastExpression: `((char) 125)`
+                w_->Write(lit->narrow == 'C' ? "((char) "
+                          : lit->narrow == 'B' ? "((byte) " : "((short) ");
+                w_->Write(std::to_string(lit->raw));
+                w_->Write(")");
+                break;
         }
         return true;
     }
@@ -619,7 +594,7 @@ public:
                 w_->Write(*b ? "true" : "false");
                 return;
             }
-            if (!emit_fp_const_typed(a, etype)) visit_ins(a);
+            if (!emit_const_at(ConstContext::Operand, etype, a)) visit_ins(a);
         };
         w_->Write("(");
         operand(arg1);
@@ -645,11 +620,11 @@ public:
     }
     void visit_cond_expression(std::string_view op, std::string_view etype,
                                 IRForm* arg1, IRForm* arg2) override {
-        if (!emit_fp_const_typed(arg1, etype)) visit_ins(arg1);
+        if (!emit_const_at(ConstContext::Operand, etype, arg1)) visit_ins(arg1);
         w_->Write(" ");
         w_->Write(op);
         w_->Write(" ");
-        if (!emit_fp_const_typed(arg2, etype)) visit_ins(arg2);
+        if (!emit_const_at(ConstContext::Operand, etype, arg2)) visit_ins(arg2);
     }
     void visit_condz_expression(std::string_view op, IRForm* arg) override {
         // DAD writer.py:727-730 — if condz wraps a BinaryCompExpression (long
@@ -698,13 +673,15 @@ private:
 
     void end_ins_or_noop() { if (!w_->skip_) w_->EndIns(); }
 
-    void write_ind_visit_end(IRForm* lhs, std::string_view sep, IRForm* rhs = nullptr) {
+    void write_ind_visit_end(IRForm* lhs, std::string_view sep, IRForm* rhs = nullptr,
+                             ConstContext ctx = ConstContext::Operand) {
         w_->WriteIndent();
         visit_ins(lhs);
         w_->Write(sep);
-        // `double v = <raw-bits int const>` → `double v = 0.5`: when assigning to
-        // an F/D-typed lhs, reinterpret a raw-IEEE-bits integer constant rhs.
-        if (rhs && !(lhs && emit_fp_const_typed(rhs, lhs->get_type()))) {
+        // `double v = <raw-bits int const>` → `double v = 0.5`: the lhs type is
+        // the position's type (dexllm#102 — and in a Value context `boolean v =
+        // true`, `Foo v = null`).
+        if (rhs && !(lhs && emit_const_at(ctx, lhs->get_type(), rhs))) {
             visit_ins(rhs);
         }
         w_->EndIns();
@@ -737,56 +714,25 @@ private:
                 // as in visit_binary_expression and the AST.
                 if (auto b = BitwiseBoolConstant(bin->op(), bin->get_type(), arg2))
                     w_->Write(*b ? "true" : "false");
-                else if (!emit_fp_const_typed(arg2, bin->get_type())) visit_ins(arg2);
+                else if (!emit_const_at(ConstContext::Operand, bin->get_type(), arg2))
+                    visit_ins(arg2);
                 w_->EndIns();
                 return;
             }
         }
-        // Beyond-DAD: a genuine integer Constant 0 assigned to a REFERENCE lhs
-        // is the null reference (Dalvik 0 in an object register) — render
-        // `lhs = null`, not the uncompilable `lhs = 0`. Same integer-constant
-        // guard as visit_return (a typed reference constant — const-class /
-        // const-string — is NOT null and emits normally; its get_int_value() is
-        // 0). Mirrors the return-literal null fix in the assignment position;
-        // surfaces once a reference lhs is correctly typed (e.g. the
-        // FixInitResultTypes new-array/new-instance fix) where DAD emitted `= 0`.
-        // A ThisParam lhs is NOT a local: `this = 0` is the pre-existing DAD
-        // this-slot-reuse corruption (assignment to `this`, already invalid) —
-        // leave it DAD-faithful rather than silently diverging to `this = null`.
-        if (lhs && !dynamic_cast<ThisParam*>(lhs)) {
-            auto is_int_const = [](const std::string& ct) {
-                return ct == "I" || ct == "J" || ct == "B" || ct == "S" ||
-                       ct == "C" || ct == "Z";
-            };
-            const std::string lt = lhs->get_type();
-            if (auto* c = dynamic_cast<Constant*>(rhs);
-                c && c->is_const() && is_int_const(c->get_type())) {
-                const auto v = c->get_int_value();
-                if (v == 0 && !lt.empty() &&
-                    (lt.front() == 'L' || lt.front() == '[')) {
-                    w_->WriteIndent();
-                    visit_ins(lhs);
-                    w_->Write(" = null");
-                    w_->EndIns();
-                    return;
-                }
-                // Beyond-DAD: the const* opcode builds an INTEGER-typed value, so
-                // a `boolean` (Z) lhs assigned it renders the uncompilable `v = 0`
-                // — but a Z register holds only the boolean 0/1, so it is the
-                // literal `false`/`true` (same const-typed-int precedent as the
-                // reference→null case above and the `return false` fix; a genuine
-                // boolean/int conflation whose Z type is itself mistyped is no
-                // worse than DAD's `= 0`, and is left untouched by the type pass).
-                if (lt == "Z" && (v == 0 || v == 1)) {
-                    w_->WriteIndent();
-                    visit_ins(lhs);
-                    w_->Write(v == 1 ? " = true" : " = false");
-                    w_->EndIns();
-                    return;
-                }
-            }
-        }
-        write_ind_visit_end(lhs, " = ", rhs);
+        // Beyond-DAD: the lhs's type is the position's type for an untyped
+        // integer constant — `Foo v = null` (a Dalvik 0 in an object register),
+        // `boolean v = true` (a Z register holds only 0/1), `double v = 0.5`
+        // (raw bits). One rule for every position: `ConstantAt` (dexllm#102),
+        // which the AST's typed_rhs_expr shares. Surfaces where a type pass has
+        // correctly typed the lhs (FixInitResultTypes, the cascade, dexllm#86 /
+        // #94) and DAD emitted `= 0`. A ThisParam lhs is NOT a local: `this = 0`
+        // is the pre-existing DAD this-slot-reuse corruption (assignment to
+        // `this`, already invalid) — kept DAD-faithful (Operand context: F/D
+        // only) rather than silently diverging to `this = null`.
+        write_ind_visit_end(lhs, " = ", rhs,
+                            (lhs && !dynamic_cast<ThisParam*>(lhs))
+                                ? ConstContext::Value : ConstContext::Operand);
     }
 
     static IRForm* MapGet(const IRForm* owner, const std::string& key) {

@@ -439,7 +439,8 @@ pass risks the whole-corpus output. So:
   constant, which is exactly right for a reference — an int producer proves the
   value is not one — and exactly backwards for a boolean, since Dalvik has no
   boolean type and `const/4 v,#1` IS how a `true` is written. So `Z` needs a
-  channel of its own with the opposite proof: `bool_ret_vids` +
+  channel of its own with the opposite proof: `bool_ret_vids` (now
+  `bool_use_vids`, dexllm#102) +
   `all_defs_boolean_valued`, where a 0/1 constant is evidence FOR rather than
   against.
 

@@ -89,7 +89,10 @@ def test_the_argument_list_comes_from_the_call_site_proto() -> None:
     # while three real arguments became `unknownType v` on both fixtures — the
     # last slot was unasserted at every arity. The values below come from the
     # fixture's own consts (`const-wide 2.2`, `const/4 1`, `const/4 0`).
-    assert arg_lists[0] == ['"a"', "2.2000000000000002", "1", "0", "1"], calls[0]
+    # slot 3 is `Ljava/lang/Object;` in the CALL-SITE proto, so the 0 there is
+    # the null reference (dexllm#102) — the slot's type is read from the same
+    # proto this test exists to pin.
+    assert arg_lists[0] == ['"a"', "2.2000000000000002", "1", "null", "1"], calls[0]
     assert arg_lists[1] == ["2.2000000000000002", "1"], calls[1]
     assert arg_lists[2] == ['"a"', "2.2000000000000002", "1"], calls[2]
 

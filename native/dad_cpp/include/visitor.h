@@ -83,7 +83,8 @@ public:
     virtual void visit_move(IRForm* /*lhs*/, IRForm* /*rhs*/)       {}
     virtual void visit_move_result(IRForm* /*lhs*/, IRForm* /*rhs*/) {}
     virtual void visit_astore(IRForm* /*array*/, IRForm* /*index*/,
-                              IRForm* /*rhs*/)                       {}
+                              IRForm* /*rhs*/,
+                              std::string_view /*kind*/ = {})        {}
     virtual void visit_put_static(std::string_view /*cls*/,
                                   std::string_view /*name*/,
                                   std::string_view /*ftype*/,

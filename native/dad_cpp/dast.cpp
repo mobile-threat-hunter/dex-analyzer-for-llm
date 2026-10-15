@@ -764,48 +764,20 @@ AstValue JSONWriter::ins_to_stmt(IRForm* op, bool is_ctor) {
         AstValue expr = AstValue::Null();
         if (r->arg()) {
             if (auto* a = MapGet(r, *r->arg())) {
-                // Beyond-DAD: mirror writer.cpp visit_return so the AST agrees
-                // with the text path. A const* return value is integer-typed;
-                // the declared return type is the truth. Emit the type-correct
-                // Literal (Z→bool, reference→null, F/D→IEEE literal), gated on a
-                // genuine integer constant so const-class / const-string (typed
-                // references whose get_int_value() is 0) are NOT nulled.
-                auto* c = dynamic_cast<Constant*>(a);
-                auto is_int_const = [](const std::string& ct) {
-                    return ct == "I" || ct == "J" || ct == "B" || ct == "S" ||
-                           ct == "C" || ct == "Z";
-                };
-                const std::string& rt = snap_->meta.ret_type;
-                if (c && c->is_const() && !rt.empty() &&
-                    is_int_const(c->get_type())) {
-                    const int64_t iv = c->get_int_value();
-                    if (rt == "Z" && (iv == 0 || iv == 1)) {
-                        expr = LiteralBool(iv != 0);
-                    } else if ((rt.front() == 'L' || rt.front() == '[') &&
-                               iv == 0) {
-                        expr = LiteralNull();
-                    } else if (rt == "F") {
-                        const uint32_t bits = static_cast<uint32_t>(iv);
-                        float f;
-                        std::memcpy(&f, &bits, sizeof(f));
-                        expr = LiteralFloatChecked(f);
-                    } else if (rt == "D") {
-                        const uint64_t bits = static_cast<uint64_t>(iv);
-                        double d;
-                        std::memcpy(&d, &bits, sizeof(d));
-                        expr = LiteralDoubleChecked(d);
-                    } else {
-                        expr = visit_expr(a);
-                    }
-                } else {
-                    expr = visit_expr(a);
-                }
+                // Beyond-DAD: the declared return type is the position's type
+                // for an untyped const* value — the one rule `ConstantAt`
+                // (dexllm#102) the text Writer's visit_return shares.
+                expr = visit_const_at(ConstContext::Value,
+                                      snap_->meta.ret_type, a);
             }
         }
         return ReturnStmt(std::move(expr));
     }
     if (auto* t = dynamic_cast<ThrowExpression*>(op)) {
-        return ThrowStmt(visit_expr(MapGet(t, t->ref_id())));
+        // dexllm#102: only a reference is throwable — `throw null`.
+        return ThrowStmt(visit_const_at(ConstContext::Value,
+                                        "Ljava/lang/Throwable;",
+                                        MapGet(t, t->ref_id())));
     }
     if (dynamic_cast<NopExpression*>(op)) return AstValue::Null();
 
@@ -873,7 +845,9 @@ AstValue JSONWriter::write_inplace_if_possible(IRForm* lhs, IRForm* rhs) {
             if (auto b = BitwiseBoolConstant(bop, bin->get_type(), exp_rhs))
                 return Assignment(visit_expr(lhs), LiteralBool(*b), bop);
             return Assignment(visit_expr(lhs),
-                              visit_expr_fp_typed(exp_rhs, bin->get_type()), bop);
+                              visit_const_at(ConstContext::Operand,
+                                             bin->get_type(), exp_rhs),
+                              bop);
         }
     }
     // The rhs adjusted to the LHS type context (null / boolean / F-D), shared
@@ -890,43 +864,36 @@ AstValue JSONWriter::write_inplace_if_possible(IRForm* lhs, IRForm* rhs) {
 // A ThisParam lhs (the pre-existing DAD this-slot-reuse corruption) is kept
 // DAD-faithful rather than diverging to `this = null`.
 AstValue JSONWriter::typed_rhs_expr(IRForm* lhs, IRForm* rhs) {
-    if (lhs && !dynamic_cast<ThisParam*>(lhs)) {
-        auto is_int_const = [](const std::string& ct) {
-            return ct == "I" || ct == "J" || ct == "B" || ct == "S" ||
-                   ct == "C" || ct == "Z";
-        };
-        const std::string lt = lhs->get_type();
-        if (auto* c = dynamic_cast<Constant*>(rhs);
-            c && c->is_const() && is_int_const(c->get_type())) {
-            const auto v = c->get_int_value();
-            if (v == 0 && !lt.empty() &&
-                (lt.front() == 'L' || lt.front() == '['))
-                return LiteralNull();
-            if (lt == "Z" && (v == 0 || v == 1))
-                return LiteralBool(v == 1);
-        }
-    }
-    return visit_expr_fp_typed(rhs, lhs ? lhs->get_type()
-                                        : std::string_view());
+    const bool local = lhs && !dynamic_cast<ThisParam*>(lhs);
+    return visit_const_at(local ? ConstContext::Value : ConstContext::Operand,
+                          lhs ? lhs->get_type() : std::string_view(), rhs);
 }
 
-AstValue JSONWriter::visit_expr_fp_typed(IRForm* operand,
-                                         std::string_view target) {
-    if (operand && (target == "F" || target == "D")) {
-        if (auto* c = dynamic_cast<Constant*>(operand); c && c->is_const()) {
-            const std::string ct = c->get_type();
-            if (ct == "I" || ct == "J" || ct == "B" || ct == "S" || ct == "C") {
-                const int64_t iv = c->get_int_value();
-                if (target == "F") {
-                    const uint32_t bits = static_cast<uint32_t>(iv);
-                    float f; std::memcpy(&f, &bits, sizeof(f));
-                    return LiteralFloatChecked(f);
-                }
-                const uint64_t bits = static_cast<uint64_t>(iv);
-                double d; std::memcpy(&d, &bits, sizeof(d));
-                return LiteralDoubleChecked(d);
-            }
+// Beyond-DAD (dexllm#102): an untyped integer Constant in the declared type of
+// the position that consumes it. WHAT it means is `ConstantAt` (instruction.h),
+// the definition writer.cpp emit_const_at shares; this only builds the node.
+AstValue JSONWriter::visit_const_at(ConstContext ctx, std::string_view target,
+                                    IRForm* operand) {
+    const auto lit = ConstantAt(ctx, target, operand);
+    if (!lit) return visit_expr(operand);
+    using K = ConstLiteral::Kind;
+    switch (lit->kind) {
+        case K::Bool: return LiteralBool(lit->raw != 0);
+        case K::Null: return LiteralNull();
+        case K::Float: {
+            const uint32_t bits = static_cast<uint32_t>(lit->raw);
+            float f; std::memcpy(&f, &bits, sizeof(f));
+            return LiteralFloatChecked(f);
         }
+        case K::Double: {
+            const uint64_t bits = static_cast<uint64_t>(lit->raw);
+            double d; std::memcpy(&d, &bits, sizeof(d));
+            return LiteralDoubleChecked(d);
+        }
+        case K::NarrowCast:
+            // the node a CastExpression builds: `((char) 125)`
+            return Parenthesis(Cast(ParseDescriptor(std::string(1, lit->narrow)),
+                                    LiteralInt(lit->raw)));
     }
     return visit_expr(operand);
 }
@@ -951,11 +918,11 @@ AstValue JSONWriter::visit_expr(IRForm* op) {
         AstValue arr = ArrayAccess(visit_expr(array),
                                    visit_expr(MapGet(x, x->index_id())));
         const std::string at = array ? array->get_type() : std::string();
-        const std::string_view comp =
-            (at.size() >= 2 && at[0] == '[') ? std::string_view(at).substr(1)
-                                             : std::string_view();
+        // dexllm#102: the aput opcode's element kind, else the array's F/D.
         return Assignment(std::move(arr),
-                          visit_expr_fp_typed(MapGet(x, x->rhs_id()), comp));
+                          visit_const_at(ConstContext::Value,
+                                         ArrayStorePositionType(x->type, at),
+                                         MapGet(x, x->rhs_id())));
     }
     if (auto* x = dynamic_cast<AssignExpression*>(op)) {
         auto lhs_id = x->GetLhsId();
@@ -978,22 +945,25 @@ AstValue JSONWriter::visit_expr(IRForm* op) {
         auto operand = [&](IRForm* a) -> AstValue {
             if (auto b = BitwiseBoolConstant(x->op(), et, a))
                 return LiteralBool(*b);
-            return visit_expr_fp_typed(a, et);
+            return visit_const_at(ConstContext::Operand, et, a);
         };
         AstValue expr = BinaryInfix(x->op(), operand(a1), operand(a2));
         if (!dynamic_cast<BinaryCompExpression*>(op)) expr = Parenthesis(std::move(expr));
         return expr;
     }
     if (auto* x = dynamic_cast<CheckCastExpression*>(op)) {
+        // dexllm#102: a check-cast target is a reference — `(Void[]) null`.
         return Parenthesis(Cast(ParseDescriptor(x->clsdesc()),
-                                visit_expr(MapGet(x, x->arg_id()))));
+                                visit_const_at(ConstContext::Value,
+                                               "Ljava/lang/Object;",
+                                               MapGet(x, x->arg_id()))));
     }
     if (auto* x = dynamic_cast<ConditionalExpression*>(op)) {
         const std::string et = x->get_type();
         IRForm* a1 = MapGet(x, x->arg1_id());
         IRForm* a2 = MapGet(x, x->arg2_id());
-        return BinaryInfix(x->op(), visit_expr_fp_typed(a1, et),
-                           visit_expr_fp_typed(a2, et));
+        return BinaryInfix(x->op(), visit_const_at(ConstContext::Operand, et, a1),
+                           visit_const_at(ConstContext::Operand, et, a2));
     }
     if (auto* x = dynamic_cast<ConditionalZExpression*>(op)) {
         IRForm* arg = MapGet(x, x->arg_id());
@@ -1058,7 +1028,8 @@ AstValue JSONWriter::visit_expr(IRForm* op) {
         std::array<std::string, 3> tr{StripL(x->clsdesc()), x->name(), x->atype()};
         AstValue lhs = FieldAccess(TripleAV(tr), visit_expr(MapGet(x, x->lhs_id())));
         return Assignment(std::move(lhs),
-                          visit_expr_fp_typed(MapGet(x, x->rhs_id()), x->atype()));
+                          visit_const_at(ConstContext::Value, x->atype(),
+                                         MapGet(x, x->rhs_id())));
     }
     if (auto* x = dynamic_cast<InvokeInstruction*>(op)) {
         IRForm* base = MapGet(x, x->base());
@@ -1068,7 +1039,10 @@ AstValue JSONWriter::visit_expr(IRForm* op) {
         for (size_t i = 0; i < argids.size(); ++i) {
             const std::string_view target =
                 i < pt.size() ? std::string_view(pt[i]) : std::string_view();
-            params.push_back(visit_expr_fp_typed(MapGet(x, argids[i]), target));
+            // dexllm#102: an invocation context (Z / reference / F / D, and a
+            // narrowing cast at a B / S / C parameter).
+            params.push_back(visit_const_at(ConstContext::Argument, target,
+                                            MapGet(x, argids[i])));
         }
         // DAD's op.triple comes from androguard get_triple(): triple[0] is the
         // internal class name (no L;). Our InvokeInstruction stores the raw
@@ -1132,7 +1106,8 @@ AstValue JSONWriter::visit_expr(IRForm* op) {
         std::array<std::string, 3> tr{StripL(x->clsdesc()), x->name(), x->ftype()};
         AstValue lhs = FieldAccess(TripleAV(tr), ParseDescriptor(x->clsdesc()));
         return Assignment(std::move(lhs),
-                          visit_expr_fp_typed(MapGet(x, x->rhs_id()), x->ftype()));
+                          visit_const_at(ConstContext::Value, x->ftype(),
+                                         MapGet(x, x->rhs_id())));
     }
     if (auto* x = dynamic_cast<SwitchExpression*>(op)) {
         return visit_expr(MapGet(x, x->src_id()));

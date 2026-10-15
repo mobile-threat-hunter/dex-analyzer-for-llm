@@ -12,6 +12,7 @@
 #include <memory>
 #include <map>
 #include <set>
+#include <tuple>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -486,6 +487,22 @@ static void FixAllocationResultTypes(Graph& graph) {
 // reference class (prim→ref mirror), or a too-narrow primitive → the def width.
 // Two-phase classify-then-apply; every re-type is def-anchored and, where it
 // could be ambiguous, use-corroborated. See docs/type-inference-design.md.
+// dexllm#94 / #102 — is the value `vid` holds at instruction location `loc`
+// ONE constant: exactly one def reaches that use, and its rhs is a Constant?
+// RegisterPropagation then renders the literal there, so the use says nothing
+// about the version's type (ART types a register per instruction). Shared by
+// the narrow-integral dataflow (#94) and the `Z` propagation guard (#102).
+static bool OnlyAConstantReaches(Graph& graph, const ChainMap* ud,
+                                 const std::string& vid, int loc) {
+    if (!ud) return false;
+    auto it = ud->find(VarLocKey{vid, loc});
+    if (it == ud->end() || it->second.size() != 1) return false;
+    IRFormPtr d = graph.get_ins_from_loc(it->second[0]);
+    if (!d) return false;
+    auto r = d->get_rhs();
+    return !r.empty() && r[0] && dynamic_cast<Constant*>(r[0].get());
+}
+
 static void InferCascadeTypes(
     Graph& graph, const std::string& ret_type,
     const std::unordered_map<std::string, std::string>& declared_params,
@@ -550,13 +567,16 @@ static void InferCascadeTypes(
     // `==`/`!=` ConditionalExpression operand pairs — resolved in a post-pass
     // (once defs_of is complete): if one operand is a nonzero int constant,
     // the other is proven a primitive and joins int_use_vids.
-    std::vector<std::pair<std::string, std::string>> eqne_pairs;
-    // dexllm#86 — vids RETURNED by a method whose declared return type is `Z`.
-    // A use-bound BOOLEAN source, kept SEPARATE from the reference machinery
-    // below (`arg_type`/`store_type`, which `record` gates on `is_ref`) because
-    // the two need OPPOSITE soundness arguments — see the `Z` branch in the
-    // classification loop.
-    std::unordered_set<std::string> bool_ret_vids;
+    std::vector<std::tuple<std::string, std::string, IRForm*>> eqne_pairs;
+    // dexllm#86 / #102 — vids that land in a position whose DECLARED type is
+    // `Z`: returned by a `Z` method (#86), passed at a `Z` parameter, stored
+    // into a `Z` field, or stored by `aput-boolean` (#102). A use-bound BOOLEAN
+    // source, kept SEPARATE from the reference machinery below (`arg_type` /
+    // `store_type`, which `record` gates on `is_ref`) because the two need
+    // OPPOSITE soundness arguments — see the `Z` branch in the classification
+    // loop. These are the same positions `ConstantAt` (instruction.h) types an
+    // untyped CONSTANT at; this set is the same fact for a VARIABLE.
+    std::unordered_set<std::string> bool_use_vids;
     // dexllm#86 — vids used where a NON-BOOLEAN PRIMITIVE is required: an invoke
     // argument at an `I`/`J`/`F`/`D`/`B`/`S`/`C` parameter, the value stored by
     // an `iput`/`sput` into such a field, and the value stored by a non-boolean
@@ -588,6 +608,11 @@ static void InferCascadeTypes(
     // counts as such a use stays in one place.
     IRForm* cur_ins = nullptr;
     std::unordered_map<std::string, std::vector<IRForm*>> num_pos;
+    // dexllm#102 — the same for an `int_use_vids` use (arithmetic, ordered
+    // comparison, index, `== <nonzero>`), so the `Z` branch can ask, as #94's
+    // `z_pos` does, whether a numeric use is reached by anything but a lone
+    // constant. Every insert into the three numeric-use sets records a position.
+    std::unordered_map<std::string, std::vector<IRForm*>> int_pos;
     auto add_req = [&](const std::string& v) {
         int_required_vids.insert(v);
         if (!v.empty() && cur_ins) num_pos[v].push_back(cur_ins);
@@ -673,6 +698,8 @@ static void InferCascadeTypes(
                     if (is_ref(pt[i])) note_ref_arg(a[i], pt[i]);
                     // dexllm#86 — a NON-BOOLEAN primitive parameter position.
                     else if (is_prim_nonbool(pt[i])) add_prim(a[i]);
+                    // dexllm#102 — a `Z` parameter position.
+                    else if (pt[i] == "Z") bool_use_vids.insert(a[i]);
                 }
         } else if (auto* ie = dynamic_cast<InstanceExpression*>(f)) {
             if (!ie->arg_id().empty()) object_vids.insert(ie->arg_id());
@@ -683,11 +710,15 @@ static void InferCascadeTypes(
             note_ref_store(ii->rhs_id(), ii->atype());
             if (!ii->rhs_id().empty() && is_prim_nonbool(ii->atype()))
                 add_prim(ii->rhs_id());   // dexllm#86
+            if (!ii->rhs_id().empty() && ii->atype() == "Z")
+                bool_use_vids.insert(ii->rhs_id());   // dexllm#102
         } else if (auto* si = dynamic_cast<StaticInstruction*>(f)) {
             // sput `Cls.field = rhs`: the stored value is pinned to the field type.
             note_ref_store(si->rhs_id(), si->ftype());
             if (!si->rhs_id().empty() && is_prim_nonbool(si->ftype()))
                 add_prim(si->rhs_id());   // dexllm#86
+            if (!si->rhs_id().empty() && si->ftype() == "Z")
+                bool_use_vids.insert(si->rhs_id());   // dexllm#102
         } else if (auto* te = dynamic_cast<ThrowExpression*>(f)) {
             // `throw v`: v is a Throwable in verified Dalvik (only a reference is
             // throwable). Cast to ThrowExpression SPECIFICALLY — a sibling
@@ -708,13 +739,22 @@ static void InferCascadeTypes(
                 // return v; }`. Record it on its own channel; the branch that
                 // consumes it carries the boolean-specific proof.
                 if (ret_type == "Z" && !ret->arg()->empty())
-                    bool_ret_vids.insert(*ret->arg());
+                    bool_use_vids.insert(*ret->arg());
+                // dexllm#102 review — and a NUMBER return type is a numeric
+                // position, as #94's `z_pos` already says: once a `Z` parameter
+                // seeds a flag, `boolean v … return v;` in an `int` method is
+                // the same invalid Java the `Z` return fixed in reverse.
+                else if (is_prim_nonbool(ret_type) && !ret->arg()->empty())
+                    add_prim(*ret->arg());
             }
         }
     };
     auto note_int = [&](IRForm* f) {
         auto add = [&](const std::string& v) {
-            if (!v.empty()) int_use_vids.insert(v); };
+            if (v.empty()) return;
+            int_use_vids.insert(v);
+            if (cur_ins) int_pos[v].push_back(cur_ins);   // dexllm#102
+        };
         // A UnaryExpression covers CastExpression (a prim cast); a reference
         // check-cast is a separate CheckCastExpression, so this stays int.
         if (auto* be = dynamic_cast<BinaryExpression*>(f)) {
@@ -743,6 +783,7 @@ static void InferCascadeTypes(
                 const std::string& m = as->get_type();
                 if (m.empty() || m == "W" || m == "B" || m == "C" || m == "S")
                     add_prim(as->rhs_id());
+                else if (m == "Z") bool_use_vids.insert(as->rhs_id());  // #102
             }
         } else if (auto* fa = dynamic_cast<FilledArrayExpression*>(f)) {
             // dexllm#86 — `new int[]{v, …}`.  Each ELEMENT sits at the array's
@@ -799,7 +840,7 @@ static void InferCascadeTypes(
                 // reference is `==` only to null or another reference, never a
                 // nonzero literal). We cannot check the sibling's def here
                 // (defs_of is still being built) — defer to a post-pass.
-                eqne_pairs.emplace_back(ce->arg1_id(), ce->arg2_id());
+                eqne_pairs.emplace_back(ce->arg1_id(), ce->arg2_id(), cur_ins);
             }
         }
     };
@@ -1045,9 +1086,15 @@ static void InferCascadeTypes(
         }
         return has_nonzero;
     };
-    for (auto& [a, b] : eqne_pairs) {
-        if (!a.empty() && is_nonzero_int_const(b)) int_use_vids.insert(a);
-        if (!b.empty() && is_nonzero_int_const(a)) int_use_vids.insert(b);
+    for (auto& [a, b, at] : eqne_pairs) {
+        if (!a.empty() && is_nonzero_int_const(b)) {
+            int_use_vids.insert(a);
+            if (at) int_pos[a].push_back(at);
+        }
+        if (!b.empty() && is_nonzero_int_const(a)) {
+            int_use_vids.insert(b);
+            if (at) int_pos[b].push_back(at);
+        }
     }
 
     // Ground-truth of a def's rhs: 'R' ref producer, 'P' prim forcer,
@@ -1448,16 +1495,127 @@ static void InferCascadeTypes(
         auto it = declared_params.find(vid);
         return it != declared_params.end() && it->second == "Z";
     };
+    // MEMOISED per version (dexllm#102 review): the answer is a function of the
+    // version alone (`seen` starts at {vid} on every call), and #102 asks it
+    // once per seed, once per component member and once per propagation step —
+    // so a crafted move chain of N flags re-walked each prefix O(N) times and
+    // ran `bv_budget` dry part-way, leaving a component half typed. A verdict
+    // reached on an exhausted budget is cached too, so every later reader of
+    // the same version gets the SAME (refusing) answer.
+    std::unordered_map<std::string, bool> bv_memo;
     auto all_defs_boolean_valued = [&](const std::string& vid,
                                        const std::vector<IRForm*>& dvec) -> bool {
-        bool ground = false;
+        if (auto m = bv_memo.find(vid); m != bv_memo.end()) return m->second;
+        bool ground = false, ok = true;
         for (IRForm* d : dvec) {
             auto dr = d->get_rhs();
-            if (dr.empty() || !dr[0]) return false;
             std::set<std::string> seen{vid};
-            if (!is_bool_valued(dr[0].get(), seen, ground)) return false;
+            if (dr.empty() || !dr[0] ||
+                !is_bool_valued(dr[0].get(), seen, ground)) { ok = false; break; }
         }
-        return ground;
+        return bv_memo[vid] = ok && ground;
+    };
+
+    // dexllm#102 — the MOVE COMPONENT of a `Z` seed. `boolean v0 … int v2;
+    // v2 = v0;` does not compile, and neither does `boolean v1 = v2` with an int
+    // `v2`, so both ends of every move must end the same type: a seed is
+    // re-typed only when its whole move-connected component can be boolean, and
+    // then the whole component is. Found when #102 widened the `Z` sources:
+    // `Boolean.valueOf(v1)` made the flag `v1` a seed, the propagation reached
+    // its source `v0`, and `v0` was also moved into the int index `v2`
+    // (int-reuse.dex `sharedConst`, the `SwitchCompat.stopDrag` shape); the
+    // other direction was `CoordinatorLayout.offsetChildToAnchor`'s
+    // `int v0_5 = v14`. #86's propagation went backwards only and LEFT a source
+    // that failed a guard, accepting `boolean seed = intSource`; the component
+    // rule refuses that seed instead.
+    //
+    // A move that only one CONSTANT reaches is not such a flow: RegisterPropa-
+    // gation renders the literal there (`v0_1 = 1`), not the source version —
+    // bool-return.dex `viaLocalConflated`, the #94 `OnlyAConstantReaches` rule.
+    std::unordered_map<IRForm*, int> mloc;
+    for (NodeBase* n : graph.nodes)
+        for (auto& [loc, ins] : LocWithIns(n))
+            if (ins) mloc[ins.get()] = loc;
+    std::unordered_map<std::string, std::vector<std::string>> move_dests;
+    {
+        for (auto& [dvid, dv] : defs_of)
+            for (IRForm* d : dv) {
+                if (!dynamic_cast<MoveExpression*>(d)) continue;
+                auto dr = d->get_rhs();
+                if (dr.empty() || !dr[0] || !dr[0]->is_ident()) continue;
+                const std::string sid = dr[0]->Vid();
+                auto ml = mloc.find(d);
+                if (ml != mloc.end() &&
+                    OnlyAConstantReaches(graph, ud, sid, ml->second))
+                    continue;
+                move_dests[sid].push_back(dvid);
+            }
+    }
+    // Is `v` used where Java needs a NUMBER, at a position anything but one
+    // constant reaches? A use only a lone constant reaches renders that
+    // constant (RegisterPropagation), so it says nothing about the version's
+    // type — #94's `z_pos` rule, read here through the same
+    // `OnlyAConstantReaches`. `const/4 v0, #1` compared `p6 >= v0`, passed at
+    // `obtainUpdateOp(I…)` and later moved into the returned flag
+    // (AdapterHelper.onItemRangeInserted) is a boolean whose int uses are all
+    // the literal `1`. A use recorded without a position refuses.
+    auto numeric_use = [&](const std::string& v) -> bool {
+        if (!int_use_vids.count(v) && !int_required_vids.count(v) &&
+            !prim_use_vids.count(v))
+            return false;
+        bool any = false;
+        for (auto* pm : {&int_pos, &num_pos})
+            if (auto it = pm->find(v); it != pm->end())
+                for (IRForm* at : it->second) {
+                    any = true;
+                    auto l = mloc.find(at);
+                    if (l == mloc.end() ||
+                        !OnlyAConstantReaches(graph, ud, v, l->second))
+                        return true;
+                }
+        return !any;
+    };
+    std::unordered_map<std::string, std::vector<std::string>> move_srcs;
+    for (auto& [src, dvs] : move_dests)
+        for (const std::string& d : dvs) move_srcs[d].push_back(src);
+    // Can the WHOLE move-connected component of `vid` be boolean? Every member
+    // must pass the guards the `Z` branch applies to its seed; a member that
+    // cannot (a non-boolean def, a numeric or object use, a reference or wide
+    // type) refuses the whole component, because typing any part of it `Z`
+    // leaves a move between a boolean and a number.
+    //
+    // The verdict is decided ONCE per component and recorded for EVERY member
+    // (dexllm#102 review): asking it per seed re-walked the same component for
+    // each of its members, and a verdict that depends on how much budget was
+    // left could then differ between two members of one component.
+    std::unordered_map<std::string, bool> comp_memo;
+    auto component_ok = [&](const std::string& vid) -> bool {
+        if (auto m = comp_memo.find(vid); m != comp_memo.end()) return m->second;
+        // membership first (cheap), then the guards over all of it
+        std::vector<std::string> members{vid};
+        std::unordered_set<std::string> seen{vid};
+        for (size_t i = 0; i < members.size(); ++i)
+            for (auto* adj : {&move_dests, &move_srcs})
+                if (auto it = adj->find(members[i]); it != adj->end())
+                    for (const std::string& n : it->second)
+                        if (seen.insert(n).second) members.push_back(n);
+        auto member_ok = [&](const std::string& v) -> bool {
+            if (numeric_use(v) || object_vids.count(v)) return false;
+            auto dv = defs_of.find(v);
+            if (dv == defs_of.end() || dv->second.empty()) return false;
+            auto vv = dv->second[0]->var_map.find(v);
+            if (vv == dv->second[0]->var_map.end() || !vv->second) return false;
+            const std::string t = vv->second->get_type();
+            if (t == "Z") return true;
+            if (!is_narrow_int(t)) return false;
+            if (dynamic_cast<ThisParam*>(vv->second.get())) return false;
+            if (!declared_param_is_boolean(v, vv->second.get())) return false;
+            return all_defs_boolean_valued(v, dv->second);
+        };
+        bool ok = members.size() <= 100000;           // work cap → refuse
+        for (size_t i = 0; ok && i < members.size(); ++i) ok = member_ok(members[i]);
+        for (const std::string& m : members) comp_memo[m] = ok;
+        return ok;
     };
 
     // dexllm#88 — is an rhs form a provably W-valued ("F"/"D") producer? The
@@ -1783,29 +1941,39 @@ static void InferCascadeTypes(
             // re-types).
             retypes.emplace_back(vit->second.get(), ref_use_type(vid));
         } else if (cur_prim && cur != "Z" && is_narrow_int(cur) &&
-                   bool_ret_vids.count(vid) &&
-                   !int_use_vids.count(vid) &&
-                   !int_required_vids.count(vid) &&
-                   !prim_use_vids.count(vid) &&
+                   bool_use_vids.count(vid) &&
+                   !numeric_use(vid) &&
                    !object_vids.count(vid) &&
                    !dynamic_cast<ThisParam*>(vit->second.get()) &&
                    declared_param_is_boolean(vid, vit->second.get()) &&
-                   all_defs_boolean_valued(vid, dvec)) {
-            // USE-BOUND int→Z (dexllm#86) — the RETURN TYPE as a constraint.
+                   all_defs_boolean_valued(vid, dvec) &&
+                   component_ok(vid)) {
+            // USE-BOUND int→Z (dexllm#86, sources widened by #102) — a
+            // DECLARED `Z` position as a constraint: a `Z` return (#86), a `Z`
+            // parameter, a `Z` field store, an `aput-boolean` value (#102).
             // Dalvik has no boolean, so every `const*` builds an int-typed
             // value and DAD's last-write typing leaves a boolean flag declared
-            // `int`; returning it from a `Z` method is uncompilable Java
-            // (`int` → `boolean` has no widening). Measured on the bundled
-            // corpus this is not an occasional slip: 57 of the 60 sites where a
-            // `boolean` method returns a VARIABLE declared it `int`.
+            // `int`; returning it from a `Z` method, or passing it at a `Z`
+            // parameter, is uncompilable Java (`int` → `boolean` has no
+            // widening). Measured on the bundled corpus this is not an
+            // occasional slip: 57 of the 60 sites where a `boolean` method
+            // returns a VARIABLE declared it `int` (#86), and 1,878 `int`
+            // locals passed at a `Z` parameter (#102).
             //
-            // The return position is the proof, exactly as a reference ARGUMENT
-            // is for the mirror branch above: in verified Dalvik `return v` in a
-            // `Z` method requires v to hold a boolean, so a version reaching one
-            // IS a boolean and its `int` type is a register-conflation artifact.
-            // The `record`/`ref_use_type` channel cannot carry this — it is
-            // gated on `is_ref`, by design, because every OTHER use-bound source
-            // pins a reference.
+            // The PROOF is the def-anchor below, not the position. #86 first
+            // said "in verified Dalvik `return v` in a `Z` method requires v to
+            // hold a boolean", and that is FALSE: ART checks only the CATEGORY
+            // at a narrow-integral parameter, field store or array store
+            // (method_verifier.cc VerifyInvocationArgsFromIterator `IsIntegral
+            // Types`, VerifyPrimitivePut), and its `return` explicitly takes an
+            // Integer for a boolean ("Compilers may ... use integer values for
+            // boolean ... return types"). What the position says is that JAVA
+            // needs a boolean there; that a boolean is what the register HOLDS
+            // is proven by `all_defs_boolean_valued` — every def a 0/1 constant
+            // or a `Z` producer — so the re-type is sound whatever the verifier
+            // allows. The `record`/`ref_use_type` channel cannot carry this — it
+            // is gated on `is_ref`, by design, because every OTHER use-bound
+            // source pins a reference.
             //
             // The anti-conflation guards are needed because a register genuinely
             // shared between a flag and an int satisfies neither type. THREE
@@ -1931,12 +2099,22 @@ static void InferCascadeTypes(
         while (!work.empty()) {
             const std::string cur_vid = work.back();
             work.pop_back();
-            auto dit = defs_of.find(cur_vid);
-            if (dit == defs_of.end()) continue;
-            for (IRForm* d : dit->second) {
-                auto dr = d->get_rhs();
-                if (dr.empty() || !dr[0] || !dr[0]->is_ident()) continue;
-                const std::string sid = dr[0]->Vid();
+            // the versions this one is moved FROM (backwards, #86) and, since
+            // dexllm#102, the versions it is moved INTO (forwards): both ends of
+            // a move must end the same type, or the move is `int v0 = v14` with
+            // a boolean `v14` (CoordinatorLayout.offsetChildToAnchor). A
+            // destination passes the same guards a source does; `component_ok`
+            // already refused a seed whose component holds any that cannot.
+            std::vector<std::string> nbrs;
+            if (auto dit = defs_of.find(cur_vid); dit != defs_of.end())
+                for (IRForm* d : dit->second) {
+                    auto dr = d->get_rhs();
+                    if (!dr.empty() && dr[0] && dr[0]->is_ident())
+                        nbrs.push_back(dr[0]->Vid());
+                }
+            if (auto mit = move_dests.find(cur_vid); mit != move_dests.end())
+                nbrs.insert(nbrs.end(), mit->second.begin(), mit->second.end());
+            for (const std::string& sid : nbrs) {
                 if (sid.empty() || zed.count(sid)) continue;
                 auto sdefs = defs_of.find(sid);
                 if (sdefs == defs_of.end() || sdefs->second.empty()) continue;
@@ -1944,8 +2122,7 @@ static void InferCascadeTypes(
                 if (svit == sdefs->second[0]->var_map.end() || !svit->second) continue;
                 const std::string st = svit->second->get_type();
                 if (st == "Z" || !is_narrow_int(st)) continue;
-                if (int_use_vids.count(sid) || int_required_vids.count(sid) ||
-                    prim_use_vids.count(sid) || object_vids.count(sid)) continue;
+                if (numeric_use(sid) || object_vids.count(sid)) continue;
                 if (dynamic_cast<ThisParam*>(svit->second.get())) continue;
                 if (!declared_param_is_boolean(sid, svit->second.get())) continue;
                 if (already.count(svit->second.get())) continue;
@@ -2399,15 +2576,9 @@ static void InferCascadeTypes(
         // `performShortcut(…, I)` and the same register later holding the
         // `Z` result that is returned (`ToolbarActionBar.onKeyShortcut`).
         auto lone_const_at = [&](const std::string& vid, IRForm* ins) {
-            if (!ud) return false;
             auto lit = loc_of.find(ins);
-            if (lit == loc_of.end()) return false;
-            auto it = ud->find(VarLocKey{vid, lit->second});
-            if (it == ud->end() || it->second.size() != 1) return false;
-            IRFormPtr d = graph.get_ins_from_loc(it->second[0]);
-            if (!d) return false;
-            auto r = d->get_rhs();
-            return !r.empty() && r[0] && dynamic_cast<Constant*>(r[0].get());
+            return lit != loc_of.end() &&
+                   OnlyAConstantReaches(graph, ud, vid, lit->second);
         };
         // The value of that lone constant, for the forward transfer.
         auto lone_const_value = [&](const std::string& vid,
@@ -2821,7 +2992,17 @@ static void InferCascadeTypes(
             const std::string st = r[0]->get_type();
             if (!is_prim_desc(st)) return {};
             if (agreed.empty()) agreed = st;
-            else if (st != agreed) return {};
+            else if (width_class(st) != width_class(agreed)) return {};
+            // dexllm#102: sources that agree on the CLASS but not the narrow
+            // type (a `Z` flag and an `I` constant) join to `I`, as ART's
+            // RegType::Merge does. Comparing exact strings here refused the
+            // `{I, Z}` pair, and a destination SplitVariables had left a stale
+            // `float` stayed one (Tx3gDecoder.decodeInitializationData:
+            // `float v3_25 = 0f` stored into a `boolean` field) once #102 typed
+            // one source `Z`. Nothing after this pass refines the `I` — the
+            // narrow-integral pass has already run — so the caller below
+            // decides `Z` itself when the destination is a boolean.
+            else if (st != agreed) agreed = "I";
         }
         if (agreed.empty() || !is_prim_desc(cur)) return {};
         if (width_class(agreed) == 'j' || width_class(agreed) == 'd') return {};
@@ -2837,8 +3018,31 @@ static void InferCascadeTypes(
                 auto wit = dvec[0]->var_map.find(vid);
                 if (wit != dvec[0]->var_map.end() && wit->second &&
                     !width_retyped.count(vid)) {
-                    const std::string w =
+                    std::string w =
                         move_width_type(dvec, wit->second->get_type());
+                    // dexllm#102 review: the joined `I` of a destination that is
+                    // a boolean (a `Z` use, no numeric/object use, every def
+                    // 0/1-valued) is `Z` — the `Z` branch could not see it,
+                    // because its type was still the stale wide one. Every
+                    // source must already BE `Z` or render as its literal (a
+                    // move only a constant reaches), so no `boolean d = intSrc`
+                    // move can result.
+                    if (w == "I" && bool_use_vids.count(vid) &&
+                        !numeric_use(vid) && !object_vids.count(vid) &&
+                        all_defs_boolean_valued(vid, dvec)) {
+                        bool srcs_ok = true;
+                        for (IRForm* d : dvec) {
+                            const std::string sid = d->get_rhs()[0]->Vid();
+                            auto md = move_dests.find(sid);
+                            const bool flows =
+                                md != move_dests.end() &&
+                                std::find(md->second.begin(), md->second.end(),
+                                          vid) != md->second.end();
+                            if (flows && d->get_rhs()[0]->get_type() != "Z")
+                                srcs_ok = false;
+                        }
+                        if (srcs_ok) w = "Z";
+                    }
                     if (!w.empty()) {
                         width_retyped.insert(vid);
                         wit->second->set_type(w);

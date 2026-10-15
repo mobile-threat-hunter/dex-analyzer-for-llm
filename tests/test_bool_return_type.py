@@ -612,14 +612,13 @@ def test_the_unreachable_guards_are_present_in_the_source():
     # did.  Whitespace is normalised so a re-wrap is not a false positive.
     branch = " ".join("""
         } else if (cur_prim && cur != "Z" && is_narrow_int(cur) &&
-                   bool_ret_vids.count(vid) &&
-                   !int_use_vids.count(vid) &&
-                   !int_required_vids.count(vid) &&
-                   !prim_use_vids.count(vid) &&
+                   bool_use_vids.count(vid) &&
+                   !numeric_use(vid) &&
                    !object_vids.count(vid) &&
                    !dynamic_cast<ThisParam*>(vit->second.get()) &&
                    declared_param_is_boolean(vid, vit->second.get()) &&
-                   all_defs_boolean_valued(vid, dvec)) {""".split())
+                   all_defs_boolean_valued(vid, dvec) &&
+                   component_ok(vid)) {""".split())
     assert branch in body, (
         "the Z branch's condition changed.  Every conjunct is a guard a review "
         "or a mutant put there; dropping one is a deliberate edit, so this "
@@ -628,14 +627,14 @@ def test_the_unreachable_guards_are_present_in_the_source():
 
     propagation = " ".join("""
                 if (st == "Z" || !is_narrow_int(st)) continue;
-                if (int_use_vids.count(sid) || int_required_vids.count(sid) ||
-                    prim_use_vids.count(sid) || object_vids.count(sid)) continue;
+                if (numeric_use(sid) || object_vids.count(sid)) continue;
                 if (dynamic_cast<ThisParam*>(svit->second.get())) continue;
                 if (!declared_param_is_boolean(sid, svit->second.get())) continue;
                 if (already.count(svit->second.get())) continue;
                 if (!all_defs_boolean_valued(sid, sdefs->second)) continue;""".split())
     assert propagation in body, (
-        "the backwards propagation's guards changed — it re-types versions the "
+        "the move-component propagation's guards changed (dexllm#102: both "
+        "directions, numeric uses read per POSITION) — it re-types versions the "
         "return type never reached, so it must re-check every one of them."
     )
 
@@ -804,10 +803,14 @@ def test_a_real_apk_declares_the_same_booleans_in_the_text_and_the_ast(dk):
                 if f"->{name}(" not in desc:
                     continue
                 try:
-                    ast = dk.decompile_method_ast(desc, include_source=False)
+                    ast = dk.decompile_method_ast(desc)
                 except Exception:
                     continue
                 if not ast.get("ast"):
+                    continue
+                # an OVERLOAD shares the name: compare the method whose own text
+                # is this body, not the first one listed
+                if "\n".join(body).strip() not in ast["source"]:
                     continue
                 blob = repr(ast["ast"])
                 for v in text_bools:

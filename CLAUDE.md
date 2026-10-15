@@ -258,11 +258,11 @@ Float/double literal formatting mirrors the core_ext EncodedValue IEEE754 helper
 
 ### Production fix — float/double constants as raw IEEE bits in expressions (2026-06-18)
 
-Same const-typed-int root as the return fix, but in **non-return positions**: a `const-wide` loads a double as type `"J"` (raw bits), and DAD emits the raw int wherever it's used — `p2 *= 4611686018427387904` (should be `*= 2.0`), `if (p9 < 4607182418800017408)` (`< 1.0`), `Math.pow(x, 1065353216)` (`, 1f`). Invalid VALUE (Java widens the long, giving e.g. 4.6e18 instead of 2.0). **Sound fix without an IR type-inference pass — use the OPERATION's type.** Each `const*` opcode types its value int, but every float/double *operation* (`mul-double`, `cmp-double`, …) builds its `BinaryExpression`/`BinaryCompExpression` with type `"D"`/`"F"` (`opcode_ins.cpp`), the field/array/param/return slots carry their declared type, so the F/D context is recoverable at emission even when an operand *variable* was never inferred as `D`. An integer-Constant in such a context is definitionally the raw IEEE bits → reinterpret it (`emit_fp_const_typed`, [writer.cpp](native/dad_cpp/writer.cpp); `visit_expr_fp_typed`, [dast.cpp](native/dad_cpp/dast.cpp)), same integer-constant guard as the return fix (typed-reference constants untouched). Wired into **every** position, text and AST: binary expr / comparison / compound-assign (the **expression's own `get_type()`**, threaded through `visit_binary_expression`/`visit_cond_expression`), method-arg (`InvokeInstruction::ptype()`), plain-assign (lhs type), array-store (element type), field-store (`visit_put_*` field type). Using the expression type (not the sibling operand's type) is what closes the type-inference gap — `if (v9_25 < <1.0 bits>)` becomes `< 1.0` even though `v9_25` was not typed `D`. **Measured (bundled corpus, canonical double bit-patterns): ~hundreds → 0.** Beyond-DAD, catch-clamp precedent. parity 27/27, sweep 0-crash/0-timeout/159,305; tvleanback byte-match-vs-DAD dips further (new mismatches all verified OURS-more-correct, e.g. `* 100f` vs DAD's wrong `* 1120403456`). Guarded by `test_double_bit_patterns_largely_eliminated` in [tests/test_return_literals.py](tests/test_return_literals.py).
+Same const-typed-int root as the return fix, but in **non-return positions**: a `const-wide` loads a double as type `"J"` (raw bits), and DAD emits the raw int wherever it's used — `p2 *= 4611686018427387904` (should be `*= 2.0`), `if (p9 < 4607182418800017408)` (`< 1.0`), `Math.pow(x, 1065353216)` (`, 1f`). Invalid VALUE (Java widens the long, giving e.g. 4.6e18 instead of 2.0). **Sound fix without an IR type-inference pass — use the OPERATION's type.** Each `const*` opcode types its value int, but every float/double *operation* (`mul-double`, `cmp-double`, …) builds its `BinaryExpression`/`BinaryCompExpression` with type `"D"`/`"F"` (`opcode_ins.cpp`), the field/array/param/return slots carry their declared type, so the F/D context is recoverable at emission even when an operand *variable* was never inferred as `D`. An integer-Constant in such a context is definitionally the raw IEEE bits → reinterpret it (`emit_fp_const_typed`, [writer.cpp](native/dad_cpp/writer.cpp); `visit_expr_fp_typed`, [dast.cpp](native/dad_cpp/dast.cpp)), same integer-constant guard as the return fix (typed-reference constants untouched). Wired into **every** position, text and AST: binary expr / comparison / compound-assign (the **expression's own `get_type()`**, threaded through `visit_binary_expression`/`visit_cond_expression`), method-arg (`InvokeInstruction::ptype()`), plain-assign (lhs type), array-store (element type), field-store (`visit_put_*` field type). Using the expression type (not the sibling operand's type) is what closes the type-inference gap — `if (v9_25 < <1.0 bits>)` becomes `< 1.0` even though `v9_25` was not typed `D`. **Measured (bundled corpus, canonical double bit-patterns): ~hundreds → 0.** Beyond-DAD, catch-clamp precedent. parity 27/27, sweep 0-crash/0-timeout/159,305; tvleanback byte-match-vs-DAD dips further (new mismatches all verified OURS-more-correct, e.g. `* 100f` vs DAD's wrong `* 1120403456`). Guarded by `test_double_bit_patterns_largely_eliminated` in [tests/test_return_literals.py](tests/test_return_literals.py). **Since dexllm#102** `emit_fp_const_typed` / `visit_expr_fp_typed` are gone: the F/D reinterpret is one arm of the shared projection `ConstantAt` (see the #102 section), with the same integer-constant guard, read by both emitters.
 
 ### Production fix — boolean assignment/declaration literal (`boolean v = 0` → `false`, 2026-07-04)
 
-Same const-typed-int root as the return / fp-const fixes, in the **assignment** position: a `const*` opcode builds an integer-typed value, so a `boolean` (Z) local assigned it renders the uncompilable **`boolean v = 0;`** (a Z register holds only the boolean 0/1). DAD emits the raw int; this surfaced corpus-wide (bundled 340) once the type passes correctly type such locals `Z`, and was WIDENED into visibility by the move-cycle cascade resolution. **Fix:** in `write_inplace_if_possible` ([writer.cpp](native/dad_cpp/writer.cpp)) — parallel to the existing reference-lhs `= 0 → null` branch — a `Z` lhs assigned an integer `Constant` 0/1 emits `= false` / `= true` (same integer-constant guard: a typed-reference constant is untouched; a value ≠ 0/1 is a genuine int/boolean conflation left as-is, no-worse). **AST path (the subtle part, adversarial-review MEDIUM):** the text emits a first-assignment DECLARATION inline through `write_inplace`, but the AST DECLARATION path (`ins_to_stmt`, [dast.cpp](native/dad_cpp/dast.cpp)) **bypasses `write_inplace`** and rendered the init by the Constant's OWN type (`'I'` → `LiteralInt(0)`), so the AST said `boolean v = 0` while the text said `= false` — a text/AST divergence on 317 methods. Fixed by a shared **`typed_rhs_expr(lhs, rhs)`** helper (Z→bool / ref→null / F-D reinterpret) used by BOTH `write_inplace_if_possible` (reassignment) and the `ins_to_stmt` declaration path, so declarations agree too (it also closes the same latent gap for the reference→null and fp-const declaration forms). **Measured (a/b off→on):** `boolean v = <int>` **bundled 340→3, obf 93→0** (337+94 now `false`/`true`; the residual 3 are `boolean v = 17`-style genuine conflations, correctly left); text/AST agree on 298/298 boolean-decl methods, 0 mismatch. Beyond-DAD (return-literal/catch-clamp precedent — no `*DADFaithful`; parity suites don't assert assignment/decl literal form). parity 28/28, sweep 25,309/0-crash, AST smoke 133,647-method/0-crash. Reviewers: correctness 0-bug; adversarial soundness REFUTED (typed-reference-constant / value-range / branch-disjointness all guarded) + 1 MEDIUM (the AST decl-path divergence, FIXED). Tests: `test_boolean_assign_literals` (text) + `test_boolean_decl_text_ast_agree` (AST) in [tests/test_return_literals.py](tests/test_return_literals.py). **Sibling fix (separate pre-existing inversion, adversarial-surfaced):** dast.cpp's standalone Z-typed-Constant render was INVERTED — `LiteralBool(get_int_value() == 0)` maps value 0→`true`, disagreeing with the text path (`visit_constant_bool(i != 0)`) and the sibling AST paths (`visit_cond` `iv != 0`, the Z-lhs assign `v == 1`). Fixed to `!= 0` (0=false, nonzero=true). A probe confirmed the branch is **reached 0× on the bundled corpus** (a `Constant` is essentially never type `'Z'` — `const*` builds `'I'`-typed constants; the live boolean renders go through write_inplace / return-literal / visit_cond), so the fix is **output-neutral / defensive** — it makes an unreachable branch consistent and correct rather than fixing an observable bug. parity 28/28 (dast_parity does not cover the unreached case).
+Same const-typed-int root as the return / fp-const fixes, in the **assignment** position: a `const*` opcode builds an integer-typed value, so a `boolean` (Z) local assigned it renders the uncompilable **`boolean v = 0;`** (a Z register holds only the boolean 0/1). DAD emits the raw int; this surfaced corpus-wide (bundled 340) once the type passes correctly type such locals `Z`, and was WIDENED into visibility by the move-cycle cascade resolution. **Fix:** in `write_inplace_if_possible` ([writer.cpp](native/dad_cpp/writer.cpp)) — parallel to the existing reference-lhs `= 0 → null` branch — a `Z` lhs assigned an integer `Constant` 0/1 emits `= false` / `= true` (same integer-constant guard: a typed-reference constant is untouched; a value ≠ 0/1 is a genuine int/boolean conflation left as-is, no-worse). **AST path (the subtle part, adversarial-review MEDIUM):** the text emits a first-assignment DECLARATION inline through `write_inplace`, but the AST DECLARATION path (`ins_to_stmt`, [dast.cpp](native/dad_cpp/dast.cpp)) **bypasses `write_inplace`** and rendered the init by the Constant's OWN type (`'I'` → `LiteralInt(0)`), so the AST said `boolean v = 0` while the text said `= false` — a text/AST divergence on 317 methods. Fixed by a shared **`typed_rhs_expr(lhs, rhs)`** helper (Z→bool / ref→null / F-D reinterpret) used by BOTH `write_inplace_if_possible` (reassignment) and the `ins_to_stmt` declaration path, so declarations agree too (it also closes the same latent gap for the reference→null and fp-const declaration forms). **Measured (a/b off→on):** `boolean v = <int>` **bundled 340→3, obf 93→0** (337+94 now `false`/`true`; the residual 3 are `boolean v = 17`-style genuine conflations, correctly left); text/AST agree on 298/298 boolean-decl methods, 0 mismatch. Beyond-DAD (return-literal/catch-clamp precedent — no `*DADFaithful`; parity suites don't assert assignment/decl literal form). parity 28/28, sweep 25,309/0-crash, AST smoke 133,647-method/0-crash. Reviewers: correctness 0-bug; adversarial soundness REFUTED (typed-reference-constant / value-range / branch-disjointness all guarded) + 1 MEDIUM (the AST decl-path divergence, FIXED). Tests: `test_boolean_assign_literals` (text) + `test_boolean_decl_text_ast_agree` (AST) in [tests/test_return_literals.py](tests/test_return_literals.py). **Sibling fix (separate pre-existing inversion, adversarial-surfaced):** dast.cpp's standalone Z-typed-Constant render was INVERTED — `LiteralBool(get_int_value() == 0)` maps value 0→`true`, disagreeing with the text path (`visit_constant_bool(i != 0)`) and the sibling AST paths (`visit_cond` `iv != 0`, the Z-lhs assign `v == 1`). Fixed to `!= 0` (0=false, nonzero=true). A probe confirmed the branch is **reached 0× on the bundled corpus** (a `Constant` is essentially never type `'Z'` — `const*` builds `'I'`-typed constants; the live boolean renders go through write_inplace / return-literal / visit_cond), so the fix is **output-neutral / defensive** — it makes an unreachable branch consistent and correct rather than fixing an observable bug. parity 28/28 (dast_parity does not cover the unreached case). **Since dexllm#102** `typed_rhs_expr` and the Z / null halves of `write_inplace_if_possible` are the same `ConstantAt` projection, applied at every declared position rather than at return and local assignment only.
 
 ### Production fix — use-bound prim→ref typing from a reference ARGUMENT (design §3 Phase 2a, 2026-07-04)
 
@@ -312,7 +312,8 @@ reference that is exactly right — an int producer proves the value is not a
 reference. **For a boolean the premise inverts**: Dalvik has no boolean type, so
 `const/4 v,#1` IS how a `true` is written, and the very same constant is evidence
 FOR the boolean rather than against it. So `Z` needed a channel of its own with
-the opposite proof, not a widened gate: `bool_ret_vids` plus
+the opposite proof, not a widened gate: `bool_ret_vids` (renamed `bool_use_vids`
+by dexllm#102, which added the `Z` parameter / `Z` field / `aput-boolean` sources) plus
 `all_defs_boolean_valued`, in which a 0/1 constant qualifies and anything else —
 a wider primitive, a reference, an int outside {0,1}, an unresolvable def —
 blocks.
@@ -320,7 +321,11 @@ blocks.
 **Sound on verified Dalvik** by the same argument the mirror branch uses one
 position over: `return v` in a `Z` method requires v to hold a boolean, so a
 version reaching one IS a boolean and its `int` type is a register-conflation
-artifact. THREE anti-conflation sets are consulted, and it takes all three —
+artifact. **That premise is FALSE, and dexllm#102 corrected it**: ART's `return`
+takes an Integer for a boolean and checks only the CATEGORY at a narrow
+parameter / field / array store. The re-type was sound anyway, because of the
+DEF-anchor (`all_defs_boolean_valued`) — the position says Java NEEDS a boolean,
+the def-anchor proves the register HOLDS one. THREE anti-conflation sets are consulted, and it takes all three —
 `int_use_vids` (arithmetic / ordered compare / array index, with `==`/`!=`
 correctly excluded so an ordinary `if (v != 0)` flag test does not block),
 `int_required_vids` (array-creation size, `switch` selector — NOT a subset of
@@ -752,7 +757,8 @@ Three things the fix needed that the issue did not predict:
   `v15_0`). Candidates admit a reference `cur`; the def proof still refuses any
   genuine reference producer.
 
-**No emitter changed** — with the version typed `F`, `typed_rhs_expr` already
+**No emitter changed** — with the version typed `F`, `typed_rhs_expr` (folded
+into `ConstantAt` by dexllm#102, same rule) already
 renders `= 1f` in the text AND the AST (verified on the AST declaration node).
 
 ## Three review rounds (four reviewers), and each response needed its own review
@@ -1141,11 +1147,99 @@ and fixture methods.
 OPERAND width (DAD; the Writer's fp-constant rendering of the operands depends
 on it), so it renders `double v1 = p6 cmp p6` — dexllm#95's family — and it is
 what made `QuantizerWu`'s source register stale in the first place; a `Z` parameter given an int constant renders
-`getBooleanExtra("…", 1)`; an UNSPLIT register never reaches SplitVariables' def typing
+`getBooleanExtra("…", 1)` (fixed by dexllm#102); an UNSPLIT register never reaches SplitVariables' def typing
 (`byte v0 = 200`); and `GenInvokeRetName::Last()` follows bfs BUILD order, so a
 crafted handler built between an invoke and its `move-result` binds the wrong
 temporary (pre-existing value binding; this change trusts the type of what it
 binds).
+
+### Production fix — an untyped constant takes the type of its position (dexllm#102, 2026-10-16)
+
+Filed as `getBooleanExtra("…", 1)` — 179 lines matched by a regex over two
+framework methods. Measured over the AST of the whole corpus it is **~40,000
+sites across six position kinds**, plus the same fact for a VARIABLE: an
+integer literal at a `boolean` argument (11,925), a reference argument (9,064),
+a `byte`/`short`/`char` argument (968), a `boolean` field store (13,026), a
+reference field store (5,497), an `aput-boolean`/`aput-object` (484), and 1,878
+`int` locals passed at a `boolean` parameter. A Dalvik `const*` is UNTYPED and
+every handler builds an int-typed `Constant` (DAD); the type comes from the
+position. `B`/`S`/`C` is the sharpest: Java does not narrow a constant in an
+invocation (JLS 5.3), so `sb.append(125)` compiles — to `append(int)`,
+appending `"125"` where the bytecode appends `'}'`.
+
+**The rule already existed SIX times** — `visit_return` (text), the AST return
+branch, `write_inplace_if_possible`, `typed_rhs_expr`, `emit_fp_const_typed`,
+`visit_expr_fp_typed` — applied at return, local assignment and F/D operands
+only. The issue's direction would have added a seventh. The full design record,
+gated through [docs/hack-gate.md](docs/hack-gate.md) (HG1–HG8, four designs, one
+rejected because an IR constant node is keyed by VALUE and shared across
+positions — `takeZI(v0, v0)` is one node at a `Z` and an `I` parameter), lives
+there; this is the summary.
+
+* **Constant half — one projection.** `ConstantAt(ConstContext{Operand, Value,
+  Argument}, position_type, operand)` ([instruction.h](native/dad_cpp/include/instruction.h)),
+  read by the Writer's `emit_const_at` and dast's `visit_const_at` at return /
+  local / invoke argument / iput / sput / aput (`ArrayStorePositionType`) /
+  check-cast / throw. 0/1 at `Z` → `false`/`true`, 0 at a reference → `null`,
+  F/D raw bits → the IEEE literal, and a fitting `B`/`S`/`C` ARGUMENT → a cast.
+  A value the type cannot hold stays the integer (`takeZ(2)`, `takeRef(1)`,
+  `takeB(200)`): ART checks only the CATEGORY at a narrow position, so such a
+  dex is legal and anything else would assert a value the callee does not
+  receive. A constant built from an encoded_value (invoke-custom bootstrap
+  argument, dexllm#67) states its own type and is never projected
+  (`Constant::encoded_type`).
+* **Variable half — the type-inference pass.** #86's `Z`-return channel
+  (`bool_ret_vids` → **`bool_use_vids`**) gains the `Z` parameter, `Z` field
+  store and `aput-boolean` sources. A re-typed version's whole MOVE COMPONENT
+  (excluding moves only a constant reaches) is typed `Z` or none of it is,
+  decided ONCE per component; the numeric-use guard is per POSITION through
+  #94's `OnlyAConstantReaches` (hoisted to one definition); a NUMBER return
+  type is a numeric position, as #94's `z_pos` already said; and #94's
+  move-width rule compares CLASS, joining `{I, Z}` to `I` — or to `Z` when the
+  destination is itself a boolean and every flowing source is `Z` or a
+  literal. #86's soundness comment ("`return v` in a `Z` method requires a
+  boolean") was FALSE — ART takes an Integer there — and is corrected: the
+  def-anchor is what proves it.
+
+**Measured (a/b OFF = v0.25.0 `5c4e66c6` vs ON `7fcb3cc5`, SAME capture, both
+`.so` md5-asserted):** 44 sources / 2,348,601 decompiled lines → **46,236 lines
+changed on 25 corpus sources, line counts equal on every source** (the new
+fixture excluded — OFF's capture predates it); every changed line is one of the
+intended substitutions. An oracle built from SMALI and the callee/field
+descriptor alone (never the IR): disagreements **Z 17,155 → 0, reference 11,520
+→ 0, B/S/C 750 → 0**. javac over the changed classes: `incompatible types`
+**25,325 → 5,026**. `boolean` method returns an `int` local **652 → 220**;
+boolean/number assignment between locals **41 → 27**. parity **29/29**, pytest
+**1820 passed / 24 skipped**, TRUE corpus-less (`test_apk` MOVED aside, restore
+asserted) **1393 / 451 / 0**, narrowed to `tests/data/multidex.apk` **1700
+passed**, sweep **21,374-class / 180,879 method-block 0-crash 0-timeout, GATE:
+PASS**, determinism 3 `PYTHONHASHSEED`s → one digest, lint trio clean.
+
+**Guards** — [tests/test_typed_positions.py](tests/test_typed_positions.py), 61
+cases on the eighth AUTHORED fixture `tests/data/typed-positions.dex` (52
+methods, hand-written smali: register reuse and merge shapes cannot be pinned
+from Java), plus the corpus case. **35 mutants, each BUILT with a distinct
+`.so` md5, control asserted after: 32 killed, 3 individually equivalent** — the
+two memos MASK EACH OTHER, and removing both fails `flagChain`.
+
+**Two reviewers; nothing wrong in the projection, five real findings in the
+variable half and the guards, all fixed:** a component typed half `boolean`
+half `int` once the work budget ran out on a long flag chain (per-seed
+re-walking, ~O(N³) — BOTH reviewers built it); a narrowing cast that changed
+the value (`(byte) 200`); the width-joined destination left `int` beside a
+`boolean` field store (the hack-gate record had claimed it fixed); a number
+return not counted as numeric; and two guard holes (a component member's own
+uses, `sput-boolean` as a source), each a mutant that passed the whole suite.
+
+**Residuals, recorded:** 321 `int` locals still at a `Z` parameter (#86-class
+refusals — **dexllm#110**); 19 new javac `ambiguous` errors from a `null` at an
+overloaded callee (**dexllm#109** — a cast to the DECLARED parameter type
+suffices, which a reviewer showed; the record first said it needed the
+overload set); `==` against a non-constant int and a bitwise op with an int are
+not numeric positions (shared with #94's `z_pos`); a `char`/`byte`/`short`
+VARIABLE at a narrowing parameter has no use source; `filled-new-array`
+elements do not go through `ConstantAt` (#96/#97 family); and, pre-existing and
+unchanged, 164 `pN == 0` on a reference parameter whose register is reused.
 
 ### Production fix — reused `this` register materialised as a local (`this = X` → valid, 2026-07-03)
 
