@@ -521,7 +521,7 @@ may the verifier accept, and on what evidence".
 
 **The sample.** 8 of 20,953 `string_ids` violate ART's order rule
 (`CheckInterStringIdItem`, `dex_file_verifier.cc:2720`), all in one block of
-URLs: `https://hadesbet3.com` ×5 and `https://betonredcasinobe.com` ×4,
+URLs: `https://hadesbet3.com` ×5 and `https://betonredcasinobe.com` ×5,
 duplicated and out of place, with consistent length fields and a recomputed
 adler32 / SHA-1 — a post-build string swap (AppsFlyer URL templates and a
 `CustomTabsHelper` example URL replaced) that did not re-sort the table. With the

@@ -1300,7 +1300,7 @@ count (16 of 18, not 18 of 19), and the type-spelling cost above.
 A real gambling-app `classes.dex` was refused strict AND lenient with
 `Out-of-order string_ids` while androguard decompiled it. 8 of its 20,953
 `string_ids` break ART's order rule (`CheckInterStringIdItem`, `:2720`), all
-URLs (`https://hadesbet3.com` ×5, `https://betonredcasinobe.com` ×4) duplicated
+URLs (`https://hadesbet3.com` ×5, `https://betonredcasinobe.com` ×5) duplicated
 and out of place with recomputed checksums: a post-build string swap that did
 not re-sort the table. **ART rejects it on every app load path** (dex is
 verified unless a matching vdex exists — its runtime BINARY-SEARCHES the
