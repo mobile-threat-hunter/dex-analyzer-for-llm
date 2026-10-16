@@ -40,6 +40,8 @@ class _VerifyStatus(TypedDict):
     valid: bool
     reason: str
     source: str  # the path handed to the constructor (dexllm#26)
+    # dexllm#112: what a lenient verify accepted that ART's verifier rejects
+    art_deviations: list[str]
 
 class _ExtractedDex(TypedDict):
     bytes: bytes
@@ -111,7 +113,7 @@ def verify(path: str, lenient: bool = ...) -> list[_VerifyStatus]:
     Example::
 
         >>> dexllm.verify("app.apk")
-        [{'dex_id': 0, 'name': 'classes.dex', 'valid': True, 'reason': '', 'source': 'app.apk'}]
+        [{'dex_id': 0, 'name': 'classes.dex', 'valid': True, 'reason': '', 'source': 'app.apk', 'art_deviations': []}]
     """
 
 def is_framework_descriptor(descriptor: str) -> bool:
@@ -493,9 +495,11 @@ class DexKit:
 
     ``sources`` are loaded IN ORDER — earlier sources get lower dex_ids and win a
     class-name collision, so list a runtime-dumped dex BEFORE the original APK
-    (this mirrors ART). ``lenient=True`` verifies in ART-structural-equivalent
-    mode, so a partially-decrypted dump (valid structure, garbage method bodies)
-    still loads; header/ids/code_item bounds stay verified either way.
+    (this mirrors ART). ``lenient=True`` skips instruction-operand checks, so a
+    partially-decrypted dump (valid structure, garbage method bodies) still
+    loads, and accepts VALUE strings out of order (ART rejects that; reported in
+    ``verify_report()``'s ``art_deviations``, dexllm#112); header/ids/code_item
+    bounds stay verified either way.
     """
 
     @overload
@@ -540,7 +544,7 @@ class DexKit:
         Example::
 
             >>> dk.verify_report()
-            [{'dex_id': 0, 'name': 'classes.dex', 'valid': True, 'reason': '', 'source': 'app.apk'}]
+            [{'dex_id': 0, 'name': 'classes.dex', 'valid': True, 'reason': '', 'source': 'app.apk', 'art_deviations': []}]
         """
 
     def locate_class_dex(self, class_descriptor: str) -> int:

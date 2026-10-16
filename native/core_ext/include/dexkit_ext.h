@@ -65,6 +65,10 @@ struct DexVerifyStatus {
     bool valid = true;
     std::string reason;         // empty when valid
     std::string source;         // the constructor argument this dex came from
+    // dexllm#112: what a LENIENT verify accepted that ART's DexFileVerifier
+    // rejects (empty for a strict verify and for a rejected row). `valid` says
+    // the dex is safe to analyse; this says where it is not one ART would load.
+    std::vector<std::string> art_deviations;
 };
 
 // Where a loaded dex came from. `name` alone cannot answer that: it is the file
@@ -117,13 +121,15 @@ public:
     // VerifyReport() records after construction of DexKit(path) — same VerifyDex
     // call, same dex_id assignment (accepted dexes get a running 0-based id,
     // rejected/undecompressible get -1). `check_insns` as in the constructor's
-    // !lenient (false = ART-structural-equivalent, VerifyInsns skipped).
+    // !lenient (false = the lenient pass: VerifyInsns skipped, value strings out
+    // of order accepted and reported — see VerifyDex).
     static std::vector<DexVerifyStatus> Verify(const std::string& path,
                                                bool check_insns = true);
 
-    // `lenient` runs the load-time verifier in ART-structural-equivalent mode
-    // (VerifyInsns off) so a runtime-dumped, partially-decrypted dex with garbage
-    // method bodies but valid structure still loads — see VerifyDex's `check_insns`.
+    // `lenient` runs the load-time verifier's lenient pass (VerifyInsns off, so a
+    // runtime-dumped, partially-decrypted dex with garbage method bodies but valid
+    // structure still loads; value strings out of order accepted and reported,
+    // dexllm#112) — see VerifyDex's `check_insns`.
     explicit DexKitExt(const std::string& apk_path, bool lenient = false);
 
     // Multi-source load with PRIORITY BY ORDER. Each source (a raw .dex or a

@@ -43,9 +43,10 @@ def add_dumped_dexes(
             first-wins makes an unpacked class win a descriptor collision against the
             original (stub) class — the packer/unpack intent. Set False to keep the
             original winning (dumps only add classes the apk lacks).
-        lenient: When True (default), verify in ART-structural-equivalent mode
-            (skip instruction-operand checks) so a partially-decrypted dump — valid
-            structure, garbage method bodies — still loads, exactly as ART loads it.
+        lenient: When True (default), skip instruction-operand checks so a
+            partially-decrypted dump — valid structure, garbage method bodies —
+            still loads, exactly as ART loads it, and accept value strings out of
+            order (ART rejects that; reported in ``art_deviations``, dexllm#112).
 
     Returns:
         A new ``DexKit`` over the combined, ordered source set.

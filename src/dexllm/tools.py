@@ -1659,8 +1659,13 @@ TOOL_DEFINITIONS: list[dict] = [
         "name": "verify_report",
         "description": (
             "Per-dex structural-verification verdict from the load-time gate: a list "
-            "of {dex_id, name, valid, reason}. All valid on a cleanly-loaded APK; a "
-            "reason string appears for a dex that failed structural checks."
+            "of {dex_id, name, valid, reason, source, art_deviations}. All valid on a "
+            "cleanly-loaded APK; a reason string appears for a dex that failed "
+            "structural checks. A non-empty art_deviations means the session was "
+            "opened leniently and this dex is one ART would refuse to load (e.g. "
+            "value strings out of order after a post-build string swap) — say so "
+            "when reporting on it. An empty one does not prove a strict load: a "
+            "lenient session also skips instruction-operand checks."
         ),
         "input_schema": {"type": "object", "properties": {}},
     },

@@ -206,7 +206,8 @@ def test_a_misaligned_section_offset_is_rejected(tmp_path, section_type, delta):
     ids=["call_site_id", "method_handle"],
 )
 def test_a_misaligned_section_is_rejected_leniently_too(tmp_path, section_type):
-    """`lenient=True` gates only `VerifyInsns`; this check is in `CheckMap`.
+    """`lenient=True` gates only `VerifyInsns` and value-string order
+    (dexllm#112); this check is in `CheckMap`.
 
     A packer dump is exactly the population that would carry one, so the mode
     that exists for those dumps must not be the way past the check.

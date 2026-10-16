@@ -368,6 +368,8 @@ public:
             // "classes.dex" came from in a multi-source session. `source` always
             // names the constructor argument.
             d["source"] = s.source;
+            // dexllm#112: what a lenient verify accepted that ART rejects
+            d["art_deviations"] = s.art_deviations;
             out.append(std::move(d));
         }
         return out;
@@ -700,8 +702,8 @@ PYBIND11_MODULE(_dexkit_core, m) {
     // Runs the DexVerifier over a path's dex(es) without constructing a DexKit.
     // Never throws — a bad/unopenable/non-dex file is reported as a valid=False
     // verdict with a reason. For a loadable source the verdicts are byte-
-    // identical to DexKit(path).verify_report(). lenient=True runs the ART-
-    // structural-equivalent mode (VerifyInsns skipped).
+    // identical to DexKit(path).verify_report(). lenient=True skips
+    // VerifyInsns and accepts value strings out of order (dexllm#112).
     m.def(
         "verify",
         [](const std::string& path, bool lenient) {
@@ -714,16 +716,19 @@ PYBIND11_MODULE(_dexkit_core, m) {
                 d["valid"] = s.valid;
                 d["reason"] = s.reason;
                 d["source"] = s.source;  // see verify_report (dexllm#26)
+                d["art_deviations"] = s.art_deviations;  // dexllm#112
                 out.append(std::move(d));
             }
             return out;
         },
         py::arg("path"), py::arg("lenient") = false,
         "Structurally verify a .dex / apk's dex(es) without loading (the verify() "
-        "sibling of identify()). Returns a list of {dex_id, name, valid, reason, source} — "
+        "sibling of identify()). Returns a list of {dex_id, name, valid, reason, source, "
+        "art_deviations} — "
         "one per dex — byte-identical to DexKit(path).verify_report() for a loadable "
         "source. Never throws: a malformed / unopenable / non-dex path is reported as "
-        "a valid=False verdict. lenient=True skips VerifyInsns (ART-structural mode).");
+        "a valid=False verdict. lenient=True skips VerifyInsns and accepts value "
+        "strings out of order (ART rejects that; each row's art_deviations says so).");
 
     // Every identifier-valued attribute below is exposed through ident_out
     // (dexllm#22) rather than def_readonly: the field holds raw pool MUTF-8, and
@@ -1069,9 +1074,10 @@ PYBIND11_MODULE(_dexkit_core, m) {
              "Load a DEX source. Accepts a zip container (.apk/.jar/.zip — all "
              "classes*.dex inside are loaded) or a bare .dex file (detected by "
              "its 'dex\\n' magic). The arg keeps the name apk_path for "
-             "backward compatibility. lenient=True verifies in ART-structural-"
-             "equivalent mode (skips instruction-operand checks) so a runtime-"
-             "dumped, partially-decrypted dex still loads.")
+             "backward compatibility. lenient=True skips instruction-operand "
+             "checks (so a runtime-dumped, partially-decrypted dex loads) and "
+             "accepts value strings out of order, reported in verify_report()'s "
+             "art_deviations (dexllm#112).")
         .def(py::init<const std::vector<std::string>&, bool>(), py::arg("sources"),
              py::arg("lenient") = false,
              "Load MULTIPLE sources with PRIORITY BY ORDER. Each source (a bare "
@@ -1081,8 +1087,9 @@ PYBIND11_MODULE(_dexkit_core, m) {
              "workflow, list a decrypted/dumped dex BEFORE the original apk to make "
              "the unpacked class win (mirrors ART, where the packer orders the "
              "decrypted dex first). Each dex still passes the load-time verifier; "
-             "lenient=True uses ART-structural-equivalent verification for "
-             "partially-decrypted dumps.")
+             "lenient=True skips instruction-operand checks (partially-decrypted "
+             "dumps) and accepts value strings out of order, reported in "
+             "verify_report()'s art_deviations.")
         .def("dex_count", &PyDexKit::dex_count)
         .def("apk_path", &PyDexKit::apk_path)
         .def("sources", &PyDexKit::sources,
@@ -1122,7 +1129,8 @@ PYBIND11_MODULE(_dexkit_core, m) {
              "for a working session.")
         .def("verify_report", &PyDexKit::verify_report,
              "Structural-verification report, one dict per dex considered at "
-             "load: {dex_id, name, valid, reason, source}. A dex with valid==False was "
+             "load: {dex_id, name, valid, reason, source, art_deviations}. A dex with "
+             "valid==False was "
              "screened out at the load boundary (DexVerifier — AOSP "
              "DexFileVerifier criteria port) with a specific reason.")
         .def("list_class_methods", &PyDexKit::list_class_methods,

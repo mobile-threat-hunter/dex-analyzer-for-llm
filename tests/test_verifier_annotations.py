@@ -159,7 +159,8 @@ def _repoint(tmp_path, mode, name):
 def test_a_repointed_annotations_off_is_rejected(tmp_path, mode, lenient):
     """The verdict, at the verifier — the project's single gate.
 
-    Both modes, because `lenient=True` gates only `VerifyInsns` and a packer dump
+    Both modes, because `lenient=True` gates only `VerifyInsns` (and value-string order,
+    dexllm#112) and a packer dump
     is a first-class load path; the pre-fix build called all 9 crafts valid in
     BOTH. The reason must name an annotation structure, not some invariant the
     repoint also happened to break.

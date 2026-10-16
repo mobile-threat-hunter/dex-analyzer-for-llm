@@ -211,7 +211,8 @@ def test_the_last_legal_index_of_each_table_is_accepted(tmp_path, fixture):
 # ── the LENIENT axis ─────────────────────────────────────────────────────────
 #
 # `lenient=True` exists for a partially-decrypted packer dump: valid structure,
-# garbage method bodies. It gates `VerifyInsns` and nothing else, so a check
+# garbage method bodies. It gates `VerifyInsns` and value-string order
+# (dexllm#112) and nothing else, so a check
 # living in `CheckMap` must still fire — and a dump is precisely the population
 # that would carry a malformed method_handle section, so the mode that exists
 # for those dumps must not be the way past this one. Three sibling guard files

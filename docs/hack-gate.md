@@ -509,3 +509,96 @@ BOTH fails `flagChain` — killed.
 * Adjacent, pre-existing, unchanged (164 lines OFF and ON): a reference
   PARAMETER whose register is later reused renders `p1 == 0`, because the
   write corrupts the `Param`'s type.
+
+## Applied: dexllm#112 (a dex whose value strings are out of order)
+
+The input: a real gambling-app `classes.dex` that `DexKit` refused strict AND
+lenient with `Out-of-order string_ids`, while androguard decompiled it. Not a
+wrong output — an over-strict GATE — so the gate was run on the question "what
+may the verifier accept, and on what evidence".
+
+### What the gate measured first
+
+**The sample.** 8 of 20,953 `string_ids` violate ART's order rule
+(`CheckInterStringIdItem`, `dex_file_verifier.cc:2720`), all in one block of
+URLs: `https://hadesbet3.com` ×5 and `https://betonredcasinobe.com` ×4,
+duplicated and out of place, with consistent length fields and a recomputed
+adler32 / SHA-1 — a post-build string swap (AppsFlyer URL templates and a
+`CustomTabsHelper` example URL replaced) that did not re-sort the table. With the
+order check alone disabled every other check passes and 3,343 classes load.
+The 12,857 strings used as identifiers are still sorted and unique among
+themselves; none of the 8 is an identifier; `strings[0] == ""`.
+
+**ART rejects it on every app load path.** `DexFile_openDexFileNative` /
+`OatFileManager::OpenDexFilesFromOat` (`:492`, `:598`) and dex2oat's
+`WriteDexFiles` (`oat_writer.cc:3418`) all run `dex::Verify`; it is skipped
+only with a matching vdex or `VerifyMode::kNone`. ART needs the order because
+its runtime BINARY-SEARCHES the table (`DexFile::FindStringId`,
+`class_linker.cc` "Ordering enforced by DexFileVerifier"). So the strict verdict
+stays ART's, and accepting is an explicit divergence.
+
+**HG2 — every reader of string order or uniqueness, vendored tree included.**
+
+| reader | relies on | under value-string disorder |
+|---|---|---|
+| any binary search over the string table | order | none exists (grep, both reviewers) |
+| DexKit `empty_string_id` (`dex_item.cpp:62`) + 5 `""` Equal-search sites | `""` at index 0 | wrong answer unless `""` stays at 0 → **I3** |
+| DexItem `type_ids_map`, DexKit `class_declare_dex_map`, core_ext `type_to_idx`, slicer `FindClassIndex` | type descriptors unique by content | **I1** |
+| core_ext dexllm#108 single-dex fast path | member descriptors unique by content | **I1** |
+| value-string consumers (string search, declaring index, `list_*_strings`, IOC, smali / Java) | index, or content dedupe | correct with duplicates (fuzzed by a reviewer: 331 crafts, 0 failures) |
+
+### The designs
+
+| design | verdict |
+|---|---|
+| A — drop the check | **FAIL HG7**: an identifier duplicate silently merges two fields or two types in the content-keyed readers (a reviewer's mutant: `APOS` listed twice, every `String` field read as `Object`) |
+| B — skip it in lenient only | same failure |
+| C — re-sort the table and remap every string index | **FAIL HG1/HG5**: a second reader of every string-index position (code, encoded values, annotations, debug info, call sites) |
+| **D — accept under lenient only what the readers need** | passes |
+
+**D**, in `AcceptUnsortedValueStrings` (`dex_verifier.cpp`): a lenient pass
+accepts when **I1** the strings used as identifiers (type descriptors, proto
+shorty, field / method names) are strictly increasing among themselves and
+**I3** the empty string is only at index 0; otherwise ART's failure stands. The
+acceptance is decided by ROLE, from the id tables (HG4), and REPORTED: a new
+`art_deviations` list on every verify row, raw / `.pyi` / SDK / MCP (HG6). A
+strict pass never accepts it, so a strict row is ART's verdict with `[]`.
+Decided by the user: lenient (not a new flag) carries it; the MCP server and
+HTTP `/upload` — whose callers cannot pass `lenient=True` — try strict, retry
+lenient, and say so (`session_note`, `opened` / `strict_refusal`), through one
+helper (`_open.py`, HG5).
+
+### What the two reviewers found
+
+No crash, hang or wrong answer from the core claim. Every finding was in the
+server fallback or the guards, and all are fixed:
+
+* **CONFIRMED by BOTH — the fallback missed the realistic shape.** A strict load
+  of an APK whose `classes.dex` carries the swap beside a good `classes2.dex`
+  does not RAISE: the sibling loads (dexllm#25), so the main dex was dropped with
+  no note. The helper now also retries when a strict row is rejected, and takes
+  the lenient session when it loads more dexes.
+* **CONFIRMED by BOTH — I1's strictness was unguarded.** Every craft SWAPPED two
+  identifiers; equal contents passed a `> 0` mutant. Two duplicate-identifier
+  crafts now pin it.
+* the note pointed at `art_deviations` while a lenient fallback also lifts
+  `VerifyInsns` refusals (an empty list then proves nothing) — reworded, and the
+  tool description says the converse does not hold; a stale-note mutant
+  (a path re-opened cleanly kept its note) is pinned; the deviation message
+  counted adjacent PAIRS while saying "strings" — reworded; and a dozen
+  comments, docstrings and examples still called lenient
+  "ART-structural-equivalent" or listed the row without the new field.
+
+### Measured
+
+a/b over 304 real inputs (bundled corpus, committed fixtures, AOSP
+`art/test/dexdump`, `tools/dexter/testdata`, all four ART fuzzer corpora, the
+voice-phishing APKs) × strict + lenient: **0 verdict changes**, every strict
+row's `art_deviations` empty. The mechanism fires on the crafts and the sample
+only: the sample verifies strict-invalid and lenient-valid with one deviation,
+3,343 classes / ~270,000 lines decompile with 0 `DECOMPILE ERROR`, and an
+oracle that never reads the IR (androguard) agrees on the class list and on the
+const-strings of 4,142 / 4,142 methods it can decode (21 more it cannot decode
+at all). Mutation matrix **15 mutants, all killed** (each identifier role, I1
+strictness, I3, strict relaxed, deviation dropped on each layer, the fallback,
+the multidex retry, the note).

@@ -62,6 +62,7 @@ from sse_starlette.sse import EventSourceResponse
 
 from . import DexKit
 from . import tools as dxtools
+from ._open import open_strict_then_lenient
 
 # ─── Config ───────────────────────────────────────────────────────────────
 
@@ -181,6 +182,10 @@ async def upload(apk: UploadFile = File(...)) -> dict:
     400 carrying its reason. A container whose SIBLING dex is rejected still
     loads its survivors (dexllm#25), so it is a 200; `loaded_dex_count` is
     then the honest count, and the per-dex verdicts are in `verify_report()`.
+    A container the STRICT verifier refuses is retried with `lenient=True`
+    (dexllm#112): if that loads, it is a 200 with `opened: "lenient"` and the
+    strict refusal in `strict_refusal`; only a container neither mode loads is
+    a 400, carrying the strict reason.
 
     The file lives in a session-scoped tempdir until DELETE /session/{id}
     or LRU eviction. Opening DexKit can take several seconds for large
@@ -205,7 +210,7 @@ async def upload(apk: UploadFile = File(...)) -> dict:
         )
 
     try:
-        dk = await asyncio.to_thread(DexKit, apk_path)
+        dk, strict_refusal = await asyncio.to_thread(open_strict_then_lenient, apk_path)
         # The loader already probed this file to decide how to read it, so take
         # ITS record rather than reading the path a second time (dexllm#42) —
         # applying here the same rule that change made for the MCP tool: a fact
@@ -233,6 +238,12 @@ async def upload(apk: UploadFile = File(...)) -> dict:
         "apk_path": apk_path,
         "filename": apk.filename,
         "size_bytes": size_bytes,
+        # dexllm#112: "lenient" when the strict verifier refused the upload and
+        # the session was opened with lenient=True instead; `strict_refusal`
+        # is that refusal ("" for a strict load). Per-dex `art_deviations` are
+        # in verify_report().
+        "opened": "lenient" if strict_refusal else "strict",
+        "strict_refusal": strict_refusal,
         # What the uploaded container WAS, as the loader recorded it. Its
         # `source` is the STORED path (= `apk_path`), i.e. the file that was
         # actually probed — not the client's `filename`, which is display

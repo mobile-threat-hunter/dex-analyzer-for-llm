@@ -113,6 +113,8 @@ def test_verify_never_throws_on_missing_file():
             # dexllm#26 — every row names the source it came from, including a
             # row for a path that never produced a dex at all
             "source": "/nonexistent/does/not/exist.dex",
+            # dexllm#112 — empty for a rejected row (and for any strict verify)
+            "art_deviations": [],
         }
     ]
 
@@ -228,7 +230,8 @@ def test_sdk_verify_lenient_kwonly(loadable_apks):
     """lenient is keyword-only on the SDK surface (mirrors open_apk)."""
     apk = loadable_apks[0]
     assert sdk.verify(apk, lenient=True) == tuple(
-        sdk.DexVerifyStatus(**r) for r in dexllm.verify(apk, lenient=True)
+        sdk.DexVerifyStatus(**{**r, "art_deviations": tuple(r["art_deviations"])})
+        for r in dexllm.verify(apk, lenient=True)
     )
 
 

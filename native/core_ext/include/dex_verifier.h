@@ -58,7 +58,9 @@
 //                              CheckIntraAnnotationItem :2056, fused with the
 //                              offset-following of CheckInterAnnotationsDirectory
 //                              Item :3276 — dexllm#56)
-//   CheckInterSection :3477  — cross-refs: id ordering/uniqueness; descriptor
+//   CheckInterSection :3477  — cross-refs: id ordering/uniqueness (a LENIENT
+//                              pass tolerates value-string order, dexllm#112,
+//                              and reports it in art_deviations); descriptor
 //                              syntax for EVERY type_id (CheckInterTypeIdItem
 //                              :2735) as well as the field/method/class_def
 //                              references to one; member-name validity;
@@ -226,12 +228,16 @@
 #include <map>
 #include <string>
 #include <utility>
+#include <vector>
 
 namespace dexkit::ext {
 
 struct DexVerifyResult {
     bool ok = true;
     std::string reason;  // empty when ok; first structural violation otherwise
+    // What a LENIENT pass accepted that ART's DexFileVerifier rejects
+    // (dexllm#112). Always empty for a strict pass and for a rejection.
+    std::vector<std::string> art_deviations;
 };
 
 // Verify ONE logical dex inside the image [data, data+size). `header_off` is
@@ -246,14 +252,18 @@ struct DexVerifyResult {
 // is the container. The verifier derives that span the way ART's
 // DexFile::GetDataRange does — see ComputeDataRange.
 //
-// `check_insns` (default true) gates the ONE deliberate non-port: VerifyInsns
-// (instruction-operand bounds), which ART's *structural* DexFileVerifier does not
-// do. Set false for an "ART-structural-equivalent" pass that accepts a
-// structurally-valid dex whose method bodies are garbage — e.g. a runtime-dumped,
-// partially-decrypted dex from a packer, where only the currently-executing
-// methods are decrypted. ART loads such a dex (it defers instruction validity to
-// the runtime method_verifier, which packers skip); this lets the analyzer do the
-// same WITHOUT relaxing any header/structure/bounds check.
+// `check_insns` (default true) selects the STRICT pass, which is ART's verdict
+// plus the ONE deliberate addition: VerifyInsns (instruction-operand bounds),
+// which ART's *structural* DexFileVerifier does not do. false selects the
+// LENIENT pass, which differs in two ways:
+//   - VerifyInsns is skipped, so a structurally-valid dex whose method bodies are
+//     garbage loads — e.g. a runtime-dumped, partially-decrypted dex from a
+//     packer. ART loads such a dex too (it defers instruction validity to the
+//     runtime method_verifier, which packers skip).
+//   - VALUE strings out of order are accepted (dexllm#112) — ART REJECTS this —
+//     when the identifier strings stay ordered and "" stays at index 0; see
+//     AcceptUnsortedValueStrings. It is reported in `art_deviations`.
+// No header / structure / bounds check is relaxed by either.
 // Per-IMAGE scratch, threaded across the slices of ONE image by
 // ClassifyImageSlices (its only caller). It exists for one reason, and dexllm#59
 // learned it the hard way: a v41 CONTAINER is verified once PER SLICE, with

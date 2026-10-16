@@ -65,10 +65,16 @@ class DexVerifyStatus:
     multi-source session — ``source`` always names the constructor argument
     (dexllm#26).
 
+    ``art_deviations`` (dexllm#112) lists what a ``lenient`` verify accepted
+    that ART's DexFileVerifier rejects — e.g. value strings out of order after
+    a post-build string swap. ``valid`` says the dex is safe to ANALYSE; a
+    non-empty ``art_deviations`` says it is not one ART would load. Always empty
+    for a strict verify and for a rejected dex.
+
     Example (real)::
 
         DexVerifyStatus(dex_id=0, name='classes.dex', valid=True, reason='',
-                        source='app.apk')
+                        source='app.apk', art_deviations=())
     """
 
     dex_id: int
@@ -76,6 +82,7 @@ class DexVerifyStatus:
     valid: bool
     reason: str
     source: str = ""
+    art_deviations: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

@@ -189,7 +189,8 @@ class DexKitAdapter:
 
     Construct with a single apk/dex path or a list of sources (earlier sources get
     lower dex_ids; first-wins on a class collision). ``lenient`` runs the load-time
-    verifier in ART-structural-equivalent mode for partially-decrypted dumps.
+    verifier leniently: partially-decrypted dumps load, and value strings out of
+    order are accepted and reported in ``art_deviations`` (dexllm#112).
     """
 
     def __init__(self, sources: Sources, *, lenient: bool = False) -> None:
@@ -912,7 +913,7 @@ class DexKitAdapter:
 def _to_verify_statuses(
     rows: Sequence[Mapping[str, Any]],
 ) -> tuple[DexVerifyStatus, ...]:
-    """Convert raw {dex_id, name, valid, reason, source} rows to the typed model."""
+    """Convert raw verify rows to the typed model."""
     return tuple(
         DexVerifyStatus(
             dex_id=x["dex_id"],
@@ -922,6 +923,7 @@ def _to_verify_statuses(
             # x["source"], not .get(): the raw layer always emits it, so a
             # missing key is a regression that should raise, not degrade to "".
             source=x["source"],
+            art_deviations=tuple(x["art_deviations"]),
         )
         for x in rows
     )

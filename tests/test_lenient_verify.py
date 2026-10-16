@@ -1,4 +1,4 @@
-"""Lenient (ART-structural-equivalent) verification for runtime-dumped dexes.
+"""Lenient verification for runtime-dumped dexes.
 
 `DexKit(src, lenient=True)` skips the load verifier's instruction-operand checks
 (VerifyInsns — the one part beyond ART's structural DexFileVerifier) so a
@@ -7,6 +7,8 @@ what a packer's runtime-dumped, partially-decrypted dex looks like (only the
 currently-executing methods are decrypted), and exactly what ART loads — it defers
 instruction validity to the runtime method_verifier, which packers skip. Header,
 ids, and code_item BOUNDS are still verified. See [[project-packer-analysis-direction]].
+Since dexllm#112 lenient ALSO accepts value strings out of order (ART rejects that);
+see tests/test_unsorted_value_strings.py.
 """
 
 import glob
@@ -87,7 +89,7 @@ def test_strict_rejects_garbage_instructions(garbage_dex):
 
 
 def test_lenient_loads_structurally_valid_dump(garbage_dex):
-    # lenient=True (ART-structural-equivalent) loads it — the structure is intact,
+    # lenient=True (skips VerifyInsns) loads it — the structure is intact,
     # only the method bodies are garbage (the partial-decrypt dump case).
     dk = dexllm.DexKit(garbage_dex, lenient=True)
     assert dk.list_classes()  # classes are recovered

@@ -261,7 +261,8 @@ def test_an_unresolvable_method_handle_index_is_rejected_at_the_gate(
     The reason is asserted because "rejected" alone would pass on any unrelated
     rejection: the craft is one byte on an otherwise untouched dex, so the ONLY
     thing that can be wrong with it is the value it retyped. Both modes, because
-    `check_insns_` gates `VerifyInsns` and nothing else.
+    `check_insns_` gates `VerifyInsns` (and value-string order, dexllm#112)
+    and nothing else.
     """
     import dexllm
 
@@ -922,7 +923,7 @@ def test_the_method_handle_index_bound_is_exactly_the_declared_count(tmp_path, l
     `count - 1` must be ACCEPTED and `count` REJECTED - an off-by-one that admits
     `count` passes any reject-only assertion, and one that rejects `count - 1`
     passes any accept-only one. Both verify modes, because `check_insns_` gates
-    `VerifyInsns` and nothing else, and a packer dump is the population most
+    `VerifyInsns` (and value-string order, dexllm#112) and nothing else, and a packer dump is the population most
     likely to carry a malformed value.
     """
     import dexllm

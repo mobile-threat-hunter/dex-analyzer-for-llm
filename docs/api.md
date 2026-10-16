@@ -50,13 +50,27 @@ verdict per dex (a bare `.dex` → one entry; a zip/apk → one per `classes*.de
 loadable source the result is byte-identical to `DexKit(path).verify_report()`
 (same `VerifyDex` call, same `dex_id` assignment — accepted dexes get a running
 0-based id, rejected/undecompressible get `-1`). `lenient=True` skips
-`VerifyInsns` (ART-structural-equivalent mode), as in the constructor.
+`VerifyInsns` (ART's structural verifier has no such check) and accepts VALUE
+strings out of order — see below — as in the constructor.
+
+**`art_deviations` (dexllm#112).** Every row carries a list of what a
+`lenient` verify accepted that ART's `DexFileVerifier` rejects. Today there is
+one such acceptance: a string table whose VALUE strings (const-string operands,
+encoded values) are out of order or duplicated, the shape a post-build string
+swap leaves when it does not re-sort `string_ids`. It is accepted only when the
+strings used as IDENTIFIERS — type descriptors, proto shorty, field and method
+names — are still strictly ordered among themselves and the empty string, if
+any, is at index 0, because those are the only properties this library's
+readers rely on (it never binary-searches the table; ART's runtime does, which
+is why ART insists). `valid: True` says the dex is safe to analyse; a non-empty
+`art_deviations` says it is not one ART would load. A strict verify never
+accepts it, so its rows are ART's verdict and always carry `[]`.
 ```python
 dexllm.verify('app.apk')
-# [{'dex_id': 0, 'name': 'classes.dex', 'valid': True, 'reason': '', 'source': 'app.apk'}]
+# [{'dex_id': 0, 'name': 'classes.dex', 'valid': True, 'reason': '', 'source': 'app.apk', 'art_deviations': []}]
 dexllm.verify('broken.dex')
 # [{'dex_id': -1, 'name': 'broken.dex', 'valid': False, 'reason': 'Empty or truncated file',
-#   'source': 'broken.dex'}]
+#   'source': 'broken.dex', 'art_deviations': []}]
 ```
 Entry shape matches `dk.verify_report()` (below). Use it to screen an unknown
 file (dumped/decrypted dex, disguised container) before committing to a load.
@@ -66,8 +80,9 @@ Constructs the analyzer. Identifies the file **by content, not extension** (a
 disguised `.apk` still loads). Multiple sources load in order — earlier sources
 get lower `dex_id`, so first-wins prefers them (packer/unpack ordering). Raises
 `std::runtime_error` (Python `RuntimeError`) on a non-dex/non-zip file or a zip
-with no `classes*.dex`. `lenient=True` runs the verifier in
-ART-structural-equivalent mode (accepts partially-decrypted dumps).
+with no `classes*.dex`. `lenient=True` skips instruction-operand checks (so a
+partially-decrypted dump loads) and accepts value strings out of order, reported
+per dex in `verify_report()`'s `art_deviations` (dexllm#112).
 
 ### `dk.dex_count() -> int`
 ```python
@@ -101,7 +116,7 @@ question is about a path on disk, and this when it is about the session.
 Per-dex structural-verification verdict (the load-time `VerifyDex` gate results).
 ```python
 dk.verify_report()
-# [{'dex_id': 0, 'name': 'classes.dex', 'valid': True, 'reason': '', 'source': 'app.apk'}]
+# [{'dex_id': 0, 'name': 'classes.dex', 'valid': True, 'reason': '', 'source': 'app.apk', 'art_deviations': []}]
 ```
 | key | type |
 |---|---|

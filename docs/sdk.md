@@ -60,10 +60,13 @@ fields are `tuple`s; `Mapping` fields are read-only views. See
 ### Loading & probing
 - **`ContainerInfo`** `(format, is_apk, has_manifest, dex_count, source)` — content-based
   file probe. `format` ∈ `"dex" | "zip" | "unknown"`.
-- **`DexVerifyStatus`** `(dex_id, name, valid, reason, source)` — one loaded dex's
-  structural-verification verdict; `reason` is empty when `valid`. `name` is the
-  entry name for a zip member but the file path for a bare `.dex`, so `source` —
-  the path handed to the session — is what identifies it (dexllm#26).
+- **`DexVerifyStatus`** `(dex_id, name, valid, reason, source, art_deviations)` — one
+  loaded dex's structural-verification verdict; `reason` is empty when `valid`.
+  `name` is the entry name for a zip member but the file path for a bare `.dex`, so
+  `source` — the path handed to the session — is what identifies it (dexllm#26).
+  `art_deviations` (dexllm#112) lists what a `lenient` verify accepted that ART's
+  DexFileVerifier rejects (value strings out of order after a post-build string
+  swap); empty for a strict verify and for a rejected dex.
 - **`ExtractedDex`** `(dex_id, data, source, entry, offset, size)` — one dex's
   bytes plus its provenance, returned by `extract_dex`. `data` is spelled `bytes`
   on the raw `DexKit.extract_dex` dict (a `bytes: bytes` dataclass field would
@@ -315,8 +318,8 @@ application use-case interface.
   (pybind objects, dicts) into the typed models, so it satisfies
   `DexAnalysisUseCase`. Constructed from a single path or a sequence (earlier
   sources get lower dex_ids → first-wins on a class collision); `lenient=True` runs
-  the load-time verifier in ART-structural-equivalent mode for partially-decrypted
-  dumps. Accepts `str` or `os.PathLike`. **`.raw`** exposes the underlying `DexKit`
+  the load-time verifier leniently — partially-decrypted dumps load, and value
+  strings out of order are accepted and reported in `art_deviations` (dexllm#112). Accepts `str` or `os.PathLike`. **`.raw`** exposes the underlying `DexKit`
   as an escape hatch (e.g. for L7 search not surfaced by a port).
 - **`ContainerProbe`** — the object implementing `ContainerProbePort` (stateless).
 - **`open_apk(sources, *, lenient=False) -> DexKitAdapter`** — the factory; returns

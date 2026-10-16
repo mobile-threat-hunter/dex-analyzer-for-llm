@@ -15,7 +15,7 @@ parallel-safe — rather than Xposed module development.
 | APK load | ~28 ms (lazy slicer parse + load-time structural verification — ~100× faster than androguard; multiple grows with APK size: Telegram's 39 k classes / 5 dex load in ~120 ms) |
 | Decompile | DAD-quality Java; 4.5× faster per-method than androguard |
 | Multidex | first-wins duplicate-class resolution, deterministic — matches ART/AOSP, so a packer's class collisions decompile to the body that actually runs |
-| Unpack workflow | `DexKit([dump, apk])` loads multiple sources with **priority by order** (decrypted dex first → first-wins makes it win, mirroring ART); `add_dumped_dexes()` is the re-analyze-after-dumping verb; `lenient=True` verifies in **ART-structural-equivalent** mode so a partially-decrypted dump still loads |
+| Unpack workflow | `DexKit([dump, apk])` loads multiple sources with **priority by order** (decrypted dex first → first-wins makes it win, mirroring ART); `add_dumped_dexes()` is the re-analyze-after-dumping verb; `lenient=True` skips instruction-operand checks so a partially-decrypted dump still loads, and accepts a post-build string swap ART rejects (value strings out of order), saying so in `art_deviations` |
 | Memory | ~520 MB on a 39k-class app — embeddable in-process, no JVM |
 | Parallel | C++ releases the GIL → real multi-threaded decompile from one in-process instance |
 | Search | L1–L7 (name / string / annotation / super / API call-site / xref) — 3–6× faster than androguard |
@@ -353,7 +353,7 @@ import dexllm
 dexllm.identify("/path/to/suspect")   # → {format, is_apk, has_manifest, dex_count, source}
 
 # Structurally verify a dex/apk without loading — never raises (the verify() sibling of identify())
-dexllm.verify("/path/to/suspect")     # → [{dex_id, name, valid, reason, source}, …] (per dex)
+dexllm.verify("/path/to/suspect")     # → [{dex_id, name, valid, reason, source, art_deviations}, …] (per dex)
 
 dk = dexllm.DexKit("/path/to/app.apk")   # .apk/.jar/.zip, a bare .dex, or a disguised container
 
@@ -401,7 +401,10 @@ uvicorn dexllm.server:app --port 8000       # FastAPI + SSE web backend
 
 The web backend's `POST /upload` takes the same inputs as everything else —
 identified by content, not by filename — and returns the `identify()` verdict
-alongside the `session_id`.
+alongside the `session_id`. Both servers open a sample the strict verifier
+refuses with `lenient=True` instead, and say so: `/upload` answers
+`opened: "lenient"` with the `strict_refusal`, and every MCP answer for such a
+session carries a `session_note` (dexllm#112).
 
 ## Tests
 

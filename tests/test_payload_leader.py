@@ -151,7 +151,7 @@ def _craft(tmp_path: Path, target, shape: str) -> tuple[str, str]:
     path = tmp_path / f"leader_{shape}.dex"
     path.write_bytes(bytes(dex))
     # The premise: the gate accepts it, in BOTH modes.  `check_insns_` gates
-    # VerifyInsns and nothing else, and a leader off a boundary is exactly the
+    # VerifyInsns and value-string order (dexllm#112) and nothing else, and a leader off a boundary is exactly the
     # thing VerifyInsns is asked about — so a craft that only verified leniently
     # would prove a weaker claim than the issue makes.
     for lenient in (False, True):

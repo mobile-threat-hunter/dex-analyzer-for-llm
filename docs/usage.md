@@ -69,7 +69,7 @@ per-dex verdicts of a **loaded** container with `dk.verify_report()`:
 
 ```python
 for r in dk.verify_report():
-    print(r)   # → {'dex_id': 0, 'name': 'classes.dex', 'valid': True, 'reason': '', 'source': 'app.apk'}
+    print(r)   # → {'dex_id': 0, 'name': 'classes.dex', 'valid': True, 'reason': '', 'source': 'app.apk', 'art_deviations': []}
 ```
 
 To verify **without loading** — the `verify()` sibling of `identify()` — use
@@ -80,8 +80,8 @@ For a loadable source the result is byte-identical to `dk.verify_report()`.
 
 ```python
 dexllm.verify("/path/to/suspect")     # per-dex, no load, no raise
-# → [{'dex_id': 0, 'name': 'classes.dex', 'valid': True, 'reason': '', 'source': 'app.apk'}]
-dexllm.verify("broken.dex", lenient=True)   # lenient = ART-structural mode (skip VerifyInsns)
+# → [{'dex_id': 0, 'name': 'classes.dex', 'valid': True, 'reason': '', 'source': 'app.apk', 'art_deviations': []}]
+dexllm.verify("broken.dex", lenient=True)   # skip VerifyInsns; accept + report unsorted value strings
 ```
 
 A container whose every dex fails verification raises at construction (but
@@ -123,9 +123,11 @@ dk.decompile_class("Lcom/evil/RealC2;")        # the real body
 ```
 
 Defaults: `prefer=True` (dumps loaded first → win collisions) and `lenient=True`
-(verify in **ART-structural-equivalent** mode — skip instruction-operand checks — so
-a *partially*-decrypted dump, with valid structure but garbage method bodies, still
-loads, exactly as ART loads it; header/structure/bounds are still verified). It
+(skip instruction-operand checks, so a *partially*-decrypted dump, with valid
+structure but garbage method bodies, still loads, exactly as ART loads it;
+header/structure/bounds are still verified. Lenient also accepts VALUE strings out
+of order — ART rejects that — and reports it in `verify_report()`'s
+`art_deviations`, dexllm#112). It
 returns a fresh `DexKit` (a clean rebuild, consistent caches) — keep the new handle.
 
 The single-source constructor argument is still named `apk_path` for backward

@@ -50,6 +50,7 @@ from mcp.server.stdio import stdio_server
 
 from . import DexKit
 from . import tools as dxtools
+from ._open import open_strict_then_lenient
 
 # ─── DexKit LRU instance cache ────────────────────────────────────────────
 
@@ -57,15 +58,24 @@ _DK_CACHE_MAX = 4
 _dk_cache: OrderedDict[str, DexKit] = OrderedDict()
 
 
+# dexllm#112: the strict refusal a session was opened leniently after, by path.
+_dk_lenient_note: dict[str, str] = {}
+
+
 def _get_dk(apk_path: str) -> DexKit:
     p = str(Path(apk_path).expanduser().resolve())
     if p in _dk_cache:
         _dk_cache.move_to_end(p)
         return _dk_cache[p]
-    dk = DexKit(p)
+    dk, strict_refusal = open_strict_then_lenient(p)
     _dk_cache[p] = dk
+    if strict_refusal:
+        _dk_lenient_note[p] = strict_refusal
+    else:
+        _dk_lenient_note.pop(p, None)
     while len(_dk_cache) > _DK_CACHE_MAX:
-        _dk_cache.popitem(last=False)
+        evicted, _ = _dk_cache.popitem(last=False)
+        _dk_lenient_note.pop(evicted, None)
     return dk
 
 
@@ -127,7 +137,21 @@ def dispatch_tool(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         dk = _get_dk(apk_path)
     except Exception as e:  # noqa: BLE001 — surface any open failure to the LLM
         return {"error": f"failed to open APK '{apk_path}': {type(e).__name__}: {e}"}
-    return dxtools.execute(tool_name, args, dk)
+    result = dxtools.execute(tool_name, args, dk)
+    # dexllm#112: a session opened leniently says so on EVERY answer, because the
+    # model may never call verify_report and must not mistake it for a clean load.
+    note = _dk_lenient_note.get(str(Path(apk_path).expanduser().resolve()))
+    if note and isinstance(result, dict):
+        result = {
+            **result,
+            "session_note": (
+                "opened with lenient=True after strict verification refused it: "
+                f"{note}. Lenient skips instruction-operand checks and accepts "
+                "value strings out of order; verify_report shows each dex, and a "
+                "non-empty art_deviations names what ART would reject."
+            ),
+        }
+    return result
 
 
 # ─── MCP server (low-level) ───────────────────────────────────────────────

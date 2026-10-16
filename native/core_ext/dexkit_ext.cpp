@@ -401,6 +401,7 @@ struct LogicalSlice {
     // on its own the way a v35-40 dex can.
     bool self_contained = true;
     std::string reason;
+    std::vector<std::string> art_deviations;  // dexllm#112
 };
 
 // MIRROR of the core's ParseLogicalDexOffsets (vendor/dexkit_core/Core/dexkit/
@@ -453,6 +454,7 @@ std::vector<LogicalSlice> ClassifyImageSlices(const uint8_t* base, size_t n,
         auto vr = VerifyDex(base, n, check_insns, s.offset, &image_state);
         s.ok = vr.ok;
         s.reason = vr.reason;
+        s.art_deviations = vr.art_deviations;
         if (!s.ok) ++rejected;
     }
     if (rejected != 0) {
@@ -508,7 +510,7 @@ size_t EmitSliceVerdicts(std::vector<LogicalSlice>& slices,
                 "dex_id as uint16_t, so at most 65536 can be loaded)";
         }
         if (s.ok) {
-            report.push_back({next_dex_id++, name, true, {}, source});
+            report.push_back({next_dex_id++, name, true, {}, source, s.art_deviations});
             ++accepted;
         } else {
             report.push_back({-1, name, false, s.reason, source});

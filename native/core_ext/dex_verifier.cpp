@@ -8,6 +8,8 @@
 //                        CheckIntraCodeItem :1726) + VerifyInsns (see below)
 //   CheckInterSection  — IMPLEMENTED  (ART :3477) — id ordering/uniqueness +
 //                        descriptor syntax + class_def semantics
+// The lenient pass ALSO tolerates value strings out of order (dexllm#112, which
+// ART rejects; see AcceptUnsortedValueStrings and `art_deviations`).
 // VerifyInsns is the ONE deliberate non-port: instruction-operand bounds anchored
 // to the Dalvik bytecode spec via slicer VerifyFlags, NOT ART dex_file_verifier
 // (which omits per-insn checks — those are the runtime method_verifier). Full
@@ -321,6 +323,7 @@ public:
     }
 
     const std::string& reason() const { return reason_; }
+    const std::vector<std::string>& art_deviations() const { return art_deviations_; }
 
 private:
     // ART DexFile::GetDataRange (dex_file.cc :240) — the byte range every dex
@@ -450,6 +453,7 @@ private:
 
     bool CheckIntraSection();  // ART :2450
     bool CheckInterSection();  // ART :3477
+    bool AcceptUnsortedValueStrings(u4 out_of_order);  // dexllm#112
     // ART CheckIntraMethodHandleItem :1492 — fused into CheckMap for the same
     // reason the annotations subtree fused into CheckIntraSection (dexllm#56):
     // ART reaches it by ITERATING the map's sections, and this port has no such
@@ -537,11 +541,17 @@ private:
     size_t avail_ = 0;     // image_size_ - header_off_ (ART CheckHeader's `size`)
     const u1* begin_ = nullptr;  // ART DataBegin() — the base every offset is off
     size_t size_ = 0;            // ART DataSize()  — and the bound for them
-    bool check_insns_ = true;  // false = ART-structural-equivalent (skip VerifyInsns)
+    // false = the LENIENT pass: skip VerifyInsns (ART's structural verifier has
+    // no such check), and accept VALUE strings out of order (dexllm#112, which
+    // ART rejects — recorded in art_deviations_). Every other check is ART's.
+    bool check_insns_ = true;
     VerifyImageState owned_state_;  // used when the caller threads none
     VerifyImageState* img_state_;   // per-IMAGE scratch (dexllm#59)
     const dex::Header* header_ = nullptr;
     std::string reason_;
+    // What a LENIENT pass accepted that ART's DexFileVerifier rejects (dexllm#112).
+    // Never written by a strict pass, so a strict verdict stays ART's verdict.
+    std::vector<std::string> art_deviations_;
     // ART's NumMethodHandles() (dex_file.cc :290, zero-inited at :159) — the
     // map's method_handle count, carried forward by CheckMap so
     // VerifyEncodedValue's 0x16 arm can bound its index (ART :1212). 0 means the
@@ -943,7 +953,7 @@ bool DexVerifier::VerifyCodeItem(u4 off) {
     const u1* insns = base + sizeof(dex::Code);
     if (!CheckListSize(insns, insns_size, sizeof(u2), "insns")) return false;
     // VerifyInsns (operand bounds) is beyond ART's structural verifier; skip it in
-    // ART-structural-equivalent mode so a partially-decrypted dump (garbage method
+    // the lenient pass so a partially-decrypted dump (garbage method
     // bodies, valid structure) passes — exactly what ART loads. The insns byte
     // span is still bounded by CheckListSize above.
     if (check_insns_ &&
@@ -1605,13 +1615,65 @@ bool DexVerifier::CheckIntraSection() {
 // semantics in VerifyClassDefs. Out of scope (see dex_verifier.h): proto
 // shorty-match, call_site/method_handle inter-checks, annotations definer-match,
 // and intra encoded_array/annotations/debug_info — lazy-parsed / not dereferenced.
+// dexllm#112 — a LENIENT pass over a string table ART's order rule rejects. ART
+// enforces the order because its runtime BINARY-SEARCHES the table by content;
+// this port never does (no reader in the vendored core, slicer, core_ext or
+// dad_cpp searches it — every string is reached by INDEX). What the readers DO
+// rely on is narrower, and it is exactly what this accepts on:
+//   I1  the strings used as IDENTIFIERS — type descriptors, proto shorty,
+//       field / method names — are strictly ordered AMONG THEMSELVES, hence
+//       content-unique: `type_ids_map`, DexKit's `class_declare_dex_map`,
+//       core_ext's `type_to_idx`, slicer `FindClassIndex` and the dexllm#108
+//       single-dex fast path all key on that content;
+//   I3  the empty string occurs only at index 0, where DexKit's
+//       `empty_string_id` looks for it (the `""` Equal search).
+// A VALUE string (const-string, encoded value, annotation element, source
+// file, …) may then sit anywhere and repeat — the shape of a post-build string
+// swap that did not re-sort the table. Anything else keeps ART's failure.
+// Every index read here was bounded in CheckIntraSection.
+bool DexVerifier::AcceptUnsortedValueStrings(u4 out_of_order) {
+    const u4 n = header_->string_ids_size;
+    std::vector<bool> ident(n, false);
+    for (u4 i = 0; i < header_->type_ids_size; ++i)
+        ident[TableAt<dex::TypeId>(header_->type_ids_off, i)->descriptor_idx] = true;
+    for (u4 i = 0; i < header_->proto_ids_size; ++i)
+        ident[TableAt<dex::ProtoId>(header_->proto_ids_off, i)->shorty_idx] = true;
+    for (u4 i = 0; i < header_->field_ids_size; ++i)
+        ident[TableAt<dex::FieldId>(header_->field_ids_off, i)->name_idx] = true;
+    for (u4 i = 0; i < header_->method_ids_size; ++i)
+        ident[TableAt<dex::MethodId>(header_->method_ids_off, i)->name_idx] = true;
+    u4 prev = n;  // none yet
+    for (u4 i = 0; i < n; ++i) {
+        if (i != 0 && StringContent(i)[0] == '\0') return false;  // I3
+        if (!ident[i]) continue;
+        if (prev != n && CompareModifiedUtf8ToModifiedUtf8AsUtf16CodePointValues(
+                             StringContent(prev), StringContent(i)) >= 0) {
+            return false;  // I1
+        }
+        prev = i;
+    }
+    // `out_of_order` counts adjacent PAIRS that are not strictly increasing,
+    // which is what ART's loop tests — not a count of strings.
+    art_deviations_.push_back(
+        "string_ids: " + std::to_string(out_of_order) +
+        " adjacent pair(s) out of order or duplicated among value strings "
+        "(identifier strings are ordered); ART's DexFileVerifier rejects this "
+        "dex");
+    return true;
+}
+
 bool DexVerifier::CheckInterSection() {
     // string_ids: strictly increasing by UTF-16 code-point value (ART :2720).
+    u4 out_of_order = 0;
     for (u4 i = 1; i < header_->string_ids_size; ++i) {
         if (CompareModifiedUtf8ToModifiedUtf8AsUtf16CodePointValues(
                 StringContent(i - 1), StringContent(i)) >= 0) {
-            return Fail("Out-of-order string_ids");
+            if (check_insns_) return Fail("Out-of-order string_ids");
+            ++out_of_order;
         }
+    }
+    if (out_of_order != 0 && !AcceptUnsortedValueStrings(out_of_order)) {
+        return Fail("Out-of-order string_ids");
     }
     // type_ids: per-item descriptor syntax (ART CheckInterTypeIdItem :2735), then
     // strictly increasing descriptor_idx (ART :2749).
@@ -1745,7 +1807,8 @@ bool DexVerifier::CheckClassDataDefiners(u4 off, u4 cls) {
     // the same). Its OFFSET check is NOT repeated: `off` is a precondition, met
     // because CheckIntraSection runs first and calls VerifyClassData over the
     // same class_defs table with the same `!= 0` condition — including under
-    // `lenient`, which gates only VerifyInsns. Nothing is unsafe if that ever
+    // `lenient`, which never skips an intra check (it skips VerifyInsns and
+    // tolerates value-string ORDER, dexllm#112). Nothing is unsafe if that ever
     // changed: `begin_ + u4` cannot underflow and ReadUleb bounds every byte
     // against EndOfFile, so a wild `off` ends in "class_data bad counts".
     const u1* p = OffsetToPtr(off);
@@ -1803,7 +1866,7 @@ DexVerifyResult VerifyDex(const u1* data, size_t size, bool check_insns,
                           size_t header_off, VerifyImageState* image) {
     try {
         DexVerifier v(data, size, header_off, check_insns, image);
-        if (v.Verify()) return {true, {}};
+        if (v.Verify()) return {true, {}, v.art_deviations()};
         return {false, v.reason()};
     } catch (const std::exception& e) {
         // VerifyInsns decodes instructions via the slicer (GetWidthFromBytecode /
