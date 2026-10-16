@@ -417,7 +417,7 @@ check-cast. Text and AST read one definition (`ConstantAt`), so they agree.
 | position type | value | rendered |
 |---|---|---|
 | `boolean` | 0 / 1 | `false` / `true` |
-| a reference or array | 0 | `null` |
+| a reference or array | 0 | `null`; as an **argument**, `((String) null)` — cast to the declared parameter type, because a bare `null` resolves to the MOST SPECIFIC applicable overload and can be ambiguous (`putExtra("k", null)`) or bind a method the bytecode does not call (dexllm#109) |
 | `byte` / `short` / `char` **argument** | fits the type | `((char) 125)` — Java does not narrow a constant in an invocation, so `append(125)` would call `append(int)` |
 | `float` / `double` | the raw bits | the IEEE-754 literal (`1f`, `Double.NaN`) |
 | any of the above | a value the type cannot hold (`takeZ(2)`, `takeRef(1)`, `takeB(200)`) | the integer, unchanged — ART checks only the category at a narrow position, so such a dex is legal and a cast or a `true` would assert a value the callee does not receive |

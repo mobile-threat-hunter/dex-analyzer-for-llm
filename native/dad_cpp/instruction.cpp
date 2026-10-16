@@ -1696,7 +1696,9 @@ std::optional<ConstLiteral> ConstantAt(ConstContext ctx,
         return std::nullopt;
     }
     if (pt.front() == 'L' || pt.front() == '[') {
-        if (v == 0) return ConstLiteral{K::Null, v};
+        if (v == 0)
+            return ConstLiteral{ctx == ConstContext::Argument ? K::NullCast
+                                                              : K::Null, v};
         return std::nullopt;
     }
     // The cast must not CHANGE the value: ART checks only the category at a

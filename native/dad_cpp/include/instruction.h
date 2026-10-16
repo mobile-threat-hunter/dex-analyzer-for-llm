@@ -1197,6 +1197,17 @@ std::optional<bool> BitwiseBoolConstant(std::string_view op,
 //               Only when the value FITS the type: a cast that changed
 //               it (`(byte) 200` is -56) would assert a value the callee
 //               does not receive, so such a value stays the integer.
+//               A `null` here is cast to the DECLARED parameter type
+//               (`NullCast`, dexllm#109): a bare `null` resolves to the
+//               MOST SPECIFIC applicable overload, so it can be ambiguous
+//               (`putExtra("k", null)`) or silently select a method the
+//               bytecode does not call (a synthetic accessor constructor
+//               beside a public one). With the cast the null position no
+//               longer influences which overload javac picks, and no
+//               overload set is needed for that. It does not make the WHOLE
+//               call unambiguous: another argument whose static type is
+//               more specific than its parameter can still select a
+//               different overload (pre-existing; a reviewer's craft).
 // The value guards are not heuristics: ART's verifier accepts only its Zero
 // constant at a reference position, so a nonzero integer there is a dex no VM
 // loads and is left as the integer; at a `Z` position ART checks only the
@@ -1210,7 +1221,7 @@ std::optional<bool> BitwiseBoolConstant(std::string_view op,
 // typed reference constant (const-string / const-class) is never touched.
 enum class ConstContext { Operand, Value, Argument };
 struct ConstLiteral {
-    enum class Kind { Bool, Null, Float, Double, NarrowCast };
+    enum class Kind { Bool, Null, NullCast, Float, Double, NarrowCast };
     Kind kind;
     int64_t raw = 0;     // the constant's integer value (the bits for F/D)
     char narrow = 0;     // 'B' / 'S' / 'C' for NarrowCast

@@ -407,7 +407,10 @@ javac reaches only because the same method stopped failing attribution
 several reference overloads (`putExtra("…", null)`, `this(p2, null)`). OFF's
 `0` there either failed to compile or silently resolved to the `int` overload;
 choosing the overload needs a cast, which needs overload resolution — recorded,
-not fixed (see the residuals).
+not fixed (see the residuals). **Both halves of that last sentence were later
+corrected:** the cast needs only the DECLARED parameter type, and dexllm#109
+applies it to every `null` argument (16 of the 18 such errors at that capture
+gone; the residual 2 have another cause on the same line).
 
 **HG8.** 24 mutants, each BUILT with its own `.so` md5 and run against six
 guard files, control md5 asserted before and after: **24 killed**. Four
@@ -489,7 +492,8 @@ BOTH fails `flagChain` — killed.
   NOT: casting to the DECLARED parameter type (which `ConstantAt` already
   receives) always selects that exact method, the most specific applicable
   one (`putExtra("a", (String) null)` compiles against android-36). Filed as
-  dexllm#109.
+  dexllm#109 and FIXED there: every `null` argument is cast to its declared
+  parameter type.
 * **Two numeric positions `numeric_use` still does not record**, both shared
   with #94's `z_pos`: `==` against a non-constant int and a bitwise op with an
   int. A flag seeded by a `Z` parameter can be typed `boolean` there; OFF was

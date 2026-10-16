@@ -880,6 +880,10 @@ AstValue JSONWriter::visit_const_at(ConstContext ctx, std::string_view target,
     switch (lit->kind) {
         case K::Bool: return LiteralBool(lit->raw != 0);
         case K::Null: return LiteralNull();
+        case K::NullCast:
+            // dexllm#109: the node a check-cast of null builds
+            return Parenthesis(Cast(ParseDescriptor(std::string(target)),
+                                    LiteralNull()));
         case K::Float: {
             const uint32_t bits = static_cast<uint32_t>(lit->raw);
             float f; std::memcpy(&f, &bits, sizeof(f));

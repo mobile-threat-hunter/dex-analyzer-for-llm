@@ -869,3 +869,41 @@
     invoke-static {v0}, LTypedPositions;->takeZ(Z)V
     return v0
 .end method
+# dexllm#109: overloads a bare `null` cannot tell apart. `takeAmb(null)` is
+# ambiguous between String and Object[]; `takeSpec(null)` is NOT ambiguous but
+# resolves to the more specific String overload while the bytecode calls the
+# Object one. A cast to the DECLARED parameter type selects exactly the call.
+.method static takeAmb(Ljava/lang/String;)V
+    .registers 1
+    return-void
+.end method
+.method static takeAmb([Ljava/lang/Object;)V
+    .registers 1
+    return-void
+.end method
+.method static takeSpec(Ljava/lang/Object;)V
+    .registers 1
+    return-void
+.end method
+.method static takeSpec(Ljava/lang/String;)V
+    .registers 1
+    return-void
+.end method
+.method static argNullAmbiguous()V
+    .registers 1
+    const/4 v0, 0x0
+    invoke-static {v0}, LTypedPositions;->takeAmb(Ljava/lang/String;)V
+    return-void
+.end method
+.method static argNullSpecific()V
+    .registers 1
+    const/4 v0, 0x0
+    invoke-static {v0}, LTypedPositions;->takeSpec(Ljava/lang/Object;)V
+    return-void
+.end method
+.method static argNullArray()V
+    .registers 1
+    const/4 v0, 0x0
+    invoke-static {v0}, LTypedPositions;->takeAmb([Ljava/lang/Object;)V
+    return-void
+.end method

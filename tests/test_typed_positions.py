@@ -54,13 +54,16 @@ EXPECTED = {
     # invocation context
     "argTrue": "TypedPositions.takeZ(true);",
     "argFalse": "TypedPositions.takeZ(false);",
-    "argNull": "TypedPositions.takeRef(null);",
-    "argNullStr": "TypedPositions.takeStr(null);",
+    # a null ARGUMENT is cast to the declared parameter type (dexllm#109): a
+    # bare null resolves to the most specific overload, which can be ambiguous
+    # or a method the bytecode does not call
+    "argNull": "TypedPositions.takeRef(((Object) null));",
+    "argNullStr": "TypedPositions.takeStr(((String) null));",
     # `append(125)` resolves to append(int): the cast is what selects append(C)
     "argChar": "return p1.append(((char) 125)).toString();",
     "argByte": "TypedPositions.takeB(((byte) -1));",
     "argShort": "TypedPositions.takeS(((short) 500));",
-    "ctorArgs": "return new TypedPositions(true, null);",
+    "ctorArgs": "return new TypedPositions(true, ((Object) null));",
     # one register, two declared types in ONE call: the node is SHARED (an
     # IRForm keys constants by value), so the type is the position's, not the
     # node's
@@ -92,6 +95,10 @@ EXPECTED = {
     "argByteOut": "TypedPositions.takeB(200);",
     "argShortOut": "TypedPositions.takeS(40000);",
     "argCharNeg": "return p1.append(-1).toString();",
+    # dexllm#109: overloads a bare null cannot tell apart
+    "argNullAmbiguous": "TypedPositions.takeAmb(((String) null));",
+    "argNullSpecific": "TypedPositions.takeSpec(((Object) null));",
+    "argNullArray": "TypedPositions.takeAmb(((Object[]) null));",
 }
 
 
@@ -117,7 +124,10 @@ def _ast_args(node, out):
         and isinstance(node[1][1], list)
         and node[1][1][0] == "Literal"
     ):
-        out.append(("cast" + node[1][0][1][0], node[1][1][1]))
+        # the type's NAME and its array DIMENSION: a cast that dropped the
+        # `[]` would disagree with the text and pass a name-only check
+        name, dim = node[1][0][1][0], node[1][0][1][1]
+        out.append(("cast" + name + "[]" * dim, node[1][1][1]))
     for c in node:
         _ast_args(c, out)
 
@@ -127,7 +137,10 @@ def _ast_args(node, out):
 AST_EXPECTED = {
     "argTrue": (".boolean", "true"),
     "argFalse": (".boolean", "false"),
-    "argNull": (".null", "null"),
+    "argNull": ("castjava/lang/Object", "null"),
+    "argNullStr": ("castjava/lang/String", "null"),
+    "argNullArray": ("castjava/lang/Object[]", "null"),
+    "checkCastNull": ("castjava/lang/Void[]", "null"),
     "argChar": ("cast.char", "125"),
     "argByte": ("cast.byte", "-1"),
     "argShort": ("cast.short", "500"),
@@ -136,7 +149,6 @@ AST_EXPECTED = {
     "aputTrue": (".boolean", "true"),
     "aputNull": (".null", "null"),
     "throwNull": (".null", "null"),
-    "checkCastNull": (".null", "null"),
 }
 
 
@@ -306,10 +318,30 @@ def _smali_expectations(smali):
             meth = ops.split("}, ")[1]
             for r, t in zip(regs, _params(meth[meth.index("(") :])):
                 if r == reg:
-                    exp.append((t, val))
+                    exp.append(("call", t, val))
         elif op.startswith(("iput", "sput")) and ops.split(",")[0] == reg:
-            exp.append((ops.split(":")[-1], val))
+            exp.append(("field", ops.split(":")[-1], val))
     return exp
+
+
+_PRIM = {
+    "Z": ".boolean",
+    "B": ".byte",
+    "S": ".short",
+    "C": ".char",
+    "I": ".int",
+    "J": ".long",
+    "F": ".float",
+    "D": ".double",
+}
+
+
+def _ast_type_name(desc):
+    """The AST's spelling of a type: element name, then one `[]` per dim."""
+    dim = len(desc) - len(desc.lstrip("["))
+    elem = desc[dim:]
+    name = elem[1:-1] if elem[0] == "L" else _PRIM[elem]
+    return name + "[]" * dim
 
 
 def test_the_smali_oracle_agrees_with_the_ast(fx):
@@ -324,11 +356,17 @@ def test_the_smali_oracle_agrees_with_the_ast(fx):
         a = fx.decompile_method_ast(m, include_source=False)
         lits = []
         _ast_args(a["ast"]["body"], lits)
-        for t, v in exp:
+        for kind, t, v in exp:
             if t == "Z" and v in (0, 1):
                 want = (".boolean", "true" if v else "false")
             elif t[0] in "L[" and v == 0:
-                want = (".null", "null")
+                # a null ARGUMENT carries the declared type as a cast node
+                # (dexllm#109); a null STORE is a bare literal
+                want = (
+                    ("cast" + _ast_type_name(t), "null")
+                    if kind == "call"
+                    else (".null", "null")
+                )
             elif (t, -128 <= v <= 127) == ("B", True) or (
                 t,
                 -32768 <= v <= 32767,
@@ -547,3 +585,69 @@ def test_a_number_return_type_rules_out_boolean(fx):
     same), so `boolean v0 … return v0;` cannot appear."""
     text = fx.decompile_method(_desc(fx, "zThenIntReturn"))
     assert _decls(text).get("v0") == "int", text
+
+
+# ---- dexllm#109: javac is the oracle for which overload a null selects ----
+
+_NULL_CALLS = {
+    "argNullAmbiguous": "takeAmb:(Ljava/lang/String;)V",
+    "argNullSpecific": "takeSpec:(Ljava/lang/Object;)V",
+    "argNullArray": "takeAmb:([Ljava/lang/Object;)V",
+}
+
+
+def test_javac_selects_the_overload_the_bytecode_calls(fx, tmp_path):
+    """Compile the DECOMPILED methods beside the fixture's overloads and read
+    back which method each call binds to. A bare `null` fails twice here:
+    `takeAmb(null)` does not compile (String vs Object[]), and
+    `takeSpec(null)` compiles to the String overload while the bytecode calls
+    the Object one -- a wrong method, silently."""
+    import shutil
+    import subprocess
+
+    if not (shutil.which("javac") and shutil.which("javap")):
+        pytest.skip("no JDK on PATH")
+    body = "\n".join(fx.decompile_method(_desc(fx, n)) for n in _NULL_CALLS)
+    src = (
+        "public class TypedPositions {\n"
+        "  static void takeAmb(String s) {}\n"
+        "  static void takeAmb(Object[] s) {}\n"
+        "  static void takeSpec(Object o) {}\n"
+        "  static void takeSpec(String s) {}\n" + body + "\n}\n"
+    )
+    (tmp_path / "TypedPositions.java").write_text(src)
+    r = subprocess.run(
+        ["javac", "-d", str(tmp_path), str(tmp_path / "TypedPositions.java")],
+        capture_output=True,
+        text=True,
+    )
+    assert r.returncode == 0, r.stderr + src
+    dis = subprocess.run(
+        ["javap", "-c", "-cp", str(tmp_path), "TypedPositions"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    for name, call in _NULL_CALLS.items():
+        sect = dis.split(f" {name}();", 1)[1].split("\n\n", 1)[0]
+        assert f"Method {call}" in sect, (name, sect)
+
+
+def test_a_null_argument_is_a_parenthesised_cast_node(fx):
+    """The AST shape is the one a NarrowCast and a check-cast of null build,
+    `Parenthesis(Cast(Type, Literal null))`, pinned whole -- a bare `Cast`
+    would render the same Java and pass every literal-level check."""
+    a = fx.decompile_method_ast(_desc(fx, "argNullArray"), include_source=False)
+    call = a["ast"]["body"][2][0][1]
+    assert call[1][1] == [
+        "Parenthesis",
+        [
+            [
+                "Cast",
+                [
+                    ["TypeName", ["java/lang/Object", 1]],
+                    ["Literal", "null", [".null", 0]],
+                ],
+            ]
+        ],
+    ], call

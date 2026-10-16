@@ -561,6 +561,12 @@ public:
         switch (lit->kind) {
             case K::Bool: w_->Write(lit->raw ? "true" : "false"); break;
             case K::Null: w_->Write("null"); break;
+            case K::NullCast:
+                // dexllm#109: the spelling a check-cast of null gets
+                w_->Write("((");
+                w_->Write(GetType(std::string(target)));
+                w_->Write(") null)");
+                break;
             case K::Float: {
                 const uint32_t bits = static_cast<uint32_t>(lit->raw);
                 float f; std::memcpy(&f, &bits, sizeof(f));

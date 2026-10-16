@@ -1233,13 +1233,67 @@ uses, `sput-boolean` as a source), each a mutant that passed the whole suite.
 
 **Residuals, recorded:** 321 `int` locals still at a `Z` parameter (#86-class
 refusals — **dexllm#110**); 19 new javac `ambiguous` errors from a `null` at an
-overloaded callee (**dexllm#109** — a cast to the DECLARED parameter type
-suffices, which a reviewer showed; the record first said it needed the
-overload set); `==` against a non-constant int and a bitwise op with an int are
+overloaded callee (**dexllm#109**, FIXED in the section below); `==` against a non-constant int and a bitwise op with an int are
 not numeric positions (shared with #94's `z_pos`); a `char`/`byte`/`short`
 VARIABLE at a narrowing parameter has no use source; `filled-new-array`
 elements do not go through `ConstantAt` (#96/#97 family); and, pre-existing and
 unchanged, 164 `pN == 0` on a reference parameter whose register is reused.
+
+### Production fix — every `null` argument is cast to its declared parameter type (dexllm#109, 2026-10-16)
+
+dexllm#102 rendered a `0` at a reference ARGUMENT as a bare `null`. A bare
+`null` resolves to the MOST SPECIFIC applicable overload, so it is either
+ambiguous (`putExtra("k", null)` — javac `reference to putExtra is ambiguous`)
+or, worse, silently binds a method the bytecode does not call: measured on the
+corpus, `new PathDataEvaluator(null)` calls a synthetic accessor constructor
+but resolves to the public `PathDataNode[]` one. The issue proposed needing the
+callee's overload set; a #102 reviewer showed it does not — a cast to the
+DECLARED parameter type (already in `ConstantAt`'s `position_type`) takes the
+null position out of overload selection.
+
+**User decision: cast EVERY null argument** (census: 8,917 null arguments; a
+"cast only where needed" variant could prove only 3,798 of them unambiguous
+from the dex alone, and a framework method table was the larger alternative).
+`ConstLiteral::Kind::NullCast`, produced by `ConstantAt` in the `Argument`
+context only; the Writer renders `((T) null)` through `GetType`, the AST
+`Parenthesis(Cast(ParseDescriptor(T), LiteralNull()))` — the shapes a
+check-cast of null already had. Field / array / return / local / check-cast /
+throw nulls stay bare, and the cast does not make a whole call unambiguous (a
+non-null argument more specific than its parameter can still pick another
+overload — pre-existing, a reviewer's craft).
+
+**Measured (a/b OFF = #102 build `7fcb3cc5` vs ON `a1c7ddc2`, same capture):**
+7,867 lines on 23 corpus sources, **9,065 casts added, 0 other changes**, line
+counts equal on every source except the fixture itself (rebuilt between the
+captures). javac over the changed classes: null-argument ambiguity errors **18
+→ 2** (the 2 left have another cause on the line — a phantom
+`ClockFaceView(v5_4, <any>)` constructor from a separate malformed
+declaration, and a non-null argument), `no suitable constructor … <null>` **7 →
+0**. Total errors rise 28,724 → 28,751, every new one on a line that already
+failed — mostly the #96 `new X[] {…})` lines, where a cast gives javac's parser
+more to recover from. **A cost the javac harness cannot see, accepted by the
+user:** the cast spells its type the way the rest of the output does
+(`GetType`), so ~1,390 casts name a type javac cannot resolve —
+`Drawable$Callback` (nested `$`, 1,366, 485 of them anonymous `Outer$1`) or
+`reflect.Method` (a stripped `java.lang` subpackage, 21) — where a bare `null`
+compiled. The output already carries the same spelling at 4,640 declarations
+and 3,263 casts; the project-wide fix belongs to **dexllm#111** (type spelling),
+not to this cast. parity **29/29**, pytest **1827 passed / 24 skipped**,
+TRUE corpus-less **1400 / 451 / 0**, narrowed to `tests/data/multidex.apk`
+**1707 passed**, sweep **21,374-class 0-crash, GATE: PASS**, determinism 3
+`PYTHONHASHSEED`s → one digest, lint trio clean.
+
+**Guards** — `tests/data/typed-positions.dex` gains `argNullAmbiguous` /
+`argNullSpecific` / `argNullArray` and two overload pairs, and
+`test_javac_selects_the_overload_the_bytecode_calls` compiles the DECOMPILED
+methods beside them and reads the bound method back with `javap` (skips
+without a JDK). **8 mutants, each BUILT, all killed** — six from the diff and
+the three the reviewers built (the AST cast dropping the array dimension, the
+AST dropping `Parenthesis`, both of which passed every test until the AST
+check read the dimension and the node shape was pinned). Two reviewers; **no
+defect in the production change**; their findings were the two AST guard
+holes, a comment that overclaimed ("selects exactly the method"), the javac
+count (16 of 18, not 18 of 19), and the type-spelling cost above.
 
 ### Production fix — reused `this` register materialised as a local (`this = X` → valid, 2026-07-03)
 
