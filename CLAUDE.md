@@ -1344,6 +1344,59 @@ acceptance logic; both found the fallback blind to a multidex APK whose
 I1's strictness unguarded; both fixed. Full record: the dexllm#112 section of
 [docs/hack-gate.md](docs/hack-gate.md).
 
+### The text Writer ports DAD's follow-less `if` and switch `default` (dexllm#113, 2026-10-16)
+
+`decompile_method` (text) and `decompile_method_ast` disagreed on control flow:
+the text dropped a value `return` the AST kept (tvleanback
+`MediaSessionCompatApi21.hasCallback` fell off its end on two of its three
+paths), and a switch block that is both `default` and a case target was
+emitted twice (`IconCompat$Api23Impl.createFromIconInner`). Both are PORTING
+GAPS in `writer.cpp`; `dast.cpp` ported the same two DAD branches correctly,
+which is why only the text diverged.
+
+* **`EmitIf` had folded DAD's follow-is-None branch (`writer.py:352-363`) into
+  the follow path**, whose `!visited_.count(false)` check skipped a false arm
+  that is a ReturnBlock already reached through the true arm — but a return is
+  re-emitted at every reaching path (VisitNode's `is_return` exemption). It now
+  has its own branch: both arms visited, no swap, no `if_follow` push (the old
+  path pushed a nullptr; not pushing is DAD's and dast's shape, and a mutant that
+  pushes is output-identical on all 47 sources — IfStruct hands an enclosing
+  follow to inner conds, so a follow-less if has none to disable). One
+  divergence from DAD, deliberate: `} else {` is omitted when
+  `Writer::EmitsNothing(false)` — the same early returns as VisitNode, in the
+  same order — says the arm writes nothing, so DAD's empty `} else { }` is not
+  printed (the AST keeps an empty block).
+* **`EmitSwitch` lacked `writer.py:398-400`** (a case node that IS the default
+  takes `default:` among its labels; the trailing default is skipped). Not only
+  a duplicate: when that block falls through into the next case, the trailing
+  copy SKIPPED the shared statements on the default path — a WRONG ANSWER
+  (fixture `fallDefault`: OFF returns 1 on the default path, the bytecode 8;
+  found by the adversarial reviewer).
+
+**Measured (a/b OFF=`f2a3bdbf` = v0.26.0 vs ON=`8209664a`, SAME script):** 46
+sources (bundled corpus + fixtures + the #112 gambling sample) / 2,595,724 lines →
+**406 classes on 17 sources change (+516 / −582 lines)**; text-vs-AST
+value-return mismatches **32 → 0** on every source (multiple_locale 17 → 0, the
+#112 sample 7 → 0). Every changed line is a moved / newly explicit `default:`
+(`case 1: default: break;` where the default is the switch follow — DAD's form),
+a removed duplicate default body, an added `} else { return …; }`, or a removed
+empty `} else { }` (884 → 668); a name-normalised check finds no statement lost.
+Both reviewers re-derived it on their own populations (27→0 and 32→0 mismatches,
+368 classes; 0 text/AST switch-label mismatches over 2,967 switch methods).
+parity 29/29, sweep 21,374-class 0-crash GATE: PASS, determinism 3
+`PYTHONHASHSEED`s one digest, corpus-less 1430 / 452 / 0, narrowed 1737, lint clean.
+Text now matches androguard DAD on both issue methods.
+
+**Guards:** [tests/test_cfg_text_ast.py](tests/test_cfg_text_ast.py) (12) on the
+ninth AUTHORED fixture `tests/data/cfg-shapes.smali` (`hasCallback` register for
+register, `sharedDefault`, `caseIf`, `fallDefault`). 8 mutants BUILT with distinct
+`.so` md5s: 7 killed, the nullptr-push one equivalent (above); the reviewers' 6 more
+agreed. **Residuals, recorded:** `hasCallback`'s `if (v0 == null) { }` arm is still
+empty in text, AST AND DAD (its block was visited through the catch handler — a
+structuring issue); 668 empty `} else { }` and 539 empty trailing `default:` come
+from the follow path, untouched; `EmitsNothing` does not model the `<clinit>`
+tail-`return;` drop, so a crafted `<clinit>` can print an empty else (0 in corpus).
+
 ### Production fix — reused `this` register materialised as a local (`this = X` → valid, 2026-07-03)
 
 When a method reuses its receiver register p0 (`this`) as a scratch local — reads `this` early, overwrites it (`move-result` / `const`), reads the new value later, the two merging at a shared use (e.g. `return`) — `GroupVariables` binds the param-def and reuse-defs into ONE version (they share the merge use), so `SplitVariables` leaves it unsplit and it keeps its `ThisParam` identity. DAD (and our 1:1 port) then emit **`this = <value>`** — always invalid Java (you cannot assign to `this`). **Confirmed identical bug in androguard DAD**, so this is a beyond-DAD production divergence. Dominant real-corpus invalid-Java bucket (269 occurrences bundled, above every other). **Fix — `MaterializeReusedThis` ([dataflow.cpp](native/dad_cpp/dataflow.cpp), declared in [dataflow.h](native/dad_cpp/include/dataflow.h)), runs AFTER SplitVariables and BEFORE the chain consumers:** allocate a fresh local `vX`, rewrite every graph reference to the receiver → `vX`, and inject `vX = this` at the entry block head — the sole remaining `this` is that copy's rhs → `<Ret> vX = this; … vX = …; return vX;` (valid). `findFragmentByWho` (the canonical repro) becomes byte-valid: `Fragment v7 = this; if(!p2.equals(this.mWho)){ if(this.mChildFragmentManager==null){ v7 = null; } else { v7 = this.mChildFragmentManager.findFragmentByWho(p2); } } return v7;` (reads stay `this.mWho` because RP propagates the entry copy for uses it dominates; `v7 = 0` renders `null` via the existing reference-lhs null-render). **Type safety (two adversarial-review rounds, 4 reviewers):** `vX` is typed as the method **RETURN type** — the one assignability anchor valid Dalvik gives (everything reaching a `return` is assignable to it). The pass is a **validate-then-mutate** (atomic — Phase A reads only, so every early bail leaves the graph pristine) that fires ONLY when (a) the return type is a reference, (b) the receiver is RETURNED, and (c) every reassignment rhs is a reference whose type **EXACTLY equals** ret_type, or the narrow-integer constant 0 (null). Exact equality (not just `is_ref`) is REQUIRED: the unsplit phi-web can bind a def reaching only an intermediate use (never the return) with an unrelated type — `vX = getBar()` where `Bar ⊄ Foo` (adversarial CONFIRMED) — the merge-point-assignability property does NOT hold per-def, and there is no type hierarchy to check assignability. A **void-invoke artifact** (`this = super.onDraw()` — a void call DAD wrongly models as defining the receiver; DAD keeps the `this` name so its later `this.getScrollX()` reads accidentally render correctly, and renaming would EXPOSE the artifact as `v.getScrollX()` on a void result — strictly worse), a non-reference return, a non-returned reuse, a genuine primitive (`this = 5`), or a non-exact reference reuse all bail → left as DAD's (invalid but **no-worse**) `this = X`. The receiver's ThisParam type is CORRUPTED during Construct (each `this = X` AssignExpression ctor does `this_param.set_type(X.get_type())`) so it is restored to the class before seeding the copy. On a `true` return the caller `number_ins()` + recomputes `BuildDefUse` (the injected copy + renumbered locs) before DCE/RP/PlaceDeclarations; `FixInitResultTypes` runs between (graph-only, no chain access, safe). Excludes `<init>` (super()/this() uses the receiver specially). **Measured (a/b off vs on, bundled corpus):** `this =` **269 → 218** (51 genuine reuses materialised valid; residual 218 = void-invoke artifacts + non-provable reuses, correctly left), **90 valid `<Ref> vX = this;` seeds**; **ALL other invalid-Java buckets byte-unchanged** (prim-used-as-object 55, ref-declared-int 23, `v<op>null` 3, `prim=new` 2), the pre-existing separate `void v=this` move-into-conflated-local bug **40→40 unchanged**, parity 28/28, 0-crash/25,309-class. No `*DADFaithful` sibling (parity suites don't assert method bodies — return-literal/catch-clamp precedent). Remaining (deferred, no-worse-than-DAD): the void-invoke-defines-receiver DAD bug itself, and genuine multi-type phi-web merges (need a real version split). Regression test `tests/test_this_reuse.py` (materialisation valid + active + the Fragment repro).

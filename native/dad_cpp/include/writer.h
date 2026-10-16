@@ -53,6 +53,7 @@ public:
 
 private:
     // ─── Node-level emission ─────────────────────────────────────────────
+    bool EmitsNothing(NodeBase* node) const;
     void VisitNode(NodeBase* node);
     void EmitStatement(StatementBlock* stmt);
     void EmitReturn(ReturnBlock* ret);

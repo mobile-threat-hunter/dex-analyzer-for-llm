@@ -313,3 +313,14 @@ licence.
 `fp-reuse.dex` (md5 `4c70add950421bd9d70ac81b012f50d0`) was written for dexllm#88
 and assembled from the committed `fp-reuse.smali`. It is part of this project and
 carries this project's licence.
+
+`cfg-shapes.dex` (md5 `e3120298c2e10d56357e63c35c36f51d`) was written for dexllm#113 and assembled from the
+committed `cfg-shapes.smali` with the smali 3.0.9 assembler bundled in jadx 1.5.3
+(`java -cp jadx-1.5.3-all.jar com.android.tools.smali.smali.Main a cfg-shapes.smali
+-o cfg-shapes.dex`, OpenJDK 17.0.17). `hasCallback` is tvleanback's
+`MediaSessionCompatApi21.hasCallback` register for register — an `if` with no
+follow whose false arm is a return block the true arm also reaches;
+`sharedDefault` is a packed-switch whose case 3 IS its default; `caseIf` is a
+follow-less if inside a case whose false arm is the switch follow; `fallDefault` a
+default that is case 3's block and falls through into case 4. It is part of this
+project and carries this project's licence.

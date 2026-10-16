@@ -899,6 +899,17 @@ void Writer::WriteMethod() {
     Write("}\n");
 }
 
+// True when VisitNode(node) would return before writing anything — the same
+// early-return conditions, in the same order.
+bool Writer::EmitsNothing(NodeBase* node) const {
+    if (!node) return true;
+    if (node == if_follow_.back() || node == switch_follow_.back() ||
+        node == loop_follow_.back() || node == latch_node_.back() ||
+        node == try_follow_.back()) return true;
+    auto* nn = dynamic_cast<Node*>(node);
+    return nn && !nn->type.is_return() && visited_.count(node);
+}
+
 void Writer::VisitNode(NodeBase* node) {
     if (!node) return;
     // The graph DFS/post_order passes are iterative to avoid stack overflow on
@@ -1026,6 +1037,42 @@ void Writer::EmitIf(CondBlock* cond) {
     if (it != cond->follow.end()) follow = it->second;
     // Branches are in tail position iff the if is AND there's no join code after.
     const bool branch_tail = entry_tail && (follow == nullptr);
+
+    // DAD writer.py:352-363 — an if with NO follow (no join code after it)
+    // visits BOTH arms unconditionally: no swap, no `if_follow` push, no
+    // visited check on the false arm. dexllm#113: this branch used to be
+    // folded into the follow path below, whose visited check dropped a false
+    // arm that is a ReturnBlock already reached through the true arm —
+    // returns are re-emitted at every reaching path (VisitNode's is_return
+    // exemption), so the text lost a `return` the AST (dast.cpp, which ports
+    // this branch) keeps. That path also pushed a nullptr `if_follow`; not
+    // pushing is DAD's and dast's shape, and measured output-equivalent on
+    // the whole corpus (IfStruct hands an enclosing follow to inner conds).
+    if (follow == nullptr) {
+        WriteIndent();
+        Write("if (");
+        WriterImpl wi3(this); wi3.constructor_ = is_constructor_;
+        cond->visit_cond(wi3);
+        Write(") {\n");
+        IncIndent();
+        tail_pos_ = branch_tail;
+        VisitNode(cond->true_branch);
+        DecIndent();
+        // DAD writes `} else {` here unconditionally, so an arm VisitNode
+        // would emit nothing for (a follow guard, or an already-visited
+        // non-return block) renders as an empty `} else { }`. Omit only that
+        // empty arm: the AST keeps an empty block, which says the same thing.
+        if (!EmitsNothing(cond->false_branch)) {
+            WriteIndent(); Write("} else {\n");
+            IncIndent();
+            tail_pos_ = branch_tail;
+            VisitNode(cond->false_branch);
+            DecIndent();
+        }
+        WriteIndent(); Write("}\n");
+        tail_pos_ = entry_tail;
+        return;
+    }
 
     // DAD: writer.py:319-326 — if the true branch goes straight to the follow
     // (or to next_case inside a switch body), negate the condition and swap
@@ -1171,6 +1218,7 @@ void Writer::EmitSwitch(SwitchBlock* sw) {
     auto sit = sw->follow.find("switch");
     if (sit != sw->follow.end()) follow = sit->second;
     switch_follow_.push_back(follow);
+    NodeBase* default_node = sw->default_case;
     for (size_t i = 0; i < sw->cases.size(); ++i) {
         NodeBase* case_node = sw->cases[i];
         if (visited_.count(case_node)) continue;
@@ -1182,15 +1230,23 @@ void Writer::EmitSwitch(SwitchBlock* sw) {
                 Write("case " + std::to_string(k) + ":\n");
             }
         }
+        // DAD writer.py:398-400 — a case block that IS the default carries the
+        // `default:` label here, and the trailing default emission is skipped.
+        // dexllm#113: without this the shared block was emitted twice (under
+        // its case labels and again under `default:`); dast.cpp ports it.
+        if (case_node == default_node) {
+            WriteIndent(); Write("default:\n");
+            default_node = nullptr;
+        }
         IncIndent();
         VisitNode(case_node);
         if (need_break_) { WriteIndent(); Write("break"); EndIns(); }
         else need_break_ = true;
         DecIndent();
     }
-    if (sw->default_case && sw->default_case != follow) {
+    if (default_node && default_node != follow) {
         WriteIndent(); Write("default:\n");
-        IncIndent(); VisitNode(sw->default_case); DecIndent();
+        IncIndent(); VisitNode(default_node); DecIndent();
     }
     switch_follow_.pop_back();
     DecIndent();
