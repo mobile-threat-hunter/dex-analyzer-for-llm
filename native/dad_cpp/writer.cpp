@@ -478,7 +478,11 @@ public:
             visit_ins(args[i]);
             if (i + 1 < args.size()) w_->Write(", ");
         }
-        w_->Write("})");
+        // DAD writer.py:652 writes '})' here, and nothing opens the ')' it
+        // closes - so every filled-new-array line was unbalanced Java
+        // (dexllm#96). Beyond-DAD emit fix: close the initializer only. The
+        // AST (dast ArrayInitializer) never carried the ')'.
+        w_->Write("}");
     }
 
     void visit_fill_array(IRForm* array, FillArrayExpression* owner) override {

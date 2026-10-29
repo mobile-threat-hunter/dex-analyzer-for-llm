@@ -503,7 +503,8 @@ BOTH fails `flagChain` — killed.
   already invalid OFF).
 * **`filled-new-array` elements do not go through `ConstantAt`**:
   `new Object[] {0}` stays an autoboxed `Integer` where the bytecode stores
-  `null`. Pre-existing and identical OFF — the #96 / #97 family.
+  `null`. Pre-existing and identical OFF; unfiled — neither dexllm#96 (the
+  stray `)`, fixed) nor dexllm#97 (the `/range` element list).
 * **A char / byte / short VARIABLE at a narrowing parameter** (`int v6_20`
   passed to `append(C)`): the type-inference pass has no `C` use source.
 * Adjacent, pre-existing, unchanged (164 lines OFF and ON): a reference
