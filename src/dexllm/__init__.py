@@ -122,4 +122,4 @@ __all__ = [
     "summarize_capabilities",
     "verify",
 ]
-__version__ = "0.27.0"
+__version__ = "0.28.0"
