@@ -214,9 +214,12 @@ EncodedValueText DecodeEncodedValueText(const U1*& p,
         // `SignExtend` is the one ParseCallSiteArg already uses, so the rule is
         // read once in this file (dexllm#70's lesson).
         case 0x02:   // SHORT
-        case 0x04:   // INT
-        case 0x06: { // LONG
+        case 0x04: { // INT
             return {std::to_string(SignExtend(ReadIntLE(p, end, nbytes), nbytes))};
+        }
+        case 0x06: { // LONG — dexllm#92: the method body's spelling, `L` suffix
+            return {dexkit::dad::FormatLongLiteral(
+                SignExtend(ReadIntLE(p, end, nbytes), nbytes))};
         }
         case 0x03: { // CHAR — the ONE unsigned member: zero-extended.
             return {std::to_string(ReadIntLE(p, end, nbytes))};

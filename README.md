@@ -222,6 +222,9 @@ androguard gets wrong:
 - **Literals** — boolean `return false/true` (not `return 0/1`), `return null` for a null reference,
   IEEE-754 `float`/`double` literals (`1.0f`, `Double.NaN`) where androguard prints the raw integer
   bits, and `null`/`true`/`false` field initializers (not Python `None`/`True`/`False`).
+  Every `long` literal carries its `L` (`220L`, `946728000000L`), in a method body and a static
+  initializer alike — by type, not only past the int range, so a call reads as the `(J)` overload
+  the bytecode binds (dexllm#92).
   A static initializer's float payload is zero-extended to the **right**, as ART reads it, so a
   short encoding decodes to the constant the class declares rather than to a denormal (dexllm#70).
   A static value with **no Java expression form at all** — a `MethodHandle`, a method reference, an

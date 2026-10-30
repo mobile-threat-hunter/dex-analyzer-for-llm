@@ -231,7 +231,9 @@ def test_bootstrap_arguments_keep_their_own_types() -> None:
     src = dk.decompile_class("LTestLinkerMethodMultipleArgumentTypes;")
     assert (
         '), -1, 1, 97, 1024, 1, 11.1000004f, 2.2000000000000002, "Hello", '
-        "TestLinkerMethodMultipleArgumentTypes.class, 123456789)" in src
+        # the LONG argument is a `long` literal since dexllm#92
+        "TestLinkerMethodMultipleArgumentTypes.class, 123456789L)"
+        in src
     ), src
 
 

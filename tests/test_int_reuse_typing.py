@@ -186,7 +186,7 @@ EXPECTED = {
         "Short.valueOf(v0_1);",
     ],
     # NEGATIVE: a genuine `long` index (invalid Dalvik) is not narrowed
-    "wideIdx([II)I": ["long v0 = 5;", "v0 = 6;", "return p3[v0];"],
+    "wideIdx([II)I": ["long v0 = 5L;", "v0 = 6L;", "return p3[v0];"],
     # POSITIVE (adversarial review): the COMPOUND form spells the 0/1 too
     "cmpXor(Ljava/lang/String;I)Z": ["boolean v0 = p1.isEmpty();", "v0 ^= true;"],
     "cmpAnd(Ljava/lang/String;I)Z": ["boolean v0 = p1.isEmpty();", "v0 &= false;"],

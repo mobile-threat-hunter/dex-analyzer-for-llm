@@ -38,7 +38,11 @@ void Constant::Accept(Visitor& v) {
         v.visit_base_class(s);
         return;
     }
-    if (type == "I" || type == "J" || type == "B") {
+    if (type == "J") {
+        v.visit_constant_long(cst2_);  // dexllm#92
+        return;
+    }
+    if (type == "I" || type == "B") {
         v.visit_constant_int(cst2_);
         return;
     }
@@ -196,11 +200,11 @@ void BinaryCompExpression::Accept(Visitor& v) {
 }
 
 void UnaryExpression::Accept(Visitor& v) {
-    v.visit_unary_expression(op_, MapGet(*this, arg_));
+    v.visit_unary_expression(op_, type, MapGet(*this, arg_));
 }
 
 void CastExpression::Accept(Visitor& v) {
-    v.visit_cast(op_, MapGet(*this, arg_));
+    v.visit_cast(op_, src_type(), MapGet(*this, arg_));
 }
 
 void ConditionalExpression::Accept(Visitor& v) {

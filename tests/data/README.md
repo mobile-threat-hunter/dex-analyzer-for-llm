@@ -324,3 +324,15 @@ follow whose false arm is a return block the true arm also reaches;
 follow-less if inside a case whose false arm is the switch follow; `fallDefault` a
 default that is case 3's block and falls through into case 4. It is part of this
 project and carries this project's licence.
+
+`long-literals.dex` (md5 `89fb3ba54f294cc4c25a6c3c9091d5e7`) was written for dexllm#92
+and assembled from the committed `long-literals.smali` with the smali 3.0.9
+assembler bundled in jadx 1.5.3 (`java -cp jadx-1.5.3-all.jar
+com.android.tools.smali.smali.Main a long-literals.smali -o long-literals.dex`,
+OpenJDK 17.0.17). One method per position a `long` constant is rendered in
+(an overloaded `(J)` argument, a value outside the int range, `Long.MIN_VALUE`,
+a return, an `add-long` and a `cmp-long` operand, a static and an instance field
+store, a `long-to-int` and a `neg-long` operand), six `long` static
+initializers, and the controls that must NOT gain an `L` — an int at the `(I)`
+overload, an int static, a `const-wide` at a double parameter, and double / float
+bits under a `double-to-int` / `neg-double` / `neg-float`. It is part of this project and carries this project's licence.

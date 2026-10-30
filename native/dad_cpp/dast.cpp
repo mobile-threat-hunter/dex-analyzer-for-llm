@@ -1119,10 +1119,13 @@ AstValue JSONWriter::visit_expr(IRForm* op) {
     if (auto* x = dynamic_cast<UnaryExpression*>(op)) {
         IRForm* lhs = MapGet(x, x->arg_id());
         AstValue expr;
+        // dexllm#92: the operand is a typed position (the Writer's twin).
         if (auto* ce = dynamic_cast<CastExpression*>(op)) {
-            expr = Cast(ParseDescriptor(ce->clsdesc()), visit_expr(lhs));
+            expr = Cast(ParseDescriptor(ce->clsdesc()),
+                        visit_const_at(ConstContext::Operand, ce->src_type(), lhs));
         } else {
-            expr = UnaryPrefix(x->op(), visit_expr(lhs));
+            expr = UnaryPrefix(x->op(),
+                               visit_const_at(ConstContext::Operand, x->type, lhs));
         }
         return Parenthesis(std::move(expr));
     }

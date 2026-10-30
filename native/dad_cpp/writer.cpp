@@ -58,6 +58,13 @@ std::string FormatDoubleLiteral(double d) {
 }  // namespace
 
 // ============================================================================
+// FormatLongLiteral (dexllm#92 — see writer.h)
+// ============================================================================
+std::string FormatLongLiteral(int64_t value) {
+    return std::to_string(value) + "L";
+}
+
+// ============================================================================
 // EscapeJavaString
 // ============================================================================
 std::string EscapeJavaString(std::string_view raw) {
@@ -130,6 +137,9 @@ public:
     // ─── visit_constant: DAD writer.py:461 (split per overload) ──────────
     void visit_constant_int(int64_t value) override {
         w_->Write(std::to_string(value));
+    }
+    void visit_constant_long(int64_t value) override {
+        w_->Write(FormatLongLiteral(value));
     }
     void visit_constant_double(double value) override {
         // dexllm#67: `%g` is six significant figures — `Double.MAX_VALUE` printed
@@ -614,18 +624,23 @@ public:
         operand(arg2);
         w_->Write(")");
     }
-    void visit_unary_expression(std::string_view op, IRForm* arg) override {
+    // dexllm#92: the operand goes through `ConstantAt` like every other typed
+    // position — a `const-wide` read as a double here is `1.0`, not the long
+    // `4607182418800017408L` (which javac accepts with the wrong value).
+    void visit_unary_expression(std::string_view op, std::string_view operand_type,
+                                IRForm* arg) override {
         w_->Write("(");
         w_->Write(op);
         w_->Write(" ");
-        visit_ins(arg);
+        if (!emit_const_at(ConstContext::Operand, operand_type, arg)) visit_ins(arg);
         w_->Write(")");
     }
-    void visit_cast(std::string_view op, IRForm* arg) override {
+    void visit_cast(std::string_view op, std::string_view operand_type,
+                    IRForm* arg) override {
         w_->Write("(");
         w_->Write(op);
         w_->Write(" ");
-        visit_ins(arg);
+        if (!emit_const_at(ConstContext::Operand, operand_type, arg)) visit_ins(arg);
         w_->Write(")");
     }
     void visit_cond_expression(std::string_view op, std::string_view etype,

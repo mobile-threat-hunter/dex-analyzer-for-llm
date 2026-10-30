@@ -61,6 +61,10 @@ public:
     // visit_constant: takes int, double, or string depending on Constant.type.
     // C++: split into three overloads for type safety.
     virtual void visit_constant_int(int64_t /*value*/)              {}
+    // dexllm#92: a LONG-typed (`J`) constant, so an emitter can spell its type
+    // (`220L`). Defaults to the int path, which is what every implementer did
+    // before, so none had to change — the dexllm#67 visit_constant_float shape.
+    virtual void visit_constant_long(int64_t value) { visit_constant_int(value); }
     virtual void visit_constant_double(double /*value*/)            {}
     // dexllm#67: a FLOAT-typed constant, so an emitter can use its own
     // float-precision formatter. Defaults to the double path, which is exactly
@@ -137,9 +141,15 @@ public:
                                           std::string_view /*etype*/,
                                           IRForm* /*arg1*/,
                                           IRForm* /*arg2*/)           {}
+    // `operand_type` is the type the operand is READ as — a unary's own type
+    // (neg-double reads a double), a conversion's source type (double-to-int
+    // reads a double). dexllm#92: an untyped `const-wide` there holds double
+    // BITS and must be reinterpreted (`ConstantAt`), not printed as a long.
     virtual void visit_unary_expression(std::string_view /*op*/,
+                                         std::string_view /*operand_type*/,
                                          IRForm* /*arg*/)             {}
     virtual void visit_cast(std::string_view /*op*/,
+                            std::string_view /*operand_type*/,
                             IRForm* /*arg*/)                          {}
     virtual void visit_cond_expression(std::string_view /*op*/,
                                         std::string_view /*etype*/,

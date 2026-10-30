@@ -472,6 +472,7 @@ widening to float).
 | `VALUE_NULL` / `VALUE_BOOLEAN` | `None` / `True` / `False` | `null` / `true` / `false` |
 | `VALUE_FLOAT` / `VALUE_DOUBLE` | the raw payload as an integer | the IEEE754 value, round-trip formatted (dexllm#70) |
 | a negative `VALUE_SHORT` / `VALUE_INT` / `VALUE_LONG` | its UNSIGNED bit pattern — `-1` stored in one byte reads `255`, `Long.MIN_VALUE` reads `9223372036854775808` | the signed value, sign-extended from the stored bytes; `VALUE_CHAR` stays zero-extended (dexllm#91) |
+| a `VALUE_LONG` | the bare decimal — `946728000000` does not lex | the method body's spelling, `L` suffixed whatever the value (`5L`, dexllm#92) |
 | `VALUE_TYPE` / `VALUE_FIELD` / `VALUE_ENUM` | a raw descriptor / a Python list | `pkg.Cls.class` / `pkg.Cls.NAME` |
 | `VALUE_METHOD_TYPE` / `VALUE_METHOD_HANDLE` | the raw payload as an integer | `invoke.MethodType.methodType(…)` / a trailing `// = Cls::name` comment (dexllm#64) |
 | `VALUE_METHOD` | a Python list — `['LMain;', '<init>', ['()', 'V']]` | a trailing `// = Main::new` comment (dexllm#64) |

@@ -29,9 +29,8 @@ _FIXTURE = REPO_ROOT / "tests" / "data" / "negative-statics.dex"
 _CLASS = "LNegativeStatics;"
 
 # What Java says each field holds — a LITERAL, so an edit of the rule cannot
-# silently move the expectation with it. LONG values still lack the `L` suffix
-# (dexllm#92); that is the same on both sides of this change and is pinned here
-# so #92 updates it deliberately.
+# silently move the expectation with it. LONG values carry the `L` suffix
+# since dexllm#92 (a `long` literal is spelled by its type, whatever its value).
 _EXPECTED = {
     "SHORT_MINUS_ONE": "-1",
     "SHORT_MIN": "-32768",
@@ -41,10 +40,10 @@ _EXPECTED = {
     "INT_ALPHA_MASK": "-16777216",
     "INT_MIN": "-2147483648",
     "INT_MAX": "2147483647",
-    "LONG_MINUS_ONE": "-1",
-    "LONG_MIN": "-9223372036854775808",
-    "LONG_MINUS_2_32": "-4294967296",
-    "LONG_PLUS_255": "255",
+    "LONG_MINUS_ONE": "-1L",
+    "LONG_MIN": "-9223372036854775808L",
+    "LONG_MINUS_2_32": "-4294967296L",
+    "LONG_PLUS_255": "255L",
     "CHAR_0X80": "128",
     "CHAR_MAX": "65535",
     "BYTE_MINUS_ONE": "-0x1",
@@ -120,7 +119,7 @@ def test_the_declaration_and_the_inlined_read_agree(fixture_decls) -> None:
     body = dexllm.DexKit(str(_FIXTURE)).decompile_method(
         "LNegativeStatics;->all()[Ljava/lang/Object;"
     )
-    # `L?`: dexllm#92 will suffix long literals, and that must not blind this.
+    # `L?`: a long literal carries `L` since dexllm#92.
     # The narrowing cast: since dexllm#102 a constant at a byte / short / char
     # PARAMETER renders `Short.valueOf(((short) -1))` (Java does not narrow an
     # invocation argument implicitly) — the value inside is the one compared.
@@ -214,7 +213,8 @@ def _oracle(b: bytes) -> dict[str, dict[str, str]]:
             if vt != 0x03 and raw >> (8 * n - 1):
                 val = raw - (1 << (8 * n))
             name = string(u4(ofid + 8 * fidx[k] + 4))
-            out.setdefault(cls, {})[name] = str(val)
+            # A LONG is spelled with its type's suffix since dexllm#92.
+            out.setdefault(cls, {})[name] = str(val) + ("L" if vt == 0x06 else "")
     return out
 
 
@@ -283,17 +283,21 @@ def test_the_signed_arms_share_the_call_site_decoders_sign_extension() -> None:
     """
     # Whitespace-normalised and word-bounded, so a re-wrap or a reformat is not
     # a false failure and `MySignExtend(` does not satisfy it.
-    signed = re.sub(r"\s+", "", _decoder_case_body("0x06"))
-    assert re.search(
-        r"\bSignExtend\(ReadIntLE\(p,end,nbytes\),nbytes\)", signed
-    ), signed
+    # INT (0x02 SHORT falls into it) and LONG are separate arms since dexllm#92,
+    # which gave LONG its suffix; both must still CALL the one rule.
+    for code in ("0x04", "0x06"):
+        signed = re.sub(r"\s+", "", _decoder_case_body(code))
+        assert re.search(r"\bSignExtend\(ReadIntLE\(p,end,nbytes\),nbytes\)", signed), (
+            code,
+            signed,
+        )
     char = re.sub(r"\s+", "", _decoder_case_body("0x03"))
     assert "SignExtend" not in char and "ReadIntLE(p,end,nbytes)" in char, char
 
-    # 0x02 and 0x04 are bare labels falling through into the 0x06 arm.
+    # 0x02 is a bare label falling through into the 0x04 arm.
     text = _strip_comments(
         (REPO_ROOT / "native" / "core_ext" / "dexitem_code_source.cpp").read_text()
     )
     fn = text[text.index("DecodeEncodedValueText(const U1*& p") :]
-    labels = fn[fn.index("case 0x02:") : fn.index("case 0x06:")]
-    assert re.fullmatch(r"case 0x02:\s*case 0x04:\s*", labels), labels
+    labels = fn[fn.index("case 0x02:") : fn.index("case 0x04:")]
+    assert re.fullmatch(r"case 0x02:\s*", labels), labels

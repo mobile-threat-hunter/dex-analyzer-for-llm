@@ -153,4 +153,15 @@ private:
 // callers (e.g., tests that format Java literals directly).
 std::string EscapeJavaString(std::string_view raw);
 
+// A `long` literal (dexllm#92). Every J-typed value carries the `L` suffix, not
+// only one outside the int range: a bare `220` at a `(J)` parameter binds an
+// `(I)` overload when one exists (JLS 15.12.2), so the suffix states the type
+// the bytecode used, not merely what the lexer needs. The rule is decided by the
+// TYPE, never by the value; it is the spelling DAD's dast.py:613 `literal_long`
+// already gives the AST, so the text and the AST agree. Shared by the Writer and
+// the static-initializer decoder (core_ext), so the rule is read once.
+// Long.MIN_VALUE renders as `-9223372036854775808L`, which is valid Java (the
+// one literal unary minus may apply to); a named-constant spelling is #89's call.
+std::string FormatLongLiteral(int64_t value);
+
 }  // namespace dexkit::dad

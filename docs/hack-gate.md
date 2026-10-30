@@ -503,8 +503,8 @@ BOTH fails `flagChain` — killed.
   already invalid OFF).
 * **`filled-new-array` elements do not go through `ConstantAt`**:
   `new Object[] {0}` stays an autoboxed `Integer` where the bytecode stores
-  `null`. Pre-existing and identical OFF; unfiled — neither dexllm#96 (the
-  stray `)`, fixed) nor dexllm#97 (the `/range` element list).
+  `null`. Pre-existing and identical OFF; filed as dexllm#117 — neither dexllm#96
+  (the stray `)`, fixed) nor dexllm#97 (the `/range` element list).
 * **A char / byte / short VARIABLE at a narrowing parameter** (`int v6_20`
   passed to `append(C)`): the type-inference pass has no `C` use source.
 * Adjacent, pre-existing, unchanged (164 lines OFF and ON): a reference
@@ -603,3 +603,62 @@ const-strings of 4,142 / 4,142 methods it can decode (21 more it cannot decode
 at all). Mutation matrix **15 mutants, all killed** (each identifier role, I1
 strictness, I3, strict relaxed, deviation dropped on each layer, the fallback,
 the multidex retry, the note).
+
+## Applied: dexllm#92 (a `long` literal and its `L` suffix)
+
+The fix lives in an EMITTER, which is exactly where this gate is suspicious, so
+each criterion was checked rather than assumed.
+
+* **HG1 origin.** The IR already states the type: every `const-wide*` builds a
+  `Constant` typed `J`. Nothing upstream is wrong; the Writer simply discarded
+  the type at `Constant::Accept` (`J` routed to `visit_constant_int`). Spelling
+  a literal's type is the emitter's job, and DAD's own AST emitter
+  (dast.py:613 `literal_long`) already did it. PASS.
+* **HG2 every reader.** Walked in from the bindings: `decompile_method` /
+  `_class` / `_with_pc_map` reach `Constant::Accept` -> the Writer (the only
+  `Visitor` overriding `visit_constant_int`); `decompile_method_ast` builds its
+  own `LiteralLong` (already `L`); a static `long` initializer is
+  `DecodeEncodedValueText`'s `0x06` arm (now the same helper); an invoke-custom
+  LONG bootstrap argument is a `J` Constant (moves with the body); a
+  `const-wide` at an F/D position is reinterpreted by `ConstantAt` BEFORE
+  `Accept`; smali prints its own `#value`. Not covered, and recorded: a
+  `long[]` fill-array payload (`FillArrayExpression` has no element type —
+  dexllm#93's problem). PASS with that residual.
+* **HG3 views agree.** Text `NL` tokens vs AST `.long` nodes, per method, over
+  201,670 corpus methods: 5,805 = 5,805, 0 mismatches. Before the change they
+  disagreed on every one. PASS.
+* **HG4 no value-sniffing.** The suffix is decided by the type (`J`), never by
+  the value — the user chose this over jadx's `|v| >= Integer.MAX_VALUE` rule,
+  which also leaves `takeOv(220)` binding the `(I)` overload. PASS.
+* **HG5 no re-derivation.** One `FormatLongLiteral`, called by both readers;
+  a source pin kills a correct inline duplicate in either (M6, M8). PASS.
+* **HG6 new convention guarded.** `visit_constant_long` defaults to the int
+  path (the dexllm#67 `visit_constant_float` shape), and a source pin requires
+  `Accept` to route `J` there. PASS.
+* **HG7 incidental guarantee.** The rule assumes a `J` Constant holds a long
+  value. It can also hold double BITS, and those are rendered by `ConstantAt`
+  at every F/D position before `Accept` runs; a position `ConstantAt` misses
+  would print the bits with an `L` where it printed them bare — the same wrong
+  value either way, not a new one. Recorded, not relied on. PASS.
+* **HG8 removal observable.** 17 mutants, each built: all killed (below).
+
+**What the gate missed and a reviewer found.** HG7's escape hatch ("a position
+`ConstantAt` misses prints the bits with an `L` — the same wrong value") was
+WRONG for exactly the positions it waved through: a bare long of that size does
+not lex, so the old output was a compile ERROR and the new one compiled with the
+wrong value. A conversion and a negation were such positions. They are typed
+now (`operand_type` on both visitors, `ConstantAt`'s Operand context in the
+Writer and dast), which also fixed six corpus lines that compiled with a wrong
+float value. The lesson for HG7: "no worse" has to be checked against what the
+COMPILER does with the old output, not against the value it denotes.
+
+**Mutation matrix** (guard files: `test_long_literals`, `test_negative_static_ints`,
+`test_int_reuse_typing`, `test_return_literals`; control `e8330119` restored and
+asserted): M0 every file at HEAD — `.so` `a69a3a29`, v0.28.0's exactly — 28
+fail; M1 `Accept` routes `J` to the int path 16; M2 Writer override removed 16;
+M3 helper without `L` 26; M4 jadx's out-of-int-range rule 17; M5 static arm back
+to `to_string` 12; M6 static arm inline duplicate 1 (source pin); M7 ints get
+`L` too 36; M8 Writer inline duplicate 1 (source pin); M9 the INT static arm
+given the long spelling 10. Cast/unary (control `fbd78d3e`): Writer cast / unary skips
+`ConstantAt` 2 / 3; dast cast / unary 2 / 3; `Accept` passes no cast / unary type
+2 / 3; a cast reading its RESULT type 2.
