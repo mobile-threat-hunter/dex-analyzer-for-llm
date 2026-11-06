@@ -638,3 +638,24 @@ def test_a_zero_length_entry_reads_like_an_empty_image():
         [("a.dex", D0), ("b.dex", b"")]
     ).verify_report()[1]
     assert zipped["reason"] == image["reason"] == "empty image"
+
+
+def test_a_container_whose_range_holds_another_dex_is_not_salvaged(tmp_path):
+    """A container is copied out only when its range holds exactly its own
+    entries. Here both entries claim a container_size that also covers the v35
+    dex after them, and a rejected dex at the end forces the salvage path:
+    copying the "container" would hand the core that v35 dex twice (the load
+    then refuses itself as unverified). The container is rejected instead and
+    the v35 dex loads on its own."""
+    b = bytearray(CONTAINER.read_bytes())
+    total = len(b) + len(D0)
+    first = struct.unpack_from("<I", b, 32)[0]
+    for off in (0, first):
+        struct.pack_into("<I", b, off + 0x70, total)  # container_size
+    p = tmp_path / "overlap.dex"
+    p.write_bytes(bytes(b) + D0 + _bad_magic(D1))
+    rows = dexllm.verify(str(p))
+    assert [r["valid"] for r in rows] == [False, False, True, False]
+    assert "v41 container" in rows[0]["reason"]
+    dk = dexllm.DexKit(str(p))
+    assert dk.list_classes() == [FOO] and dk.extract_dex(0)["offset"] == total - len(D0)

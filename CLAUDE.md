@@ -1614,7 +1614,7 @@ slice runtime mode refuses must take its siblings with it, because a container
 dex cannot be copied out on its own (pinned by
 `test_a_runtime_rejected_container_slice_takes_its_siblings_with_it`).
 
-**Measured (a/b OFF=`fbd78d3e` — HEAD, bit-reproduced — vs ON=`1ce90f83`, SAME
+**Measured (a/b OFF=`fbd78d3e` — HEAD, bit-reproduced — vs ON=`1ce90f83`, re-captured on `6a35324c` after the CI fix below with 0 records moving, SAME
 script, every source in its own subprocess judged by exit status):** 109 sources
 — the bundled corpus, every committed fixture, `art/test/dexdump` (+ the `.jar`),
 `tools/dexter/testdata`, all four ART fuzzer corpora, the #112 sample and 6
@@ -1628,7 +1628,7 @@ decompiled Java, smali, extracted bytes and exit status are identical on all 109
 (lenient: its value-string swap is an ART deviation), `all-dex-files.jar`
 (strict: `all.dex` rejected) and the crafts.
 
-**Guards:** `tests/test_load_policy.py` (48), corpus-less — every craft is built
+**Guards:** `tests/test_load_policy.py` (49), corpus-less — every craft is built
 from `tests/data/multidex.apk` / `multidex-container.dex`: the issue's dup-class
 fixture, the prefix rule, the checksum-only and VerifyInsns-only crafts, the v35
 concatenation and v41 container cases, verify≡session in both modes, a list
@@ -1640,12 +1640,22 @@ guards: `test_bad_source_in_list_rejected` →
 `test_a_bad_source_in_a_list_is_a_row_not_an_error`; the #112 craft now fixes
 its checksum, as its own docstring always said the real shape does.
 
-**29 mutants, each BUILT with a distinct `.so` md5 (the two Python ones share the
+**30 mutants, each BUILT with a distinct `.so` md5 (the two Python ones share the
 control `.so` by construction), control asserted before and after: all
 killed.** M7 (an empty image not ending the sequence) and M8 (a decompression
 failure not ending it) SURVIVED the first matrix and are why
 `test_an_empty_image_ends_the_sequence` and
 `test_an_entry_that_does_not_decompress_ends_the_sequence` exist.
+
+**CI caught a 60x regression the local gates could not see** (first push,
+`7090198`): the narrowed sibling rule compared every container slice with every
+slice, and `test_a_shared_section_is_walked_once_not_once_per_sibling` (dexllm#59's
+amplification guard — 69,906 slices, all rejected, a 5 s ceiling) took 3.8 s here
+and 5.4-19.9 s on the CI runners; OFF takes 0.06 s. The rule is now O(n log n)
+(slices are in offset order, so a container's range is a contiguous run, checked
+by binary search) and takes 0.08 s. Its run-membership half had no guard (M30
+survived) until `test_a_container_whose_range_holds_another_dex_is_not_salvaged`.
+A clock guard's margin is a property of the slowest runner, not of this machine.
 
 **ASan** (the #119 criterion): an ASan build of the extension, loaded with
 `python -S` so the editable finder cannot hand back the normal `.so` (it did,
@@ -1654,9 +1664,9 @@ verify / logical-dex guards (74 passed) and a 2,280-input malformed-bytes fuzz x
 {strict, lenient} x {isolated, runtime} through `verify_bytes`, `from_bytes`
 (+ classes, `extract_dex`, decompile) and `from_dex_images`: **0 reports**.
 
-parity 29/29, pytest 1959 passed / 24 skipped, TRUE corpus-less (`test_apk`
-moved aside, restore asserted) 1528 / 455 / 0, narrowed to
-`tests/data/multidex.apk` 1837 / 146, sweep 21,374-class 0-crash GATE: PASS,
+parity 29/29, pytest 1960 passed / 24 skipped, TRUE corpus-less (`test_apk`
+moved aside, restore asserted) 1529 / 455 / 0, narrowed to
+`tests/data/multidex.apk` 1838 / 146, sweep 21,374-class 0-crash GATE: PASS,
 determinism 3 `PYTHONHASHSEED`s -> one digest, lint trio clean.
 
 **Two reviewers, and both found the same real defect independently: the first

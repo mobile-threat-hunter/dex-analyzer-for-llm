@@ -615,17 +615,37 @@ std::vector<LogicalSlice> ClassifySourceImage(const uint8_t* base, size_t n,
         // reject all of it rather than load one that would read the wrong bytes.
         // A rejected dex elsewhere in the image does not cost it anything
         // (dexllm#120 — before, any rejection took every container dex with it).
-        std::vector<bool> bad(slices.size(), false);
+        // O(n log n): slices are in offset order (LogicalDexSlices walks forward),
+        // so the dexes inside one container's range are a contiguous run, and the
+        // container is whole iff that run is exactly its own members and none of
+        // them is rejected. A quadratic all-pairs scan here cost 60x on a crafted
+        // 69,906-slice container (CI's amplification guard caught it).
+        std::map<uint32_t, std::vector<size_t>> members;  // container_begin → indices
         for (size_t i = 0; i < slices.size(); ++i) {
-            const auto& c = slices[i];
-            if (c.self_contained) continue;
-            bool whole = c.container_end <= n;
-            for (const auto& t : slices) {
-                const bool same = !t.self_contained && t.container_begin == c.container_begin;
-                const bool inside = t.offset >= c.container_begin && t.offset < c.container_end;
-                if ((same && !t.ok) || (inside && !same)) whole = false;
+            if (!slices[i].self_contained) members[slices[i].container_begin].push_back(i);
+        }
+        std::vector<bool> bad(slices.size(), false);
+        auto first_at = [&](uint64_t off) {  // first slice whose offset >= off
+            size_t lo = 0, hi = slices.size();
+            while (lo < hi) {
+                const size_t mid = lo + (hi - lo) / 2;
+                if (slices[mid].offset < off) lo = mid + 1; else hi = mid;
             }
-            bad[i] = !whole;
+            return lo;
+        };
+        for (const auto& [begin, idx] : members) {
+            const auto& c = slices[idx.front()];
+            bool whole = c.container_end <= n;
+            for (size_t i : idx) whole = whole && slices[i].ok;
+            const size_t lo = first_at(begin), hi = first_at(c.container_end);
+            // every slice in [lo, hi) must be a member: members are sorted, so
+            // count those inside the run and compare with its length
+            const auto in_lo = std::lower_bound(idx.begin(), idx.end(), lo);
+            const auto in_hi = std::lower_bound(idx.begin(), idx.end(), hi);
+            const auto inside = static_cast<size_t>(in_hi - in_lo);
+            // ...and every member must lie in it, or the copy would leave one out
+            if (inside != hi - lo || inside != idx.size()) whole = false;
+            if (!whole) for (size_t i : idx) bad[i] = true;
         }
         for (size_t i = 0; i < slices.size(); ++i) {
             if (slices[i].ok && bad[i]) {
