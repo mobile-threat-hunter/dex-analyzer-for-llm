@@ -21,7 +21,17 @@ Typical use::
 
 from __future__ import annotations
 
-from .adapter import ContainerProbe, DexKitAdapter, identify, open_apk, verify
+from .adapter import (
+    ContainerProbe,
+    DexKitAdapter,
+    identify,
+    identify_bytes,
+    open_apk,
+    open_bytes,
+    open_dex_images,
+    verify,
+    verify_bytes,
+)
 from .model import (
     ApiCallers,
     ApiUsage,
@@ -45,6 +55,7 @@ from .model import (
     FieldRef,
     Indicator,
     IocReport,
+    LoadStatus,
     MethodAst,
     MethodInfo,
     MethodRef,
@@ -69,6 +80,7 @@ from .ports import (
     DexExtractionPort,
     EnumerationPort,
     IndicatorExtractionPort,
+    LoadMode,
     MatchType,
     PermissionAnalysisPort,
     SearchPort,
@@ -78,8 +90,12 @@ from .ports import (
 __all__ = [
     # factories / adapters
     "open_apk",
+    "open_bytes",
+    "open_dex_images",
     "identify",
+    "identify_bytes",
     "verify",
+    "verify_bytes",
     "DexKitAdapter",
     "ContainerProbe",
     # ports
@@ -100,11 +116,13 @@ __all__ = [
     "CacheControlPort",
     # search
     "MatchType",
+    "LoadMode",
     "ClassRef",
     "MethodRef",
     # models
     "ContainerInfo",
     "DexVerifyStatus",
+    "LoadStatus",
     "ExtractedDex",
     "SourceLocation",
     "StatementLocation",

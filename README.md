@@ -11,10 +11,10 @@ parallel-safe — rather than Xposed module development.
 
 | | dexllm |
 |---|---|
-| Input | `.apk`/`.jar`/`.zip`, a bare `.dex`, or a disguised/extension-less container — identified by content (PK / `dex\n` magic), not filename; `identify()` probes without loading |
+| Input | `.apk`/`.jar`/`.zip`, a bare `.dex`, or a disguised/extension-less container — identified by content (PK / `dex\n` magic), not filename; `identify()` probes without loading. Also from bytes the caller holds (`DexKit.from_bytes`, or an explicit `(name, bytes)` dex list via `DexKit.from_dex_images`), through the same verifier |
 | APK load | ~28 ms (lazy slicer parse + load-time structural verification — ~100× faster than androguard; multiple grows with APK size: Telegram's 39 k classes / 5 dex load in ~120 ms) |
 | Decompile | DAD-quality Java; 4.5× faster per-method than androguard |
-| Multidex | first-wins duplicate-class resolution, deterministic — matches ART/AOSP, so a packer's class collisions decompile to the body that actually runs |
+| Multidex | first-wins duplicate-class resolution, deterministic — matches ART/AOSP, so a packer's class collisions decompile to the body that actually runs. When a dex is rejected the default still loads its siblings, which ART does not (it stops at the first `classesN.dex` it cannot open): `load_status()` says so, each row's `art_open` says what ART would open, and `mode="runtime"` loads exactly that |
 | Unpack workflow | `DexKit([dump, apk])` loads multiple sources with **priority by order** (decrypted dex first → first-wins makes it win, mirroring ART); `add_dumped_dexes()` is the re-analyze-after-dumping verb; `lenient=True` skips instruction-operand checks so a partially-decrypted dump still loads, and accepts a post-build string swap ART rejects (value strings out of order), saying so in `art_deviations` |
 | Memory | ~520 MB on a 39k-class app — embeddable in-process, no JVM |
 | Parallel | C++ releases the GIL → real multi-threaded decompile from one in-process instance |
@@ -131,7 +131,9 @@ spec-reference not runtime dep), turned to **crash-safety**, not execution trust
     [docs/dexkit-vs-art-dex-handling.md](docs/dexkit-vs-art-dex-handling.md).
 
 **Deliberately not checked** — execution-trust mechanics irrelevant to a read-only
-analyzer, or out of the structural scope: adler32/SHA-1 checksums, instruction
+analyzer, or out of the structural scope: adler32/SHA-1 checksums (the adler32 is
+computed only to predict ART's open — reported in `art_deviations`, never a
+rejection), instruction
 *dataflow* semantics, debug_info, the *contents* of call_site entries,[^handle]
 proto shorty-match, access-flag bitmasks, and the offset→map-type
 cross-check.[^ann]
@@ -356,7 +358,7 @@ import dexllm
 dexllm.identify("/path/to/suspect")   # → {format, is_apk, has_manifest, dex_count, source}
 
 # Structurally verify a dex/apk without loading — never raises (the verify() sibling of identify())
-dexllm.verify("/path/to/suspect")     # → [{dex_id, name, valid, reason, source, art_deviations}, …] (per dex)
+dexllm.verify("/path/to/suspect")     # → [{dex_id, name, valid, reason, source, art_deviations, art_open}, …] (per dex)
 
 dk = dexllm.DexKit("/path/to/app.apk")   # .apk/.jar/.zip, a bare .dex, or a disguised container
 

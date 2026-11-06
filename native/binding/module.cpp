@@ -309,23 +309,130 @@ py::dict container_info_dict(const dexkit::ext::ContainerInfo& info) {
     // and using it made `identify(b"...")` answer where its documented sibling
     // `verify(b"...")` raised on the identical argument.
     d["source"] = info.source;
+    // dexllm#119: `source` is a caller label, not a path, for bytes input.
+    d["in_memory"] = info.in_memory;
     return d;
+}
+
+// One dict shape for a verdict row — verify_report(), the static verify() /
+// verify_bytes() and load_status()'s `rejected` — so the four cannot drift.
+py::dict verify_row_dict(const dexkit::ext::DexVerifyStatus& s) {
+    py::dict d;
+    d["dex_id"] = s.dex_id;
+    d["name"] = s.name;
+    d["valid"] = s.valid;
+    d["reason"] = s.reason;
+    // dexllm#26 — `name` is the file path for a bare .dex but only the entry
+    // name for a zip member, so it cannot say WHICH source a "classes.dex" came
+    // from in a multi-source session. `source` always names the constructor
+    // argument.
+    d["source"] = s.source;
+    // dexllm#112: what a lenient verify accepted that ART rejects (and, since
+    // dexllm#120, a header checksum ART would refuse).
+    d["art_deviations"] = s.art_deviations;
+    // dexllm#120: whether ART's open of this source yields this dex.
+    d["art_open"] = s.art_open;
+    return d;
+}
+
+dexkit::ext::LoadMode mode_arg(const std::string& mode) {
+    try {
+        return dexkit::ext::ParseLoadMode(mode);
+    } catch (const std::invalid_argument& e) {
+        throw py::value_error(e.what());
+    }
+}
+
+// Copy a bytes-like object into an image the session owns (dexllm#119). The
+// buffer is released before this returns, so the caller may mutate or drop it.
+std::unique_ptr<dexkit::MemMap> image_from_buffer(const py::handle& obj) {
+    Py_buffer view;
+    if (PyObject_GetBuffer(obj.ptr(), &view, PyBUF_SIMPLE) != 0) {
+        throw py::error_already_set();
+    }
+    std::unique_ptr<dexkit::MemMap> mm;
+    try {
+        mm = dexkit::ext::OwnedImageCopy(static_cast<const uint8_t*>(view.buf),
+                                         static_cast<size_t>(view.len));
+    } catch (const std::invalid_argument& e) {
+        PyBuffer_Release(&view);
+        throw py::value_error(e.what());
+    } catch (...) {
+        PyBuffer_Release(&view);
+        throw;
+    }
+    PyBuffer_Release(&view);
+    return mm;
 }
 
 class PyDexKit {
 public:
-    explicit PyDexKit(const std::string& apk_path, bool lenient = false)
-        : ext_(apk_path, lenient),
+    explicit PyDexKit(const std::string& apk_path, bool lenient = false,
+                      const std::string& mode = "isolated")
+        : ext_(apk_path, lenient, mode_arg(mode)),
           decompiler_(std::make_unique<dexkit::dad::Decompiler>(
               ext_.GetCodeSource())) {}
 
     // Multi-source load: sources are loaded in order, earlier ones get lower
     // dex_ids → first-wins prefers them. Load a decrypted/dumped dex first to
     // make the unpacked class win a collision (packer / runtime-unpack workflow).
-    explicit PyDexKit(const std::vector<std::string>& sources, bool lenient = false)
-        : ext_(sources, lenient),
+    explicit PyDexKit(const std::vector<std::string>& sources, bool lenient = false,
+                      const std::string& mode = "isolated")
+        : ext_(sources, lenient, mode_arg(mode)),
           decompiler_(std::make_unique<dexkit::dad::Decompiler>(
               ext_.GetCodeSource())) {}
+
+    // dexllm#119 — in-memory inputs. The images are copied in before the
+    // DexKitExt is built, so the session owns them.
+    PyDexKit(std::vector<dexkit::ext::LoadInput> inputs, bool lenient,
+             dexkit::ext::LoadMode mode)
+        : ext_(std::move(inputs), lenient, mode),
+          decompiler_(std::make_unique<dexkit::dad::Decompiler>(
+              ext_.GetCodeSource())) {}
+
+    static std::unique_ptr<PyDexKit> from_bytes(const py::object& data, bool lenient,
+                                                const std::string& mode,
+                                                const std::string& source) {
+        std::vector<dexkit::ext::LoadInput> inputs(1);
+        inputs[0].source = source;
+        inputs[0].image = image_from_buffer(data);
+        return std::make_unique<PyDexKit>(std::move(inputs), lenient, mode_arg(mode));
+    }
+
+    static std::unique_ptr<PyDexKit> from_dex_images(const py::iterable& images,
+                                                     bool lenient,
+                                                     const std::string& mode,
+                                                     const std::string& source) {
+        const auto m = mode_arg(mode);
+        std::vector<dexkit::ext::LoadInput> inputs(1);
+        inputs[0].source = source;
+        for (const auto& item : images) {
+            if (!(py::isinstance<py::tuple>(item) || py::isinstance<py::list>(item)) ||
+                py::len(item) != 2 || !py::isinstance<py::str>(item[py::int_(0)])) {
+                throw py::type_error(
+                    "from_dex_images: each image must be a (name: str, data: bytes) pair");
+            }
+            inputs[0].dex_images.emplace_back(item[py::int_(0)].cast<std::string>(),
+                                              image_from_buffer(item[py::int_(1)]));
+        }
+        if (inputs[0].dex_images.empty()) {
+            throw py::value_error("from_dex_images: no dex images given");
+        }
+        return std::make_unique<PyDexKit>(std::move(inputs), lenient, m);
+    }
+
+    py::dict load_status() const {
+        const auto st = ext_.GetLoadStatus();
+        py::dict d;
+        d["mode"] = st.mode;
+        d["complete"] = st.complete;
+        d["matches_art"] = st.matches_art;
+        d["loaded_dex_count"] = st.loaded_dex_count;
+        py::list rejected;
+        for (const auto& r : st.rejected) rejected.append(verify_row_dict(r));
+        d["rejected"] = std::move(rejected);
+        return d;
+    }
 
     int dex_count() const { return ext_.DexCount(); }
     const std::string& apk_path() const { return ext_.GetApkPath(); }
@@ -357,21 +464,7 @@ public:
     }
     py::list verify_report() const {
         py::list out;
-        for (const auto& s : ext_.VerifyReport()) {
-            py::dict d;
-            d["dex_id"] = s.dex_id;
-            d["name"] = s.name;
-            d["valid"] = s.valid;
-            d["reason"] = s.reason;
-            // dexllm#26 — `name` is the file path for a bare .dex but only the
-            // entry name for a zip member, so it cannot say WHICH source a
-            // "classes.dex" came from in a multi-source session. `source` always
-            // names the constructor argument.
-            d["source"] = s.source;
-            // dexllm#112: what a lenient verify accepted that ART rejects
-            d["art_deviations"] = s.art_deviations;
-            out.append(std::move(d));
-        }
+        for (const auto& s : ext_.VerifyReport()) out.append(verify_row_dict(s));
         return out;
     }
     py::list list_class_methods(const std::string& class_descriptor) const {
@@ -706,29 +799,53 @@ PYBIND11_MODULE(_dexkit_core, m) {
     // VerifyInsns and accepts value strings out of order (dexllm#112).
     m.def(
         "verify",
-        [](const std::string& path, bool lenient) {
-            auto report = dexkit::ext::DexKitExt::Verify(path, /*check_insns=*/!lenient);
+        [](const std::string& path, bool lenient, const std::string& mode) {
+            const auto m = mode_arg(mode);
+            auto report = dexkit::ext::DexKitExt::Verify(path, /*check_insns=*/!lenient, m);
             py::list out;
-            for (const auto& s : report) {
-                py::dict d;
-                d["dex_id"] = s.dex_id;
-                d["name"] = s.name;
-                d["valid"] = s.valid;
-                d["reason"] = s.reason;
-                d["source"] = s.source;  // see verify_report (dexllm#26)
-                d["art_deviations"] = s.art_deviations;  // dexllm#112
-                out.append(std::move(d));
-            }
+            for (const auto& s : report) out.append(verify_row_dict(s));
             return out;
         },
-        py::arg("path"), py::arg("lenient") = false,
+        py::arg("path"), py::arg("lenient") = false, py::arg("mode") = "isolated",
         "Structurally verify a .dex / apk's dex(es) without loading (the verify() "
         "sibling of identify()). Returns a list of {dex_id, name, valid, reason, source, "
-        "art_deviations} — "
-        "one per dex — byte-identical to DexKit(path).verify_report() for a loadable "
+        "art_deviations, art_open} — "
+        "one per dex — byte-identical to DexKit(path, lenient, mode).verify_report() for "
+        "a loadable "
         "source. Never throws: a malformed / unopenable / non-dex path is reported as "
         "a valid=False verdict. lenient=True skips VerifyInsns and accepts value "
         "strings out of order (ART rejects that; each row's art_deviations says so).");
+
+    m.def(
+        "verify_bytes",
+        [](const py::object& data, bool lenient, const std::string& mode,
+           const std::string& source) {
+            const auto m = mode_arg(mode);
+            auto image = image_from_buffer(data);
+            auto report = dexkit::ext::DexKitExt::VerifyBytes(
+                image->ok() ? image->data() : nullptr, image->ok() ? image->len() : 0,
+                source, /*check_insns=*/!lenient, m);
+            py::list out;
+            for (const auto& s : report) out.append(verify_row_dict(s));
+            return out;
+        },
+        py::arg("data"), py::kw_only(), py::arg("lenient") = false,
+        py::arg("mode") = "isolated", py::arg("source") = "<bytes>",
+        "verify() over bytes the caller holds (dexllm#119): the same rows "
+        "DexKit.from_bytes(data, ...).verify_report() records, with `source` as the "
+        "label. Never throws for a verdict.");
+
+    m.def(
+        "identify_bytes",
+        [](const py::object& data, const std::string& source) {
+            auto image = image_from_buffer(data);
+            return container_info_dict(dexkit::ext::DexKitExt::IdentifyBytes(
+                image->ok() ? image->data() : nullptr, image->ok() ? image->len() : 0,
+                source));
+        },
+        py::arg("data"), py::kw_only(), py::arg("source") = "<bytes>",
+        "identify() over bytes the caller holds (dexllm#119): {format, is_apk, "
+        "has_manifest, dex_count, source, in_memory}.");
 
     // Every identifier-valued attribute below is exposed through ident_out
     // (dexllm#22) rather than def_readonly: the field holds raw pool MUTF-8, and
@@ -1069,17 +1186,22 @@ PYBIND11_MODULE(_dexkit_core, m) {
         });
 
     py::class_<PyDexKit>(m, "DexKit")
-        .def(py::init<const std::string&, bool>(), py::arg("apk_path"),
-             py::arg("lenient") = false,
+        .def(py::init<const std::string&, bool, const std::string&>(),
+             py::arg("apk_path"), py::arg("lenient") = false,
+             py::arg("mode") = "isolated",
              "Load a DEX source. Accepts a zip container (.apk/.jar/.zip — all "
              "classes*.dex inside are loaded) or a bare .dex file (detected by "
              "its 'dex\\n' magic). The arg keeps the name apk_path for "
              "backward compatibility. lenient=True skips instruction-operand "
              "checks (so a runtime-dumped, partially-decrypted dex loads) and "
              "accepts value strings out of order, reported in verify_report()'s "
-             "art_deviations (dexllm#112).")
-        .def(py::init<const std::vector<std::string>&, bool>(), py::arg("sources"),
-             py::arg("lenient") = false,
+             "art_deviations (dexllm#112). mode='isolated' (default) loads every dex "
+             "that verifies; mode='runtime' loads only what ART's open would — "
+             "a zip stops at the first classesN.dex ART cannot open (dexllm#120). "
+             "Either way load_status() says whether anything was left out.")
+        .def(py::init<const std::vector<std::string>&, bool, const std::string&>(),
+             py::arg("sources"), py::arg("lenient") = false,
+             py::arg("mode") = "isolated",
              "Load MULTIPLE sources with PRIORITY BY ORDER. Each source (a bare "
              ".dex or a zip/apk) is loaded in turn, so sources earlier in the list "
              "get lower dex_ids. Class resolution is first-wins (lowest dex_id), so "
@@ -1089,7 +1211,36 @@ PYBIND11_MODULE(_dexkit_core, m) {
              "decrypted dex first). Each dex still passes the load-time verifier; "
              "lenient=True skips instruction-operand checks (partially-decrypted "
              "dumps) and accepts value strings out of order, reported in "
-             "verify_report()'s art_deviations.")
+             "verify_report()'s art_deviations. A source that yields no dex is "
+             "a valid=False row, not an error; the load raises only when no "
+             "source yields one (dexllm#119). mode as for the single-path form; "
+             "in mode='runtime' each source is its own ART open, as on a class "
+             "path.")
+        .def_static("from_bytes", &PyDexKit::from_bytes, py::arg("data"),
+             py::kw_only(), py::arg("lenient") = false, py::arg("mode") = "isolated",
+             py::arg("source") = "<bytes>",
+             "Load one file held in memory — a zip/apk or a bare .dex, sniffed by "
+             "content exactly like a path (dexllm#119). The bytes are copied in, so "
+             "the caller may drop or mutate its buffer afterwards. `source` is the "
+             "label every row reports (sources(), verify_report(), extract_dex()); "
+             "source_info()'s in_memory is True. lenient and mode as for the "
+             "constructor.")
+        .def_static("from_dex_images", &PyDexKit::from_dex_images, py::arg("images"),
+             py::kw_only(), py::arg("lenient") = false, py::arg("mode") = "isolated",
+             py::arg("source") = "<images>",
+             "Load an explicit dex list: an iterable of (name, bytes) pairs, in load "
+             "order — the order is dex_id and first-wins, and each name is the entry "
+             "verify_report() and extract_dex() report (dexllm#119). One source, one "
+             "multidex sequence: in mode='runtime' the dexes after the first one ART "
+             "could not open are not loaded. Copied in like from_bytes.")
+        .def("load_status", &PyDexKit::load_status,
+             "Whether this session is the whole of what it was given (dexllm#120): "
+             "{mode, complete, matches_art, loaded_dex_count, rejected}. complete is "
+             "False when any dex was left out (each is in rejected, a verify_report() "
+             "row); matches_art is False when the loaded set differs from what ART's "
+             "open would load — e.g. classes.dex rejected but classes2.dex loaded, "
+             "where first-wins answers describe a class path the device never "
+             "reaches.")
         .def("dex_count", &PyDexKit::dex_count)
         .def("apk_path", &PyDexKit::apk_path)
         .def("sources", &PyDexKit::sources,

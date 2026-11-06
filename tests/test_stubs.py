@@ -155,6 +155,10 @@ def test_stub_argument_names_match_the_runtime():
         if rt_params is None:
             continue
         stub_params = [a.arg for a in fn.args.args if a.arg != "self"]
+        # pybind renders a keyword-only boundary as a bare `*` (dexllm#119's
+        # bytes factories are the first DexKit members to have one).
+        if fn.args.kwonlyargs:
+            stub_params += ["*"] + [a.arg for a in fn.args.kwonlyargs]
         assert (
             rt_params == stub_params
         ), f"DexKit.{fn.name}: stub {stub_params} != runtime {rt_params}"

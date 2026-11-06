@@ -1660,4 +1660,5 @@ def test_identify_of_a_missing_path_still_reports_the_full_key_set():
         "has_manifest": False,
         "dex_count": 0,
         "source": "/nonexistent/x.apk",
+        "in_memory": False,
     }

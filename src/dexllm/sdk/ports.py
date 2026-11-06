@@ -13,7 +13,7 @@ object at runtime (method presence only — Protocols don't check signatures).
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from typing import Literal, Protocol, runtime_checkable
+from typing import Literal, Protocol, Union, runtime_checkable
 
 from .model import (
     CallSite,
@@ -35,6 +35,7 @@ from .model import (
     FieldInfo,
     FieldRef,
     IocReport,
+    LoadStatus,
     MethodAst,
     MethodInfo,
     MethodRef,
@@ -47,6 +48,13 @@ from .model import (
 # The five name/descriptor match modes DexKit's search accepts.
 MatchType = Literal["equals", "contains", "starts_with", "ends_with", "regex"]
 
+# How a rejected dex affects the dexes after it (dexllm#119/#120): "isolated"
+# loads every dex that verifies; "runtime" loads only what ART's open would.
+LoadMode = Literal["isolated", "runtime"]
+
+# What a bytes entry point accepts: anything exposing a contiguous buffer.
+BytesLike = Union[bytes, bytearray, memoryview]
+
 
 @runtime_checkable
 class ContainerProbePort(Protocol):
@@ -57,14 +65,32 @@ class ContainerProbePort(Protocol):
         ...
 
     def verify(
-        self, path: str, *, lenient: bool = False
+        self, path: str, *, lenient: bool = False, mode: LoadMode = "isolated"
     ) -> tuple[DexVerifyStatus, ...]:
         """Structurally verify a path's dex(es) without loading.
 
         One verdict per dex; byte-identical to ``verify_report`` after loading
-        the same source. Never raises — a malformed / unopenable / non-dex path
-        is reported as a ``valid=False`` verdict.
+        the same source with the same ``lenient`` and ``mode``. Never raises — a
+        malformed / unopenable / non-dex path is reported as a ``valid=False``
+        verdict.
         """
+        ...
+
+    def identify_bytes(
+        self, data: BytesLike, *, source: str = "<bytes>"
+    ) -> ContainerInfo:
+        """:meth:`identify` over bytes the caller holds (dexllm#119)."""
+        ...
+
+    def verify_bytes(
+        self,
+        data: BytesLike,
+        *,
+        lenient: bool = False,
+        mode: LoadMode = "isolated",
+        source: str = "<bytes>",
+    ) -> tuple[DexVerifyStatus, ...]:
+        """:meth:`verify` over bytes the caller holds (dexllm#119)."""
         ...
 
 
@@ -209,6 +235,16 @@ class EnumerationPort(Protocol):
         deleted, which a dumped dex in a temp directory routinely is. Probing the
         path again would answer ``dex_count == 0`` — the documented "nothing to
         analyse" sentinel — for a session that still works.
+        """
+        ...
+
+    def load_status(self) -> LoadStatus:
+        """Report whether the session is the whole of what it was given (#120).
+
+        ``complete`` is False when a dex was left out; ``matches_art`` is False
+        when the loaded dexes are not what ART's open would load — the case in
+        which every first-wins answer describes a class path the device never
+        reaches.
         """
         ...
 

@@ -49,7 +49,16 @@ def add_dumped_dexes(
             order (ART rejects that; reported in ``art_deviations``, dexllm#112).
 
     Returns:
-        A new ``DexKit`` over the combined, ordered source set.
+        A new ``DexKit`` over the combined, ordered source set, in the original
+        session's ``mode``.
+
+    Raises:
+        ValueError: no dump paths, or ``dk`` was loaded from bytes
+            (``DexKit.from_bytes`` / ``from_dex_images``), whose sources cannot be
+            re-read.
+        RuntimeError: a dump yields no dex (missing, not a dex, or rejected by
+            the verifier) -- unlike a plain ``DexKit([...])``, where such a source
+            is only a ``valid=False`` row.
     """
     if isinstance(dumps, (str, os.PathLike)):
         paths = [os.fspath(dumps)]
@@ -57,6 +66,29 @@ def add_dumped_dexes(
         paths = [os.fspath(p) for p in dumps]
     if not paths or not all(paths):
         raise ValueError("add_dumped_dexes: no (non-empty) dump paths given")
+    # The rebuild re-reads dk's sources from disk, which bytes input never had:
+    # its sources() are caller labels (dexllm#119). Refuse rather than open a
+    # file that happens to share a label's name.
+    in_memory = [i["source"] for i in dk.source_info() if i["in_memory"]]
+    if in_memory:
+        raise ValueError(
+            "add_dumped_dexes: the session was loaded from bytes "
+            f"({', '.join(in_memory)}), so it cannot be rebuilt from its sources; "
+            "rebuild it with DexKit.from_dex_images, listing the dumps before the "
+            "session's own dexes (extract_dex(i) returns their bytes and entry names)"
+        )
     original = list(dk.sources())
     order = paths + original if prefer else original + paths
-    return DexKit(order, lenient=lenient)
+    # Keep the session's load mode: a runtime-view session stays one (#120).
+    rebuilt = DexKit(order, lenient=lenient, mode=dk.load_status()["mode"])
+    # A list source that yields nothing is a row, not an error (dexllm#119), but
+    # a dump that loaded nothing defeats the call: analysing without it, unaware,
+    # is the failure this verb exists to prevent. Raise as it did before #119.
+    for path in paths:
+        rows = [r for r in rebuilt.verify_report() if r["source"] == path]
+        if not any(r["valid"] for r in rows):
+            reasons = "; ".join(r["reason"] for r in rows) or "no dex"
+            raise RuntimeError(
+                f"add_dumped_dexes: dump '{path}' yielded no dex: {reasons}"
+            )
+    return rebuilt

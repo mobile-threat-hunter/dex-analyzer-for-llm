@@ -587,7 +587,8 @@ bool DexVerifier::CheckHeader() {
     if (file_size > avail_) return Fail("Bad file size (past image)");
     if (header_->header_size != header_size) return Fail("Bad header size");
     if (header_->endian_tag != dex::kEndianConstant) return Fail("Unexpected endian_tag");
-    // adler32: intentionally not verified (policy).
+    // adler32: intentionally not verified (policy). The loader reads it for
+    // art_open (dexllm#120) without making it a rejection.
 
     // ART :670 — the v41 container fields must be self-consistent.
     if (version >= dex::Header::kV41) {

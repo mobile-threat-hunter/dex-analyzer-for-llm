@@ -155,6 +155,8 @@
 //   * debug_info — dexllm never parses it; not verified by design.
 //   * adler32 checksum — intentionally not verified (project policy; ART itself
 //     only warns when verify_checksum=false — aosp-wiki dexfileverifier.md).
+//     The LOADER computes it since dexllm#120 to predict ART's open: a mismatch
+//     is an art_deviation and makes the row art_open == false, never a reject.
 //   * ART's CheckIntraSectionIterate data-section rules (:2354) — a data-section
 //     item at offset 0 is rejected (:2356) and every one is recorded in
 //     offset_to_type_map_. Neither is ported: they belong to the map-driven intra

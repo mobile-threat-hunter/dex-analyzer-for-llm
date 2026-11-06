@@ -45,6 +45,48 @@ struct ContainerInfo {
     // dexllm#26's lesson for extract_dex, applied to the same shape of data.
     // LAST, like DexVerifyStatus::source: provenance follows the verdict.
     std::string source;
+    // dexllm#119: the source was handed over as BYTES, so `source` is the
+    // caller's label rather than a path — nothing can be re-read from it.
+    bool in_memory = false;
+};
+
+// dexllm#119/#120 — how a dex the gate rejects affects the dexes after it.
+//
+// ART opens a zip's classes.dex, classes2.dex, ... in order and STOPS at the
+// first one it cannot open, keeping the ones before it (DexFileLoader::Open +
+// OatFileManager::OpenDexFilesFromOat, android-16.0.0_r4), and it opens each
+// element of a class path on its own (DexPathList.makeDexElements suppresses a
+// failed element). A file whose header is not a v41 container yields ONE dex.
+//
+//   Isolated (default): every dex is judged on its own and every dex that
+//     verifies loads — the analyst sees everything the gate can vouch for.
+//   Runtime: only the dexes ART's open would produce load — the device's view.
+//
+// Both modes compute DexVerifyStatus::art_open the same way; they differ only in
+// whether a dex with art_open == false is loaded.
+enum class LoadMode { Isolated, Runtime };
+// "isolated" | "runtime"; throws std::invalid_argument on anything else.
+[[nodiscard]] LoadMode ParseLoadMode(const std::string& mode);
+[[nodiscard]] const char* LoadModeName(LoadMode mode);
+
+// An owned copy of caller bytes, for LoadInput (dexllm#119). Throws
+// std::invalid_argument past 4 GiB - 1 (MemMap's length is uint32_t, and a
+// truncated image would be a different file); an empty buffer gives an empty,
+// not-ok image, which the loader reports as "empty".
+[[nodiscard]] std::unique_ptr<dexkit::MemMap> OwnedImageCopy(const uint8_t* data,
+                                                             size_t len);
+
+// One construction source (dexllm#119). Exactly one of three shapes:
+//   * `image` null and `dex_images` empty — `source` is a PATH, read from disk;
+//   * `image` set — the bytes of one file (a zip/apk or a bare .dex), sniffed
+//     by content exactly like a path; `source` is the caller's label;
+//   * `dex_images` non-empty — an explicit dex list, in load order, each with
+//     the entry name it reports; one source, one multidex sequence.
+// The session OWNS every image (moved in), so the caller's buffer is free to go.
+struct LoadInput {
+    std::string source;
+    std::unique_ptr<dexkit::MemMap> image;
+    std::vector<std::pair<std::string, std::unique_ptr<dexkit::MemMap>>> dex_images;
 };
 
 // Per-dex structural-verification verdict (DexVerifier at the load boundary).
@@ -66,9 +108,28 @@ struct DexVerifyStatus {
     std::string reason;         // empty when valid
     std::string source;         // the constructor argument this dex came from
     // dexllm#112: what a LENIENT verify accepted that ART's DexFileVerifier
-    // rejects (empty for a strict verify and for a rejected row). `valid` says
+    // rejects (empty for a rejected row). `valid` says
     // the dex is safe to analyse; this says where it is not one ART would load.
+    // Since dexllm#120 a header checksum that does not match is reported here
+    // too, in either mode: ART checks it on open, the gate deliberately does not.
     std::vector<std::string> art_deviations;
+    // dexllm#120: whether ART's open of this SOURCE would produce this dex —
+    // sequence-aware, so a dex after the first one ART cannot open is false even
+    // when it verifies. Computed from the checks this port runs (the lenient
+    // verdict, art_deviations, the checksum, the sequence rule), so `true` means
+    // "no check dexllm runs says ART would refuse it", not a proof.
+    bool art_open = false;
+};
+
+// dexllm#120 — whether a session is the whole of what it was given, and whether
+// it is what the device would load. Derived from VerifyReport(), so the two
+// cannot disagree.
+struct LoadStatus {
+    std::string mode;          // "isolated" | "runtime"
+    bool complete = true;      // no dex the loader considered was left out
+    bool matches_art = true;   // loaded set == the art_open set
+    int loaded_dex_count = 0;
+    std::vector<DexVerifyStatus> rejected;  // every valid == false row
 };
 
 // Where a loaded dex came from. `name` alone cannot answer that: it is the file
@@ -124,13 +185,25 @@ public:
     // !lenient (false = the lenient pass: VerifyInsns skipped, value strings out
     // of order accepted and reported — see VerifyDex).
     static std::vector<DexVerifyStatus> Verify(const std::string& path,
-                                               bool check_insns = true);
+                                               bool check_insns = true,
+                                               LoadMode mode = LoadMode::Isolated);
+
+    // dexllm#119 — the same two probes over bytes the caller already holds.
+    // `source` is a label echoed into every row. Same rules, same rows: a buffer
+    // and a file holding the same bytes give identical answers.
+    static ContainerInfo IdentifyBytes(const uint8_t* data, size_t len,
+                                       const std::string& source);
+    static std::vector<DexVerifyStatus> VerifyBytes(const uint8_t* data, size_t len,
+                                                    const std::string& source,
+                                                    bool check_insns = true,
+                                                    LoadMode mode = LoadMode::Isolated);
 
     // `lenient` runs the load-time verifier's lenient pass (VerifyInsns off, so a
     // runtime-dumped, partially-decrypted dex with garbage method bodies but valid
     // structure still loads; value strings out of order accepted and reported,
     // dexllm#112) — see VerifyDex's `check_insns`.
-    explicit DexKitExt(const std::string& apk_path, bool lenient = false);
+    explicit DexKitExt(const std::string& apk_path, bool lenient = false,
+                       LoadMode mode = LoadMode::Isolated);
 
     // Multi-source load with PRIORITY BY ORDER. Each source (a raw .dex or a
     // zip/apk) is verified and loaded in turn, so sources earlier in the list get
@@ -138,8 +211,19 @@ public:
     // FIRST source wins a class-descriptor collision — load a runtime-decrypted /
     // dumped dex BEFORE the original apk to make the unpacked class win (mirrors
     // ART, where the packer orders the decrypted dex first). apk_path() reports
-    // the first source. `lenient` as above. Throws if no source yields a valid dex.
-    explicit DexKitExt(const std::vector<std::string>& sources, bool lenient = false);
+    // the first source. `lenient` as above.
+    //
+    // dexllm#119: a source that yields no dex is a valid == false row, not an
+    // error, so one bad file does not cost the others (ART's class path does the
+    // same). Throws only when NO source yields a dex — with that source's own
+    // message when there is exactly one.
+    explicit DexKitExt(const std::vector<std::string>& sources, bool lenient = false,
+                       LoadMode mode = LoadMode::Isolated);
+
+    // dexllm#119 — the general form: paths, in-memory files and explicit dex
+    // lists, in load order. The two constructors above build one of these.
+    explicit DexKitExt(std::vector<LoadInput> inputs, bool lenient = false,
+                       LoadMode mode = LoadMode::Isolated);
 
     ~DexKitExt();
 
@@ -174,6 +258,10 @@ public:
     [[nodiscard]] const std::vector<ContainerInfo>& SourceInfo() const {
         return source_info_;
     }
+
+    // dexllm#120 — see LoadStatus.
+    [[nodiscard]] LoadStatus GetLoadStatus() const;
+    [[nodiscard]] LoadMode GetLoadMode() const { return mode_; }
 
     // Locate which dex_id defines the given class descriptor; -1 if not declared
     // in any loaded dex (i.e. external Android API or app-external reference).
@@ -452,35 +540,19 @@ public:
     dexkit::DexKit& core() { return *core_; }
 
 private:
-    // Verify + collect the structurally-valid dex(es) of ONE source (raw .dex or
-    // zip/apk) onto the end of `out`, recording per-dex verdicts in verify_status_
-    // with the running combined dex_id. Throws if the source can't be opened or
-    // isn't a dex/zip container; per-dex verify failures are recorded and skipped.
+    // Verify + collect the structurally-valid dex(es) of ONE source onto the end
+    // of `out`, recording per-dex verdicts in verify_status_ with the running
+    // combined dex_id. Never throws for a verdict: a source that cannot be
+    // opened, is not a container, or yields no dex is recorded as rows and its
+    // one-line reason is written to `failure` (empty when it yielded a dex).
     // Returns how many logical dexes it accepted.
-    size_t CollectSource(const std::string& path, bool check_insns,
-                         std::vector<std::unique_ptr<dexkit::MemMap>>& out);
-
-    // The load gate for ONE image (a raw .dex file, or one decompressed zip
-    // entry). Verifies every LOGICAL dex the core would split the image into and
-    // appends only verified ones to `out`; returns how many were accepted.
-    //
-    // dexllm#25: the core's AddImage runs ParseLogicalDexOffsets, so ONE image can
-    // become several dexes — verifying the image once (at offset 0) let every
-    // later logical dex reach the core unverified, which is exactly the input a
-    // packer dump produces. When every slice verifies the image is handed over
-    // whole (no copy, byte-for-byte the previous behaviour). When some slice
-    // fails, the survivors are copied into images of their own so the rejected
-    // one cannot be reached — per-logical-dex rejection, mirroring the zip
-    // branch's per-entry rejection.
-    size_t CollectImage(std::unique_ptr<dexkit::MemMap> image,
-                        const std::string& source, const std::string& entry,
-                        const std::string& name, bool check_insns,
+    size_t CollectInput(LoadInput& input, bool check_insns,
                         std::vector<std::unique_ptr<dexkit::MemMap>>& out,
-                        std::string* first_reject_reason);
+                        std::string& failure);
 
     // Post-load invariant: the core parsed exactly the dexes we verified, and
     // every one of them produced a DexItem. Cheap, and it is what keeps the gate
-    // honest — CollectImage mirrors the core's split rule, and a drift between
+    // honest — LogicalDexSlices mirrors the core's split rule, and a drift between
     // the two would silently reopen dexllm#25.
     void AssertLoadedDexesWereVerified(size_t accepted) const;
 
@@ -490,6 +562,7 @@ private:
 
     std::string apk_path_;
     std::vector<std::string> sources_;  // original construction sources
+    LoadMode mode_ = LoadMode::Isolated;
     std::unique_ptr<dexkit::DexKit> core_;
     bool analysis_caches_warm_ = false;
     std::vector<ApiResolveIndex> api_resolve_index_;  // one per dex, empty until built
@@ -518,11 +591,11 @@ private:
     std::unique_ptr<DexItemCodeSource> code_source_;  // lazy-constructed
     std::vector<DexVerifyStatus> verify_status_;      // load-boundary verdicts
     // One probe per construction source, in GetSources() order, recorded by
-    // CollectSource — which already runs ProbeContainer to decide HOW to load,
+    // CollectInput — which already runs ProbeContainer to decide HOW to load,
     // so this keeps a result that was being computed and thrown away.
     std::vector<ContainerInfo> source_info_;
     int next_dex_id_ = 0;  // running dex_id handed out to accepted LOGICAL dexes
-    // Provenance of one loaded image, recorded in CollectImage BEFORE the image
+    // Provenance of one loaded image, recorded by CollectInput BEFORE the image
     // is moved into the core. Keyed by image rather than by dex_id because the
     // core splits a concatenated image into several logical dexes, so the
     // dex_id -> source relation is only knowable after the load; DexItem keeps the

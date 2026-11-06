@@ -58,15 +58,26 @@ fields are `tuple`s; `Mapping` fields are read-only views. See
 [Conventions](#conventions) for the immutability / hashability rules.
 
 ### Loading & probing
-- **`ContainerInfo`** `(format, is_apk, has_manifest, dex_count, source)` — content-based
-  file probe. `format` ∈ `"dex" | "zip" | "unknown"`.
-- **`DexVerifyStatus`** `(dex_id, name, valid, reason, source, art_deviations)` — one
+- **`ContainerInfo`** `(format, is_apk, has_manifest, dex_count, source, in_memory)` — content-based
+  file probe. `format` ∈ `"dex" | "zip" | "unknown"`, or `"images"` for a session
+  built by `open_dex_images`; `in_memory` is True when the source was handed over
+  as bytes, so `source` is a caller label rather than a path (dexllm#119).
+- **`DexVerifyStatus`** `(dex_id, name, valid, reason, source, art_deviations, art_open)` — one
   loaded dex's structural-verification verdict; `reason` is empty when `valid`.
   `name` is the entry name for a zip member but the file path for a bare `.dex`, so
   `source` — the path handed to the session — is what identifies it (dexllm#26).
   `art_deviations` (dexllm#112) lists what a `lenient` verify accepted that ART's
   DexFileVerifier rejects (value strings out of order after a post-build string
-  swap); empty for a strict verify and for a rejected dex.
+  swap) — and, in either mode, a header checksum ART would refuse on open
+  (dexllm#120); empty for a rejected dex. `art_open` (dexllm#120) is whether ART's
+  open of the source yields this dex: ART stops a zip at the first `classesN.dex`
+  it cannot open, so a dex after that one is `False` even when it verifies.
+- **`LoadStatus`** `(mode, complete, matches_art, loaded_dex_count, rejected)` —
+  whether a session is the whole of what it was given (dexllm#120): `complete` is
+  False when a dex was left out (each is in `rejected`), `matches_art` False when
+  the loaded dexes differ from what ART's open would load — e.g. a rejected
+  `classes.dex` with a loaded `classes2.dex`, where first-wins answers describe a
+  class path the device never reaches.
 - **`ExtractedDex`** `(dex_id, data, source, entry, offset, size)` — one dex's
   bytes plus its provenance, returned by `extract_dex`. `data` is spelled `bytes`
   on the raw `DexKit.extract_dex` dict (a `bytes: bytes` dataclass field would
@@ -286,9 +297,9 @@ so a consumer depends on just what it needs:
 
 | Port | Methods |
 |---|---|
-| **`ContainerProbePort`** | `identify(path) -> ContainerInfo`, `verify(path, *, lenient=False) -> tuple[DexVerifyStatus, …]` (load-free) |
+| **`ContainerProbePort`** | `identify(path) -> ContainerInfo`, `verify(path, *, lenient=False, mode="isolated") -> tuple[DexVerifyStatus, …]`, `identify_bytes(data, *, source)`, `verify_bytes(data, *, lenient, mode, source)` (load-free; the `_bytes` pair takes a bytes-like the caller holds, dexllm#119) |
 | **`DecompilationPort`** | `decompile_method`, `decompile_method_with_pc_map`, `decompile_class`, `decompile_method_ast`, `render_method_smali`, `render_class_smali`. **Split any of the text results on `"\n"`, never `str.splitlines()`** — a string literal may carry a raw U+0085 / U+2028 / U+2029 that `splitlines()` breaks on and the emitter does not (the `pc_map` line numbering depends on it; since dexllm#83 a `static final String` initializer follows the same rule as a method body) |
-| **`EnumerationPort`** | `list_classes` / `list_classes_in_dex`, `list_class_methods`, `list_fields` / `list_fields_in_dex`, `list_methods` / `list_methods_in_dex`, `list_value_strings` / `list_class_strings` / `list_method_strings` (app-wide, class-scoped, method-scoped — the forward direction of `find_*_using_strings`), `list_external_method_refs` / `list_external_field_refs` / `list_external_type_refs`, `list_class_headers` (every class_def's supertypes + access flags in ONE crossing — the bulk form of `class_info`'s hierarchy half), `verify_report`, `source_info` (what each source WAS, probed at load — a session fact that survives the file) (uniform scope axis: bare = all dexes, `…_in_dex(dex_id)` = one dex) |
+| **`EnumerationPort`** | `list_classes` / `list_classes_in_dex`, `list_class_methods`, `list_fields` / `list_fields_in_dex`, `list_methods` / `list_methods_in_dex`, `list_value_strings` / `list_class_strings` / `list_method_strings` (app-wide, class-scoped, method-scoped — the forward direction of `find_*_using_strings`), `list_external_method_refs` / `list_external_field_refs` / `list_external_type_refs`, `list_class_headers` (every class_def's supertypes + access flags in ONE crossing — the bulk form of `class_info`'s hierarchy half), `verify_report`, `source_info` (what each source WAS, probed at load — a session fact that survives the file), `load_status` (`LoadStatus` — whether anything was left out and whether the loaded set is the device's, dexllm#120) (uniform scope axis: bare = all dexes, `…_in_dex(dex_id)` = one dex) |
 | **`DexExtractionPort`** | `extract_dex` → `ExtractedDex` / `extract_dexes` → all of them in `dex_id` order (bytes + provenance: `source` / `entry` / `offset`; the packer/dump primitive). Provenance is not derivable elsewhere — the verify report's `name` is only the entry name for a zip member, so two sources both report `classes.dex`, and only `offset` says where in a concatenated container a dex starts |
 | **`ClassInspectionPort`** | `class_info`, `class_fields`, `class_methods`, `locate_class_dex` (the ISP split of raw's `get_class_summary`; `class_methods` is the structured twin of `class_fields` — `EnumerationPort.list_class_methods` returns descriptors, which carry no access flags, so before dexllm#37 a method modifier was reachable only by dropping to `.raw`; `locate_class_dex` = cheap declaring-dex lookup, vs the heavy `class_info().dex_id`) |
 | **`CrossReferencePort`** | `find_call_sites_to` (a target's callers — the reverse edge) / `find_call_sites_from` (a method's callees — the forward edge), `resolve_call_args`, `find_field_read_sites`, `find_field_write_sites`, `find_type_references`. `find_call_sites_to` / `find_call_sites_from` is the same pair the raw `DexKit` and the MCP catalog use — one spelling across all three layers, and the only one: the pre-unification adapter aliases (`find_call_sites`, `find_call_sites_to_api`, `find_call_sites_from_method`, `find_field_readers`, `find_field_writers`) were removed, as were `find_methods_reading_field` / `find_methods_writing_field` when dexllm#84 gave the pair its return type. Both call-site directions and `resolve_call_args` take `method_descriptor` |
@@ -319,14 +330,22 @@ application use-case interface.
   `DexAnalysisUseCase`. Constructed from a single path or a sequence (earlier
   sources get lower dex_ids → first-wins on a class collision); `lenient=True` runs
   the load-time verifier leniently — partially-decrypted dumps load, and value
-  strings out of order are accepted and reported in `art_deviations` (dexllm#112). Accepts `str` or `os.PathLike`. **`.raw`** exposes the underlying `DexKit`
+  strings out of order are accepted and reported in `art_deviations` (dexllm#112); `mode="runtime"` loads only what ART's open would (dexllm#120). Accepts `str` or `os.PathLike`. **`.raw`** exposes the underlying `DexKit`
   as an escape hatch (e.g. for L7 search not surfaced by a port).
 - **`ContainerProbe`** — the object implementing `ContainerProbePort` (stateless).
-- **`open_apk(sources, *, lenient=False) -> DexKitAdapter`** — the factory; returns
-  a `DexAnalysisUseCase`.
+- **`open_apk(sources, *, lenient=False, mode="isolated") -> DexKitAdapter`** — the factory; returns
+  a `DexAnalysisUseCase`. `mode` as for the raw `DexKit` (`"isolated"` loads every
+  dex that verifies, `"runtime"` only what ART's open would — read `load_status()`).
+- **`open_bytes(data, *, lenient, mode, source) -> DexKitAdapter`** /
+  **`open_dex_images(images, *, lenient, mode, source) -> DexKitAdapter`** — the
+  in-memory factories (dexllm#119): one file held as bytes, sniffed by content like
+  a path, or an explicit `(name, bytes)` dex list in load order. Bytes are copied
+  in; `source` is the label every row reports.
 - **`identify(path) -> ContainerInfo`** — the load-free probe (functional form of
   `ContainerProbe`).
-- **`verify(path, *, lenient=False) -> tuple[DexVerifyStatus, ...]`** — load-free
+- **`identify_bytes(data, *, source)`** / **`verify_bytes(data, *, lenient, mode, source)`**
+  — the same two probes over bytes the caller holds (dexllm#119).
+- **`verify(path, *, lenient=False, mode="isolated") -> tuple[DexVerifyStatus, ...]`** — load-free
   structural verification (functional form of `ContainerProbe.verify`). One
   verdict per dex, byte-identical to loading the source and reading
   `verify_report`; never raises (a malformed/unopenable path is a `valid=False`

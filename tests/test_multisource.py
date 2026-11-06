@@ -93,7 +93,16 @@ def test_empty_sources_rejected():
         dexllm.DexKit([])
 
 
-def test_bad_source_in_list_rejected(two_dexes):
+def test_a_bad_source_in_a_list_is_a_row_not_an_error(two_dexes):
+    """dexllm#119: one unopenable source no longer costs the others. It is a
+    valid=False row, the session says it is incomplete, and only a list in
+    which NO source yields a dex raises (inverted from the pre-#119 guard)."""
     a, _ = two_dexes
-    with pytest.raises(Exception):
-        dexllm.DexKit([a, "/nonexistent/dexllm/missing.dex"])
+    missing = "/nonexistent/dexllm/missing.dex"
+    dk = dexllm.DexKit([a, missing])
+    assert dk.dex_count() == dexllm.DexKit(a).dex_count()
+    [row] = [r for r in dk.verify_report() if r["source"] == missing]
+    assert not row["valid"] and row["dex_id"] == -1 and "cannot open" in row["reason"]
+    assert dk.load_status()["complete"] is False
+    with pytest.raises(RuntimeError, match="none of the 2 sources"):
+        dexllm.DexKit([missing, missing + "2"])

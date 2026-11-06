@@ -41,10 +41,15 @@ class ContainerInfo:
     what a session recorded at LOAD (dexllm#42) — the latter stays true after the
     file is gone.
 
+    ``format`` is ``"images"`` for an explicit dex list
+    (:func:`dexllm.sdk.open_dex_images`), and ``in_memory`` is True when the
+    source was handed over as bytes, so ``source`` is the caller's label rather
+    than a path (dexllm#119).
+
     Example (real, a2dp.Vol_137.apk)::
 
         ContainerInfo(format='zip', is_apk=True, has_manifest=True, dex_count=1,
-                      source='a2dp.Vol_137.apk')
+                      source='a2dp.Vol_137.apk', in_memory=False)
     """
 
     format: str
@@ -52,6 +57,7 @@ class ContainerInfo:
     has_manifest: bool
     dex_count: int
     source: str
+    in_memory: bool = False
 
 
 @dataclass(frozen=True)
@@ -68,13 +74,20 @@ class DexVerifyStatus:
     ``art_deviations`` (dexllm#112) lists what a ``lenient`` verify accepted
     that ART's DexFileVerifier rejects — e.g. value strings out of order after
     a post-build string swap. ``valid`` says the dex is safe to ANALYSE; a
-    non-empty ``art_deviations`` says it is not one ART would load. Always empty
-    for a strict verify and for a rejected dex.
+    non-empty ``art_deviations`` says it is not one ART would load. Empty for a
+    rejected dex; for a strict verify it can hold only a header-checksum
+    mismatch, which ART checks on open and the gate does not (dexllm#120).
+
+    ``art_open`` (dexllm#120) says whether ART's open of this SOURCE would
+    produce this dex. It is sequence-aware: ART stops a zip at the first
+    ``classesN.dex`` it cannot open, so a dex after that one is ``False`` even
+    when it verifies. ``True`` means no check dexllm runs says ART would refuse
+    it, not a proof.
 
     Example (real)::
 
         DexVerifyStatus(dex_id=0, name='classes.dex', valid=True, reason='',
-                        source='app.apk', art_deviations=())
+                        source='app.apk', art_deviations=(), art_open=True)
     """
 
     dex_id: int
@@ -83,6 +96,31 @@ class DexVerifyStatus:
     reason: str
     source: str = ""
     art_deviations: tuple[str, ...] = ()
+    art_open: bool = False
+
+
+@dataclass(frozen=True)
+class LoadStatus:
+    """Whether a session is the whole of what it was given (dexllm#120).
+
+    ``complete`` is False when any dex the loader considered was left out — each
+    one is in ``rejected``. ``matches_art`` is False when the loaded dexes differ
+    from what ART's open would load: a rejected ``classes.dex`` with a loaded
+    ``classes2.dex`` is the case that matters, since every first-wins answer then
+    describes a class path the device never reaches. ``mode`` is ``"isolated"``
+    or ``"runtime"``.
+
+    Example (a zip whose ``classes.dex`` is corrupt)::
+
+        LoadStatus(mode='isolated', complete=False, matches_art=False,
+                   loaded_dex_count=1, rejected=(DexVerifyStatus(...),))
+    """
+
+    mode: str
+    complete: bool
+    matches_art: bool
+    loaded_dex_count: int
+    rejected: tuple[DexVerifyStatus, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

@@ -22,7 +22,7 @@ Descriptors are Dalvik form throughout: ``Lpkg/Cls;`` for a type,
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from typing import Any, TypedDict, overload
 
 # ── dict-returning shapes (structural contracts) ─────────────────────────────
@@ -33,6 +33,8 @@ class _IdentifyResult(TypedDict):
     has_manifest: bool
     dex_count: int
     source: str  # the path the keys above describe (dexllm#26/#42)
+    # dexllm#119: bytes input — `source` is a caller label, not a path
+    in_memory: bool
 
 class _VerifyStatus(TypedDict):
     dex_id: int
@@ -42,6 +44,15 @@ class _VerifyStatus(TypedDict):
     source: str  # the path handed to the constructor (dexllm#26)
     # dexllm#112: what a lenient verify accepted that ART's verifier rejects
     art_deviations: list[str]
+    # dexllm#120: whether ART's open of this source yields this dex
+    art_open: bool
+
+class _LoadStatus(TypedDict):
+    mode: str  # "isolated" | "runtime"
+    complete: bool  # no dex the loader considered was left out
+    matches_art: bool  # the loaded set equals the art_open set
+    loaded_dex_count: int
+    rejected: list[_VerifyStatus]  # every valid == False row
 
 class _ExtractedDex(TypedDict):
     bytes: bytes
@@ -100,10 +111,31 @@ def identify(path: str) -> _IdentifyResult:
 
         >>> dexllm.identify("app.apk")
         {'format': 'zip', 'is_apk': True, 'has_manifest': True, 'dex_count': 1,
-         'source': 'app.apk'}
+         'source': 'app.apk', 'in_memory': False}
     """
 
-def verify(path: str, lenient: bool = ...) -> list[_VerifyStatus]:
+def identify_bytes(
+    data: bytes | bytearray | memoryview, *, source: str = "<bytes>"
+) -> _IdentifyResult:
+    """:func:`identify` over bytes the caller holds (dexllm#119).
+
+    ``source`` is the label echoed into the result, whose ``in_memory`` is True.
+    """
+
+def verify_bytes(
+    data: bytes | bytearray | memoryview,
+    *,
+    lenient: bool = False,
+    mode: str = "isolated",
+    source: str = "<bytes>",
+) -> list[_VerifyStatus]:
+    """:func:`verify` over bytes the caller holds (dexllm#119).
+
+    The same rows ``DexKit.from_bytes(data, ...).verify_report()`` records. Never
+    raises for a verdict.
+    """
+
+def verify(path: str, lenient: bool = ..., mode: str = ...) -> list[_VerifyStatus]:
     """Structural verdict per dex, load-free — and it NEVER raises.
 
     Same VerifyDex call and dex_id assignment as ``DexKit(path).verify_report()``,
@@ -113,7 +145,9 @@ def verify(path: str, lenient: bool = ...) -> list[_VerifyStatus]:
     Example::
 
         >>> dexllm.verify("app.apk")
-        [{'dex_id': 0, 'name': 'classes.dex', 'valid': True, 'reason': '', 'source': 'app.apk', 'art_deviations': []}]
+        [{'dex_id': 0, 'name': 'classes.dex', 'valid': True, 'reason': '', 'source': 'app.apk', 'art_deviations': [], 'art_open': True}]
+
+    ``mode`` as for :class:`DexKit` — the rows must match the session's.
     """
 
 def is_framework_descriptor(descriptor: str) -> bool:
@@ -500,13 +534,67 @@ class DexKit:
     loads, and accepts VALUE strings out of order (ART rejects that; reported in
     ``verify_report()``'s ``art_deviations``, dexllm#112); header/ids/code_item
     bounds stay verified either way.
+
+    ``mode`` decides what a rejected dex costs the dexes after it (dexllm#120):
+    ``"isolated"`` (default) loads every dex that verifies — a corrupt
+    ``classes.dex`` leaves ``classes2.dex`` loaded; ``"runtime"`` loads only what
+    ART's open would — a zip stops at the first ``classesN.dex`` ART cannot open,
+    keeping the ones before it, and each source of a list is its own open. Read
+    :meth:`load_status` either way. In a list, a source that yields no dex is a
+    ``valid=False`` row, not an error; construction raises only when no source
+    yields one (dexllm#119).
     """
 
     @overload
-    def __init__(self, apk_path: str, lenient: bool = False) -> None: ...
+    def __init__(
+        self, apk_path: str, lenient: bool = False, mode: str = "isolated"
+    ) -> None: ...
     @overload
-    def __init__(self, sources: Sequence[str], lenient: bool = False) -> None: ...
+    def __init__(
+        self, sources: Sequence[str], lenient: bool = False, mode: str = "isolated"
+    ) -> None: ...
+    @staticmethod
+    def from_bytes(
+        data: bytes | bytearray | memoryview,
+        *,
+        lenient: bool = False,
+        mode: str = "isolated",
+        source: str = "<bytes>",
+    ) -> DexKit:
+        """Load one file held in memory — a zip/apk or a bare dex (dexllm#119).
 
+        Sniffed by content exactly like a path, through the same verifier, with
+        the same verdicts. The bytes are COPIED in, so the caller may drop or
+        mutate its buffer afterwards. ``source`` is the label every row reports;
+        ``source_info()[0]["in_memory"]`` is True. Images of 4 GiB or more raise
+        ``ValueError`` rather than being truncated.
+
+        Example::
+
+            dk = dexllm.DexKit.from_bytes(apk_bytes, source="sample.apk")
+        """
+
+    @staticmethod
+    def from_dex_images(
+        images: Iterable[tuple[str, bytes | bytearray | memoryview]],
+        *,
+        lenient: bool = False,
+        mode: str = "isolated",
+        source: str = "<images>",
+    ) -> DexKit:
+        """Load an explicit dex list: ``(name, bytes)`` pairs in load order (#119).
+
+        The order is ``dex_id`` and first-wins, and each name is the entry
+        ``verify_report()`` / ``extract_dex()`` report — for an embedder that read
+        the container itself. One source, one multidex sequence: in
+        ``mode="runtime"`` the dexes after the first one ART could not open are
+        not loaded. Copied in like :meth:`from_bytes`.
+
+        Example::
+
+            dk = dexllm.DexKit.from_dex_images(
+                [("classes.dex", d0), ("classes2.dex", d1)], source="sample.apk")
+        """
     # load / container
     def dex_count(self) -> int:
         """Count the loaded dexes. Example: ``dk.dex_count()`` -> ``1``."""
@@ -535,11 +623,29 @@ class DexKit:
             dk.source_info()[0]["is_apk"]   # -> True
         """
 
+    def load_status(self) -> _LoadStatus:
+        """Report whether the session is the whole of what it was given (#120).
+
+        ``complete`` is False when any dex was left out (each is in
+        ``rejected``). ``matches_art`` is False when the loaded dexes differ from
+        what ART's open would load — e.g. a rejected ``classes.dex`` with a loaded
+        ``classes2.dex``, where every first-wins answer describes a class path the
+        device never reaches.
+
+        Example::
+
+            dk.load_status()
+            # {'mode': 'isolated', 'complete': True, 'matches_art': True,
+            #  'loaded_dex_count': 1, 'rejected': []}
+        """
+
     def verify_report(self) -> list[_VerifyStatus]:
         """Per-dex structural verdict from the load-time gate.
 
-        A fully-rejected container raises at construction instead, so a reachable
-        ``valid=False`` here means a sibling dex in the same APK was rejected.
+        A single source that yields nothing raises at construction instead, so a
+        reachable ``valid=False`` here is a rejected sibling dex in the same APK, a
+        dex ``mode="runtime"`` did not open, or — in a list — a source that
+        yielded no dex at all (dexllm#119). :meth:`load_status` summarises them.
 
         Example::
 

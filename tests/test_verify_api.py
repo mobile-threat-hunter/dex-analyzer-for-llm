@@ -115,6 +115,7 @@ def test_verify_never_throws_on_missing_file():
             "source": "/nonexistent/does/not/exist.dex",
             # dexllm#112 — empty for a rejected row (and for any strict verify)
             "art_deviations": [],
+            "art_open": False,
         }
     ]
 

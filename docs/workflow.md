@@ -45,7 +45,10 @@ The constructor identifies the container by **content, not filename**, then gate
 *logical* dex, so a concatenated / packer-dump image is checked at each embedded
 header rather than only at offset 0. A malformed dex is rejected with a byte-level
 reason; siblings in the same apk (and the other logical dexes of the same image)
-still load. The load is lazy — no method is decompiled yet.
+still load in the default `mode="isolated"` — `mode="runtime"` loads only what
+ART's open would, which stops at the first `classesN.dex` it cannot open, and
+`load_status()` says which kind of session it is (dexllm#120). The load is lazy —
+no method is decompiled yet.
 
 ```mermaid
 sequenceDiagram

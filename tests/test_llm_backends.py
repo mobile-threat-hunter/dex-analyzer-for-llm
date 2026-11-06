@@ -232,6 +232,7 @@ def test_fastapi_upload_is_content_based():
             # path, which is the file that was actually probed. `filename` is the
             # (unvalidated) client string; the two are deliberately different.
             "source": body["apk_path"],
+            "in_memory": False,
         }, body
         # Through the private session store on purpose: the only public
         # read-back is POST /analyze, which needs an ANTHROPIC_API_KEY.

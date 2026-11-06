@@ -104,6 +104,15 @@ _RAW_DEPRECATED_ALIASES: dict[str, str] = {}
 # operation shape, so a different name is correct. Maps raw name → port pieces.
 _RAW_DECOMPOSED = {"get_class_summary": ("class_info", "class_fields", "class_methods")}
 
+# raw-only, because they are CONSTRUCTORS: a session is built by a module-level
+# SDK factory, never by a port method — `DexKit(path)` is `open_apk`, and the
+# dexllm#119 bytes factories follow the same `open_*` family. Maps raw name →
+# the dexllm.sdk factory that must exist.
+_RAW_FACTORY_TO_SDK_OPEN = {
+    "from_bytes": "open_bytes",
+    "from_dex_images": "open_dex_images",
+}
+
 # SDK-only record types (dexllm#37's type axis). Each is genuinely SDK-side: a
 # composite the raw layer has no single object for, or a raw dict/tuple return
 # given a type. None of them is a second name for a registered pybind class —
@@ -112,6 +121,7 @@ _SDK_ONLY_MODELS = {
     # raw returns a plain dict
     "ContainerInfo",
     "DexVerifyStatus",
+    "LoadStatus",
     "ExtractedDex",
     "DecompiledMethod",
     "DecompiledClass",
@@ -140,7 +150,9 @@ _RAW_ONLY_MODELS = {"ClassSummary"}
 # rather than DexKit methods — a location difference, not a naming drift.
 _PORT_FROM_MODULE_FUNCTION = {
     "identify",
+    "identify_bytes",
     "verify",
+    "verify_bytes",
     "extract_iocs",
     "detect_content_providers",
     "detect_permissive_tls",
@@ -908,7 +920,11 @@ def test_raw_and_port_share_one_spelling_per_operation():
         ):
             ports |= {m for m in vars(obj) if not m.startswith("_")}
 
-    licensed_raw_only = set(_RAW_DEPRECATED_ALIASES) | set(_RAW_DECOMPOSED)
+    licensed_raw_only = (
+        set(_RAW_DEPRECATED_ALIASES)
+        | set(_RAW_DECOMPOSED)
+        | set(_RAW_FACTORY_TO_SDK_OPEN)
+    )
     assert raw - ports == licensed_raw_only, (
         f"unlicensed raw-only names: {(raw - ports) - licensed_raw_only} | "
         f"stale exceptions: {licensed_raw_only - (raw - ports)}"
@@ -937,6 +953,13 @@ def test_raw_and_port_share_one_spelling_per_operation():
         assert callable(
             getattr(dexllm, name, None)
         ), f"{name} is not a module-level dexllm function"
+    for raw_name, factory in _RAW_FACTORY_TO_SDK_OPEN.items():
+        assert isinstance(
+            dexllm.DexKit.__dict__.get(raw_name), staticmethod
+        ), f"{raw_name} is not a static factory on raw DexKit"
+        assert callable(
+            getattr(dexllm.sdk, factory, None)
+        ), f"{raw_name} claims SDK factory {factory}, which dexllm.sdk lacks"
 
 
 def test_raw_and_port_share_one_spelling_per_argument():

@@ -107,8 +107,10 @@ encoded_array) / inter (id ordering+uniqueness, descriptor + member-name syntax,
 class_def semantics) — **plus** `VerifyInsns`, an instruction-operand bounds pass
 that ART keeps in the *runtime* method_verifier (deliberately not vendored), here
 re-derived from the Dalvik bytecode spec. **Intentional differences from ART:**
-adler32/SHA-1 still **not** checked (policy — checksums are not a crash vector and
-malware routinely lies about them); instruction *dataflow* semantics,
+adler32/SHA-1 still **not** checked by the gate (policy — checksums are not a crash
+vector and malware routinely lies about them; since dexllm#120 the loader does
+compute the adler32 to predict ART's open, reporting a mismatch in
+`art_deviations` and `art_open` without rejecting); instruction *dataflow* semantics,
 call_site CONTENTS and debug_info are out of scope (documented in
 `dex_verifier.h`) — for both fixed-size sections the EXTENT is bounded and, since
 dexllm#62, the 4-byte ALIGNMENT is checked, which is what ART's `CheckMap` does.
@@ -131,6 +133,34 @@ still surface lazily as `SLICER_CHECK` → `std::runtime_error`, skipping that m
 > sets — but the structural crash surface ART's `DexFileVerifier` covers is covered
 > here too.
 
+### Which dexes a multidex open yields (dexllm#119/#120)
+
+The verifier above judges ONE dex. What a whole apk yields is a separate rule, and
+the two systems differ on it by default:
+
+| | ART (android-16.0.0_r4) | dexllm `mode="isolated"` (default) | dexllm `mode="runtime"` |
+|---|---|---|---|
+| zip `classes*.dex` | opened in order; the **first** one it cannot open ends the open, the ones before it are kept (`DexFileLoader::Open` returns false, `OatFileManager::OpenDexFilesFromOat` returns the prefix) | every entry judged on its own; a rejected one is skipped and its siblings load | ART's rule |
+| a failed class-path element | suppressed, the next element opens (`DexPathList.makeDexElements`) | a list source that yields nothing is a `valid: False` row | ART's rule |
+| bytes after a dex in one image | ignored — ART reads on only while the dex it opened is a v41 container entry that is not its container's last (`IsDexContainerLastEntry`) | split and loaded (the packer-dump case, dexllm#25) | ART's rule |
+| a zip with a duplicate entry name | the whole archive is refused (libziparchive `kDuplicateEntry`) | the last copy loads | nothing loads |
+| a dex failing a check ART does not run (`VerifyInsns`) | opened | rejected (strict) | rejected, but the sequence continues |
+| adler32 mismatch | the open fails — on the path that opens the apk's dex itself with verification on (`OatFileManager`'s no-oat fallback, `kVerifyChecksum`); an installed app's usable oat/vdex is not re-verified | loaded, reported | ART's rule |
+| a gap in `classesN.dex` (no `classes2.dex`, a `classes3.dex`) | the open ends successfully at the gap (`kEntryNotFound`) | the same: counted and loaded up to the gap, the rest not reported | the same |
+
+Every verdict row carries `art_open`, computed the same way in both modes, and
+`dk.load_status()` says whether the loaded set is the `art_open` set. The case it
+exists for: a rejected `classes.dex` beside a valid `classes2.dex` — the device
+opens nothing, while an isolated session holds `classes2.dex` as dex 0 and every
+first-wins answer describes a class path the device never reaches. ART's sources
+were READ for this, not run: `art_open` is a prediction from the checks this port
+implements. Not modelled: a local file header whose name disagrees with the
+central directory (libziparchive answers "not found", which ends the multidex
+loop *successfully*). When some dex of an image is rejected the survivors are
+copied out per **container**, so a v41 container whose own entries all verify
+still loads beside a rejected dex elsewhere in the image (before dexllm#120 any
+rejection in the image took every container dex with it).
+
 ### Per-check breakdown
 
 Legend: ✅ ported (behavioural parity) · ⊕ beyond ART's *structural* verifier ·
@@ -144,7 +174,7 @@ Legend: ✅ ported (behavioural parity) · ⊕ beyond ART's *structural* verifie
 | magic / version / header_size / file_size / endian_tag | ✅ |
 | every section offset+size (overflow-safe `CheckValidOffsetAndSize`) | ✅ |
 | type_ids / proto_ids < 65536 (`CheckSizeLimit`) | ✅ |
-| adler32 checksum / SHA-1 signature | ⊖ (not a crash vector; malware forges them) |
+| adler32 checksum / SHA-1 signature | ⊖ (not a crash vector; malware forges them) — the adler32 is computed to predict ART's open (`art_open`, an `art_deviation`), never a rejection (dexllm#120) |
 | map ordering / in-bounds / alignment / unknown+dup types / required sections | ✅ — the alignment half only became complete in dexllm#62: `IsDataSectionType` had `call_site_id` / `method_handle` / `map_list` in its *false* arm where ART :82 has them true, and that predicate gates the alignment branch, so a misaligned offset on any of the three was accepted. ART's other use of the predicate, the `data_items_left` item budget (:777), stays unported on purpose — see `docs/aosp-oob-divergences.md` B2b |
 
 **CheckIntraSection (ART :2450)**
@@ -230,7 +260,8 @@ by extracting the raw `.dex` and loading it individually.
 ## 5. AOSP-only security mechanisms (no dexllm analog)
 
 - **Janus (CVE-2017-13156)**: from a ZIP, ART's `location_checksum` = **ZIP CRC32**,
-  not the DEX adler32 (`dex_file_loader.cc:564`). dexllm reads no checksum at all.
+  not the DEX adler32 (`dex_file_loader.cc:564`). dexllm's gate reads no checksum;
+  the loader computes the dex adler32 only to predict ART's open (dexllm#120).
 - **vdex skip-verify**, **`access(W_OK)` writable-dex block** (`dalvik_system_DexFile.cc:380`),
   **`VerifyMode::kNone`** — all *execution-trust* mechanisms, irrelevant to a
   read-only analyzer.

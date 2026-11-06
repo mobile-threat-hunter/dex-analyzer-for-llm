@@ -818,8 +818,13 @@ def _t_identify(dk: DexKit) -> dict:
 
 
 def _t_verify_report(dk: DexKit) -> dict:
-    """Per-dex structural-verification verdict (the load-time VerifyDex results)."""
-    return {"dexes": dk.verify_report()}
+    """Per-dex structural-verification verdict (the load-time VerifyDex results).
+
+    With the session's load_status (dexllm#120), so a partial session -- a
+    rejected dex, or a loaded set ART would not open -- cannot pass for a whole
+    one in the one answer a model reads about the load.
+    """
+    return {"dexes": dk.verify_report(), "load_status": dk.load_status()}
 
 
 def _t_decompile_method_ast(
@@ -1658,14 +1663,19 @@ TOOL_DEFINITIONS: list[dict] = [
     {
         "name": "verify_report",
         "description": (
-            "Per-dex structural-verification verdict from the load-time gate: a list "
-            "of {dex_id, name, valid, reason, source, art_deviations}. All valid on a "
-            "cleanly-loaded APK; a reason string appears for a dex that failed "
-            "structural checks. A non-empty art_deviations means the session was "
-            "opened leniently and this dex is one ART would refuse to load (e.g. "
-            "value strings out of order after a post-build string swap) — say so "
-            "when reporting on it. An empty one does not prove a strict load: a "
-            "lenient session also skips instruction-operand checks."
+            "Per-dex structural-verification verdict from the load-time gate: "
+            "{dexes: [{dex_id, name, valid, reason, source, art_deviations, art_open}], "
+            "load_status: {mode, complete, matches_art, loaded_dex_count, rejected}}. "
+            "All valid on a cleanly-loaded APK; a reason string appears for a dex "
+            "that failed structural checks. A non-empty art_deviations names what "
+            "ART would refuse in a dex this session still loaded — value strings "
+            "out of order (only in a lenient session) or a header checksum that "
+            "does not match (either mode). art_open says whether the device would "
+            "open that dex at all: ART stops an APK at the first classesN.dex it "
+            "cannot open. If load_status.matches_art is false, say so when "
+            "reporting: the session holds dexes the device never loads (e.g. a "
+            "corrupt classes.dex beside a loaded classes2.dex), so first-wins "
+            "answers may describe a class path that never runs."
         ),
         "input_schema": {"type": "object", "properties": {}},
     },

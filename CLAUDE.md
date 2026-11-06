@@ -1320,7 +1320,8 @@ by ROLE from the id tables, never by value.
 "ART-structural-equivalent" — older sections saying `check_insns_` gates ONLY
 `VerifyInsns` are as of before #112); every verify row gains
 **`art_deviations: list[str]`** (raw `verify()` / `verify_report()`, `.pyi`, SDK
-`DexVerifyStatus`, MCP), always `[]` for a strict row; and the MCP server and
+`DexVerifyStatus`, MCP), always `[]` for a strict row (until dexllm#120, which
+reports a stale header checksum there in either mode); and the MCP server and
 HTTP `/upload` open strict, retry lenient when strict raises OR rejects a dex,
 and say so (`session_note` on every MCP answer; `opened` / `strict_refusal` on
 the upload) — one helper, [src/dexllm/_open.py](src/dexllm/_open.py).
@@ -1529,11 +1530,157 @@ payloads fit an int); a LONG-encoded initializer on an `int`/`char` field
 `long` local renders `long v0 = 1;` (valid Java; the constant is not `J`). And, pre-existing in
 `FormatDoubleLiteral` (a whole-number double prints as an int): `neg-double` of a
 zero `const-wide` renders `(- 0)`, which is `0.0`, where the bytecode yields
-`-0.0` (the delta reviewer's PLAUSIBLE; `neg-float` of 0 renders `(- 0f)`,
+`-0.0` (the delta reviewer's PLAUSIBLE, filed as dexllm#118; `neg-float` of 0 renders `(- 0f)`,
 correct). A delta adversarial review of the cast/unary response found nothing
 else: all 15 conversion handlers pass the right `src_type`, and `ConstantAt`'s
 Operand context projects only F/D, so no Bool / Null / NarrowCast fires inside a
 cast (`((byte) 200)` stays as written).
+
+### A session says whether it is whole, and can be the device's view; bytes go in (dexllm#119, dexllm#120, 2026-11-03)
+
+Two issues filed together and designed together, because a comment on #119
+made them one decision: what a rejected dex costs the dexes after it.
+
+**#120 was reproduced first, and its premise was half wrong.** A zip whose
+`classes.dex` is corrupt and whose `classes2.dex` declares the same class loads
+`classes2.dex` as `dex_id 0`, and `locate_class_dex` / `decompile_*` answer from
+it with no marker — confirmed. The issue said ART "fails the whole open"; read
+against android-16.0.0_r4 it does not. `DexFileLoader::Open` returns `false` at
+the first `classesN.dex` it cannot open, but the dexes it opened before are
+already in the out-vector, and `OatFileManager::OpenDexFilesFromOat` returns
+them (`dalvik_system_DexFile.cc` throws only when the vector is EMPTY). So ART
+keeps the PREFIX. Two more rules came out of the same reading:
+`DexPathList.makeDexElements` suppresses a failed class-path element and opens
+the next, and ART reads past a dex only while it is a v41 container entry
+(`IsDexContainerLastEntry` — `ContainerSize()` is `file_size` for v35), so a
+concatenated v35 dump yields ONE dex on a device.
+
+**User decisions (three, escalated):** `mode="isolated"` stays the default
+(today's zip behaviour) and `mode="runtime"` is opt-in; what ends a runtime
+sequence is what ART would refuse, not what dexllm refuses; and the adler32 is
+computed for the prediction only, never a rejection.
+
+**What changed.**
+
+* **`art_open`** on every verdict row (raw, `verify()`, `verify_bytes()`, SDK
+  `DexVerifyStatus`): whether ART's open of this SOURCE yields this dex. Computed
+  from the LENIENT verdict (a strict-only `VerifyInsns` failure is re-judged
+  leniently, so it is not an ART failure), no `art_deviations`, a matching
+  checksum, and the sequence rule. `True` is "no check dexllm runs says ART
+  refuses it", not a proof.
+* **A checksum mismatch is an `art_deviation`**, in either mode — so the #112
+  contract "a strict row always carries `[]`" no longer holds. The gate still
+  does not read it (dex_verifier.h policy unchanged); the loader computes it with
+  slicer's existing `dex::ComputeChecksum` (zlib, ART's range).
+* **`mode="runtime"`** loads only `art_open` dexes. A dexllm-only rejection is
+  still rejected (the gate is the safety contract) but does not end the
+  sequence. When a source yields nothing because of the sequence, the error
+  says the later dexes VERIFIED and were not opened, rather than "failed
+  verification".
+* **`load_status()`** → `{mode, complete, matches_art, loaded_dex_count,
+  rejected}`, derived from `verify_report()`. `matches_art` is the flag #120
+  asked for: False exactly when first-wins answers describe a class path the
+  device does not reach.
+* **The image walk follows ART's container rule exactly.** Within one image ART
+  reads on only while the dex it opened is a v41 entry that is NOT its
+  container's last (`IsDexContainerLastEntry`), so a v35 dex yields one dex and a
+  container yields its own entries; a non-last entry whose successor does not
+  fit is a failure with a row of its own. A zip with a duplicate entry name is
+  one libziparchive refuses whole (`kDuplicateEntry`).
+* **Survivors are copied out per CONTAINER**, so a v41 container whose own
+  entries verify still loads beside a rejected dex elsewhere in the image —
+  before this, any rejection in an image took every container dex with it.
+* **A list source that yields no dex is a row, not an error** (#119 comment,
+  isolated case). The constructor raises only when no source yields a dex, with
+  that source's own message when there is one source — so every existing
+  single-source error string is unchanged.
+* **Bytes input:** `DexKit.from_bytes(data, *, lenient, mode, source)`,
+  `DexKit.from_dex_images([(name, bytes), ...], ...)`, `dexllm.verify_bytes`,
+  `dexllm.identify_bytes`; SDK `open_bytes` / `open_dex_images` /
+  `identify_bytes` / `verify_bytes` / `LoadStatus` / `LoadMode`. Copied in
+  (`OwnedImageCopy`, refusing >= 4 GiB rather than truncating to MemMap's
+  `uint32_t`); `source_info()` gains `in_memory` and `format: "images"`;
+  `add_dumped_dexes` refuses an in-memory session (it rebuilds by re-reading
+  `sources()`) and now keeps the session's `mode`.
+
+**One walk, not two.** The loader (`CollectSource` + `CollectImage`) and the
+load-free `Verify()` were two hand-kept copies of the same probe → slice →
+verdict loop, held equal only by a test. Both now call `WalkSource` (an
+`ImageSink` keeps the accepted images in the load path; `Verify()` passes none),
+so `verify(path, mode=m) == DexKit(path, mode=m).verify_report()` holds by
+construction. `ProbeContainer(path)` is `ProbeMap(MemMap(path))`, the same
+probe bytes use. The v41 sibling rule runs AFTER the sequence rule — a container
+slice runtime mode refuses must take its siblings with it, because a container
+dex cannot be copied out on its own (pinned by
+`test_a_runtime_rejected_container_slice_takes_its_siblings_with_it`).
+
+**Measured (a/b OFF=`fbd78d3e` — HEAD, bit-reproduced — vs ON=`1ce90f83`, SAME
+script, every source in its own subprocess judged by exit status):** 109 sources
+— the bundled corpus, every committed fixture, `art/test/dexdump` (+ the `.jar`),
+`tools/dexter/testdata`, all four ART fuzzer corpora, the #112 sample and 6
+crafts — x {identify, verify strict/lenient, load strict/lenient with dex_count,
+rows, class list, source_info, extract_dex provenance + bytes, locate, smali and
+decompile digests, exit} = **649 axis records, 20 changed, all on 5 ART
+fuzzer-corpus files and all the same change: a checksum `art_deviation`**. An
+independent zlib oracle over every valid row agrees **106/106**. Class lists,
+decompiled Java, smali, extracted bytes and exit status are identical on all 109.
+`load_status().matches_art` is False on exactly those 5, the #112 sample
+(lenient: its value-string swap is an ART deviation), `all-dex-files.jar`
+(strict: `all.dex` rejected) and the crafts.
+
+**Guards:** `tests/test_load_policy.py` (48), corpus-less — every craft is built
+from `tests/data/multidex.apk` / `multidex-container.dex`: the issue's dup-class
+fixture, the prefix rule, the checksum-only and VerifyInsns-only crafts, the v35
+concatenation and v41 container cases, verify≡session in both modes, a list
+with a bad / missing source, bytes ≡ path over every committed fixture, buffer
+release, `from_dex_images` order + names + one-sequence, empty / str / malformed
+pair inputs, a lazily-mapped 4 GiB buffer refused, a 250-craft bytes fuzz judged
+by exit status, the SDK layer and `add_dumped_dexes`' mode. Inverted inherited
+guards: `test_bad_source_in_list_rejected` →
+`test_a_bad_source_in_a_list_is_a_row_not_an_error`; the #112 craft now fixes
+its checksum, as its own docstring always said the real shape does.
+
+**29 mutants, each BUILT with a distinct `.so` md5 (the two Python ones share the
+control `.so` by construction), control asserted before and after: all
+killed.** M7 (an empty image not ending the sequence) and M8 (a decompression
+failure not ending it) SURVIVED the first matrix and are why
+`test_an_empty_image_ends_the_sequence` and
+`test_an_entry_that_does_not_decompress_ends_the_sequence` exist.
+
+**ASan** (the #119 criterion): an ASan build of the extension, loaded with
+`python -S` so the editable finder cannot hand back the normal `.so` (it did,
+and an `assert` on `__file__` caught it), runs the load-policy / multi-source /
+verify / logical-dex guards (74 passed) and a 2,280-input malformed-bytes fuzz x
+{strict, lenient} x {isolated, runtime} through `verify_bytes`, `from_bytes`
+(+ classes, `extract_dex`, decompile) and `from_dex_images`: **0 reports**.
+
+parity 29/29, pytest 1959 passed / 24 skipped, TRUE corpus-less (`test_apk`
+moved aside, restore asserted) 1528 / 455 / 0, narrowed to
+`tests/data/multidex.apk` 1837 / 146, sweep 21,374-class 0-crash GATE: PASS,
+determinism 3 `PYTHONHASHSEED`s -> one digest, lint trio clean.
+
+**Two reviewers, and both found the same real defect independently: the first
+cut called every slice after a v41 entry `art_open`**, so two containers back
+to back were four opened dexes (ART: two), and a v35 dex after a container
+ended the sequence for `classes2.dex` (ART never reads it). Fixed with the
+`last_entry` rule; that fix exposed the sibling rule rejecting the container ART
+DOES open, which is what the per-container copy fixes. Also CONFIRMED and fixed:
+a non-last entry whose successor does not fit had no row; a duplicate zip entry
+was `art_open`; `add_dumped_dexes` with a missing dump silently succeeded once
+list sources stopped raising (it raises again, for dumps only); the MCP
+`verify_report` text said a non-empty `art_deviations` means a lenient session
+(it now carries `load_status` too); a checksum-only bare dex in runtime mode was
+called "failed dex verification"; and a zero-length zip entry and an empty
+image gave different reasons. **Declined and documented:** a local file header
+whose name disagrees with the central directory (libziparchive treats it as a
+missing entry — a zip-validity model of its own); `from_dex_images` models a
+zip's `classesN.dex` sequence, not `InMemoryDexClassLoader` (each buffer one dex,
+all-or-nothing); `art_open` is a boolean, not #120's true/false/null, with
+`True` documented as "no check dexllm runs refuses it"; the adler32 row is
+qualified to the no-oat / verification-on path; and the two runtime-only
+differences on VALID input (a concatenated dump loads its first dex, a stale
+checksum is refused) are stated as ART's answer to #119's "identical when every
+dex is valid" criterion.
 
 ### Production fix — reused `this` register materialised as a local (`this = X` → valid, 2026-07-03)
 
@@ -4207,7 +4354,7 @@ Exposed via `dexllm.DexKit(apk_path)`. The constructor identifies the file **by 
 | `dexllm.add_dumped_dexes(dk, dumps, prefer=True, lenient=True)` → DexKit | **Python** ([packer.py](src/dexllm/packer.py)). Re-analyze with runtime-dumped dex(es): returns a fresh `DexKit` over `dumps + dk.sources()` (prefer → dumps first → unpacked classes win collisions; lenient → ART-structural-equivalent verify for partial-decrypt dumps). `dk.sources()` exposes the construction sources. Packer-unpack workflow. |
 | `identify(path)` → dict | Module-level. Content-based probe (no load): `{format, is_apk, has_manifest, dex_count, source}`. Proves a disguised `.apk` and pre-filters 0-dex containers. |
 | `source_info()` → list[dict] | **dexllm#42** — what each construction source WAS, probed once at LOAD: one row per `sources()` entry, in the same order, with `identify()`'s keys. A **session fact**, so it survives the file: the MCP `identify` tool re-probed the path per call, and a source deleted after the load — a dump in a temp dir, exactly what `add_dumped_dexes` is for — answered `format: "unknown", dex_count: 0` for a live 286-class session, where 0 is the documented "resources-only container, nothing to analyse" sentinel. `CollectSource` already ran `ProbeContainer` to decide HOW to load, so this keeps a result that was being computed and thrown away; `ContainerInfoFrom` is the single place a probe becomes a `ContainerInfo`, shared by `Identify()` and the loader so they cannot drift. Ask `identify(path)` about a PATH and this about the SESSION. **Breaking:** the SDK `ContainerInfo` gains a required `source` field (last, so the four existing positional arguments keep their meaning) and `identify()`'s dict gains the key — `/upload`'s `identified` carries it too, and now comes from the loader's own record rather than a second read of the disk. |
-| `verify_report()` → list[dict] | Per-loaded-dex structural-verification verdict: `{dex_id, name, valid, reason, source, art_deviations}`. The malformed-dex gate (`VerifyDex`) runs at load; this exposes its results (a fully-rejected container raises at construction instead). **One row per LOGICAL dex** (dexllm#25) — a concatenated source contributes several rows sharing a `name` — and an accepted row's `dex_id` is the REAL dex_id, so the accepted rows are exactly `0 … dex_count()-1` (dexllm#27: it used to be `out.size()`, the load-order IMAGE index, which drifted by the split count and made `sdk._dex_name` / `tools._dex_name_map` attribute a dex to another source). A rejected row is still `dex_id == -1`. |
+| `verify_report()` → list[dict] | Per-loaded-dex structural-verification verdict: `{dex_id, name, valid, reason, source, art_deviations, art_open}`. The malformed-dex gate (`VerifyDex`) runs at load; this exposes its results (a single source that yields no dex raises at construction instead; in a list it is a `valid: False` row since dexllm#119, and `load_status()` summarises the rows — dexllm#120). **One row per LOGICAL dex** (dexllm#25) — a concatenated source contributes several rows sharing a `name` — and an accepted row's `dex_id` is the REAL dex_id, so the accepted rows are exactly `0 … dex_count()-1` (dexllm#27: it used to be `out.size()`, the load-order IMAGE index, which drifted by the split count and made `sdk._dex_name` / `tools._dex_name_map` attribute a dex to another source). A rejected row is still `dex_id == -1`. |
 | `set_decompiler_cache_capacity(capacity)` / `decompiler_cache_capacity()` | LRU cache cap (default 4096, 0 = unbounded). |
 | `clear_decompiler_cache()` / `decompiler_cache_size()` | Cache lifecycle. |
 | L1-L7 search family | Pre-existing find/match APIs (class/method/field by name/strings/annotation/etc). |

@@ -31,7 +31,7 @@ Content-based probe **without loading** — pre-filter resources-only containers
 ```python
 dexllm.identify('app.apk')
 # {'format': 'zip', 'is_apk': True, 'has_manifest': True, 'dex_count': 1,
-#  'source': 'app.apk'}
+#  'source': 'app.apk', 'in_memory': False}
 ```
 | key | type | meaning |
 |---|---|---|
@@ -40,8 +40,17 @@ dexllm.identify('app.apk')
 | `has_manifest` | `bool` | manifest present in the container |
 | `dex_count` | `int` | number of sequential `classes*.dex` |
 | `source` | `str` | the path these keys describe — echoes the argument, and is what lets [`dk.source_info()`](#dksource_info---listdict) reuse the shape |
+| `in_memory` | `bool` | the source was handed over as bytes, so `source` is a caller label rather than a path (dexllm#119) |
 
-### `dexllm.verify(path: str, lenient: bool = False) -> list[dict]`
+`format` is also `"images"` in `dk.source_info()` for a session built by
+[`DexKit.from_dex_images`](#dexllmdexkitfrom_bytesdata---dexkitfrom_dex_imagesimages).
+
+### `dexllm.identify_bytes(data, *, source="<bytes>") -> dict`
+`identify()` over bytes the caller already holds (dexllm#119) — any bytes-like
+object (`bytes`, `bytearray`, `memoryview`). Same keys; `source` is the label
+echoed back and `in_memory` is `True`.
+
+### `dexllm.verify(path: str, lenient: bool = False, mode: str = "isolated") -> list[dict]`
 Structural verification **without loading** — the `verify()` sibling of
 `identify()`. Runs the `VerifyDex` gate over a path's dex(es) and returns one
 verdict per dex (a bare `.dex` → one entry; a zip/apk → one per `classes*.dex`).
@@ -51,7 +60,9 @@ loadable source the result is byte-identical to `DexKit(path).verify_report()`
 (same `VerifyDex` call, same `dex_id` assignment — accepted dexes get a running
 0-based id, rejected/undecompressible get `-1`). `lenient=True` skips
 `VerifyInsns` (ART's structural verifier has no such check) and accepts VALUE
-strings out of order — see below — as in the constructor.
+strings out of order — see below — as in the constructor. `mode` is the
+constructor's too (below): the rows a session records depend on it, so a
+`verify()` that is to equal `verify_report()` takes the same `mode`.
 
 **`art_deviations` (dexllm#112).** Every row carries a list of what a
 `lenient` verify accepted that ART's `DexFileVerifier` rejects. Today there is
@@ -64,25 +75,133 @@ any, is at index 0, because those are the only properties this library's
 readers rely on (it never binary-searches the table; ART's runtime does, which
 is why ART insists). `valid: True` says the dex is safe to analyse; a non-empty
 `art_deviations` says it is not one ART would load. A strict verify never
-accepts it, so its rows are ART's verdict and always carry `[]`.
+accepts that one. Since dexllm#120 the list also carries a **header checksum
+that does not match**, in either mode: ART checks the adler32 on open, the
+gate deliberately does not (a checksum is not a crash vector, and a forged one
+is routine in malware), so a mismatch is reported here and never rejects.
+
+**`art_open` (dexllm#120).** Whether ART's open of this **source** yields this
+dex. It is computed from the checks this port runs — the LENIENT verdict
+(`VerifyInsns` is not part of ART's structural verifier, so a dex the strict
+gate rejects for an instruction operand is still one ART opens), no
+`art_deviations`, a matching checksum — and from the order ART opens things in
+(`DexFileLoader::Open` + `OatFileManager`, android-16.0.0_r4):
+
+- a zip's `classes.dex`, `classes2.dex`, … are opened in order and ART **stops at
+  the first one it cannot open**, keeping the ones before it — so every dex after
+  that one is `art_open: False` even when it verifies;
+- within one image ART reads on only while the dex it just opened is a v41
+  container entry that is **not its container's last** (`IsDexContainerLastEntry`):
+  so a v035–040 dex yields one dex, a container yields its own entries, and
+  whatever follows — the rest of a concatenated packer dump, a second container —
+  is `art_open: False` (not a failure: the next source still opens). A non-last
+  entry whose successor does not fit the image IS a failure, and gets a row of
+  its own;
+- a zip with two entries of one name is refused whole by ART's zip reader
+  (libziparchive `kDuplicateEntry`), so every dex in it is `art_open: False` —
+  dexllm's own reader still loads the last copy in `"isolated"` mode;
+- every source of a list is its own open, as on a class path
+  (`DexPathList.makeDexElements` suppresses a failed element).
+
+`True` means "no check dexllm runs says ART would refuse it", not a proof: the
+verifier's documented out-of-scope checks are not run, and of the zip format only
+duplicate entry names are modelled — a local file header whose name disagrees
+with the central directory (which libziparchive treats as a missing entry) is
+not.
 ```python
 dexllm.verify('app.apk')
-# [{'dex_id': 0, 'name': 'classes.dex', 'valid': True, 'reason': '', 'source': 'app.apk', 'art_deviations': []}]
+# [{'dex_id': 0, 'name': 'classes.dex', 'valid': True, 'reason': '', 'source': 'app.apk', 'art_deviations': [], 'art_open': True}]
 dexllm.verify('broken.dex')
 # [{'dex_id': -1, 'name': 'broken.dex', 'valid': False, 'reason': 'Empty or truncated file',
-#   'source': 'broken.dex', 'art_deviations': []}]
+#   'source': 'broken.dex', 'art_deviations': [], 'art_open': False}]
 ```
 Entry shape matches `dk.verify_report()` (below). Use it to screen an unknown
 file (dumped/decrypted dex, disguised container) before committing to a load.
 
-### `dexllm.DexKit(apk_path: str)` / `DexKit(sources: list[str], lenient=False)`
+### `dexllm.verify_bytes(data, *, lenient=False, mode="isolated", source="<bytes>") -> list[dict]`
+`verify()` over bytes the caller holds (dexllm#119): the same rows
+`DexKit.from_bytes(data, ...).verify_report()` records, with `source` as the
+label. Never raises for a verdict.
+
+### `dexllm.DexKit(apk_path: str, lenient=False, mode="isolated")` / `DexKit(sources: list[str], lenient=False, mode="isolated")`
 Constructs the analyzer. Identifies the file **by content, not extension** (a
 disguised `.apk` still loads). Multiple sources load in order — earlier sources
-get lower `dex_id`, so first-wins prefers them (packer/unpack ordering). Raises
-`std::runtime_error` (Python `RuntimeError`) on a non-dex/non-zip file or a zip
-with no `classes*.dex`. `lenient=True` skips instruction-operand checks (so a
+get lower `dex_id`, so first-wins prefers them (packer/unpack ordering). A
+single source raises `RuntimeError` on a non-dex/non-zip file, a zip with no
+`classes*.dex`, or a source none of whose dexes loads. In a **list**, such a
+source is a `valid: False` row and the others still load; the constructor raises
+only when no source yields a dex (dexllm#119 — before it, one bad file in a list
+failed the whole session). `lenient=True` skips instruction-operand checks (so a
 partially-decrypted dump loads) and accepts value strings out of order, reported
 per dex in `verify_report()`'s `art_deviations` (dexllm#112).
+
+**`mode`** (dexllm#119/#120) decides what a rejected dex costs the dexes after it:
+
+| `mode` | loads | a corrupt `classes.dex` beside a valid `classes2.dex` |
+|---|---|---|
+| `"isolated"` (default) | every dex that verifies — what the gate can vouch for | `classes2.dex` loads as dex 0; `load_status()` says the view is partial |
+| `"runtime"` | only the dexes whose [`art_open`](#dexllmverifypath-str-lenient-bool--false-mode-str--isolated---listdict) is true — the device's view | nothing loads, so the constructor raises, saying `classes2.dex` verified but was not opened |
+
+When every dex is valid and ART would open all of them the two modes are
+identical. They differ on valid input in exactly the shapes ART opens less of: a
+concatenated packer dump (runtime loads its first dex) and a dex whose header
+checksum is stale (runtime refuses it) — #119 asked that both modes match today's
+loading "when every dex is valid", and these are read as ART's answer, not as
+regressions.
+
+A dex the strict gate rejects for a reason ART does not check (`VerifyInsns`)
+is rejected in both modes — the gate is the safety contract — but it does not
+end the sequence in `"runtime"`, because ART would open it and the dexes after
+it. Read [`dk.load_status()`](#dkload_status---dict) in either mode.
+
+### `dexllm.DexKit.from_bytes(data, ...)` / `DexKit.from_dex_images(images, ...)`
+In-memory inputs (dexllm#119), for an embedder that already holds the bytes:
+
+```python
+dk = dexllm.DexKit.from_bytes(apk_bytes, lenient=True, source="sample.apk")
+dk = dexllm.DexKit.from_dex_images(
+    [("classes.dex", dex0), ("classes2.dex", dex1)], lenient=True, source="sample.apk")
+```
+
+- `from_bytes(data, *, lenient=False, mode="isolated", source="<bytes>")` — one
+  file (zip/apk or bare dex), sniffed by content **exactly like a path**, through
+  the same per-logical-dex verifier, with the same verdicts: a buffer and a file
+  holding the same bytes give identical `verify_report()`, `dex_count()`, class
+  lists, `extract_dex()` and decompiled output.
+- `from_dex_images(images, *, lenient=False, mode="isolated", source="<images>")`
+  — an explicit dex list for a caller that read the container itself: an iterable
+  of `(name, bytes)` pairs **in load order**, so the order is `dex_id` and
+  first-wins, and each `name` is the entry `verify_report()` and `extract_dex()`
+  report. It is one source and one multidex sequence for `mode="runtime"` —
+  it models the dexes of a **zip** (`classes.dex`, `classes2.dex`, …), not
+  `InMemoryDexClassLoader`, which opens each buffer as one dex and yields nothing
+  if any buffer fails.
+
+The bytes are **copied** in, so the caller may drop or mutate its buffer
+afterwards. `source` is the label `sources()`, every row and `extract_dex()`
+report; `source_info()`'s `in_memory` is `True`, and
+[`add_dumped_dexes`](#dexllmadd_dumped_dexesdk-dumps-prefertrue-lenienttrue---dexkit)
+refuses such a session (it rebuilds by re-reading `sources()` from disk). An
+image of 4 GiB or more raises `ValueError` rather than being truncated (the
+loader's image length is 32-bit); an empty buffer raises `RuntimeError`.
+
+### `dk.load_status() -> dict`
+Whether the session is the whole of what it was given (dexllm#120). Derived from
+`verify_report()`, so the two cannot disagree.
+
+```python
+dk.load_status()
+# {'mode': 'isolated', 'complete': True, 'matches_art': True, 'loaded_dex_count': 1,
+#  'rejected': []}
+```
+
+| key | meaning |
+|---|---|
+| `mode` | `"isolated"` \| `"runtime"` |
+| `complete` | no dex the loader considered was left out |
+| `matches_art` | the loaded dexes are exactly the `art_open` ones. `False` after a rejected `classes.dex` with a loaded `classes2.dex` — the case to look for, since every first-wins answer (`locate_class_dex`, `decompile_*`) then describes a class path the device never reaches, and `dex_id: 0` is not `classes.dex` |
+| `loaded_dex_count` | `dex_count()` |
+| `rejected` | every `valid: False` row of `verify_report()` |
 
 ### `dk.dex_count() -> int`
 ```python
@@ -116,7 +235,7 @@ question is about a path on disk, and this when it is about the session.
 Per-dex structural-verification verdict (the load-time `VerifyDex` gate results).
 ```python
 dk.verify_report()
-# [{'dex_id': 0, 'name': 'classes.dex', 'valid': True, 'reason': '', 'source': 'app.apk', 'art_deviations': []}]
+# [{'dex_id': 0, 'name': 'classes.dex', 'valid': True, 'reason': '', 'source': 'app.apk', 'art_deviations': [], 'art_open': True}]
 ```
 | key | type |
 |---|---|
@@ -125,6 +244,8 @@ dk.verify_report()
 | `valid` | `bool` |
 | `reason` | `str` (empty when valid; byte-level reason when rejected) |
 | `source` | `str` — the path handed to the constructor. `name` alone is ambiguous: it is the file path for a bare `.dex` but only the entry name for a zip member, so two sources both report `classes.dex` (dexllm#26) |
+| `art_deviations` | `list[str]` — what ART would refuse that this row's verdict accepted (see `verify()`) |
+| `art_open` | `bool` — whether ART's open of the source yields this dex (see `verify()`) |
 
 **Rows ↔ dex_ids** (dexllm#25/#27). One row per **logical** dex, not per file: a
 concatenated / packer-dump container is split by the loader into several logical
@@ -1376,7 +1497,13 @@ are the single source of truth; the dangerous variants derive from them.
 ### `dexllm.add_dumped_dexes(dk, dumps, prefer=True, lenient=True) -> DexKit`
 Re-analyze with runtime-dumped dex(es): returns a **fresh** `DexKit` over
 `dumps + dk.sources()` (prefer → dumps win collisions; lenient → accept
-partial-decrypt dumps).
+partial-decrypt dumps). The rebuild keeps `dk`'s `mode`, and it re-reads `dk.sources()`
+from disk, so a session built from bytes (`from_bytes` / `from_dex_images`)
+raises `ValueError` — rebuild it with `from_dex_images` instead, taking the
+session's own dexes from `extract_dex()`. A dump that yields no dex raises
+`RuntimeError`, even though a plain `DexKit([...])` would make it a
+`valid: False` row: analysing without the dump, unaware, is what this verb exists
+to prevent.
 ```python
 dk2 = dexllm.add_dumped_dexes(dk, ['/tmp/dump.dex'])
 ```

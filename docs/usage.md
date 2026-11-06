@@ -58,7 +58,7 @@ Probe a file **without loading it** with `dexllm.identify(path)` — handy for t
 ```python
 dexllm.identify("/path/to/suspect")
 # → {'format': 'zip', 'is_apk': True, 'has_manifest': True, 'dex_count': 2,
-#    'source': '/path/to/suspect'}
+#    'source': '/path/to/suspect', 'in_memory': False}
 #   format: "dex" | "zip" | "unknown";  is_apk = a zip carrying an AndroidManifest.xml
 ```
 
@@ -69,7 +69,7 @@ per-dex verdicts of a **loaded** container with `dk.verify_report()`:
 
 ```python
 for r in dk.verify_report():
-    print(r)   # → {'dex_id': 0, 'name': 'classes.dex', 'valid': True, 'reason': '', 'source': 'app.apk', 'art_deviations': []}
+    print(r)   # → {'dex_id': 0, 'name': 'classes.dex', 'valid': True, 'reason': '', 'source': 'app.apk', 'art_deviations': [], 'art_open': True}
 ```
 
 To verify **without loading** — the `verify()` sibling of `identify()` — use
@@ -80,7 +80,7 @@ For a loadable source the result is byte-identical to `dk.verify_report()`.
 
 ```python
 dexllm.verify("/path/to/suspect")     # per-dex, no load, no raise
-# → [{'dex_id': 0, 'name': 'classes.dex', 'valid': True, 'reason': '', 'source': 'app.apk', 'art_deviations': []}]
+# → [{'dex_id': 0, 'name': 'classes.dex', 'valid': True, 'reason': '', 'source': 'app.apk', 'art_deviations': [], 'art_open': True}]
 dexllm.verify("broken.dex", lenient=True)   # skip VerifyInsns; accept + report unsorted value strings
 ```
 
@@ -89,6 +89,22 @@ A container whose every dex fails verification raises at construction (but
 [DEX-handling comparison](dexkit-vs-art-dex-handling.md) §1 for exactly what's checked.
 
 In a multidex APK, a class declared in more than one `classes*.dex` resolves **first-wins by lowest dex_id** (classes.dex before classes2.dex), deterministically — matching ART/AOSP, so packer collisions decompile to the body that actually runs (see [DEX-handling comparison](dexkit-vs-art-dex-handling.md)).
+
+**When a dex is rejected, ask whether the session is the device's view.** By
+default a rejected dex is skipped and its siblings still load — a corrupt
+`classes.dex` leaves `classes2.dex` loaded as dex 0, which is what the gate can
+vouch for. ART stops at the first `classesN.dex` it cannot open, so on a device
+that apk opens nothing. `load_status()` says which of the two you are holding,
+and `mode="runtime"` loads only what ART's open would (dexllm#120):
+
+```python
+dk = dexllm.DexKit("/path/to/suspect")
+st = dk.load_status()
+print(st["complete"], st["matches_art"])             # → True True for a whole apk
+print([(r["name"], r["reason"], r["art_open"]) for r in st["rejected"]])
+# matches_art False: first-wins answers describe a class path the device never reaches
+dexllm.DexKit("/path/to/suspect", mode="runtime")   # the device's view
+```
 
 ### Multiple sources — priority by order (packer / runtime-unpack)
 
@@ -108,7 +124,15 @@ dk = dexllm.DexKit(["dump1.dex", "dump2.dex", "app.apk"]) # several dumps + apk
 
 Each source is a bare `.dex` or a zip/apk, every dex still passes the load-time
 verifier, and classes from **all** sources are cross-indexed (search/decompile see
-the merged set). This is the static side of the unpack workflow — dump the
+the merged set). A source that yields no dex is a `valid: False` row rather than an
+error, so one bad dump does not cost the rest; the load raises only when no source
+yields a dex (dexllm#119).
+
+An embedder that already holds the bytes skips the temporary file:
+`DexKit.from_bytes(data, source="sample.apk")` sniffs one file by content like a
+path, and `DexKit.from_dex_images([("classes.dex", d0), ("classes2.dex", d1)])`
+takes an explicit dex list in load order, under the caller's entry names. Both go
+through the same verifier and copy the bytes in. This is the static side of the unpack workflow — dump the
 decrypted dex with an external dynamic tool, then load it first. (`apk_path()`
 reports the first source; `sources()` returns the whole list.)
 

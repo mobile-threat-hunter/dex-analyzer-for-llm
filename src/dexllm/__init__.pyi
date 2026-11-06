@@ -37,10 +37,16 @@ from ._dexkit_core import (
     identify as identify,
 )
 from ._dexkit_core import (
+    identify_bytes as identify_bytes,
+)
+from ._dexkit_core import (
     is_framework_descriptor as is_framework_descriptor,
 )
 from ._dexkit_core import (
     verify as verify,
+)
+from ._dexkit_core import (
+    verify_bytes as verify_bytes,
 )
 from .capability import (
     ApiUsage as ApiUsage,
@@ -161,6 +167,7 @@ __all__ = [
     "format_class",
     "format_class_summary",
     "identify",
+    "identify_bytes",
     "is_framework_descriptor",
     "is_timeout_marker",
     "java_to_descriptor",
@@ -172,4 +179,5 @@ __all__ = [
     "safe_decompile_method",
     "summarize_capabilities",
     "verify",
+    "verify_bytes",
 ]

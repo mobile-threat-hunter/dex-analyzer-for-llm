@@ -5,7 +5,9 @@
 
 #include <algorithm>
 #include <array>
+#include <cstdio>   // snprintf (checksum deviation text)
 #include <cstring>  // memcmp (raw-dex magic sniff)
+#include <functional>
 #include <map>
 #include <set>
 #include <stdexcept>
@@ -343,8 +345,8 @@ int CountClassesDex(const dexkit::ZipArchive& za) {
     return count;
 }
 
-// One content-based classification of a path, shared by Identify() (which
-// reports) and the constructor (which loads) so the detection rule lives in ONE
+// One content-based classification of a source, shared by Identify() (which
+// reports) and the loader (which loads) so the detection rule lives in ONE
 // place and the two can't drift. `map` is always populated — even when not ok —
 // so the caller can distinguish "can't open (missing/empty)" from "opened but not
 // a recognized container". `za` (held for the zip load path) borrows `map`, so it
@@ -358,14 +360,19 @@ struct Probe {
 };
 
 // The one place a Probe becomes a reported ContainerInfo, so Identify() (which
-// reports a path) and CollectSource() (which records what it loaded) cannot drift
+// reports a path) and the loader (which records what it loaded) cannot drift
 // — the same single-rule discipline Probe itself exists for.
 ContainerInfo ContainerInfoFrom(const std::string& path, const struct Probe& p);
 
-Probe ProbeContainer(const std::string& path) {
+// The probe over an image already in memory — a file mapped from a path, or
+// bytes the caller handed over (dexllm#119). One rule for both.
+Probe ProbeMap(std::unique_ptr<dexkit::MemMap> map) {
     Probe p;
-    p.map = std::make_unique<dexkit::MemMap>(path);
-    if (!p.map->ok()) return p;  // unknown: missing or empty
+    p.map = std::move(map);
+    if (!p.map || !p.map->ok()) {  // unknown: missing or empty
+        if (!p.map) p.map = std::make_unique<dexkit::MemMap>();
+        return p;
+    }
     if (LooksLikeRawDex(*p.map)) {
         p.format = "dex";
         p.dex_count = 1;
@@ -379,6 +386,10 @@ Probe ProbeContainer(const std::string& path) {
     p.has_manifest = p.za->Find("AndroidManifest.xml") != nullptr;
     p.dex_count = CountClassesDex(*p.za);
     return p;
+}
+
+Probe ProbeContainer(const std::string& path) {
+    return ProbeMap(std::make_unique<dexkit::MemMap>(path));
 }
 
 ContainerInfo ContainerInfoFrom(const std::string& path, const Probe& p) {
@@ -400,8 +411,25 @@ struct LogicalSlice {
     // it is only meaningful as part of the whole image — it cannot be copied out
     // on its own the way a v35-40 dex can.
     bool self_contained = true;
+    // dexllm#120: ART's raw-image loop stops after this dex
+    // (DexFile::IsDexContainerLastEntry — `End() == container end`). True for a
+    // v35-v40 dex, whose container IS itself, and for a v41 dex whose
+    // `container_off + file_size == container_size`.
+    bool last_entry = true;
+    // The byte range of the container this dex belongs to — itself for a
+    // v35-v40 dex. Survivors of a partially-rejected image are copied out per
+    // CONTAINER, so a container dex keeps the bytes its offsets address.
+    uint32_t container_begin = 0;
+    uint64_t container_end = 0;
     std::string reason;
     std::vector<std::string> art_deviations;  // dexllm#112
+    // dexllm#120. `art_own`: this dex on its own passes every check ART's open
+    // runs that this port implements — the LENIENT verdict (VerifyInsns is not
+    // part of ART's structural verifier), no art_deviation, a matching header
+    // checksum. `art_reason` says why not. `art_open` adds the sequence rule.
+    bool art_own = false;
+    std::string art_reason;
+    bool art_open = false;
 };
 
 // MIRROR of the core's ParseLogicalDexOffsets (vendor/dexkit_core/Core/dexkit/
@@ -426,6 +454,13 @@ std::vector<LogicalSlice> LogicalDexSlices(const uint8_t* base, size_t n) {
         s.offset = static_cast<uint32_t>(off);
         s.size = sz;
         s.self_contained = header->header_size < dex::Header::kV41Size;
+        s.last_entry = s.self_contained ||
+                       uint64_t{header->ContainerOff()} + sz == header->ContainerSize();
+        const uint32_t in_container = header->ContainerOff();
+        s.container_begin = in_container <= off ? static_cast<uint32_t>(off - in_container)
+                                                : static_cast<uint32_t>(off);
+        s.container_end = s.self_contained ? uint64_t{s.offset} + sz
+                                           : uint64_t{s.container_begin} + header->ContainerSize();
         slices.push_back(s);
         off += sz;
         if (off >= n) break;
@@ -433,20 +468,30 @@ std::vector<LogicalSlice> LogicalDexSlices(const uint8_t* base, size_t n) {
     return slices;
 }
 
-// The verdict for every logical dex of one image. Shared by the load path
-// (CollectImage) and the load-free Verify(), which is documented to produce
-// byte-identical rows — so every rule that decides a verdict lives HERE, not in
-// one of the two callers.
+std::string JoinReasons(const std::vector<std::string>& v) {
+    std::string out;
+    for (const auto& s : v) {
+        if (!out.empty()) out += "; ";
+        out += s;
+    }
+    return out;
+}
+
+// The verdict for every logical dex of one image, on its own. Shared by the
+// load path and the load-free Verify(), which is documented to produce
+// byte-identical rows — so every rule that decides a verdict lives HERE (and in
+// ClassifySourceImage below), not in one of the two callers.
 std::vector<LogicalSlice> ClassifyImageSlices(const uint8_t* base, size_t n,
                                               bool check_insns) {
     auto slices = LogicalDexSlices(base, n);
-    size_t rejected = 0;
     // ONE state for the whole image (dexllm#59). A v41 container is verified once
     // per slice with the container as its span, so a method_handle section shared
     // between siblings would otherwise be walked once per sibling — quadratic in
     // the container, measured at 20.59 s for 16 MB. The state carries the memo
-    // that collapses the repeat and the budget that bounds the rest.
+    // that collapses the repeat and the budget that bounds the rest. The lenient
+    // re-verify below gets a state of its own for the same reason.
     VerifyImageState image_state;
+    VerifyImageState lenient_state;
     for (auto& s : slices) {
         // The WHOLE image plus this dex's header offset — a v41 container dex
         // addresses a data section shared with its siblings, so the verifier
@@ -455,17 +500,137 @@ std::vector<LogicalSlice> ClassifyImageSlices(const uint8_t* base, size_t n,
         s.ok = vr.ok;
         s.reason = vr.reason;
         s.art_deviations = vr.art_deviations;
-        if (!s.ok) ++rejected;
+
+        // dexllm#120 — what ART's open would make of this dex. A strict
+        // rejection may be a check ART's structural verifier does not run
+        // (VerifyInsns), so a strict reject is re-judged leniently. Only rejected
+        // slices pay for it.
+        bool lenient_ok = vr.ok;
+        std::string lenient_reason = vr.reason;
+        std::vector<std::string> lenient_devs = vr.art_deviations;
+        if (check_insns && !vr.ok) {
+            auto lv = VerifyDex(base, n, /*check_insns=*/false, s.offset, &lenient_state);
+            lenient_ok = lv.ok;
+            lenient_reason = lv.reason;
+            lenient_devs = lv.art_deviations;
+        }
+        // ART checks the adler32 on open (DexFileLoader, kVerifyChecksum); the
+        // gate deliberately does not (dex_verifier.h). Reported, never rejected.
+        // LogicalDexSlices put [offset, offset + file_size) inside the image.
+        const auto* h = reinterpret_cast<const dex::Header*>(base + s.offset);
+        const uint32_t computed = dex::ComputeChecksum(h);
+        if (computed != h->checksum) {
+            char buf[96];
+            std::snprintf(buf, sizeof(buf),
+                          "header checksum 0x%08x does not match the adler32 "
+                          "0x%08x ART computes on open",
+                          h->checksum, computed);
+            s.art_deviations.emplace_back(buf);
+            lenient_devs.emplace_back(buf);
+        }
+        s.art_own = lenient_ok && lenient_devs.empty();
+        if (!s.art_own) s.art_reason = lenient_ok ? JoinReasons(lenient_devs) : lenient_reason;
     }
+    return slices;
+}
+
+// Where one source's ART open has got to (dexllm#120). ART stops a source at the
+// first dex it cannot open; every dex after it is not part of what it yields.
+// Threaded through every image of ONE source, fresh for each source.
+struct ArtSequence {
+    LoadMode mode = LoadMode::Isolated;
+    bool broken = false;
+    std::string why;  // "<name>: <reason>" of the dex that ended the sequence
+    void Break(const std::string& name, const std::string& reason) {
+        if (broken) return;
+        broken = true;
+        why = name + ": " + reason;
+    }
+};
+
+// ClassifyImageSlices, then the two rules that need more than one dex: the ART
+// sequence (dexllm#120) and the v41 sibling rule.
+//
+// `missing_entry` is set when ART would read one MORE container entry than the
+// image yields — the last slice is a v41 entry that is not its container's last,
+// and the split could not produce the next one. ART's open fails there, so the
+// sequence ends; the caller reports it as a row of its own. It is not a slice:
+// nothing can be loaded from it and it must not drive the sibling rule.
+std::vector<LogicalSlice> ClassifySourceImage(const uint8_t* base, size_t n,
+                                              bool check_insns, const std::string& name,
+                                              ArtSequence& seq,
+                                              std::string* missing_entry) {
+    auto slices = ClassifyImageSlices(base, n, check_insns);
+    if (slices.empty()) {
+        // Too short for a header or a file_size that does not fit: ART's open of
+        // this entry fails too, and that ends the source.
+        seq.Break(name, "no logical dex in image");
+        return slices;
+    }
+    bool image_ended = false;
+    for (size_t i = 0; i < slices.size(); ++i) {
+        auto& s = slices[i];
+        const std::string label =
+            slices.size() > 1 ? name + " @" + std::to_string(s.offset) : name;
+        std::string not_opened;
+        if (i > 0 && slices[i - 1].last_entry) image_ended = true;
+        if (seq.broken) {
+            not_opened = "not opened: ART stops a source at the first dex it cannot "
+                         "open (" + seq.why + ")";
+        } else if (image_ended) {
+            // ART reads past a dex only while it is a v41 container entry that is
+            // not its container's last (DexFileLoader::Open, IsDexContainerLastEntry):
+            // the bytes after are not part of what it opens. Not a failure — the
+            // source does not end here, the image does.
+            not_opened = "not opened: ART stops reading an image after a dex that is "
+                         "not followed by an entry of the same v41 container, and "
+                         "this one comes after it";
+        } else if (!s.art_own) {
+            seq.Break(label, s.art_reason);
+            not_opened = "ART would not open this dex: " + s.art_reason;
+        }
+        s.art_open = not_opened.empty();
+        if (seq.mode == LoadMode::Runtime && s.ok && !s.art_open) {
+            s.ok = false;
+            s.reason = not_opened;
+        }
+    }
+    const auto& tail = slices.back();
+    if (!seq.broken && !image_ended && !tail.last_entry && missing_entry != nullptr) {
+        const uint32_t next = tail.offset + tail.size;
+        *missing_entry = "the v41 container entry expected at offset " +
+                         std::to_string(next) +
+                         " (the previous entry is not its container's last) does not "
+                         "fit the image; ART's open fails there";
+        seq.Break(name + " @" + std::to_string(next), "container entry does not fit");
+    }
+    size_t rejected = 0;
+    for (const auto& s : slices) rejected += s.ok ? 0 : 1;
     if (rejected != 0) {
         // A rejected slice means the image cannot be handed to the core whole —
-        // the survivors have to be copied out (CollectImage), and a container dex
-        // does not survive that: its offsets address the container. Reject it too
-        // rather than load one that would read its siblings' bytes.
-        for (auto& s : slices) {
-            if (s.ok && !s.self_contained) {
-                s.ok = false;
-                s.reason =
+        // the survivors are copied out (the load path), a v41 dex together with
+        // the rest of ITS container, since its offsets address the container. So
+        // a container survives only whole: if one of its dexes is rejected, or its
+        // range holds a dex of another container, or it does not fit the image,
+        // reject all of it rather than load one that would read the wrong bytes.
+        // A rejected dex elsewhere in the image does not cost it anything
+        // (dexllm#120 — before, any rejection took every container dex with it).
+        std::vector<bool> bad(slices.size(), false);
+        for (size_t i = 0; i < slices.size(); ++i) {
+            const auto& c = slices[i];
+            if (c.self_contained) continue;
+            bool whole = c.container_end <= n;
+            for (const auto& t : slices) {
+                const bool same = !t.self_contained && t.container_begin == c.container_begin;
+                const bool inside = t.offset >= c.container_begin && t.offset < c.container_end;
+                if ((same && !t.ok) || (inside && !same)) whole = false;
+            }
+            bad[i] = !whole;
+        }
+        for (size_t i = 0; i < slices.size(); ++i) {
+            if (slices[i].ok && bad[i]) {
+                slices[i].ok = false;
+                slices[i].reason =
                     "another dex in this v41 container failed verification, and a "
                     "container dex cannot be loaded apart from its siblings";
             }
@@ -485,6 +650,18 @@ std::vector<LogicalSlice> ClassifyImageSlices(const uint8_t* base, size_t n,
 // input, deterministic and loud for crafted input.
 constexpr int kMaxLoadedDexes = 1 << 16;
 
+DexVerifyStatus RejectRow(const std::string& name, const std::string& reason,
+                          const std::string& source) {
+    DexVerifyStatus r;
+    r.dex_id = -1;
+    r.name = name;
+    r.valid = false;
+    r.reason = reason;
+    r.source = source;
+    r.art_open = false;
+    return r;
+}
+
 // One verdict row per logical dex, giving each accepted one the next real dex_id.
 // Returns how many were accepted, and downgrades any slice it had to refuse so
 // the caller's salvage path cannot load one anyway.
@@ -495,10 +672,10 @@ size_t EmitSliceVerdicts(std::vector<LogicalSlice>& slices,
         // Too short to hold a header, or a file_size that does not fit — the core
         // would build no DexItem at all, so this is a rejection with a reason
         // rather than a silent empty load.
-        report.push_back({-1, name, false,
-                          "no logical dex in image (truncated header or a "
-                          "file_size that does not fit the image)",
-                          source});
+        report.push_back(RejectRow(name,
+                                   "no logical dex in image (truncated header or a "
+                                   "file_size that does not fit the image)",
+                                   source));
         return 0;
     }
     size_t accepted = 0;
@@ -509,12 +686,21 @@ size_t EmitSliceVerdicts(std::vector<LogicalSlice>& slices,
                 "too many logical dexes in this session (the core addresses a "
                 "dex_id as uint16_t, so at most 65536 can be loaded)";
         }
+        DexVerifyStatus r;
+        r.name = name;
+        r.source = source;
+        r.art_open = s.art_open;
         if (s.ok) {
-            report.push_back({next_dex_id++, name, true, {}, source, s.art_deviations});
+            r.dex_id = next_dex_id++;
+            r.valid = true;
+            r.art_deviations = s.art_deviations;
             ++accepted;
         } else {
-            report.push_back({-1, name, false, s.reason, source});
+            r.dex_id = -1;
+            r.valid = false;
+            r.reason = s.reason;
         }
+        report.push_back(std::move(r));
     }
     return accepted;
 }
@@ -530,122 +716,327 @@ std::unique_ptr<dexkit::MemMap> CopySlice(const uint8_t* base, uint32_t size) {
     return mm;
 }
 
+// Receives an image with at least one accepted slice, so the loader can keep it.
+// Verify() passes none and keeps nothing.
+using ImageSink = std::function<void(std::unique_ptr<dexkit::MemMap> image,
+                                     const std::string& entry, const std::string& name,
+                                     const std::vector<LogicalSlice>& slices,
+                                     size_t accepted)>;
+
+// In Runtime mode a source can yield nothing while dexes in it VERIFY — they
+// come after the one ART cannot open. "failed verification" would be false
+// then, so say what happened and that Isolated mode would load them.
+void NoteRuntimeTruncation(const ArtSequence& seq, const std::string& source,
+                           const std::vector<DexVerifyStatus>& report, size_t first_row,
+                           std::string& failure) {
+    if (seq.mode != LoadMode::Runtime || !seq.broken) return;
+    size_t skipped = 0;
+    bool art_refused = false;  // a dex that VERIFIED, refused only for ART's sake
+    for (size_t i = first_row; i < report.size(); ++i) {
+        if (report[i].reason.rfind("not opened: ART stops", 0) == 0) ++skipped;
+        if (report[i].reason.rfind("ART would not open this dex", 0) == 0) art_refused = true;
+    }
+    if (skipped == 0 && art_refused) {
+        failure = "dexllm: ART's open of '" + source + "' yields no dex (" + seq.why +
+                  "); the dex passed dexllm's verifier — mode='isolated' loads it";
+        return;
+    }
+    if (skipped == 0) return;
+    failure = "dexllm: ART's open of '" + source + "' yields no dex (" + seq.why +
+              "); " + std::to_string(skipped) +
+              " dex(es) after it were not opened — mode='isolated' judges each dex "
+              "on its own";
+}
+
+// The walk over ONE source, shared by the loader and the load-free Verify() so
+// the two produce the same rows by construction. Rows go to `report`, accepted
+// images to `sink`. Never throws for a verdict; `failure` gets the one-line
+// reason when the source yields no dex at all (the constructor's error message).
+//
+// dexllm#25: the core's AddImage runs ParseLogicalDexOffsets, so ONE image can
+// become several dexes — verifying the image once (at offset 0) let every later
+// logical dex reach the core unverified, which is exactly the input a packer dump
+// produces. So every image is classified per LOGICAL dex.
+size_t WalkSource(Probe& p, const std::string& source, bool in_memory, bool check_insns,
+                  LoadMode mode, int& next_dex_id, std::vector<DexVerifyStatus>& report,
+                  const ImageSink& sink, std::string& failure) {
+    ArtSequence seq;
+    seq.mode = mode;
+    const size_t first_row = report.size();
+    auto one_image = [&](std::unique_ptr<dexkit::MemMap> image, const std::string& entry,
+                         const std::string& name, std::string* first_reject) {
+        const auto* base = reinterpret_cast<const uint8_t*>(image->data());
+        std::string missing;
+        auto slices =
+            ClassifySourceImage(base, image->len(), check_insns, name, seq, &missing);
+        const size_t accepted = EmitSliceVerdicts(slices, name, source, next_dex_id, report);
+        if (!missing.empty()) report.push_back(RejectRow(name, missing, source));
+        if (first_reject != nullptr && first_reject->empty()) {
+            for (const auto& s : slices) {
+                if (!s.ok) { *first_reject = s.reason; break; }
+            }
+            if (slices.empty()) *first_reject = report.back().reason;
+        }
+        if (accepted != 0 && sink) sink(std::move(image), entry, name, slices, accepted);
+        return accepted;
+    };
+
+    if (p.format == "unknown") {
+        // Not openable, or neither a raw .dex nor a zip/apk. ART's class path
+        // skips such an element; so does a multi-source session (dexllm#119).
+        const bool opened = p.map && p.map->ok();
+        report.push_back(RejectRow(
+            source,
+            opened      ? std::string("neither a .dex (no 'dex\\n' magic) nor a "
+                                      "zip/apk container (no PK signature / invalid "
+                                      "central directory)")
+            : in_memory ? std::string("empty buffer")
+                        : std::string("cannot open (file not found or empty)"),
+            source));
+        failure = opened
+                      ? "dexllm: '" + source + "' is neither a .dex (no 'dex\\n' magic) "
+                        "nor a zip/apk container (no PK signature / invalid central "
+                        "directory)"
+                  : in_memory ? "dexllm: '" + source + "' is an empty buffer"
+                              : "dexllm: cannot open '" + source + "' (file not found or empty)";
+        return 0;
+    }
+
+    if (p.format == "dex") {
+        // Structural gate (DexVerifier) BEFORE the core parses the image — a
+        // malformed dex is screened out here so the core/slicer never touch it.
+        std::string reason;
+        const size_t accepted = one_image(std::move(p.map), std::string{}, source, &reason);
+        if (accepted == 0) {
+            failure = "dexllm: '" + source + "' failed dex verification: " + reason;
+            NoteRuntimeTruncation(seq, source, report, first_row, failure);
+        }
+        return accepted;
+    }
+
+    // p.format == "zip": extract each classes*.dex, verify at the load boundary,
+    // and feed only structurally-valid dexes to the core via AddImage. This
+    // replaces the core's internal zip loader (DexKit(apk_path) → AddZipPath) so a
+    // malformed dex is screened out *before* the core parses it — no vendored-core
+    // change. In Isolated mode a rejected dex is recorded (verify_report) and
+    // skipped while its siblings still load (per-dex rejection); in Runtime mode
+    // the dexes after it are not opened, as on a device (dexllm#120).
+    if (p.dex_count == 0) {
+        report.push_back(RejectRow(
+            source,
+            std::string("zip container has no classes*.dex (AndroidManifest.xml ") +
+                (p.has_manifest ? "present" : "absent") + ")",
+            source));
+        failure = "dexllm: zip container '" + source + "' has no classes*.dex to "
+                  "decompile (AndroidManifest.xml " +
+                  (p.has_manifest ? "present" : "absent") + ")";
+        return 0;
+    }
+    {
+        // libziparchive refuses an archive with two central-directory entries of
+        // one name (zip_cd_entry_map.cc, kDuplicateEntry), so ART opens nothing
+        // from it. dexllm's reader keeps the LAST record and loads; say ART would
+        // not (dexllm#120). A known anti-analysis trick.
+        std::set<std::string_view> names;
+        for (const auto& e : p.za->GetEntries()) {
+            if (!names.insert(e.name).second) {
+                seq.Break(source, "duplicate zip entry '" + std::string(e.name) +
+                                      "' (ART's zip reader refuses the archive)");
+                break;
+            }
+        }
+    }
+    size_t accepted = 0;
+    for (int idx = 1; idx <= p.dex_count; ++idx) {
+        auto name = "classes" + (idx == 1 ? std::string() : std::to_string(idx)) + ".dex";
+        const auto* entry = p.za->Find(name);
+        if (entry == nullptr) continue;  // counted by ProbeContainer; defensive
+        if (entry->uncomp_size == 0) {
+            // A zero-length entry: the same reason from_dex_images gives an empty
+            // image, so one input reads the same either way (ART fails it too).
+            report.push_back(RejectRow(name, "empty image", source));
+            seq.Break(name, "empty image");
+            continue;
+        }
+        auto mm = p.za->GetUncompressData(*entry);
+        if (!mm.ok()) {
+            // ART fails this entry too (kExtractToMemoryError), ending the source.
+            report.push_back(RejectRow(name, "decompression failed", source));
+            seq.Break(name, "decompression failed");
+            continue;
+        }
+        accepted += one_image(std::make_unique<dexkit::MemMap>(std::move(mm)), name, name,
+                              nullptr);
+    }
+    if (accepted == 0) {
+        failure = "dexllm: all " + std::to_string(p.dex_count) + " dex(es) in '" + source +
+                  "' failed verification";
+        NoteRuntimeTruncation(seq, source, report, first_row, failure);
+    }
+    return accepted;
+}
+
 }  // namespace
+
+LoadMode ParseLoadMode(const std::string& mode) {
+    if (mode == "isolated") return LoadMode::Isolated;
+    if (mode == "runtime") return LoadMode::Runtime;
+    throw std::invalid_argument("dexllm: mode must be 'isolated' or 'runtime', got '" +
+                                mode + "'");
+}
+
+const char* LoadModeName(LoadMode mode) {
+    return mode == LoadMode::Runtime ? "runtime" : "isolated";
+}
 
 ContainerInfo DexKitExt::Identify(const std::string& path) {
     return ContainerInfoFrom(path, ProbeContainer(path));
 }
 
+// Copy caller bytes into an image the session owns (dexllm#119). MemMap's length
+// is uint32_t, so anything that does not fit is refused rather than truncated.
+std::unique_ptr<dexkit::MemMap> OwnedImageCopy(const uint8_t* data, size_t len) {
+    if (len > UINT32_MAX) {
+        throw std::invalid_argument("dexllm: an in-memory image of " + std::to_string(len) +
+                                    " bytes is too large (the limit is 4 GiB - 1)");
+    }
+    if (len == 0) return std::make_unique<dexkit::MemMap>();  // reported as empty
+    auto mm = std::make_unique<dexkit::MemMap>(static_cast<uint32_t>(len));
+    if (!mm->ok()) {
+        throw std::runtime_error("dexllm: cannot allocate " + std::to_string(len) +
+                                 " bytes for an in-memory image");
+    }
+    std::memcpy(mm->data(), data, len);
+    return mm;
+}
+
+ContainerInfo DexKitExt::IdentifyBytes(const uint8_t* data, size_t len,
+                                       const std::string& source) {
+    auto info = ContainerInfoFrom(source, ProbeMap(OwnedImageCopy(data, len)));
+    info.in_memory = true;
+    return info;
+}
+
 std::vector<DexVerifyStatus> DexKitExt::Verify(const std::string& path,
-                                               bool check_insns) {
-    // Load-free: mirror CollectSource's probe + per-dex VerifyDex, but COLLECT
-    // every verdict (never throw, never retain the mmap, never AddImage). The
-    // running dex_id (`accepted`) reproduces CollectSource's out.size() so a
-    // loadable path's verdicts are byte-identical to VerifyReport() after load.
+                                               bool check_insns, LoadMode mode) {
+    // Load-free: the loader's walk with no sink — every verdict collected, never
+    // throwing, never retaining the mmap, never AddImage. The same walk is what
+    // makes a loadable path's verdicts byte-identical to VerifyReport().
     std::vector<DexVerifyStatus> report;
     Probe p = ProbeContainer(path);
-    int accepted = 0;  // running 0-based dex_id for verified dexes
-
-    if (p.format == "unknown") {
-        // Not openable, or neither a raw .dex nor a zip/apk. One never-throwing
-        // verdict — where DexKit(path) would throw, verify(path) reports.
-        report.push_back(
-            {-1, path, false,
-             p.map->ok()
-                 ? std::string("neither a .dex (no 'dex\\n' magic) nor a "
-                               "zip/apk container (no PK signature / invalid "
-                               "central directory)")
-                 : std::string("cannot open (file not found or empty)"),
-             path});
-        return report;
-    }
-
-    if (p.format == "dex") {
-        const auto* base = reinterpret_cast<const uint8_t*>(p.map->data());
-        auto slices = ClassifyImageSlices(base, p.map->len(), check_insns);
-        EmitSliceVerdicts(slices, path, path, accepted, report);
-        return report;
-    }
-
-    // p.format == "zip": verify each classes*.dex at the load boundary. A
-    // rejected dex is recorded and the walk continues (per-dex rejection), the
-    // same as the zip branch of CollectSource.
-    if (p.dex_count == 0) {
-        report.push_back(
-            {-1, path, false,
-             std::string("zip container has no classes*.dex (AndroidManifest.xml ") +
-                 (p.has_manifest ? "present" : "absent") + ")",
-             path});
-        return report;
-    }
-    for (int idx = 1; idx <= p.dex_count; ++idx) {
-        auto name =
-            "classes" + (idx == 1 ? std::string() : std::to_string(idx)) + ".dex";
-        const auto* entry = p.za->Find(name);
-        if (entry == nullptr) continue;  // counted by ProbeContainer; defensive
-        auto mm = p.za->GetUncompressData(*entry);
-        if (!mm.ok()) {
-            report.push_back({-1, name, false, "decompression failed", path});
-            continue;
-        }
-        const auto* base = reinterpret_cast<const uint8_t*>(mm.data());
-        auto slices = ClassifyImageSlices(base, mm.len(), check_insns);
-        EmitSliceVerdicts(slices, name, path, accepted, report);
-    }
+    int next_dex_id = 0;
+    std::string failure;
+    WalkSource(p, path, /*in_memory=*/false, check_insns, mode, next_dex_id, report, nullptr,
+               failure);
     return report;
 }
 
-size_t DexKitExt::CollectImage(std::unique_ptr<dexkit::MemMap> image,
-                               const std::string& source, const std::string& entry,
-                               const std::string& name, bool check_insns,
+std::vector<DexVerifyStatus> DexKitExt::VerifyBytes(const uint8_t* data, size_t len,
+                                                    const std::string& source,
+                                                    bool check_insns, LoadMode mode) {
+    std::vector<DexVerifyStatus> report;
+    Probe p = ProbeMap(OwnedImageCopy(data, len));
+    int next_dex_id = 0;
+    std::string failure;
+    WalkSource(p, source, /*in_memory=*/true, check_insns, mode, next_dex_id, report,
+               nullptr, failure);
+    return report;
+}
+
+size_t DexKitExt::CollectInput(LoadInput& input, bool check_insns,
                                std::vector<std::unique_ptr<dexkit::MemMap>>& out,
-                               std::string* first_reject_reason) {
-    const auto* base = reinterpret_cast<const uint8_t*>(image->data());
-    const size_t n = image->len();
-
-    auto slices = ClassifyImageSlices(base, n, check_insns);
-    // Rows are emitted here, so the accepted dex_ids are handed out in load
-    // order across every source of the session.
-    const size_t accepted =
-        EmitSliceVerdicts(slices, name, source, next_dex_id_, verify_status_);
-
-    if (first_reject_reason != nullptr && first_reject_reason->empty()) {
-        for (const auto& s : slices) {
-            if (!s.ok) { *first_reject_reason = s.reason; break; }
+                               std::string& failure) {
+    const std::string& source = input.source;
+    // Keep the accepted images. When every logical dex of an image verified it is
+    // handed over whole — the ordinary path, no copy; otherwise the survivors are
+    // copied into images of their own so a rejected slice cannot be reached.
+    ImageSink sink = [&](std::unique_ptr<dexkit::MemMap> image, const std::string& entry,
+                         const std::string& name, const std::vector<LogicalSlice>& slices,
+                         size_t accepted) {
+        if (accepted == slices.size()) {
+            image_origin_[image.get()] = {source, entry, 0};
+            out.push_back(std::move(image));
+            return;
         }
-        if (slices.empty()) *first_reject_reason = verify_status_.back().reason;
-    }
-    if (accepted == 0) return 0;
+        const auto* base = reinterpret_cast<const uint8_t*>(image->data());
+        std::set<uint32_t> containers_copied;
+        for (const auto& s : slices) {
+            if (!s.ok) continue;
+            // A v41 dex is copied with the whole of its container (the sibling
+            // rule guaranteed every dex in that range is accepted and it fits), so
+            // the core splits the copy into exactly those dexes.
+            uint32_t from = s.offset;
+            uint32_t size = s.size;
+            if (!s.self_contained) {
+                if (!containers_copied.insert(s.container_begin).second) continue;
+                from = s.container_begin;
+                size = static_cast<uint32_t>(s.container_end - s.container_begin);
+            }
+            auto copy = CopySlice(base + from, size);
+            if (copy == nullptr) {
+                // Out of memory. Throwing rather than dropping the slice keeps the
+                // verdict rows (already emitted, with their dex_ids) true: a dex
+                // reported as accepted is one the session actually loaded.
+                throw std::runtime_error(
+                    "dexllm: cannot allocate " + std::to_string(size) +
+                    " bytes to salvage the verified dex at offset " +
+                    std::to_string(from) + " of '" + name + "'");
+            }
+            // `base_offset` keeps the reported provenance offset the same value it
+            // would have had if the whole container had verified.
+            image_origin_[copy.get()] = {source, entry, from};
+            out.push_back(std::move(copy));
+        }
+    };
 
-    if (accepted == slices.size()) {
-        // Every logical dex verified — hand the image over whole. This is the
-        // ordinary path (one dex per image, and a fully-valid concatenated
-        // container), and it copies nothing.
-        image_origin_[image.get()] = {source, entry, 0};
-        out.push_back(std::move(image));
+    if (!input.dex_images.empty()) {
+        // dexllm#119 — an explicit dex list: one source, one multidex sequence, in
+        // the caller's order and under the caller's entry names.
+        ContainerInfo info;
+        info.format = "images";
+        info.dex_count = static_cast<int>(input.dex_images.size());
+        info.source = source;
+        info.in_memory = true;
+        source_info_.push_back(info);
+        size_t accepted = 0;
+        ArtSequence seq;
+        seq.mode = mode_;
+        const size_t first_row = verify_status_.size();
+        for (auto& [name, image] : input.dex_images) {
+            if (!image || !image->ok()) {
+                // Anything else goes through the verifier, so the same bytes give
+                // the same reason here as they do inside a zip.
+                verify_status_.push_back(RejectRow(name, "empty image", source));
+                seq.Break(name, "empty image");
+                continue;
+            }
+            const auto* base = reinterpret_cast<const uint8_t*>(image->data());
+            std::string missing;
+            auto slices =
+                ClassifySourceImage(base, image->len(), check_insns, name, seq, &missing);
+            const size_t n =
+                EmitSliceVerdicts(slices, name, source, next_dex_id_, verify_status_);
+            if (!missing.empty()) verify_status_.push_back(RejectRow(name, missing, source));
+            if (n != 0) sink(std::move(image), name, name, slices, n);
+            accepted += n;
+        }
+        if (accepted == 0) {
+            failure = "dexllm: none of the " + std::to_string(input.dex_images.size()) +
+                      " dex image(s) of '" + source + "' passed verification";
+            NoteRuntimeTruncation(seq, source, verify_status_, first_row, failure);
+        }
         return accepted;
     }
 
-    // A slice failed. The image cannot be handed over as-is (the core would
-    // parse the rejected slice too), so copy the survivors out. `base_offset`
-    // keeps the reported provenance offset the same value it would have had if
-    // the whole container had verified.
-    for (const auto& s : slices) {
-        if (!s.ok) continue;
-        auto copy = CopySlice(base + s.offset, s.size);
-        if (copy == nullptr) {
-            // Out of memory. Throwing rather than dropping the slice keeps the
-            // verdict rows (already emitted, with their dex_ids) true: a dex
-            // reported as accepted is one the session actually loaded.
-            throw std::runtime_error(
-                "dexllm: cannot allocate " + std::to_string(s.size) +
-                " bytes to salvage the verified dex at offset " +
-                std::to_string(s.offset) + " of '" + name + "'");
-        }
-        image_origin_[copy.get()] = {source, entry, s.offset};
-        out.push_back(std::move(copy));
-    }
-    return accepted;
+    const bool in_memory = input.image != nullptr;
+    Probe p = in_memory ? ProbeMap(std::move(input.image)) : ProbeContainer(source);
+    // Keep what the probe found, so a session can answer "what was this source"
+    // from memory rather than re-reading a path that may be gone (dexllm#42).
+    ContainerInfo info = ContainerInfoFrom(source, p);
+    info.in_memory = in_memory;
+    source_info_.push_back(info);
+    return WalkSource(p, source, in_memory, check_insns, mode_, next_dex_id_, verify_status_,
+                      sink, failure);
 }
 
 void DexKitExt::AssertLoadedDexesWereVerified(size_t accepted) const {
@@ -675,97 +1066,66 @@ void DexKitExt::AssertLoadedDexesWereVerified(size_t accepted) const {
     }
 }
 
-size_t DexKitExt::CollectSource(const std::string& path, bool check_insns,
-                                std::vector<std::unique_ptr<dexkit::MemMap>>& out) {
-    Probe p = ProbeContainer(path);  // one content-based classification
-    // Keep what the probe found, so a session can answer "what was this source"
-    // from memory rather than re-reading a path that may be gone (dexllm#42).
-    // Recorded BEFORE the throws below: a source that fails to load produces no
-    // session at all, so every row here belongs to a source that did load.
-    source_info_.push_back(ContainerInfoFrom(path, p));
+namespace {
 
-    if (p.format == "unknown") {
-        if (!p.map->ok()) {  // ProbeContainer always sets map; ok() distinguishes
-            throw std::runtime_error(
-                "dexllm: cannot open '" + path + "' (file not found or empty)");
-        }
-        throw std::runtime_error(
-            "dexllm: '" + path + "' is neither a .dex (no 'dex\\n' magic) nor a "
-            "zip/apk container (no PK signature / invalid central directory)");
-    }
-
-    if (p.format == "dex") {
-        // Structural gate (DexVerifier) BEFORE the core parses the image — a
-        // malformed dex is screened out here so the core/slicer never touch it.
-        // Per LOGICAL dex, not per file: see CollectImage (dexllm#25).
-        std::string reason;
-        const size_t accepted = CollectImage(std::move(p.map), path, std::string{},
-                                             path, check_insns, out, &reason);
-        if (accepted == 0) {
-            throw std::runtime_error(
-                "dexllm: '" + path + "' failed dex verification: " + reason);
-        }
-        return accepted;
-    }
-
-    // p.format == "zip": extract each classes*.dex, verify at the load boundary,
-    // and feed only structurally-valid dexes to the core via AddImage. This
-    // replaces the core's internal zip loader (DexKit(apk_path) → AddZipPath) so a
-    // malformed dex is screened out *before* the core parses it — no vendored-core
-    // change. A rejected dex is recorded (verify_report) and skipped; sibling
-    // dexes in the multidex still load (per-dex rejection).
-    if (p.dex_count == 0) {
-        throw std::runtime_error(
-            "dexllm: zip container '" + path + "' has no classes*.dex to decompile "
-            "(AndroidManifest.xml " + (p.has_manifest ? "present" : "absent") + ")");
-    }
-    size_t accepted = 0;
-    for (int idx = 1; idx <= p.dex_count; ++idx) {
-        auto name = "classes" + (idx == 1 ? std::string() : std::to_string(idx)) + ".dex";
-        const auto* entry = p.za->Find(name);
-        if (entry == nullptr) continue;  // counted by ProbeContainer; defensive
-        auto mm = p.za->GetUncompressData(*entry);
-        if (!mm.ok()) {
-            verify_status_.push_back({-1, name, false, "decompression failed", path});
-            continue;
-        }
-        auto owned = std::make_unique<dexkit::MemMap>(std::move(mm));
-        accepted += CollectImage(std::move(owned), path, name, name, check_insns,
-                                 out, nullptr);
-    }
-    if (accepted == 0) {
-        throw std::runtime_error(
-            "dexllm: all " + std::to_string(p.dex_count) + " dex(es) in '" + path +
-            "' failed verification");
-    }
-    return accepted;
+std::vector<LoadInput> PathInputs(const std::vector<std::string>& paths) {
+    std::vector<LoadInput> inputs(paths.size());
+    for (size_t i = 0; i < paths.size(); ++i) inputs[i].source = paths[i];
+    return inputs;
 }
 
-DexKitExt::DexKitExt(const std::string& apk_path, bool lenient)
-    : apk_path_(apk_path), sources_{apk_path} {
-    core_ = std::make_unique<dexkit::DexKit>();
-    std::vector<std::unique_ptr<dexkit::MemMap>> valid_dexes;
-    const size_t accepted = CollectSource(apk_path, /*check_insns=*/!lenient, valid_dexes);
-    core_->AddImage(std::move(valid_dexes));
-    AssertLoadedDexesWereVerified(accepted);
-}
+}  // namespace
 
-DexKitExt::DexKitExt(const std::vector<std::string>& sources, bool lenient)
-    : apk_path_(sources.empty() ? std::string{} : sources.front()),
-      sources_(sources) {
-    if (sources.empty()) {
+DexKitExt::DexKitExt(const std::string& apk_path, bool lenient, LoadMode mode)
+    : DexKitExt(PathInputs({apk_path}), lenient, mode) {}
+
+DexKitExt::DexKitExt(const std::vector<std::string>& sources, bool lenient, LoadMode mode)
+    : DexKitExt(PathInputs(sources), lenient, mode) {}
+
+DexKitExt::DexKitExt(std::vector<LoadInput> inputs, bool lenient, LoadMode mode)
+    : mode_(mode) {
+    if (inputs.empty()) {
         throw std::runtime_error("dexllm: no dex sources given");
     }
+    for (const auto& in : inputs) sources_.push_back(in.source);
+    apk_path_ = sources_.front();
     core_ = std::make_unique<dexkit::DexKit>();
     // Load sources in order — earlier sources get lower dex_ids, so first-wins
-    // resolution prefers them (load a decrypted/dumped dex first to win).
+    // resolution prefers them (load a decrypted/dumped dex first to win). A
+    // source that yields nothing is rows, not an error (dexllm#119): ART's class
+    // path suppresses a failed element the same way.
     std::vector<std::unique_ptr<dexkit::MemMap>> valid_dexes;
     size_t accepted = 0;
-    for (const auto& src : sources) {
-        accepted += CollectSource(src, /*check_insns=*/!lenient, valid_dexes);
+    std::vector<std::string> failures;
+    for (auto& in : inputs) {
+        std::string failure;
+        accepted += CollectInput(in, /*check_insns=*/!lenient, valid_dexes, failure);
+        if (!failure.empty()) failures.push_back(std::move(failure));
+    }
+    if (accepted == 0) {
+        // One source: its own message, exactly as before. Several: all of them.
+        if (failures.size() == 1) throw std::runtime_error(failures.front());
+        std::string msg = "dexllm: none of the " + std::to_string(inputs.size()) +
+                          " sources yielded a dex that passed verification";
+        for (const auto& f : failures) msg += "\n  " + f;
+        throw std::runtime_error(msg);
     }
     core_->AddImage(std::move(valid_dexes));
     AssertLoadedDexesWereVerified(accepted);
+}
+
+LoadStatus DexKitExt::GetLoadStatus() const {
+    LoadStatus st;
+    st.mode = LoadModeName(mode_);
+    st.loaded_dex_count = DexCount();
+    for (const auto& r : verify_status_) {
+        if (!r.valid) {
+            st.complete = false;
+            st.rejected.push_back(r);
+        }
+        if (r.valid != r.art_open) st.matches_art = false;
+    }
+    return st;
 }
 
 DexKitExt::~DexKitExt() = default;

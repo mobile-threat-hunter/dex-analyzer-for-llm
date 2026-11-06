@@ -35,8 +35,10 @@ from ._dexkit_core import (
     ResolvedArg,
     ResolvedCallSite,
     identify,
+    identify_bytes,
     is_framework_descriptor,
     verify,
+    verify_bytes,
 )
 from .capability import (
     ApiUsage,
@@ -110,6 +112,7 @@ __all__ = [
     "format_class",
     "format_class_summary",
     "identify",
+    "identify_bytes",
     "is_framework_descriptor",
     "is_timeout_marker",
     "java_to_descriptor",
@@ -121,5 +124,6 @@ __all__ = [
     "safe_decompile_method",
     "summarize_capabilities",
     "verify",
+    "verify_bytes",
 ]
 __version__ = "0.28.0"

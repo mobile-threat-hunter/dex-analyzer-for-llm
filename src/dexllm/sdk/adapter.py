@@ -41,6 +41,7 @@ from .model import (
     FieldRef,
     Indicator,
     IocReport,
+    LoadStatus,
     MethodAst,
     MethodInfo,
     MethodRef,
@@ -52,7 +53,7 @@ from .model import (
     TlsTrustComponent,
     TypeReferences,
 )
-from .ports import MatchType
+from .ports import BytesLike, LoadMode, MatchType
 
 # A single apk/dex path or a sequence of them; each element accepts anything
 # os.fspath understands (str or os.PathLike, e.g. pathlib.Path).
@@ -190,10 +191,15 @@ class DexKitAdapter:
     Construct with a single apk/dex path or a list of sources (earlier sources get
     lower dex_ids; first-wins on a class collision). ``lenient`` runs the load-time
     verifier leniently: partially-decrypted dumps load, and value strings out of
-    order are accepted and reported in ``art_deviations`` (dexllm#112).
+    order are accepted and reported in ``art_deviations`` (dexllm#112). ``mode``
+    decides what a rejected dex costs the dexes after it (dexllm#119/#120):
+    ``"isolated"`` loads every dex that verifies, ``"runtime"`` only what ART's
+    open would — read :meth:`load_status` either way.
     """
 
-    def __init__(self, sources: Sources, *, lenient: bool = False) -> None:
+    def __init__(
+        self, sources: Sources, *, lenient: bool = False, mode: LoadMode = "isolated"
+    ) -> None:
         """Load ``sources`` into a ``DexKit`` (see the class docstring for order).
 
         Accepts a single path or a sequence of paths; each may be a ``str`` or any
@@ -203,11 +209,22 @@ class DexKitAdapter:
             src_list = [os.fspath(sources)]
         else:
             src_list = [os.fspath(s) for s in sources]
-        if len(src_list) == 1 and not lenient:
-            self._dk = dexllm.DexKit(src_list[0])
+        if len(src_list) == 1:
+            dk = dexllm.DexKit(src_list[0], lenient=lenient, mode=mode)
         else:
-            self._dk = dexllm.DexKit(src_list, lenient=lenient)
+            dk = dexllm.DexKit(src_list, lenient=lenient, mode=mode)
+        self._wrap(dk)
+
+    def _wrap(self, dk: "dexllm.DexKit") -> None:
+        self._dk = dk
         self._dex_names: dict[int, str] | None = None  # lazy dex_id → file-name map
+
+    @classmethod
+    def _from_raw(cls, dk: "dexllm.DexKit") -> "DexKitAdapter":
+        """Adapt an already-loaded session (the bytes factories build one)."""
+        self = cls.__new__(cls)
+        self._wrap(dk)
+        return self
 
     def _dex_name(self, dex_id: int) -> str:
         """Map a dex_id to its file name (``classes.dex`` / …); ``""`` if unknown.
@@ -410,6 +427,17 @@ class DexKitAdapter:
     def source_info(self) -> tuple[ContainerInfo, ...]:
         """Return what each construction source was, probed once at load."""
         return tuple(_container_info(row) for row in self._dk.source_info())
+
+    def load_status(self) -> LoadStatus:
+        """Return whether the session is the whole of what it was given (#120)."""
+        st = self._dk.load_status()
+        return LoadStatus(
+            mode=st["mode"],
+            complete=st["complete"],
+            matches_art=st["matches_art"],
+            loaded_dex_count=st["loaded_dex_count"],
+            rejected=_to_verify_statuses(st["rejected"]),
+        )
 
     # -- DexExtractionPort --
 
@@ -924,6 +952,7 @@ def _to_verify_statuses(
             # missing key is a regression that should raise, not degrade to "".
             source=x["source"],
             art_deviations=tuple(x["art_deviations"]),
+            art_open=x["art_open"],
         )
         for x in rows
     )
@@ -941,6 +970,7 @@ def _container_info(row: Mapping[str, Any]) -> ContainerInfo:
         is_apk=row["is_apk"],
         has_manifest=row["has_manifest"],
         dex_count=row["dex_count"],
+        in_memory=row["in_memory"],
     )
 
 
@@ -961,22 +991,76 @@ class ContainerProbe:
         return _to_container_info(path)
 
     def verify(
-        self, path: str, *, lenient: bool = False
+        self, path: str, *, lenient: bool = False, mode: LoadMode = "isolated"
     ) -> tuple[DexVerifyStatus, ...]:
         """Structurally verify a path's dex(es) without loading (no raise)."""
-        return _to_verify_statuses(dexllm.verify(os.fspath(path), lenient))
+        return _to_verify_statuses(dexllm.verify(os.fspath(path), lenient, mode))
+
+    def identify_bytes(
+        self, data: BytesLike, *, source: str = "<bytes>"
+    ) -> ContainerInfo:
+        """Probe bytes the caller holds by content (dexllm#119)."""
+        return identify_bytes(data, source=source)
+
+    def verify_bytes(
+        self,
+        data: BytesLike,
+        *,
+        lenient: bool = False,
+        mode: LoadMode = "isolated",
+        source: str = "<bytes>",
+    ) -> tuple[DexVerifyStatus, ...]:
+        """Structurally verify bytes the caller holds without loading (no raise)."""
+        return verify_bytes(data, lenient=lenient, mode=mode, source=source)
 
 
 # ── factories ─────────────────────────────────────────────────────────────────
 
 
-def open_apk(sources: Sources, *, lenient: bool = False) -> DexKitAdapter:
+def open_apk(
+    sources: Sources, *, lenient: bool = False, mode: LoadMode = "isolated"
+) -> DexKitAdapter:
     """Open an apk / dex source (or list of sources) as a typed analysis session.
 
     Returns a :class:`DexKitAdapter`, which satisfies
     :class:`~dexllm.sdk.ports.DexAnalysisUseCase`.
     """
-    return DexKitAdapter(sources, lenient=lenient)
+    return DexKitAdapter(sources, lenient=lenient, mode=mode)
+
+
+def open_bytes(
+    data: BytesLike,
+    *,
+    lenient: bool = False,
+    mode: LoadMode = "isolated",
+    source: str = "<bytes>",
+) -> DexKitAdapter:
+    """Open one file held in memory — a zip/apk or a bare dex (dexllm#119).
+
+    Same content sniffing, verification and verdicts as :func:`open_apk` on a
+    path holding the same bytes. The bytes are copied in; ``source`` is the label
+    every row reports.
+    """
+    return DexKitAdapter._from_raw(
+        dexllm.DexKit.from_bytes(data, lenient=lenient, mode=mode, source=source)
+    )
+
+
+def open_dex_images(
+    images: "Sequence[tuple[str, BytesLike]]",
+    *,
+    lenient: bool = False,
+    mode: LoadMode = "isolated",
+    source: str = "<images>",
+) -> DexKitAdapter:
+    """Open an explicit dex list: ``(name, bytes)`` pairs in load order (#119).
+
+    The order is ``dex_id`` and first-wins; each name is the entry the session
+    reports. One source, one multidex sequence for ``mode="runtime"``.
+    """
+    return DexKitAdapter._from_raw(
+        dexllm.DexKit.from_dex_images(images, lenient=lenient, mode=mode, source=source)
+    )
 
 
 def identify(path: SourceLike) -> ContainerInfo:
@@ -984,10 +1068,33 @@ def identify(path: SourceLike) -> ContainerInfo:
     return _to_container_info(path)
 
 
-def verify(path: SourceLike, *, lenient: bool = False) -> tuple[DexVerifyStatus, ...]:
+def verify(
+    path: SourceLike, *, lenient: bool = False, mode: LoadMode = "isolated"
+) -> tuple[DexVerifyStatus, ...]:
     """Structurally verify a path's dex(es) without loading (no raise).
 
     The functional form of :meth:`ContainerProbe.verify`. One verdict per dex,
     byte-identical to loading the source and reading ``verify_report``.
     """
-    return _to_verify_statuses(dexllm.verify(os.fspath(path), lenient))
+    return _to_verify_statuses(dexllm.verify(os.fspath(path), lenient, mode))
+
+
+def identify_bytes(data: BytesLike, *, source: str = "<bytes>") -> ContainerInfo:
+    """Probe bytes the caller holds by content (no load) — dexllm#119."""
+    return _container_info(dexllm.identify_bytes(data, source=source))
+
+
+def verify_bytes(
+    data: BytesLike,
+    *,
+    lenient: bool = False,
+    mode: LoadMode = "isolated",
+    source: str = "<bytes>",
+) -> tuple[DexVerifyStatus, ...]:
+    """Structurally verify bytes without loading (no raise) — dexllm#119.
+
+    The same rows ``open_bytes(data, ...).verify_report()`` records.
+    """
+    return _to_verify_statuses(
+        dexllm.verify_bytes(data, lenient=lenient, mode=mode, source=source)
+    )

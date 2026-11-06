@@ -22,6 +22,7 @@ whole file runs in the corpus-less CI leg.
 
 import pathlib
 import struct
+import zlib
 
 import pytest
 
@@ -80,6 +81,10 @@ def _craft(tmp_path, name, edit):
         struct.pack_into("<I", b, off + 4 * i, v)
 
     edit(b, get, put)
+    # The shape fixes the checksum too (module docstring). Without this a second
+    # deviation -- the checksum ART checks on open, dexllm#120 -- rides along.
+    file_size = struct.unpack_from("<I", b, 32)[0]
+    struct.pack_into("<I", b, 8, zlib.adler32(bytes(b[12:file_size])))
     p = tmp_path / f"{name}.dex"
     p.write_bytes(bytes(b))
     return str(p)
