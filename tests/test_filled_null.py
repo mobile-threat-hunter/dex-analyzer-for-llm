@@ -32,6 +32,10 @@ EXPECTED = {
     "nestedNull()[[I": "return new int[][] {null};",
     "refOne()[Ljava/lang/Object;": "return new Object[] {1};",
     "sharedZero()[Ljava/lang/Object;": "return new Object[] {null, new int[] {0}};",
+    # dexllm#97: the /range form keeps its middle register too
+    "rangeNulls()[Ljava/lang/Object;": 'return new Object[] {null, "a", null};',
+    "rangeOne()[I": "return new int[] {7};",  # was {7, 7}: first == last
+    "rangeTwo()[I": "return new int[] {7, 6};",  # the control
 }
 
 

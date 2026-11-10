@@ -290,17 +290,23 @@ IRFormPtr FilledNewArray(int64_t count, std::string_view type_desc,
     return std::make_shared<AssignExpression>(std::move(ret), std::move(exp));
 }
 
-// DAD: opcode_ins.py:412 filled-new-array/range — bug-faithful: DAD
-// declares `a, c, n = get_variables(vmap, ins.AA, ins.CCCC, ins.NNNN)` but
-// then ignores `a` (count) and passes only `[c, n]` to FilledArrayExpression,
-// despite the range being `cccc..nnnn` (a contiguous span). Faithful port:
-// emit a 2-element FilledArrayExpression with first and last register.
+// DAD: opcode_ins.py:412 filled-new-array/range. DAD declares
+// `a, c, n = get_variables(vmap, ins.AA, ins.CCCC, ins.NNNN)` and passes only
+// `[c, n]` to FilledArrayExpression — the two BOUNDS of a contiguous range — so
+// every register in between was dropped from the array and its defining call
+// left behind as a bare statement, and a range of one listed its register twice
+// — every one of the corpus's 45 sites (43 wider than two, 2 of width one). Beyond-DAD
+// (dexllm#97): the expression gets every register of the range, the way the
+// invoke-range handlers do. An element is one register (filled-new-array builds
+// int[] or a reference array, never a wide one), so no pair rule applies.
 IRFormPtr FilledNewArrayRange(int64_t count, std::string_view type_desc,
-                              std::string_view cccc, std::string_view nnnn,
+                              const std::vector<std::string>& regs,
                               IRFormPtr ret, Vmap& vmap) {
-    auto regs = GetVariables(vmap, {cccc, nnnn});
+    std::vector<IRFormPtr> args;
+    args.reserve(regs.size());
+    for (const auto& r : regs) args.push_back(GetVariable(vmap, r));
     auto exp = std::make_shared<FilledArrayExpression>(
-        count, type_desc, regs);
+        count, type_desc, args);
     return std::make_shared<AssignExpression>(std::move(ret), std::move(exp));
 }
 

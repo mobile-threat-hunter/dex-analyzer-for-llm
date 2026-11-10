@@ -233,10 +233,11 @@ IRFormPtr FilledNewArray(int64_t count, std::string_view type_desc,
                          std::string_view e, std::string_view f,
                          std::string_view g, IRFormPtr ret, Vmap& vmap);
 
-// DAD: opcode_ins.py:412 filled-new-array/range — pass first/last register
-// IDs of the range as `cccc`/`nnnn`; `aa` = count.
+// DAD: opcode_ins.py:412 filled-new-array/range. `regs` is EVERY register of
+// the range `vCCCC .. vCCCC+AA-1`, in order (dexllm#97 — DAD passes only the
+// two bounds); `count` = AA.
 IRFormPtr FilledNewArrayRange(int64_t count, std::string_view type_desc,
-                              std::string_view cccc, std::string_view nnnn,
+                              const std::vector<std::string>& regs,
                               IRFormPtr ret, Vmap& vmap);
 
 // DAD: opcode_ins.py:421 fill-array-data — `value` is the payload (vector

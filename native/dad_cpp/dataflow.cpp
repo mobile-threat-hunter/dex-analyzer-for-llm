@@ -795,14 +795,9 @@ static void InferCascadeTypes(
             // `FilledArrayExpression` carries the ARRAY descriptor as its type,
             // so the element type is what follows the '['.
             //
-            // STATED LIMIT — the `/range` form is NOT covered, and the reason is
-            // one level down: `FilledNewArrayRange` is bug-faithful to DAD and
-            // hands the expression only `{cccc, nnnn}`, so `args()` holds TWO
-            // registers whatever the real element count is. The middle elements
-            // are not in the IR at all, so no guard here can see them — such a
-            // method's rendering is already lossy, with or without this pass.
-            // Measured: 45 `/range` sites corpus-wide and **0** of them inside a
-            // `)Z` method, so the residual is 0-incidence rather than latent.
+            // The `/range` form is covered too since dexllm#97: before it,
+            // `FilledNewArrayRange` handed the expression only the two range
+            // bounds, so the middle elements were not in the IR at all.
             const std::string& at = fa->get_type();
             if (at.size() >= 2 && at[0] == '[' &&
                 is_prim_nonbool(at.substr(1)))

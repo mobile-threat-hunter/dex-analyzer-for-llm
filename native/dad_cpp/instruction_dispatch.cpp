@@ -434,12 +434,9 @@ IRFormPtr DispatchInstruction(const RawIns& ri,
                                   regs.c, regs.d, regs.e, regs.f, regs.g,
                                   gen_ret.New(), vmap);
         }
-        case K::FilledNewArrayRange: {
-            uint32_t last = d.vC + (d.vA > 0 ? d.vA - 1 : 0);
-            return FilledNewArrayRange(d.vA, type_desc(),
-                                       RegName(d.vC), RegName(last),
+        case K::FilledNewArrayRange:
+            return FilledNewArrayRange(d.vA, type_desc(), BuildRangeRegs(d.vA, d.vC),
                                        gen_ret.New(), vmap);
-        }
 
         case K::FillArrayData: {
             std::vector<int64_t> values;

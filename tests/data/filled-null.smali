@@ -69,3 +69,36 @@
     move-result-object v2
     return-object v2
 .end method
+
+# filled-new-array/range {v0 .. v2} -- dexllm#97: every register of the range is
+# an element (the IR kept the bounds only), and dexllm#117: each zero is null
+.method public static rangeNulls()[Ljava/lang/Object;
+    .registers 4
+    const/4 v0, 0x0
+    const-string v1, "a"
+    const/4 v2, 0x0
+    filled-new-array/range {v0 .. v2}, [Ljava/lang/Object;
+    move-result-object v3
+    return-object v3
+.end method
+
+# filled-new-array/range {v0 .. v0} -- a range of ONE: DAD's two-bounds form
+# put the same register in twice
+.method public static rangeOne()[I
+    .registers 2
+    const/4 v0, 0x7
+    filled-new-array/range {v0 .. v0}, [I
+    move-result-object v1
+    return-object v1
+.end method
+
+# filled-new-array/range {v0 .. v1} -- a range of TWO: the one width the
+# two-bounds form happened to get right (the control)
+.method public static rangeTwo()[I
+    .registers 3
+    const/4 v0, 0x7
+    const/4 v1, 0x6
+    filled-new-array/range {v0 .. v1}, [I
+    move-result-object v2
+    return-object v2
+.end method

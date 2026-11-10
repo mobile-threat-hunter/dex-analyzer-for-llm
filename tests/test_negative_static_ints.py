@@ -105,10 +105,9 @@ def test_the_declaration_and_the_inlined_read_agree(fixture_decls) -> None:
     on every negative one (`255` beside `-1`).
 
     Compared by VALUE via `int(x, 0)`, because BYTE renders as `-0x1` in a
-    declaration and `-1` in a body - two spellings, one value. The body's array
-    initializer is itself mis-structured (a pre-existing, DAD-faithful
-    `filled-new-array/range` limitation recorded in CLAUDE.md), so only the
-    `valueOf(...)` arguments are read, in order, which that defect leaves intact.
+    declaration and `-1` in a body - two spellings, one value. Only the
+    `valueOf(...)` arguments are read, in order (the array initializer kept two
+    of its fifteen elements until dexllm#97; the read did not depend on that).
 
     Coverage is thinner than one-per-field: d8 SHARES constants, so one
     `const/4 #-1` feeds the SHORT, INT and BYTE `-1` reads, and `CHAR_0X80`'s

@@ -337,7 +337,7 @@ initializers, and the controls that must NOT gain an `L` — an int at the `(I)`
 overload, an int static, a `const-wide` at a double parameter, and double / float
 bits under a `double-to-int` / `neg-double` / `neg-float`. It is part of this project and carries this project's licence.
 
-`filled-null.dex` (md5 `ed2a8beb64a686d7fcba2f118d3a48b1`) was written for dexllm#117
+`filled-null.dex` (md5 `3a21961b8a623693bad6a778f63c96be`) was written for dexllm#117
 and assembled from the committed `filled-null.smali` with the smali 3.0.9 assembler
 bundled in jadx 1.5.3 (`java -cp jadx-1.5.3-all.jar
 com.android.tools.smali.smali.Main a filled-null.smali -o filled-null.dex`, OpenJDK
@@ -345,5 +345,7 @@ com.android.tools.smali.smali.Main a filled-null.smali -o filled-null.dex`, Open
 `Object[]` (the issue's `HandlerDispatcherKt.asHandler` shape), a `null` first in a
 `String[]`, a `null` in an `int[][]`, the `int[]` control whose `0` stays `0`, a
 nonzero int in an `Object[]` that must stay an int, and one `const/4 v0, 0` read by
-both an `int[]` and an `Object[]`. No committed fixture carried a null element
-before it. It is part of this project and carries this project's licence.
+both an `int[]` and an `Object[]`; dexllm#97 added `rangeNulls`, a
+`filled-new-array/range {v0 .. v2}` whose middle register is a string and whose
+ends are nulls, plus `rangeOne` (a range of one, which the two-bounds form
+duplicated) and `rangeTwo` (a range of two, the one width it got right). No committed fixture carried a null element before it. It is part of this project and carries this project's licence.

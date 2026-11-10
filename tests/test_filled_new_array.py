@@ -24,9 +24,9 @@ _DATA = REPO_ROOT / "tests" / "data"
 _FILLED = re.compile(r"\bnew \S+?(?:\[\])+ \{")
 
 # (fixture, method, the rendered line) - pinned LITERALLY so an edit of the
-# rule cannot move the expectation with it. `new Object[] {v1, ...}` in
-# NegativeStatics.all() is filled-new-array/RANGE, whose two-register element
-# list is the separate DAD-faithful defect dexllm#97.
+# rule cannot move the expectation with it. NegativeStatics.all() is
+# filled-new-array/RANGE, which kept only its two bound registers until
+# dexllm#97.
 _PINNED = [
     (
         "bool-return.dex",
@@ -47,7 +47,15 @@ _PINNED = [
     (
         "negative-statics.dex",
         "LNegativeStatics;->all()[Ljava/lang/Object;",
-        "return new Object[] {v1, Byte.valueOf(((byte) -1))};",
+        # the /range form: all 15 elements since dexllm#97 (it kept the first
+        # and last register only, and the rest became bare statements)
+        "return new Object[] {Short.valueOf(((short) -1)), Short.valueOf(((short) "
+        "-32768)), Integer.valueOf(-1), Integer.valueOf(-128), Integer.valueOf(128), "
+        "Integer.valueOf(-16777216), Integer.valueOf(-2147483648), "
+        "Integer.valueOf(2147483647), Long.valueOf(-1L), "
+        "Long.valueOf(-9223372036854775808L), Long.valueOf(-4294967296L), "
+        "Long.valueOf(255L), Character.valueOf(((char) 128)), "
+        "Character.valueOf(((char) 65535)), Byte.valueOf(((byte) -1))};",
     ),
 ]
 
