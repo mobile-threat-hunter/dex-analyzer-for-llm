@@ -287,4 +287,24 @@ void PlaceDeclarations(Graph& graph,
                        const std::unordered_map<std::string, IRFormPtr>& dvars,
                        const ChainMap& du, const ChainMap& ud);
 
+// Beyond-DAD (dexllm#121): `new-instance vA` makes an UNINITIALIZED reference
+// and `invoke-direct {vA, ...} <init>` initializes that same object in place,
+// so a `move-object vD, vA` between the two copies a reference that, once the
+// constructor has run, IS the constructed object. DAD models the constructor as
+// a fresh definition of vA alone (`vA = vA.<init>(...)`), which leaves vD reading
+// the pre-construction definition: RegisterPropagation then cannot fold
+// `new X` into its <init> (the allocation has two uses) and the Writer renders
+// the constructor as a call on a variable, `vA(args)`.
+//
+// Within one basic block, runs the <init> on the allocation's own register
+// (d8's /range form names a COPY as the receiver) and hoists every copy to just
+// after it, so each copy reads the constructed value. Moving it is semantics-preserving because an
+// uninitialized reference admits no use but a move and its own <init> (ART's
+// method verifier); the pass also refuses whenever an instruction in between
+// reads or writes vA or a copy's destination, or the <init> is not in the same
+// block, so on a crafted dex that breaks that rule it does nothing.
+// Runs after Construct and before BuildDefUse; returns true iff it reordered
+// anything (the caller then renumbers the graph).
+bool HoistUninitializedCopies(Graph& graph);
+
 }  // namespace dexkit::dad

@@ -101,6 +101,9 @@ bool DvMethod::BuildProcessedGraph() {
         // Construct returned empty — caller falls back to signature-only.
         return false;
     }
+    // Beyond-DAD (dexllm#121): a copy of an uninitialized new-instance reads
+    // the constructed object; hoist it past the <init> before any chain is built.
+    if (HoistUninitializedCopies(*graph_)) graph_->number_ins();
 
     // 3. Dataflow analyses.
     //    lparams as string keys (DAD uses int keys; we use "v<N>").

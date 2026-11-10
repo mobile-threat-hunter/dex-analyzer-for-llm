@@ -3926,4 +3926,142 @@ void PlaceDeclarations(
     }
 }
 
+
+// Does any path from `ins[from..]` of `start` read `reg` before writing it?
+// Follows normal and exception edges; a block reached a second time adds
+// nothing. Used by HoistUninitializedCopies (dexllm#121) to drop a copy no one
+// reads -- a dead definition keeps the register from being split by version.
+static bool RegReadLater(Graph& graph, BasicBlock* start, size_t from,
+                         const std::string& reg) {
+    std::vector<std::pair<NodeBase*, size_t>> work{{start, from}};
+    std::set<NodeBase*> seen;
+    while (!work.empty()) {
+        auto [node, pos] = work.back();
+        work.pop_back();
+        auto* bb = dynamic_cast<BasicBlock*>(node);
+        bool killed = false;
+        if (bb) {
+            const auto& ins = bb->get_ins();
+            for (size_t k = pos; k < ins.size(); ++k) {
+                auto used = ins[k]->get_used_vars();
+                if (std::find(used.begin(), used.end(), reg) != used.end())
+                    return true;
+                auto lhs = ins[k]->GetLhsId();
+                if (lhs && *lhs == reg) { killed = true; break; }
+            }
+        }
+        if (killed) continue;
+        for (NodeBase* s : graph.all_sucs(node))
+            if (seen.insert(s).second) work.push_back({s, 0});
+    }
+    return false;
+}
+
+// Beyond-DAD (dexllm#121) — see the declaration in dataflow.h.
+bool HoistUninitializedCopies(Graph& graph) {
+    bool changed = false;
+    for (NodeBase* node : graph.nodes) {
+        auto* bb = dynamic_cast<BasicBlock*>(node);
+        if (!bb) continue;
+        auto& ins = bb->get_ins();
+        for (size_t i = 0; i < ins.size(); ++i) {
+            auto* alloc = dynamic_cast<AssignExpression*>(ins[i].get());
+            if (!alloc || !alloc->lhs() ||
+                !dynamic_cast<NewInstance*>(alloc->rhs().get()))
+                continue;
+            // Every register holding the uninitialized object, in the order it
+            // acquired it: the allocation's own, then each copy's destination.
+            std::vector<std::string> aliases{*alloc->lhs()};
+            auto is_alias = [&](const std::string& v) {
+                return std::find(aliases.begin(), aliases.end(), v) !=
+                       aliases.end();
+            };
+            std::vector<size_t> copies;  // positions of `vD = <alias>`
+            size_t init_at = 0;
+            for (size_t k = i + 1; k < ins.size(); ++k) {
+                IRForm* cur = ins[k].get();
+                auto lhs = cur->GetLhsId();
+                auto used = cur->get_used_vars();
+                auto* mv = dynamic_cast<MoveExpression*>(cur);
+                if (mv && mv->move_kind() == MoveKind::Object && lhs &&
+                    !is_alias(*lhs) && used.size() == 1 && is_alias(used[0])) {
+                    copies.push_back(k);
+                    aliases.push_back(*lhs);
+                    continue;
+                }
+                auto* as = dynamic_cast<AssignExpression*>(cur);
+                auto* inv = as ? dynamic_cast<InvokeInstruction*>(as->rhs().get())
+                               : nullptr;
+                if (inv && inv->name() == "<init>" && is_alias(inv->base()) &&
+                    lhs && *lhs == inv->base()) {
+                    // An alias may be the receiver only, never an argument.
+                    const auto& args = inv->args();
+                    if (std::none_of(args.begin(), args.end(), is_alias))
+                        init_at = k;
+                    break;
+                }
+                const bool touches = (lhs && is_alias(*lhs)) ||
+                                     std::any_of(used.begin(), used.end(), is_alias);
+                if (touches) break;  // give up on this allocation
+            }
+            if (!init_at || copies.empty()) continue;
+
+            auto* init = static_cast<AssignExpression*>(ins[init_at].get());
+            auto* ctor = static_cast<InvokeInstruction*>(init->rhs().get());
+            const std::string a0 = aliases.front();  // the allocation's register
+            const IRFormPtr a0_var = alloc->var_map.at(a0);
+            const std::string recv = *init->lhs();
+            // The <init> runs on the ALLOCATION's register, whichever alias the
+            // bytecode named: d8's /range form names a copy in the first
+            // register of the window, a scratch register that holds other
+            // values elsewhere in the method, so making it the object's home
+            // would hand every later reader the scratch register's type.
+            if (recv != a0) {
+                ctor->replace_var(recv, a0_var);
+                init->replace_lhs(a0_var);
+            }
+            // The rebuilt run: everything that is not a copy, in order (the
+            // allocation stays where it was); the <init>; then one `vX = vA` per
+            // other alias, in the order the aliases arose.
+            std::vector<IRFormPtr> rebuilt;
+            std::set<size_t> cset(copies.begin(), copies.end());
+            for (size_t k = i; k <= init_at; ++k)
+                if (!cset.count(k)) rebuilt.push_back(ins[k]);
+            for (size_t k : copies) {
+                const std::string x = *ins[k]->GetLhsId();
+                const IRFormPtr x_var = ins[k]->var_map.at(x);
+                // The receiver's copy was READ by the <init> it fed; re-made
+                // after it, nothing may read it, and a dead definition would
+                // leave the register unsplit, so its other versions inherit the
+                // object's type (d8's /range receiver is a scratch register).
+                // Keep it only if some path reads the register first.
+                if (x == recv && x != a0 &&
+                    !RegReadLater(graph, bb, init_at + 1, x)) {
+                    rebuilt.push_back(nullptr);  // placeholder, removed below
+                    continue;
+                }
+                // MoveExpression's ctor applies DAD's last-write rule
+                // (lhs.set_type(rhs.get_type())); Construct already ran every
+                // write of this register in order, so a write made now would
+                // be the LAST and would win -- keep the type Construct left.
+                const std::string kept = x_var->get_type();
+                auto mv = std::make_shared<MoveExpression>(x_var, a0_var);
+                x_var->set_type(kept);
+                mv->set_move_kind(MoveKind::Object);
+                mv->source_byte_off = ins[k]->source_byte_off;
+                rebuilt.push_back(mv);
+            }
+            const size_t dropped = static_cast<size_t>(
+                std::count(rebuilt.begin(), rebuilt.end(), nullptr));
+            rebuilt.erase(std::remove(rebuilt.begin(), rebuilt.end(), nullptr),
+                          rebuilt.end());
+            std::copy(rebuilt.begin(), rebuilt.end(), ins.begin() + i);
+            ins.erase(ins.begin() + i + rebuilt.size(),
+                      ins.begin() + i + rebuilt.size() + dropped);
+            changed = true;
+        }
+    }
+    return changed;
+}
+
 }  // namespace dexkit::dad

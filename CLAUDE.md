@@ -1787,8 +1787,8 @@ use, RegisterPropagation no longer folds the `new` into the `<init>`, and the
 existing rendering of an `<init>` on a variable appears:
 `X.SRC = v2_17("SRC", 1);` — invalid Java — on 27 more lines of
 `BlendModeCompat.<clinit>` (corpus-wide `= new X;` lines 455 → 482, the classes
-affected unchanged at 256). The `$VALUES` array, which lost 27 of 29 elements
-before, is now complete. A second, pre-existing RP limitation reaches the new
+affected unchanged at 256) — dexllm#121, FIXED in the section below. The
+`$VALUES` array, which lost 27 of 29 elements before, is now complete. A second, pre-existing RP limitation reaches the new
 elements too: side-effect order across an array initializer is not preserved
 (`v2=c(); v1=b(); v0=a()` renders `{a(), b(), c()}`, as it already did for plain
 `filled-new-array` and `invoke/range`).
@@ -1806,6 +1806,102 @@ short, the range starting one late, and DAD's first-and-last via the new
 signature; a reviewer added a reversed-order mutant, killed by the pinned
 literals (the count oracle is order-blind by design). Two reviewers, 0 defects in
 the change.
+
+### A copy of an uninitialized `new-instance` reads the constructed object (dexllm#121, 2026-11-10)
+
+`new-instance vA` makes an UNINITIALIZED reference and `invoke-direct <init>`
+initializes that same object in place, so after the constructor every copy of
+vA refers to the constructed object. DAD models the constructor as a fresh
+definition of the receiver alone (`vR = vR.<init>(...)`), so a `move-object`
+copy taken BEFORE the constructor kept reading the pre-construction definition:
+the allocation had two uses, RegisterPropagation could not fold `new X` into its
+`<init>`, and the Writer rendered `X v = new X;` then `v(args);` — invalid Java,
+in text and AST alike. d8 emits two shapes: the enum `<clinit>` copies each
+constant before its constructor (`BlendModeCompat`, made visible by dexllm#97),
+and the far more common `/range` form copies the allocation into the first
+register of the window and runs `<init>` on the COPY
+(`new-instance v7; move-object v0, v7; invoke-direct/range {v0 .. v6}`).
+
+**Fix — `HoistUninitializedCopies` ([dataflow.cpp](native/dad_cpp/dataflow.cpp)),
+after Construct and before BuildDefUse, beyond-DAD.** Within one basic block it
+collects the allocation's register and every `move-object` copy of it (copies of
+copies included), refuses as soon as any other instruction reads or writes one of
+them, and finds the `<init>` whose receiver is one of them (an alias may not be an
+argument). It then runs the `<init>` on the ALLOCATION's register and puts every
+copy after it as `vD = vA` — except the receiver's own copy when no path reads
+that register again before writing it (a small CFG walk over normal and
+exception edges), which is dropped. Sound on verified Dalvik because an uninitialized
+reference admits no use but a move and its own `<init>` (ART's method verifier);
+on a crafted dex that breaks that rule the refusal leaves the method as before.
+The graph is renumbered when anything moved. No `*DADFaithful` sibling — no parity
+suite builds this shape.
+
+**Three decisions review reversed.** (1) The first cut retargeted
+the allocation to the RECEIVER register. The `/range` receiver is a d8 scratch
+register that holds other values elsewhere, so every later reader got that
+register's last-written type, a real-corpus regression an adversarial reviewer
+CONFIRMED (`a2dp.Vol.service v17 = new android.content.Intent(...)` in
+`service.DoDisconnected`; 31 new `T v = new U(` mismatches). The object's home is
+now the allocation's register. (2) A rebuilt move is made after Construct, and
+MoveExpression's ctor applies DAD's last-write rule (`lhs.set_type`), so it would
+be the LAST write and win; each restores the type Construct left. Measured, that
+restoration moves 4 corpus classes, two each way (both are pre-existing register
+conflations — `DiffUtil`'s wrong `DiffResult v10_1 = v3_11` is OFF's line too) —
+it is kept because it keeps the pass from changing any type state at all. (3) A
+DELTA review then CONFIRMED that keeping the type was itself a leak whenever the
+receiver's re-made copy is DEAD: the copy used to be read by the `<init>`, so the
+register had two version groups and SplitVariables typed its unrelated int
+version from its own def; re-made after the `<init>` with no reader, the copy
+leaves one group, the register stays unsplit, and the int takes the object's type
+(kotlin `FileTreeWalk$…$TopDownDirectoryState.step`: `AccessDeniedException
+v2_5 = null; … v2_5 = 1`; `NotificationCompat$CarExtender`: an `int` loop counter
+declared as an `UnreadConversation`). Dropping a dead receiver copy fixes both.
+
+**Measured (a/b OFF=`7a5317b6` — HEAD, bit-reproduced — vs ON=`b021ce90`, SAME
+capture):** 52 sources (bundled corpus + committed fixtures) → **272 classes
+change on 10 sources**; `= new X;` lines **482 → 51**; a constructor rendered as a
+call on a variable **478 → 49**; decompiled lines 2,322,795 → 2,322,036. Oracle
+over every changed class: **0** gained a call-on-variable line, **0** lost a
+`new T` occurrence for any T, and `T v = new U(` declarations (T≠U, T≠Object)
+**796 → 794** with **0 classes worse**, and — the axis the delta review used —
+a register's declared type within one method changes to a type it did not have
+OFF in exactly 2 places: `SpliceInsertCommand` (`ArrayList v18 = emptyList()` →
+`List`, an improvement) and `AlertParams.createListView`'s `v1_2`, a genuine
+merge of four adapter types where OFF's `CheckedItemAdapter` and ON's
+`SimpleCursorAdapter` are equally wrong (neither is the common supertype). The control-flow skeleton (try / catch /
+if / loop / switch / return lines per method) moves in exactly ONE method, see
+below. Both reviewers re-derived the counts on their own builds. parity
+29/29, pytest 2010+/24, sweep 21,374-class 0-crash GATE: PASS, determinism 3
+`PYTHONHASHSEED`s → one digest, lint trio clean.
+
+**Exposed, pre-existing, NOT fixed here:** `La2dp/Vol/main;->onCreate` (in two
+APKs) now wraps the rest of the method in its first `try`. The cause reproduces
+with NO copy at all (two sequential `new X(); try { use(x) }`): RegisterPropagation
+moves a constructor — a call that can throw — into the following try block, and
+the emptied pre-try node mis-scopes CatchStruct. This fix makes one more method
+reach it — **dexllm#122**, shipped with the user's agreement. Also recorded: `MoveExpression::has_side_effect()` is always false
+(DAD), so RP can carry a folded constructor past a side-effecting statement —
+reproduces on HEAD, 0 corpus instances found — **dexllm#123**; and the 51 residual `= new X;` are
+mostly cross-block (`new` before a branch that chooses an argument), outside the
+pass's one-block scope.
+
+**Guards:** [tests/test_init_alias.py](tests/test_init_alias.py) on the twelfth
+AUTHORED fixture `tests/data/init-alias.smali`: one copy into `$VALUES`, a copy
+only, the `/range` receiver-is-the-copy form, a copy chain, a receiver register
+that held an argument before its copy, a copy that survives as its own statement
+in a register later used as an int, a `/range` receiver later reused as a String,
+a dead `/range` receiver copy (an int elsewhere; also written then read after the
+`<init>`), a live one read in another block and one read only by an exception
+handler, the refusals (alias as an argument, a read in between, a plain `move`,
+the allocation in the `this` register, a cross-block `<init>`) pinned as
+rendered, the AST (one `ClassInstanceCreation`, no `<init>` invocation), the D-3
+offset of a rebuilt copy, and corpus cases (`BlendModeCompat`, `RegexOption`, the
+`MaterialCalendar` type). **18 mutants, each BUILT with a distinct `.so` md5,
+control asserted after: 16 killed** (one by a crash of the pass), and two are
+output-equivalent on the whole corpus, measured over the 272 changed classes: the
+rebuilt move's `MoveKind::Object` not set (0 classes differ), and the liveness
+walk not stopping at a write (21 classes differ only in variable version
+numbers — a dead copy kept where the register is split anyway).
 
 ### Production fix — reused `this` register materialised as a local (`this = X` → valid, 2026-07-03)
 

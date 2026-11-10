@@ -349,3 +349,23 @@ both an `int[]` and an `Object[]`; dexllm#97 added `rangeNulls`, a
 `filled-new-array/range {v0 .. v2}` whose middle register is a string and whose
 ends are nulls, plus `rangeOne` (a range of one, which the two-bounds form
 duplicated) and `rangeTwo` (a range of two, the one width it got right). No committed fixture carried a null element before it. It is part of this project and carries this project's licence.
+
+`init-alias.dex` (md5 `b4ab7fb7064847bf8534c2131a8ece78`) was written for dexllm#121
+and assembled from the committed `init-alias.smali` with the smali 3.0.9 assembler
+bundled in jadx 1.5.3 (`java -cp jadx-1.5.3-all.jar
+com.android.tools.smali.smali.Main a init-alias.smali -o init-alias.dex`, OpenJDK
+17.0.17). Each method takes a `move-object` copy of an uninitialized
+`new-instance` before its `<init>`, in one of these shapes:
+- the enum `$VALUES` shape (one copy into an array) and a copy only;
+- d8's `/range` form, where the `<init>` runs on the copy;
+- a copy of a copy;
+- a receiver register that held an argument before it became the copy;
+- a copy that survives as its own statement in a register later used as an int;
+- a `/range` receiver that is later a String, is dead (an int elsewhere, also
+  written then read), is read in another block, or is read only by an
+  exception handler.
+
+The refusals are also pinned as rendered: an alias passed as an argument, an
+alias read in between, a plain `move`, the allocation landing in the `this`
+register, and a cross-block `<init>`. There are two controls with no copy. It is
+part of this project and carries this project's licence.
