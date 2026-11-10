@@ -1879,7 +1879,8 @@ APKs) now wraps the rest of the method in its first `try`. The cause reproduces
 with NO copy at all (two sequential `new X(); try { use(x) }`): RegisterPropagation
 moves a constructor — a call that can throw — into the following try block, and
 the emptied pre-try node mis-scopes CatchStruct. This fix makes one more method
-reach it — **dexllm#122**, shipped with the user's agreement. Also recorded: `MoveExpression::has_side_effect()` is always false
+reach it — **dexllm#122**, shipped with the user's agreement (FIXED in the
+section below). Also recorded: `MoveExpression::has_side_effect()` is always false
 (DAD), so RP can carry a folded constructor past a side-effecting statement —
 reproduces on HEAD, 0 corpus instances found — **dexllm#123**; and the 51 residual `= new X;` are
 mostly cross-block (`new` before a branch that chooses an argument), outside the
@@ -1902,6 +1903,98 @@ output-equivalent on the whole corpus, measured over the 272 changed classes: th
 rebuilt move's `MoveKind::Object` not set (0 classes differ), and the liveness
 walk not stopping at a write (21 classes differ only in variable version
 numbers — a dead copy kept where the register is split anyway).
+
+### Back-to-back tries are siblings; a local is declared where its uses can see it (dexllm#122, 2026-11-11)
+
+Filed as "RegisterPropagation moves a constructor into the following try". The
+root turned out to be in **CatchStruct**, with two coupled defects behind it,
+and androguard DAD renders every one of them identically.
+
+**1. A try's follow was never remapped.** When a try's handlers rejoin exactly
+at the next try's first block, CatchStruct set the first TryBlock's
+`try_follow` to that block, which a LATER TryBlock then wrapped. DAD never
+remaps it — its TryBlocks are not in `graph.nodes` — so the emit walk did not
+stop at the second try and rendered it, and everything after it including the
+method's `return`, INSIDE the first (reproduces with no statement at all
+between the tries). Fixed in CatchStruct's final loop, beyond-DAD, with two
+exclusions an adversarial review CONFIRMED as regressions of the first cut:
+**nested regions** (one of the first try's handlers also covers the follow
+block — Java's `try { a(); try { b(); } catch .. } catch ..`, where the stale
+follow is what keeps the inner try inside the outer) and **a try at a loop
+header** (the loop body is walked over the header's one-way edges, so a remap
+splits the loop between the two tries; left as before — that shape is still
+mis-structured, as OFF).
+
+**2. RegisterPropagation moved a throwing call between exception contexts.**
+A side-effecting rhs is no longer propagated between blocks whose catch-edge
+handler lists differ (`SameExceptionHandlers`): `new IntentFilter(..)` before
+a `try` stays before it instead of being folded into its use inside, which
+changed which handler catches it and emptied the block the try was anchored on
+(`Caller.doGet` rendered an empty `try {}` with the real request inside the
+catch).
+
+**3. Both made Java SCOPE visible, so locals are now declared before the try.**
+Splitting a wrongly nested try, and keeping a constructor outside it, put
+uses of a try-body local after the try's closing brace — the "nesting" had
+been keeping them in scope by accident. `ScopeEscapingDefs`
+([dataflow.cpp](native/dad_cpp/dataflow.cpp)), called by `Writer::EmitTry`
+and `JSONWriter::visit_try_node` (text and AST share it), declares before
+`try {` every local the try body or one of its catches defines and code
+outside that body touches, plus PlaceDeclarations' `var_to_declare` entries
+that land inside the body for such a variable. A body's region is what the
+emitter will write inside it: nodes reached from its start over `sucs`, a
+LoopBlock's `cond_node`, a nested TryBlock's start and catches and a
+CatchBlock's start, stopping at emitter-visited nodes, the try's follow and
+every follow-stack entry. Never a parameter, `this`, or a catch variable (its
+declaration IS the `catch (T v)` — a delta review CONFIRMED the double
+declaration). The facts are indexed once per method (`BuildScopeIndex`, the
+first cut was O(tries × instructions)) and the declarations are ordered by
+(first-definition loc, name) — the first cut iterated a pointer-hashed set
+and was nondeterministic, with text and AST in different orders (CONFIRMED by
+the delta review, and by the author's own determinism run). Writer-side by
+design: Java scope is a property of the emitted brace structure, which only
+the emitters create; the IR has none.
+
+**Measured (a/b OFF=`b125ab2a` = v0.30.0, ON=`b8a2ab02`, SAME capture, 53
+sources):** 1,283 classes change, decompiled lines 2,322,235 → 2,324,697.
+Empty `try {}` bodies **49 → 11** (0 methods gain one). Uses of a local after
+the block it was declared in closed (a heuristic brace-scope oracle), over
+changed classes: **7,355 → 3,009** (2 classes worse: exoplayer `CacheUtil`,
+jamendo `AlbumBuilder`). javac over the 898 changed top-level classes
+(android.jar, `-XDshould-stop.ifError=FLOW`): errors **48,536 → 45,139**;
+cannot-find-symbol 35,861 → 31,383; missing return 129 → 116;
+`might not have been initialized` 405 → 1,226 (a hoisted `Type v;` that javac's
+definite-assignment rule cannot see is always written on a verified path —
+deliberately not given an invented initializer); `unreported exception`
+1,533 → 1,821 (calls now stay outside the try, where the bytecode has them; the
+decompiler emits no `throws` clause — pre-existing gap); `already defined`
+45 → 49 (one exoplayer method where a try nested in a catch reuses the catch
+variable's name — the #114 catch-rejoin shape). Oracles: 0 new
+call-on-variable lines, `T v = new U(` mismatches 794 → 769 with 0 classes
+worse. parity 29/29, pytest 2055/24, TRUE corpus-less 1613/466/0, narrowed
+1922/157, sweep 21,374-class 0-crash GATE: PASS, determinism 4
+`PYTHONHASHSEED`s over text AND AST → one digest, lint trio + boundary clean.
+
+**Guards:** [tests/test_two_tries.py](tests/test_two_tries.py) on the
+thirteenth AUTHORED fixture `tests/data/two-tries.smali`: back-to-back tries
+(with a constructor, a constant, nothing, three in a row, the first ending in
+an `if`), the nested and loop-header shapes pinned as left alone, hoisting
+after the try / into the catch / from a shared catch def / not when the catch
+returns, the hoist order (text and AST), a catch variable never hoisted, the
+AST's sibling TryStatements and declaration nodes, the a2dp `onCreate` corpus
+case, and a corpus brace-scope ceiling on five classes each of which moves
+under a different half of the region walk being disabled.
+`test_polymorphic_ir`'s result-type guard now also reads a hoisted
+declaration. **16 mutants, each BUILT with a distinct `.so` md5, control
+asserted after: 14 killed**; two are equivalent in what they guard — ordering
+the hoists by name alone (still a total order) and not stopping the region
+walk at visited nodes (3 classes change, no scope effect).
+
+**Residuals, recorded:** a try at a loop header (as OFF); two handlers
+rejoining one shared tail (#114); a definition reached only over an exception
+edge is lost (`hoistIntoCatch`'s `v0 = null`, as OFF); a catch-body local used
+after the try where the region walk cannot attribute it; a non-side-effecting
+throwing rhs (field get, array access) can still cross handlers.
 
 ### Production fix — reused `this` register materialised as a local (`this = X` → valid, 2026-07-03)
 

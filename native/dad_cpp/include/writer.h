@@ -108,6 +108,9 @@ private:
     // ─── State ───────────────────────────────────────────────────────────
     const MethodSnapshot* snap_;
     const Graph* graph_;
+    // dexllm#122 — ScopeEscapingDefs' per-method index, built at the first try.
+    std::shared_ptr<const struct ScopeIndex> scope_index_;
+    const struct ScopeIndex* ScopeIndexFor();
     std::ostringstream buffer_;
     int indent_ = 0;
     int depth_ = 0;  // VisitNode recursion depth (stack-overflow guard)

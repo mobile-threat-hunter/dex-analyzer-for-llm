@@ -28,6 +28,7 @@
 
 #include <cstddef>
 #include <functional>
+#include <memory>
 #include <set>
 #include <string>
 #include <unordered_map>
@@ -306,5 +307,25 @@ void PlaceDeclarations(Graph& graph,
 // Runs after Construct and before BuildDefUse; returns true iff it reordered
 // anything (the caller then renumbers the graph).
 bool HoistUninitializedCopies(Graph& graph);
+
+// Beyond-DAD (dexllm#122): the locals a `try` statement must declare BEFORE
+// itself. Java scopes a local to the block it is declared in and the emitters
+// declare a local at its first assignment, so a local defined in the try body
+// (or in one of its catches) and read anywhere outside that body names nothing
+// there. `bodies` are the try's start and each catch's start; a body's region is
+// what the emitter will write inside it -- the nodes reached from its start
+// without passing a node `stop` says belongs to an enclosing structure (a
+// follow, or a node already written). Every other instruction in the method
+// counts as outside, so a use the walk cannot attribute (a short-circuit
+// condition) only ever adds a declaration, which is still valid Java. Returns
+// undeclared Variables, never a parameter, `this` or a catch variable (its
+// declaration is the `catch (T v)` itself), ordered by first definition loc
+// then name -- a total order, independent of pointer values.
+struct ScopeIndex;  // built once per emission (BuildScopeIndex)
+std::shared_ptr<const ScopeIndex> BuildScopeIndex(const Graph& graph);
+std::vector<Variable*> ScopeEscapingDefs(
+    const Graph& graph, const ScopeIndex& index,
+    const std::vector<NodeBase*>& bodies,
+    const std::function<bool(NodeBase*)>& stop);
 
 }  // namespace dexkit::dad

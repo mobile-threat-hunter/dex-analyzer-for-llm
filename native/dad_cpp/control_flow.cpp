@@ -716,6 +716,39 @@ void CatchStruct(Graph& graph,
     for (NodeBase* n : graph.nodes) {
         n->UpdateAttributeWith(node_map);
     }
+    // Beyond-DAD (dexllm#122): two tries BACK TO BACK -- the first's handlers
+    // rejoin exactly at the second's first block -- leave the first TryBlock's
+    // follow naming a block a LATER TryBlock wrapped. DAD never remaps it (its
+    // TryBlocks are not in graph.nodes), so the emit walk did not stop at the
+    // second try and rendered it, and everything after it, INSIDE the first.
+    //
+    // Only back to back, and not from a loop header (below). When the follow block is ALSO covered by one of the
+    // first try's own handlers, the second try is NESTED in the first (Java's
+    // `try { a(); try { b(); } catch .. } catch ..`, whose outer region is split
+    // around the inner one); there the stale follow is what keeps the inner try
+    // inside the outer, so it is left as it was.
+    for (NodeBase* n : graph.nodes) {
+        auto* tb = dynamic_cast<TryBlock*>(n);
+        if (!tb) continue;
+        auto f = node_map.find(tb->try_follow);
+        if (f == node_map.end()) continue;
+        // A try that starts at a LOOP header (WhileBlockStruct already wrapped
+        // it): the follow lies on the loop's body, which the Writer walks over
+        // the header's one-way edges to RAW blocks, not through this follow.
+        // Remapping it there splits the loop across the two tries; leave it.
+        if (dynamic_cast<LoopBlock*>(tb->try_start)) continue;
+        bool nested = false;
+        if (auto ce = graph.catch_edges.find(f->first);
+            ce != graph.catch_edges.end()) {
+            for (NodeBase* c : tb->catch_nodes) {
+                auto* cb = dynamic_cast<CatchBlock*>(c);
+                if (cb && std::find(ce->second.begin(), ce->second.end(),
+                                    cb->catch_start) != ce->second.end())
+                    nested = true;
+            }
+        }
+        if (!nested) tb->try_follow = f->second;
+    }
     auto it = node_map.find(graph.entry);
     if (it != node_map.end()) graph.entry = it->second;
 }

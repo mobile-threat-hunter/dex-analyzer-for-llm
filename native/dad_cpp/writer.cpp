@@ -15,6 +15,7 @@
 #include <stdexcept>
 #include <string>
 
+#include "dataflow.h"  // ScopeEscapingDefs (dexllm#122)
 #include "mutf8.h"
 #include "opcode_ins.h"  // Op::EQUAL etc.
 #include "util.h"
@@ -1277,12 +1278,32 @@ void Writer::EmitSwitch(SwitchBlock* sw) {
     if (follow) VisitNode(follow);
 }
 
+const ScopeIndex* Writer::ScopeIndexFor() {
+    if (!scope_index_) scope_index_ = BuildScopeIndex(*graph_);
+    return scope_index_.get();
+}
+
 void Writer::EmitTry(TryBlock* tb) {
     // Conservative: returns inside try/catch bodies are kept (a return in a try
     // followed by a catch, or in a catch, is genuinely early). The try's follow
     // inherits the tail.
     const bool entry_tail = tail_pos_;
     tail_pos_ = false;
+    // Beyond-DAD (dexllm#122): a local the try body defines and code outside it
+    // reads is declared BEFORE the try -- Java scopes it to the block.
+    if (graph_) {
+        WriterImpl wi(this);
+        std::vector<NodeBase*> bodies{tb->try_start};
+        for (NodeBase* c : tb->catch_nodes)
+            if (auto* cb = dynamic_cast<CatchBlock*>(c)) bodies.push_back(cb->catch_start);
+        auto stop = [&](NodeBase* n) {
+            if (visited_.count(n) || n == tb->try_follow || n == next_case_) return true;
+            for (auto* st : {&loop_follow_, &if_follow_, &switch_follow_, &try_follow_, &latch_node_})
+                for (NodeBase* f : *st) if (f && f == n) return true;
+            return false;
+        };
+        for (Variable* v : ScopeEscapingDefs(*graph_, *ScopeIndexFor(), bodies, stop)) wi.visit_decl(v);
+    }
     WriteIndent(); Write("try {\n");
     IncIndent();
     try_follow_.push_back(tb->try_follow);

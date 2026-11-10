@@ -251,6 +251,20 @@ bool ClearPath(Graph& graph, const std::string& reg, int loc1, int loc2) {
 // =============================================================================
 // register_propagation — DAD dataflow.py:190
 // =============================================================================
+// Beyond-DAD (dexllm#122): do the blocks holding locs `a` and `b` have the same
+// exception handlers (catch edges, in order)?
+static bool SameExceptionHandlers(Graph& graph, int a, int b) {
+    NodeBase* na = graph.get_node_from_loc(a);
+    NodeBase* nb = graph.get_node_from_loc(b);
+    if (na == nb) return true;
+    auto ha = graph.catch_edges.find(na);
+    auto hb = graph.catch_edges.find(nb);
+    const bool ea = ha == graph.catch_edges.end() || ha->second.empty();
+    const bool eb = hb == graph.catch_edges.end() || hb->second.empty();
+    if (ea || eb) return ea == eb;
+    return ha->second == hb->second;
+}
+
 void RegisterPropagation(Graph& graph, ChainMap& du, ChainMap& ud) {
     bool change = true;
     while (change) {
@@ -320,6 +334,14 @@ void RegisterPropagation(Graph& graph, ChainMap& du, ChainMap& ud) {
                     }
                     if (orig_ins->has_side_effect()) {
                         if (!ClearPath(graph, /*reg=*/{}, loc, i)) continue;
+                        // Beyond-DAD (dexllm#122): a call can throw, and which
+                        // handler catches it is a property of the block it is
+                        // in. Moving it into a block with different handlers
+                        // (a constructor before a `try`, folded into its use
+                        // inside it) changes what the method does on an
+                        // exception -- and empties the block the try's
+                        // structuring was anchored on. DAD propagates anyway.
+                        if (!SameExceptionHandlers(graph, loc, i)) continue;
                     }
                     if (rhs) ins->replace(var, rhs);
 
@@ -4062,6 +4084,123 @@ bool HoistUninitializedCopies(Graph& graph) {
         }
     }
     return changed;
+}
+
+
+// Beyond-DAD (dexllm#122) — the per-method facts ScopeEscapingDefs needs,
+// gathered once: walking loc_to_ins again for every try made a method of many
+// tries quadratic.
+struct ScopeIndex {
+    std::unordered_map<const IRForm*, int> loc_of;
+    // every loc that defines or reads a variable id, ascending
+    std::unordered_map<std::string, std::vector<int>> touches;
+    std::unordered_map<std::string, int> first_def;
+    std::unordered_map<int, const IRForm*> at;
+    std::unordered_set<std::string> catch_vars;  // move-exception defs
+};
+
+std::shared_ptr<const ScopeIndex> BuildScopeIndex(const Graph& graph) {
+    auto ix = std::make_shared<ScopeIndex>();
+    std::vector<int> locs;
+    for (const auto& [loc, ins] : graph.loc_to_ins)
+        if (ins) locs.push_back(loc);
+    std::sort(locs.begin(), locs.end());
+    for (int loc : locs) {
+        const IRFormPtr& ins = graph.loc_to_ins.at(loc);
+        ix->loc_of.emplace(ins.get(), loc);
+        ix->at.emplace(loc, ins.get());
+        std::set<std::string> ids;
+        for (const auto& u : ins->get_used_vars()) ids.insert(u);
+        if (auto lhs = ins->GetLhsId()) {
+            ids.insert(*lhs);
+            ix->first_def.emplace(*lhs, loc);
+            if (dynamic_cast<const MoveExceptionExpression*>(ins.get()))
+                ix->catch_vars.insert(*lhs);
+        }
+        for (const auto& id : ids) ix->touches[id].push_back(loc);
+    }
+    return ix;
+}
+
+// Beyond-DAD (dexllm#122) — see the declaration in dataflow.h.
+std::vector<Variable*> ScopeEscapingDefs(
+        const Graph& graph, const ScopeIndex& ix,
+        const std::vector<NodeBase*>& bodies,
+        const std::function<bool(NodeBase*)>& stop) {
+    (void)graph;
+    std::map<std::pair<int, std::string>, Variable*> hoist;
+    std::unordered_set<Variable*> taken;
+    auto take = [&](Variable* v, int at) {
+        if (!v || v->declared || dynamic_cast<Param*>(v) ||
+            ix.catch_vars.count(v->Vid()) || !taken.insert(v).second)
+            return;
+        hoist.emplace(std::make_pair(at, v->Vid()), v);
+    };
+    for (NodeBase* body : bodies) {
+        if (!body) continue;
+        std::unordered_set<int> region;           // locs written inside
+        std::vector<int> region_locs;
+        std::vector<Variable*> region_decls;      // var_to_declare inside
+        std::vector<NodeBase*> work{body};
+        std::unordered_set<NodeBase*> seen{body};
+        auto push = [&](NodeBase* n) {
+            if (n && !stop(n) && seen.insert(n).second) work.push_back(n);
+        };
+        while (!work.empty()) {
+            NodeBase* n = work.back();
+            work.pop_back();
+            if (auto* bb = dynamic_cast<BasicBlock*>(n)) {
+                for (const auto& ins : bb->get_ins()) {
+                    if (!ins) continue;
+                    auto l = ix.loc_of.find(ins.get());
+                    if (l != ix.loc_of.end() && region.insert(l->second).second)
+                        region_locs.push_back(l->second);
+                }
+                for (const auto& d : bb->var_to_declare)
+                    if (auto* v = dynamic_cast<Variable*>(d.get()))
+                        region_decls.push_back(v);
+            }
+            if (auto* lb = dynamic_cast<LoopBlock*>(n)) push(lb->cond_node);
+            if (auto* tb = dynamic_cast<TryBlock*>(n)) {
+                push(tb->try_start);
+                for (NodeBase* c : tb->catch_nodes) push(c);
+            }
+            if (auto* cb = dynamic_cast<CatchBlock*>(n)) push(cb->catch_start);
+            for (NodeBase* s2 : graph.sucs(n)) push(s2);
+        }
+        auto escapes = [&](const std::string& id, int* first_out) {
+            auto t = ix.touches.find(id);
+            if (t == ix.touches.end()) return false;
+            for (int loc : t->second)
+                if (!region.count(loc)) {
+                    if (first_out) *first_out = loc;
+                    return true;
+                }
+            return false;
+        };
+        std::sort(region_locs.begin(), region_locs.end());
+        for (int loc : region_locs) {
+            const IRForm* ins = ix.at.at(loc);
+            auto lhs = ins->GetLhsId();
+            if (!lhs || !escapes(*lhs, nullptr)) continue;
+            auto it = ins->var_map.find(*lhs);
+            take(it == ins->var_map.end()
+                     ? nullptr : dynamic_cast<Variable*>(it->second.get()),
+                 loc);
+        }
+        // A declaration PlaceDeclarations put on a node inside the region, for
+        // a variable the region does not own: it would be written inside the
+        // braces and leave every outside def and use undeclared.
+        for (Variable* v : region_decls) {
+            int out = INT32_MAX;
+            if (!escapes(v->Vid(), &out)) continue;
+            auto fd = ix.first_def.find(v->Vid());
+            take(v, fd == ix.first_def.end() ? out : std::min(out, fd->second));
+        }
+    }
+    std::vector<Variable*> out;
+    for (auto& [key, v] : hoist) out.push_back(v);
+    return out;
 }
 
 }  // namespace dexkit::dad

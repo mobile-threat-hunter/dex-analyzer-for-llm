@@ -369,3 +369,19 @@ The refusals are also pinned as rendered: an alias passed as an argument, an
 alias read in between, a plain `move`, the allocation landing in the `this`
 register, and a cross-block `<init>`. There are two controls with no copy. It is
 part of this project and carries this project's licence.
+
+`two-tries.dex` (md5 `eda44a6701c47832c6b050f7eccc3d7d`) was written for dexllm#122 and assembled from the
+committed `two-tries.smali` with the smali 3.0.9 assembler bundled in jadx 1.5.3
+(`java -cp jadx-1.5.3-all.jar com.android.tools.smali.smali.Main a
+two-tries.smali -o two-tries.dex`, OpenJDK 17.0.17). It has tries back to back
+in four shapes: after a constructor, after a constant, with nothing between, and
+three in a row. It also has a first try that ends in an `if`, plus a nested try
+and a loop-header try, which must be left as they were. The rest are the
+declaration-hoisting cases:
+- a local read after its try, and one read in its catch;
+- a catch def and a normal-path def that meet in one return;
+- a catch that returns;
+- four locals defined in both arms of an if;
+- a catch variable written by a sibling handler.
+
+It is part of this project and carries this project's licence.

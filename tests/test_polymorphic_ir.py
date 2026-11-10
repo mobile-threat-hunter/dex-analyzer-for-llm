@@ -140,14 +140,25 @@ def test_the_result_type_comes_from_the_call_site() -> None:
     it needs a fixture with a live, non-`Object`, non-void polymorphic result.
     """
     dexllm, dk = _dk(_HANDLES)
-    lines = [
-        ln.strip()
-        for src in _decompile_all(dexllm, dk).values()
-        for ln in src.split("\n")
-        if "CONSUME.invokeExact(" in ln
-    ]
-    assert lines, "the fixture no longer carries a live polymorphic result"
-    assert all(ln.startswith("Object ") for ln in lines), lines
+    decls = []
+    for src in _decompile_all(dexllm, dk).values():
+        body = [ln.strip() for ln in src.split("\n")]
+        for ln in body:
+            if "CONSUME.invokeExact(" not in ln:
+                continue
+            var = ln.split(" = ", 1)[0].split()[-1]
+            # declared inline, or -- since dexllm#122 -- before the enclosing
+            # `try` when a catch reads the result too
+            decls += [d for d in body if d == ln and " " in ln.split(" = ")[0]]
+            decls += [
+                d
+                for d in body
+                if d.endswith(f" {var};")
+                and d.count(" ") == 1
+                and not d.startswith("return ")
+            ]
+    assert decls, "the fixture no longer carries a live polymorphic result"
+    assert all(d.startswith("Object ") for d in decls), decls
 
 
 def test_the_ast_and_the_text_agree_on_the_argument_count() -> None:

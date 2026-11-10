@@ -177,6 +177,9 @@ private:
     // ── State (DAD dast.py:30-40) ───────────────────────────────────────────
     const MethodSnapshot* snap_;
     const Graph* graph_;
+    // dexllm#122 — ScopeEscapingDefs' per-method index, built at the first try.
+    std::shared_ptr<const struct ScopeIndex> scope_index_;
+    const struct ScopeIndex* ScopeIndexFor();
     int depth_ = 0;  // visit_node recursion depth (stack-overflow guard)
     std::vector<AstValue> context_;
     std::vector<NodeBase*> loop_follow_{nullptr};

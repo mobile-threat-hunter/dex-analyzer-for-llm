@@ -16,6 +16,7 @@
 #include <stdexcept>
 #include <string>
 
+#include "dataflow.h"  // ScopeEscapingDefs (dexllm#122)
 #include "mutf8.h"
 #include "opcode_ins.h"  // Op::EQUAL
 #include "util.h"
@@ -700,7 +701,28 @@ void JSONWriter::visit_statement_node(StatementBlock* stmt) {
 }
 
 // DAD: dast.py:294 visit_try_node.
+const ScopeIndex* JSONWriter::ScopeIndexFor() {
+    if (!scope_index_) scope_index_ = BuildScopeIndex(*graph_);
+    return scope_index_.get();
+}
+
 void JSONWriter::visit_try_node(TryBlock* tb) {
+    // Beyond-DAD (dexllm#122): the same declarations the Writer hoists.
+    if (graph_) {
+        std::vector<NodeBase*> bodies{tb->try_start};
+        for (NodeBase* c : tb->catch_nodes)
+            if (auto* cb = dynamic_cast<CatchBlock*>(c)) bodies.push_back(cb->catch_start);
+        auto stop = [&](NodeBase* n) {
+            if (visited_nodes_.count(n) || n == tb->try_follow || n == next_case_) return true;
+            for (auto* st : {&loop_follow_, &if_follow_, &switch_follow_, &try_follow_, &latch_node_})
+                for (NodeBase* f : *st) if (f && f == n) return true;
+            return false;
+        };
+        for (Variable* v : ScopeEscapingDefs(*graph_, *ScopeIndexFor(), bodies, stop)) {
+            add(visit_decl(v));
+            v->declared = true;
+        }
+    }
     AstValue tryb = scope([&] {
         try_follow_.push_back(tb->try_follow);
         visit_node(tb->try_start);
