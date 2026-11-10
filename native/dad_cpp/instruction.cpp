@@ -1728,4 +1728,10 @@ std::string ArrayStorePositionType(std::string_view kind,
     return {};
 }
 
+std::string FilledArrayElementPositionType(std::string_view array_type) {
+    const bool ref = array_type.size() >= 2 && array_type[0] == '[' &&
+                     (array_type[1] == 'L' || array_type[1] == '[');
+    return ArrayStorePositionType(ref ? "O" : "", array_type);
+}
+
 }  // namespace dexkit::dad

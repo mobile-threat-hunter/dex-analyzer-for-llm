@@ -484,8 +484,11 @@ public:
         w_->Write("new ");
         w_->Write(GetType(atype));
         w_->Write(" {");
+        // dexllm#117: an element is a typed position like an aput-object one, so
+        // a `0` in a reference array is `null`.
+        const std::string elem = FilledArrayElementPositionType(atype);
         for (size_t i = 0; i < args.size(); ++i) {
-            visit_ins(args[i]);
+            if (!emit_const_at(ConstContext::Value, elem, args[i])) visit_ins(args[i]);
             if (i + 1 < args.size()) w_->Write(", ");
         }
         // DAD writer.py:652 writes '})' here, and nothing opens the ')' it

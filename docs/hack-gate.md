@@ -501,10 +501,11 @@ BOTH fails `flagChain` — killed.
   than appears, and corpus boolean/number moves fall (41 → 27). One corpus
   method gains an `int == boolean` (`GridLayoutManager.onFocusSearchFailed`,
   already invalid OFF).
-* **`filled-new-array` elements do not go through `ConstantAt`**:
-  `new Object[] {0}` stays an autoboxed `Integer` where the bytecode stores
-  `null`. Pre-existing and identical OFF; filed as dexllm#117 — neither dexllm#96
-  (the stray `)`, fixed) nor dexllm#97 (the `/range` element list).
+* **`filled-new-array` elements did not go through `ConstantAt`**:
+  `new Object[] {0}` stayed an autoboxed `Integer` where the bytecode stores
+  `null`. FIXED in dexllm#117 for a constant element; a `0` reaching the element
+  through a VARIABLE is still typed by the variable (a filled-array element is
+  not a use-bound type source), recorded there.
 * **A char / byte / short VARIABLE at a narrowing parameter** (`int v6_20`
   passed to `append(C)`): the type-inference pass has no `C` use source.
 * Adjacent, pre-existing, unchanged (164 lines OFF and ON): a reference

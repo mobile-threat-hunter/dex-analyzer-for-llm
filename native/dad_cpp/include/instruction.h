@@ -1240,4 +1240,14 @@ std::optional<ConstLiteral> ConstantAt(ConstContext ctx,
 std::string ArrayStorePositionType(std::string_view kind,
                                    std::string_view array_type);
 
+// The declared type of one `filled-new-array` ELEMENT, for `ConstantAt`
+// (dexllm#117): `ArrayStorePositionType` with the element kind read off the
+// array type — an `aput-object` position for a reference or array element, a
+// plain `aput` one otherwise. ART's runtime verifier lets the opcode build only
+// `int[]` or a reference array (no projection for `int[]`); the STRUCTURAL gate
+// does not enforce that, so a crafted `[F` / `[D` element is reinterpreted from
+// its bits exactly as a plain `aput` into such an array is, and a `[Z` / `[J`
+// one is left as written — garbage in, consistently.
+std::string FilledArrayElementPositionType(std::string_view array_type);
+
 }  // namespace dexkit::dad

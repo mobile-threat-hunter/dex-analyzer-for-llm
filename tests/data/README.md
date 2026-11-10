@@ -336,3 +336,14 @@ store, a `long-to-int` and a `neg-long` operand), six `long` static
 initializers, and the controls that must NOT gain an `L` — an int at the `(I)`
 overload, an int static, a `const-wide` at a double parameter, and double / float
 bits under a `double-to-int` / `neg-double` / `neg-float`. It is part of this project and carries this project's licence.
+
+`filled-null.dex` (md5 `ed2a8beb64a686d7fcba2f118d3a48b1`) was written for dexllm#117
+and assembled from the committed `filled-null.smali` with the smali 3.0.9 assembler
+bundled in jadx 1.5.3 (`java -cp jadx-1.5.3-all.jar
+com.android.tools.smali.smali.Main a filled-null.smali -o filled-null.dex`, OpenJDK
+17.0.17). One method per `filled-new-array` element position: a `null` in an
+`Object[]` (the issue's `HandlerDispatcherKt.asHandler` shape), a `null` first in a
+`String[]`, a `null` in an `int[][]`, the `int[]` control whose `0` stays `0`, a
+nonzero int in an `Object[]` that must stay an int, and one `const/4 v0, 0` read by
+both an `int[]` and an `Object[]`. No committed fixture carried a null element
+before it. It is part of this project and carries this project's licence.

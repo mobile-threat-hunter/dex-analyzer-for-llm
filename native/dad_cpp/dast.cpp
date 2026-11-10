@@ -1021,7 +1021,10 @@ AstValue JSONWriter::visit_expr(IRForm* op) {
     if (auto* x = dynamic_cast<FilledArrayExpression*>(op)) {
         AstValue tn = ParseDescriptor(x->type);
         std::vector<AstValue> params;
-        for (const auto& a : x->args()) params.push_back(visit_expr(MapGet(x, a)));
+        // dexllm#117 — the same projection the Writer applies to each element.
+        const std::string elem = FilledArrayElementPositionType(x->type);
+        for (const auto& a : x->args())
+            params.push_back(visit_const_at(ConstContext::Value, elem, MapGet(x, a)));
         return ArrayInitializer(std::move(params), std::move(tn));
     }
     if (auto* x = dynamic_cast<InstanceExpression*>(op)) {

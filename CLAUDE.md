@@ -1236,7 +1236,7 @@ refusals — **dexllm#110**); 19 new javac `ambiguous` errors from a `null` at a
 overloaded callee (**dexllm#109**, FIXED in the section below); `==` against a non-constant int and a bitwise op with an int are
 not numeric positions (shared with #94's `z_pos`); a `char`/`byte`/`short`
 VARIABLE at a narrowing parameter has no use source; `filled-new-array`
-elements do not go through `ConstantAt` (dexllm#117; not #96's `)` nor #97's range); and, pre-existing and
+elements did not go through `ConstantAt` (dexllm#117, FIXED — see its section); and, pre-existing and
 unchanged, 164 `pN == 0` on a reference parameter whose register is reused.
 
 ### Production fix — every `null` argument is cast to its declared parameter type (dexllm#109, 2026-10-16)
@@ -1442,7 +1442,8 @@ the OFF build's exactly — the diff's whole functional content), no close, `}}`
 the Writer dropping the last element, the AST dropping the last element.
 **Recorded, not fixed:** the CI fixtures carry sizes 1–3 only and no empty
 initializer (a size- or emptiness-keyed regression would be caught only by the
-corpus sweep); and filled-new-array elements still bypass `ConstantAt`.
+corpus sweep); and filled-new-array elements bypassed `ConstantAt` (FIXED in
+dexllm#117).
 
 ### A `long` literal is spelled with its type, `L` suffixed (dexllm#92, 2026-10-30)
 
@@ -1691,6 +1692,61 @@ qualified to the no-oat / verification-on path; and the two runtime-only
 differences on VALID input (a concatenated dump loads its first dex, a stale
 checksum is refused) are stated as ART's answer to #119's "identical when every
 dex is valid" criterion.
+
+### A `filled-new-array` element is a typed position (dexllm#117, 2026-11-10)
+
+The one position dexllm#102's `ConstantAt` left out. Every `const*` builds an
+int-typed Constant (DAD) and the type comes from where it is used; a
+`filled-new-array` element was visited as a bare expression in both emitters,
+so a `0` in an `Object[]` rendered `0` — which Java reads as an autoboxed
+`Integer`, a different value from the `null` the bytecode stores (corpus:
+`HandlerDispatcherKt.asHandler`, `Handler(Looper, Callback, boolean)` built by
+reflection with `0` for the callback). Text and AST both.
+
+**Fix:** `FilledArrayElementPositionType(atype)` ([instruction.cpp](native/dad_cpp/instruction.cpp))
+is `ArrayStorePositionType` with the element kind read off the array type
+(`"O"` for a reference or array element, `""` otherwise — no new reading of the
+rule), and `WriterImpl::visit_filled_new_array` and dast's
+`FilledArrayExpression` arm run each element through `ConstantAt` in the
+`Value` context, the `aput-object` one. `Argument` would cast the null, which
+only matters for overload resolution and an initializer has none.
+
+**Measured (a/b OFF = v0.29.0 `6a35324c`, bit-reproduced, vs ON `88562548`, SAME
+capture):** 51 sources / 27,037 classes / 2,322,678 decompiled lines → **5
+lines changed, 0 line counts moved**: the one corpus line and 4 fixture lines,
+each `0` → `null` inside an initializer and nothing else; **5 of 6,549**
+filled-new-array-bearing methods' ASTs change. A correctness reviewer re-derived
+the 5 lines from its own OFF/ON builds. parity 29/29, pytest 1977 passed / 24
+skipped, TRUE corpus-less (`test_apk` moved aside) 1545 / 456 / 0, narrowed to
+`tests/data/multidex.apk` 1853 passed, sweep 21,374-class
+0-crash GATE: PASS, determinism 3 `PYTHONHASHSEED`s → one digest, lint trio and
+boundary clean.
+
+**Guards:** [tests/test_filled_null.py](tests/test_filled_null.py) (16) on the
+eleventh AUTHORED fixture `tests/data/filled-null.smali` (`.dex` md5
+`ed2a8beb…`, byte-reproducible): a `null` in `Object[]`, first in `String[]`,
+in `int[][]`; the `int[]` control (`0` stays `0`); a nonzero int in `Object[]`
+(stays an int); one `const/4 v0, 0` read by an `int[]` AND an `Object[]` (one IR
+constant, two positions → `0` and `null`); text ≡ AST per method plus an
+absolute AST pin; the corpus case; and a source pin that each emitter calls the
+helper exactly once. **8 mutants, each BUILT with a distinct `.so` md5, all
+killed**: pre-fix, either emitter skipping the projection, the helper never
+projecting / calling `int[]` a reference / missing `[[`, a correct inline
+re-derivation in the Writer (killed by the source pin alone), and `Argument`
+for `Value`.
+
+**Two reviewers, 0 defects in the change.** Recorded: the helper's comment
+claimed the format allows only `int[]` / reference arrays — that is ART's
+RUNTIME verifier; a crafted `[F` / `[D` passes the structural gate and its
+elements are now reinterpreted from their bits (as a plain `aput` into such an
+array already was), `[Z` / `[J` are left as written. Comment narrowed, not
+pinned (crafted GIGO). **Not covered, pre-existing:** a `0` that reaches the
+element through a VARIABLE (two branches each `const/4 v0, 0`) is still typed by
+the variable — `int v0; … new Object[] {v0}` — because a filled-array element is
+not a use-bound type source in `InferCascadeTypes`; a reference arm in the same
+variable already makes it `Object` and the `0` renders `null`. Three stale
+mirrors (two in this file, one in hack-gate.md) still said the elements bypass
+`ConstantAt`; updated.
 
 ### Production fix — reused `this` register materialised as a local (`this = X` → valid, 2026-07-03)
 
