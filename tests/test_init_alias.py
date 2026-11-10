@@ -32,9 +32,8 @@ CLS = "LAlias;"
 FIXED = {
     "oneCopy()V": [
         'Alias v1_1 = new Alias("A", 0);',
-        "Alias v0_0 = v1_1;",
         "Alias.A = v1_1;",
-        "Alias.V = new Alias[] {v0_0};",
+        "Alias.V = new Alias[] {v1_1};",
         "return;",
     ],
     "copyOnly()LAlias;": ['return new Alias("A", 0);'],
@@ -110,15 +109,15 @@ FIXED = {
         "}",
         "}",
     ],
-    # ...and when it IS read later (in another block) the copy is kept
+    # ...and when it IS read later (in another block) the copy is kept by the
+    # pass -- and then, since dexllm#123, propagated into its use like any copy
     "liveRecv(Z)Ljava/lang/Object;": [
         'Alias v0_1 = new Alias("A", 0);',
-        "Alias v1_0 = v0_1;",
         "Alias.A = v0_1;",
         "if (!p4) {",
         "return null;",
         "} else {",
-        "return v1_0;",
+        "return v0_1;",
         "}",
     ],
     # the receiver register is written (an int) before it is read again: dead
@@ -131,15 +130,15 @@ FIXED = {
         "Alias.I = v1;",
         "return;",
     ],
-    # read only by an exception handler of the next call: live, so kept
+    # read only by an exception handler of the next call: live, so kept by the
+    # pass (and propagated since dexllm#123, a call cannot change a register)
     "recvInHandler()Ljava/lang/Object;": [
         'Alias v0_1 = new Alias("A", 0);',
-        "Alias v1 = v0_1;",
         "try {",
         "Alias.sink(v0_1);",
         "return null;",
         "} catch (RuntimeException v2) {",
-        "return v1;",
+        "return v0_1;",
         "}",
     ],
     # controls the pass never touches
@@ -170,27 +169,24 @@ REFUSED = {
     ],
     "plainMove()LAlias;": [
         "Alias v1 = new Alias;",
-        "Alias v0 = v1;",
         'v1("A", 0);',
-        "return v0;",
+        "return v1;",
     ],
     "reuseThis()LAlias;": [
         "Alias v4 = new Alias;",
-        "Alias v0 = v4;",
         'v4("A", 0);',
-        "return v0;",
+        "return v4;",
     ],
     "crossBlock(Z)LAlias;": [
         "int v3;",
         "Alias v1 = new Alias;",
-        "Alias v0 = v1;",
         "if (!p4) {",
         "v3 = 0;",
         "} else {",
         "v3 = 1;",
         "}",
         'v1("A", v3);',
-        "return v0;",
+        "return v1;",
     ],
 }
 
@@ -306,11 +302,11 @@ def test_the_range_form_on_the_corpus(loadable_apks):
 def test_a_hoisted_copy_keeps_its_own_bytecode_offset(dk):
     """D-3: the rebuilt `vD = vA` is a new IR node; its line must still map to
     the move-object it stands for (0x4), not to the <init> it now follows."""
-    r = dk.decompile_method_with_pc_map(f"{CLS}->oneCopy()V")
+    r = dk.decompile_method_with_pc_map(f"{CLS}->copyLaterInt()V")
     lines = r["source"].split("\n")
     pc = dict(r["pc_map"])
     copy_line = 1 + next(
-        i for i, x in enumerate(lines) if x.strip() == "Alias v0_0 = v1_1;"
+        i for i, x in enumerate(lines) if x.strip() == "Alias v0_1 = v1_1;"
     )
     ctor_line = 1 + next(i for i, x in enumerate(lines) if "new Alias(" in x)
     assert pc[copy_line] == 0x4

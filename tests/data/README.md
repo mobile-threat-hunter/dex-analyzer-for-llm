@@ -303,7 +303,7 @@ NOT copied from anywhere: it was written for dexllm#53 and compiled from the
 committed `permissive-tls.java` with the toolchain named above. It is part of this
 project and carries this project's licence.
 
-`typed-positions.dex` (md5 `8873d1537f8567f8ada55e99285e07b0`) was written for
+`typed-positions.dex` (md5 `d2c66fb2b22730816a3178ac425af3c6`) was written for
 dexllm#102 and assembled from the committed `typed-positions.smali` with the smali
 3.x assembler bundled in jadx 1.5.0 (`java -cp jadx-1.5.0-all.jar
 com.android.tools.smali.smali.Main a --api 26 -o typed-positions.dex
@@ -383,5 +383,21 @@ declaration-hoisting cases:
 - a catch that returns;
 - four locals defined in both arms of an if;
 - a catch variable written by a sibling handler.
+
+It is part of this project and carries this project's licence.
+
+`move-side-effect.dex` (md5 `c94d463d9e1ef2feee353677a192ec5c`) was written for
+dexllm#123 and assembled from the committed `move-side-effect.smali` the same
+way. Each method puts a call folded into a move next to a side-effecting
+statement: a constructor and a call before a static store, the control with
+nothing between, a plain copy across a folded call, a copy whose source is
+redefined first, a field read across a call that changes the field, a copy in a
+loop, two one-block loops that redefine the copy's source after the use (one
+with a call between, one without), and four definitions made before or inside a
+loop: a call, a field read the loop changes, a plain copy, and a definition that
+re-runs on the way round; plus a loop body ending in a `goto` and a call whose
+result the loop reads through an add; and a static field read before a store to
+the field (straight-line and around a loop), across a call and across an array
+store; and a folded call read inside a try.
 
 It is part of this project and carries this project's licence.

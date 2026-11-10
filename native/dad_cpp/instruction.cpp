@@ -282,6 +282,12 @@ MoveExpression::MoveExpression(IRFormPtr lhs, IRFormPtr rhs) {
 }
 
 // DAD: instruction.py:258
+// Beyond-DAD (dexllm#123) — see the declaration.
+bool MoveExpression::has_side_effect() const noexcept {
+    auto it = var_map.find(rhs_);
+    return it != var_map.end() && it->second && it->second->has_side_effect();
+}
+
 bool MoveExpression::is_call() const noexcept {
     auto it = var_map.find(rhs_);
     return (it != var_map.end() && it->second) ? it->second->is_call() : false;

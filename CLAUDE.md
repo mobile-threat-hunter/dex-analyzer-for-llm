@@ -1882,7 +1882,7 @@ the emptied pre-try node mis-scopes CatchStruct. This fix makes one more method
 reach it — **dexllm#122**, shipped with the user's agreement (FIXED in the
 section below). Also recorded: `MoveExpression::has_side_effect()` is always false
 (DAD), so RP can carry a folded constructor past a side-effecting statement —
-reproduces on HEAD, 0 corpus instances found — **dexllm#123**; and the 51 residual `= new X;` are
+reproduces on HEAD, 0 corpus instances found — **dexllm#123** (FIXED in the section below); and the 51 residual `= new X;` are
 mostly cross-block (`new` before a branch that chooses an argument), outside the
 pass's one-block scope.
 
@@ -1995,6 +1995,134 @@ rejoining one shared tail (#114); a definition reached only over an exception
 edge is lost (`hoistIntoCatch`'s `v0 = null`, as OFF); a catch-body local used
 after the try where the region walk cannot attribute it; a non-side-effecting
 throwing rhs (field get, array access) can still cross handlers.
+
+### A folded call keeps its side effect, and a definition does not move into a loop (dexllm#123, 2026-11-11)
+
+Filed from #121's review: DAD's `MoveExpression.has_side_effect` is always
+False, so once RegisterPropagation folds `v1 = make()` into the move that copies
+it (`v0 = make()`), the folded call could be carried past a side-effecting
+statement — `D.I = 5; return new D();` for bytecode that constructs first.
+Fixing that exposed three more holes in the same pass, all in DAD and all
+wrong VALUES, and the work became four rules in `RegisterPropagation` /
+`ClearPath` ([dataflow.cpp](native/dad_cpp/dataflow.cpp)). All beyond-DAD; no
+`*DADFaithful` sibling (no parity suite asserts propagation across a side
+effect or a loop).
+
+1. **`MoveExpression::has_side_effect` reports its rhs's**
+   ([instruction.cpp](native/dad_cpp/instruction.cpp)). A folded call keeps
+   its position, and the side-effect branch's #122 exception-handler check now
+   applies to it (`callIntoTry`).
+2. **A plain register copy may cross a side effect.** With (1), the loophole
+   that let OTHER expressions be propagated across a folded call closed, and a
+   copy `vD = vS` stopped crossing calls — `String v0_4 = v1_3` copies
+   appeared corpus-wide (StringsKt). A call cannot change a register, so for a
+   `MoveExpression` whose rhs `is_ident` only a redefinition of the source
+   blocks (`ClearPath(..., side_effects_block = !plain_copy)`); a field read is
+   not a plain copy (`fieldAcrossCall`).
+3. **A use on a cycle that avoids the definition** (found by BOTH reviewers,
+   independently; the hole is DAD's). `ClearPath` checks the use's own block
+   only up to the use, and `BuildPath` skips the block's self-predecessor, so
+   in a loop what follows the use reaches it again over the back edge unseen.
+   Three consequences, all reproduced on HEAD: a copy reads the loop-updated
+   source from the second iteration (`loopNoCall`; rule 2 made a call no
+   longer mask it, `loopCopy`); a loop-invariant expression is re-evaluated in
+   the loop with changed inputs (corpus: `AnimatorInflaterCompat.distributeKeyframes`
+   put `p3 / ((p5 - p4) + 2)` inside `while (p4 <= p5) { … p4++; }`, a wrong
+   value); and a call made ONCE before a loop is moved into it and runs once
+   per iteration (`callIntoLoop`; corpus: `while (i < list.size())` for a
+   `size()` the bytecode calls once, `new ReviewBuilder()` per element where
+   the bytecode builds one). The fix: `LoopInfo` — `CycleBlocks` (Tarjan over
+   `all_sucs`, once per RP; the CFG does not change there) plus a memo of
+   `ReachesAvoiding(use block, def block)`. When the use's block can return to
+   itself WITHOUT passing the definition's block (a definition on the way
+   round re-runs, and its own value is read — `defInLoop`), a side-effecting
+   definition does not move at all, and any other is checked against the rest
+   of the use's block for a redefinition and, unless it is a plain copy, a
+   side effect (a field read may see a changed field — `fieldIntoLoop`).
+4. **A static field read stays before what can write a static field**
+   (delta-review finding, DAD-shared, reproduced on HEAD). An `sget` names no
+   register, so the redefinition loop never called `ClearPath` for it and
+   nothing kept it from moving past a store: d8's `int x = F; F = 7; use(x)`
+   rendered `F = 7; use(F)`. It is now checked with the sentinel
+   `kStaticReadReg`, which `ClearPathNode` reads as "blocked only by a call or
+   an `sput`" — an `aput` or `new X[]` cannot write a static field
+   (`sgetPastArrayStore`). The first cut keyed this on "the rhs uses no
+   register", which also caught a bare `new X` and split it from its `<init>`
+   (`v0_5(this, …)`, invalid Java, 533 classes) — the a/b's call-multiset
+   check caught it; a second cut blocked on every side effect and hoisted 257
+   classes' worth of `Locale.US`-style constants past array stores.
+
+**The rules were narrowed four times by measurement, not by argument.**
+Checking the whole use block on ANY cycle changed 3,116 classes (every
+ordinary `v1[v3] = v1[v0]` in a loop stopped folding); restricting it to a
+definition in another block still over-blocked 80 (a definition INSIDE the
+loop, which re-runs); and the two static-read cuts above. Each was found by
+an ON-vs-ON class diff or the call-multiset check, not by the fixture.
+
+**Measured (a/b OFF=`b8a2ab02` = HEAD vs ON=`80cfefa0`, SAME capture, 54
+sources):** 589 classes change on 20 sources, decompiled lines 373,141 →
+373,359 in them (of 2,297,914), 490 method ASTs; the call-name multiset of
+every changed corpus class is identical (no call dropped or duplicated in the
+text — the one differing class is the edited `typed-positions` fixture). The
+declarations newly hoisted before a loop: 608 a call (`size()`, getters,
+constructors), 57 a memory read (`this.mValues` before a loop with an
+`aput`), 52 register arithmetic before a loop with a side effect
+(conservative: rule 3 checks side effects for any non-copy, though pure
+register arithmetic cannot see one — faithful to the bytecode, which computes
+it once); plus 42 classes of static reads kept before a call. javac over the
+466 changed top-level classes (android.jar, `-XDshould-stop.ifError=FLOW`):
+**53,427 → 53,343 errors**; 35 files better, 24 worse, every worse one
+inspected: an unresolved APP type now named by a hoisted declaration
+(`ReviewBuilder v2_1 = new ReviewBuilder()`, `Symbol v0 = …RESUME_TOKEN`) or a
+pre-existing stale type made visible (`IllegalStateException v0_1 = new
+MutableCallSite(...)` in invoke-custom `Main`). parity 29/29, pytest 2080 passed / 24 skipped, TRUE
+corpus-less (`test_apk` moved aside, restore asserted) 1637 / 467 / 0,
+narrowed to `tests/data/multidex.apk` 1946 passed, sweep 21,374-class 0-crash
+GATE: PASS at 18.5 s (unchanged), determinism 3 `PYTHONHASHSEED`s → one
+digest, lint trio and boundary clean. Cost on a crafted single loop of 6k
+blocks: 2.1 s against HEAD's 1.0 s — a constant factor over HEAD's own
+quadratic `BuildPath`, both ending in the existing emit-depth error.
+
+**Guards:** [tests/test_move_side_effect.py](tests/test_move_side_effect.py)
+on the fourteenth AUTHORED fixture `tests/data/move-side-effect.smali`
+(24 cases): constructor / call before a store, the no-store control, a copy
+across a folded call, a copy whose source is redefined first, a field read
+across a call, a copy in a loop, the two one-block loops (with and without a
+call), a call / a field read / a plain copy / a re-running definition around a
+loop, a body ending in `goto`, a call read in a loop through an add, a static
+read before a store (straight-line and around a loop), across a call and
+across an array store, a folded call read inside a try; the AST order; and
+the `distributeKeyframes` corpus case. `typed-positions.smali`'s `forwardKeep`
+gained a read so its copy survives propagation, and six `test_init_alias.py`
+pins moved (copies #121 re-made now fold). **19 mutants, each BUILT with a
+distinct `.so` md5, control asserted after: all killed** — pre-fix (`.so` =
+HEAD's exactly), the folded move without its side effect, a copy blocked by
+side effects (DAD), every move a copy, side effects never blocking, the
+redefinition check off, the cycle rule off, applied on any cycle, the tail one
+short, side effects ignored for a non-copy, a call allowed into the loop, the
+side-effect branch without the loop info, `CycleBlocks` missing self-edges or
+multi-block SCCs, RP passing no loop info, the static-read check off, blocked
+by any side effect, not blocked by an `sput`, not blocked by a call. M1, M8,
+M13 and three static-read mutants survived earlier matrices and are why
+`callIntoTry`, `loopGoto`, `callIntoLoopArith`, `sgetPastCall` and
+`sgetPastArrayStore` exist.
+
+**Three reviews.** Adversarial and correctness, on the first cut: the
+one-block-loop copy (rule 3), CONFIRMED by both independently; the
+correctness one also re-derived the a/b, found 17 methods whose textual call
+order moved and checked that every one restores the smali order. A delta
+review of rule 3 confirmed it on five more shapes (an expression, a copy, an
+iget, an aget, a nested loop — each wrong on HEAD), refuted the remaining
+attacks (a redefinition elsewhere on the cycle is in `BuildPath`'s set, a
+def-block-on-the-cycle re-runs), found the `sget` hole (rule 4), and measured
+the rule at ~2x HEAD on a crafted 6k-block loop (`ReachesAvoiding` is now
+memoised per block pair; the factor stays, see above). Recorded,
+pre-existing and unchanged: a use BEFORE its definition in the same block of
+a loop (`use(v0); v0 = v1 + 10; v1++`, the def's own value reaching around —
+needs `v0` undefined on entry, which ART's runtime verifier rejects and
+`verify()` does not); a definition reached only over an exception edge before
+it ran (`excBack`, mis-structured on HEAD too); and `MoveResultExpression`
+excluded from `plain_copy` is untested (equivalent: `tmpN` is written once).
 
 ### Production fix — reused `this` register materialised as a local (`this = X` → valid, 2026-07-03)
 

@@ -311,6 +311,7 @@
     if-eqz v0, :c
     invoke-static {}, LTypedPositions;->argTrue()V
     :c
+    invoke-static {v0}, LTypedPositions;->takeZ(Z)V
     return-void
 .end method
 # `v == <nonzero constant>` is a numeric use, but only the constant 1 reaches

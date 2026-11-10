@@ -32,6 +32,7 @@
 #include <set>
 #include <string>
 #include <unordered_map>
+#include <map>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -91,11 +92,35 @@ void UpdateChain(Graph& graph, int loc, ChainMap& du, ChainMap& ud);
 void DeadCodeElimination(Graph& graph, ChainMap& du, ChainMap& ud);
 
 // DAD: dataflow.py:148 clear_path_node.
-bool ClearPathNode(Graph& graph, const std::string& reg, int loc1, int loc2);
+// `side_effects_block` (default, DAD): any side-effecting instruction on the
+// path blocks. Beyond-DAD (dexllm#123): a plain register COPY reads nothing a
+// call can change, so for it only a redefinition of the source blocks.
+// Beyond-DAD (dexllm#123): a `reg` no instruction defines, meaning "the
+// value being moved is a STATIC FIELD READ" — only something that can write a
+// static field (a call, an sput) is in its way, not every side effect.
+inline const std::string kStaticReadReg = "\x01static-read";
+bool ClearPathNode(Graph& graph, const std::string& reg, int loc1, int loc2,
+                   bool side_effects_block = true);
+// Beyond-DAD (dexllm#123): the blocks that lie on a CFG cycle (an SCC of more
+// than one block, or a self-edge), over normal and exception edges.
+std::unordered_set<NodeBase*> CycleBlocks(Graph& graph);
 
 // DAD: dataflow.py:162 clear_path.
 //   `reg` is empty string when DAD passes None (side-effect-only check).
-bool ClearPath(Graph& graph, const std::string& reg, int loc1, int loc2);
+// Beyond-DAD (dexllm#123): what ClearPath needs to know about loops — the
+// blocks on a CFG cycle (CycleBlocks) and a memo of ReachesAvoiding queries.
+struct LoopInfo {
+    std::unordered_set<NodeBase*> cycles;
+    std::map<std::pair<NodeBase*, NodeBase*>, bool> reaches_avoiding;
+};
+// `loops` (optional, dexllm#123): when the use's block is on a cycle that
+// returns to it without passing the definition's block, the use runs again
+// without the definition re-running. DAD checks the use's block only up to
+// the use, so what follows it on the way round went unseen: a copy read the
+// updated source, a loop-invariant expression was re-evaluated with changed
+// inputs, and a call made once before a loop ran once per iteration.
+bool ClearPath(Graph& graph, const std::string& reg, int loc1, int loc2,
+               bool side_effects_block = true, LoopInfo* loops = nullptr);
 
 // DAD: dataflow.py:190 register_propagation.
 void RegisterPropagation(Graph& graph, ChainMap& du, ChainMap& ud);

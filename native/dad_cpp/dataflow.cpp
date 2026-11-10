@@ -216,26 +216,128 @@ void DeadCodeElimination(Graph& graph, ChainMap& du, ChainMap& ud) {
 // =============================================================================
 // clear_path_node / clear_path — DAD dataflow.py:148/162
 // =============================================================================
-bool ClearPathNode(Graph& graph, const std::string& reg, int loc1, int loc2) {
+bool ClearPathNode(Graph& graph, const std::string& reg, int loc1, int loc2,
+                   bool side_effects_block) {
     for (int loc = loc1; loc < loc2; ++loc) {
         IRFormPtr ins = graph.get_ins_from_loc(loc);
         if (!ins) continue;
+        if (reg == kStaticReadReg) {
+            if (ins->is_call() || dynamic_cast<StaticInstruction*>(ins.get()))
+                return false;
+            continue;
+        }
         std::string lhs = GetLhsKey(ins);
         if (!reg.empty() && lhs == reg) return false;
-        if (ins->has_side_effect()) return false;
+        if (side_effects_block && ins->has_side_effect()) return false;
     }
     return true;
 }
 
-bool ClearPath(Graph& graph, const std::string& reg, int loc1, int loc2) {
+// Beyond-DAD (dexllm#123) — iterative Tarjan over all_sucs.
+std::unordered_set<NodeBase*> CycleBlocks(Graph& graph) {
+    std::unordered_set<NodeBase*> out;
+    std::unordered_map<NodeBase*, int> index, low;
+    std::unordered_set<NodeBase*> on_stack;
+    std::vector<NodeBase*> stack;
+    int counter = 0;
+    for (NodeBase* root : graph.nodes) {
+        if (index.count(root)) continue;
+        std::vector<std::pair<NodeBase*, size_t>> work{{root, 0}};
+        index[root] = low[root] = counter++;
+        stack.push_back(root);
+        on_stack.insert(root);
+        while (!work.empty()) {
+            auto& [v, next] = work.back();
+            auto succs = graph.all_sucs(v);
+            if (next < succs.size()) {
+                NodeBase* w = succs[next++];
+                if (w == v) out.insert(v);  // self-edge
+                if (!index.count(w)) {
+                    index[w] = low[w] = counter++;
+                    stack.push_back(w);
+                    on_stack.insert(w);
+                    work.push_back({w, 0});
+                } else if (on_stack.count(w)) {
+                    low[v] = std::min(low[v], index[w]);
+                }
+                continue;
+            }
+            NodeBase* done = v;
+            work.pop_back();
+            if (!work.empty())
+                low[work.back().first] = std::min(low[work.back().first], low[done]);
+            if (low[done] == index[done]) {
+                std::vector<NodeBase*> scc;
+                NodeBase* w = nullptr;
+                do {
+                    w = stack.back();
+                    stack.pop_back();
+                    on_stack.erase(w);
+                    scc.push_back(w);
+                } while (w != done);
+                if (scc.size() > 1) out.insert(scc.begin(), scc.end());
+            }
+        }
+    }
+    return out;
+}
+
+// Beyond-DAD (dexllm#123): can `node` reach itself again without entering
+// `avoid` (normal and exception edges)?
+static bool ReachesAvoiding(Graph& graph, NodeBase* node, NodeBase* avoid) {
+    std::unordered_set<NodeBase*> seen;
+    std::vector<NodeBase*> work;
+    for (NodeBase* s : graph.all_sucs(node)) work.push_back(s);
+    while (!work.empty()) {
+        NodeBase* n = work.back();
+        work.pop_back();
+        if (n == node) return true;
+        if (n == avoid || !seen.insert(n).second) continue;
+        for (NodeBase* s : graph.all_sucs(n)) work.push_back(s);
+    }
+    return false;
+}
+
+bool ClearPath(Graph& graph, const std::string& reg, int loc1, int loc2,
+               bool side_effects_block,
+               LoopInfo* loops) {
     NodeBase* node1 = graph.get_node_from_loc(loc1);
     NodeBase* node2 = graph.get_node_from_loc(loc2);
+    // The use's block is on a cycle that avoids the definition's block: the
+    // use runs again without the definition running again (a definition on
+    // the way round re-runs, and its value is the one read). Moving the
+    // definition to the use would then evaluate it once per iteration, so
+    //  - an expression with a side effect (`reg` empty: the side-effect
+    //    branch) must not move at all — a call would run N times;
+    //  - any other one is safe only if nothing after the use in its block,
+    //    on the way round, changes what it reads: a redefinition of `reg`,
+    //    and, unless it is a plain register copy, a side effect.
+    bool loops_back = false;
+    if (loops && node1 != node2 && node2 && loops->cycles.count(node2)) {
+        auto key = std::make_pair(node2, node1);
+        auto it = loops->reaches_avoiding.find(key);
+        if (it == loops->reaches_avoiding.end())
+            it = loops->reaches_avoiding
+                     .emplace(key, ReachesAvoiding(graph, node2, node1))
+                     .first;
+        loops_back = it->second;
+    }
+    if (loops_back) {
+        if (reg.empty()) return false;
+        auto* bb2 = dynamic_cast<BasicBlock*>(node2);
+        if (!bb2 || !bb2->has_ins_range ||
+            !ClearPathNode(graph, reg, loc2, bb2->ins_range_hi,
+                           side_effects_block))
+            return false;
+    }
     if (node1 == node2) {
-        return ClearPathNode(graph, reg, loc1 + 1, loc2);
+        return ClearPathNode(graph, reg, loc1 + 1, loc2, side_effects_block);
     }
     auto* bb1 = dynamic_cast<BasicBlock*>(node1);
     if (!bb1 || !bb1->has_ins_range) return false;
-    if (!ClearPathNode(graph, reg, loc1 + 1, bb1->ins_range_hi)) return false;
+    if (!ClearPathNode(graph, reg, loc1 + 1, bb1->ins_range_hi,
+                       side_effects_block))
+        return false;
     auto path = BuildPath(graph, node1, node2);
     for (NodeBase* p : path) {
         auto* bb = dynamic_cast<BasicBlock*>(p);
@@ -243,7 +345,8 @@ bool ClearPath(Graph& graph, const std::string& reg, int loc1, int loc2) {
         const int lo = bb->ins_range_lo;
         const int hi = bb->ins_range_hi;
         const int end_loc = (lo <= loc2 && loc2 <= hi) ? loc2 : hi;
-        if (!ClearPathNode(graph, reg, lo, end_loc)) return false;
+        if (!ClearPathNode(graph, reg, lo, end_loc, side_effects_block))
+            return false;
     }
     return true;
 }
@@ -266,6 +369,8 @@ static bool SameExceptionHandlers(Graph& graph, int a, int b) {
 }
 
 void RegisterPropagation(Graph& graph, ChainMap& du, ChainMap& ud) {
+    // Beyond-DAD (dexllm#123): the CFG does not change during RP.
+    LoopInfo loops{CycleBlocks(graph), {}};
     bool change = true;
     while (change) {
         change = false;
@@ -323,17 +428,40 @@ void RegisterPropagation(Graph& graph, ChainMap& du, ChainMap& ud) {
                         auto duit = du.find(du_key);
                         if (duit == du.end()) continue;
                         if (duit->second.size() > 1) continue;
+                        // Beyond-DAD (dexllm#123): a plain register copy
+                        // (`v0 = v1`) reads only v1, which a call cannot
+                        // change; only v1's redefinition can make moving it
+                        // wrong. DAD blocks it on any side effect between --
+                        // which a folded call (`v7 = charAt(..)`) used to
+                        // escape, since the move it was folded into answered
+                        // "no side effect".
+                        const bool plain_copy =
+                            dynamic_cast<MoveExpression*>(orig_ins.get()) &&
+                            rhs && rhs->is_ident();
                         bool safe = true;
                         for (const auto& var2 : orig_ins->get_used_vars()) {
-                            if (!ClearPath(graph, var2, loc, i)) {
+                            if (!ClearPath(graph, var2, loc, i, !plain_copy,
+                                           &loops)) {
                                 safe = false;
                                 break;
                             }
                         }
                         if (!safe) continue;
+                        // Beyond-DAD (dexllm#123): a static field read names
+                        // no register, so it never reached the loop above and
+                        // nothing kept it from moving past a store to the
+                        // field it reads (`int x = F; F = 7; use(x)` became
+                        // `F = 7; use(F)`). It reads memory, so a side effect
+                        // between that can write a static field blocks it: a
+                        // call or an sput (kStaticReadReg says so to ClearPath).
+                        if (dynamic_cast<StaticExpression*>(rhs.get()) &&
+                            !ClearPath(graph, kStaticReadReg, loc, i, true,
+                                       &loops))
+                            continue;
                     }
                     if (orig_ins->has_side_effect()) {
-                        if (!ClearPath(graph, /*reg=*/{}, loc, i)) continue;
+                        if (!ClearPath(graph, /*reg=*/{}, loc, i, true, &loops))
+                            continue;
                         // Beyond-DAD (dexllm#122): a call can throw, and which
                         // handler catches it is a property of the block it is
                         // in. Moving it into a block with different handlers

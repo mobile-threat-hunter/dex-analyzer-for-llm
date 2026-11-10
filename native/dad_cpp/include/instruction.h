@@ -428,7 +428,12 @@ public:
     void set_move_kind(MoveKind k) noexcept { move_kind_ = k; }
 
     // DAD: instruction.py:255 has_side_effect → False (explicit override).
-    bool has_side_effect() const noexcept override { return false; }
+    // Beyond-DAD (dexllm#123): false only while the rhs is a plain register.
+    // Once RegisterPropagation folds a call into it (`v0 = make()`), the move
+    // HAS the call's side effect, and answering false let RP carry the call
+    // past a side-effecting statement -- `D.I = 5; return new D();` for a
+    // constructor that ran before the store.
+    bool has_side_effect() const noexcept override;
     // DAD: instruction.py:258 is_call → var_map[rhs].is_call()
     bool is_call() const noexcept override;
 
