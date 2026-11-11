@@ -126,4 +126,4 @@ __all__ = [
     "verify",
     "verify_bytes",
 ]
-__version__ = "0.31.0"
+__version__ = "0.31.1"
