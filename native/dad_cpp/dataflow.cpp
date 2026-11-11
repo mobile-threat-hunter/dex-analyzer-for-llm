@@ -436,9 +436,86 @@ static bool ContainsStaticRead(const IRForm* e, int depth = 0) {
     return false;
 }
 
+// Beyond-DAD (dexllm#126): can a run leave `from` and never enter `through`?
+// Either it reaches the end of the method (a block with no normal successor)
+// or it stays forever in a cycle no normal edge leaves (an infinite loop, or
+// one left only by an exception: `for (;;) q.take();`). If so, `through` does
+// not post-dominate `from`. A cycle with an exit edge is taken to terminate.
+static bool ExitsAvoiding(Graph& graph, NodeBase* from, NodeBase* through) {
+    std::unordered_set<NodeBase*> region;
+    std::vector<NodeBase*> work;
+    auto first = graph.sucs(from);
+    if (first.empty()) return true;
+    for (NodeBase* s : first)
+        if (s != through) work.push_back(s);
+    while (!work.empty()) {
+        NodeBase* n = work.back();
+        work.pop_back();
+        if (!region.insert(n).second) continue;
+        auto next = graph.sucs(n);
+        if (next.empty()) return true;
+        for (NodeBase* s : next)
+            if (s != through) work.push_back(s);
+    }
+    // Terminal cycles in `region` (iterative Tarjan, as CycleBlocks).
+    std::unordered_map<NodeBase*, int> index, low;
+    std::unordered_set<NodeBase*> on_stack;
+    std::vector<NodeBase*> stack;
+    int counter = 0;
+    for (NodeBase* root : region) {
+        if (index.count(root)) continue;
+        std::vector<std::pair<NodeBase*, size_t>> dfs{{root, 0}};
+        index[root] = low[root] = counter++;
+        stack.push_back(root);
+        on_stack.insert(root);
+        while (!dfs.empty()) {
+            auto& [v, next] = dfs.back();
+            auto succs = graph.sucs(v);
+            if (next < succs.size()) {
+                NodeBase* w = succs[next++];
+                if (!region.count(w)) continue;
+                if (!index.count(w)) {
+                    index[w] = low[w] = counter++;
+                    stack.push_back(w);
+                    on_stack.insert(w);
+                    dfs.push_back({w, 0});
+                } else if (on_stack.count(w)) {
+                    low[v] = std::min(low[v], index[w]);
+                }
+                continue;
+            }
+            NodeBase* done = v;
+            dfs.pop_back();
+            if (!dfs.empty())
+                low[dfs.back().first] =
+                    std::min(low[dfs.back().first], low[done]);
+            if (low[done] != index[done]) continue;
+            std::unordered_set<NodeBase*> scc;
+            NodeBase* w = nullptr;
+            do {
+                w = stack.back();
+                stack.pop_back();
+                on_stack.erase(w);
+                scc.insert(w);
+            } while (w != done);
+            bool cycle = scc.size() > 1;
+            bool leaves = false;
+            for (NodeBase* m : scc)
+                for (NodeBase* t : graph.sucs(m)) {
+                    if (t == m) cycle = true;
+                    if (!scc.count(t)) leaves = true;
+                }
+            if (cycle && !leaves) return true;
+        }
+    }
+    return false;
+}
+
 void RegisterPropagation(Graph& graph, ChainMap& du, ChainMap& ud) {
     // Beyond-DAD (dexllm#123): the CFG does not change during RP.
     LoopInfo loops{CycleBlocks(graph), {}};
+    // Beyond-DAD (dexllm#126): memo of ExitsAvoiding(def block, use block).
+    std::map<std::pair<NodeBase*, NodeBase*>, bool> exits_avoiding;
     bool change = true;
     while (change) {
         change = false;
@@ -545,6 +622,24 @@ void RegisterPropagation(Graph& graph, ChainMap& du, ChainMap& ud) {
                         // exception -- and empties the block the try's
                         // structuring was anchored on. DAD propagates anyway.
                         if (!SameExceptionHandlers(graph, loc, i)) continue;
+                        // Beyond-DAD (dexllm#126): a call runs where it is
+                        // written. Moving it into a block that some path from
+                        // its own block skips (`x = f(); if (c) use(x)` ->
+                        // `if (c) use(f())`) makes it run only on that path.
+                        // DAD propagates anyway; dexllm#123 stopped the loop
+                        // case, this is the branch one.
+                        NodeBase* def_node = graph.get_node_from_loc(loc);
+                        NodeBase* use_node = graph.get_node_from_loc(i);
+                        if (def_node != use_node) {
+                            auto key = std::make_pair(def_node, use_node);
+                            auto it = exits_avoiding.find(key);
+                            if (it == exits_avoiding.end())
+                                it = exits_avoiding
+                                         .emplace(key, ExitsAvoiding(graph, def_node,
+                                                                     use_node))
+                                         .first;
+                            if (it->second) continue;
+                        }
                     }
                     if (rhs) ins->replace(var, rhs);
 

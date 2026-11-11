@@ -413,3 +413,11 @@ condition); an array read before a `fill-array-data` that writes the array;
 and the control, a nested call read once that still folds.
 
 It is part of this project and carries this project's licence.
+
+`branch-call.dex` (md5 `030a15b0032ea009b313c33beb3368f4`) was written for dexllm#126 and assembled from
+the committed `branch-call.smali` the same way. Each method makes a call before
+a block that some run skips: an `if`, a throw guard, an early return, an
+infinite loop and a loop left only by an exception; and two controls whose use
+runs on every path, a diamond and a loop with an exit edge.
+
+It is part of this project and carries this project's licence.

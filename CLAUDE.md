@@ -2223,6 +2223,71 @@ call is already inside the target instruction and `ClearPath` scans only
 `monitor-enter` / `monitor-exit` still report no side effect (DAD), so a
 memory read can cross a lock boundary (concurrency, not single-thread value).
 
+
+### A call runs where it is written, not only on the branch that reads it (dexllm#126, 2026-11-12)
+
+Found while measuring dexllm#125. RegisterPropagation substituted a
+side-effecting definition into its single use whenever ClearPath, dexllm#122's
+handler rule and dexllm#123's loop rule let it, and never asked whether the
+use's block runs on every path from the definition's block. So
+`x = f(); if (c) use(x)` rendered `if (c) use(f())`. A call the bytecode makes
+unconditionally then read as conditional. Pre-existing, and DAD does the same.
+
+The corpus case is `PlaybackControlGlue.updateProgress`: `getCurrentPosition()`
+runs at `0x0` and was rendered inside `if (this.mControlsRow != null)`. The
+largest class of changes is short-circuit conditions.
+`CollapsingTextHelper.setTypefaces` calls both setters and then tests `|`, but
+rendered as `if (a() || b())`, which skips `b()`. ViewPager's two
+`getChildRectInPagerCoordinates(...).left` and `BigTextStyle.apply` (a
+constructor chain moved under `mSummaryTextSet`) are further cases, and so is
+Kotlin `ArraysKt.zip`, where `next()` was skipped once `i >= size`. Every one
+of these reads as the original source again.
+
+**Fix:** `ExitsAvoiding(graph, def_block, use_block)` in
+[dataflow.cpp](native/dad_cpp/dataflow.cpp), memoised per block pair (RP never
+changes the CFG). A side-effecting definition in another block moves only when
+no run can leave its block and never enter the use's block. Such a run either
+reaches a block with no normal successor (return, throw), or stays in a cycle
+no normal edge leaves (an infinite loop, or a worker loop left only by an
+exception — `for (;;) q.take();`). That second half came from review: both
+reviewers independently built the infinite-loop shape against the first cut,
+which only looked for an exit block. A cycle WITH an exit edge is taken to
+terminate, so a call still folds past a terminating loop into a use after it.
+Normal edges only, on purpose: a handler is reached only by a catch edge, so a
+use there is not post-dominating and is blocked. Beyond-DAD, no `*DADFaithful`
+sibling (no parity suite asserts propagation across a branch).
+
+**Measured (a/b OFF = v0.31.1 `e5636ed7` vs ON `8b7f3250`, SAME capture):**
+56 sources (bundled corpus + committed fixtures) → **297 classes change on 16 sources**, 248,442 → 249,229 lines in them; the terminal-cycle half moves **0** corpus classes (output-identical to the first cut on all 56 — it is the crafted shape's fix only). The call-name multiset is identical in every changed class: no call was
+added or dropped, the calls only moved. A correctness reviewer re-derived the
+a/b on its own builds (297 / 16) and checked hoisted calls against
+`render_method_smali`; every one runs before the branch in the bytecode. Text
+and AST agree on all 431 changed methods. Gates: parity 29/29, pytest 2111 passed / 24 skipped, TRUE corpus-less (`test_apk` moved aside, restore asserted) 1667 / 468 / 0, narrowed to `tests/data/multidex.apk` 1977 passed, sweep 21,374-class 0-crash GATE: PASS, determinism 3 `PYTHONHASHSEED`s → one digest, lint trio and boundary clean. Cost on the adversarial reviewer's crafted CFGs (M side-effecting defs into a shared N-block region): 1000/1000 0.91 s, 3000/3000 9.97 s against OFF's 0.80 / 8.27 s — the base pipeline's quadratic term dominates.
+
+**Guards:** [tests/test_branch_call.py](tests/test_branch_call.py) on the
+sixteenth AUTHORED fixture `tests/data/branch-call.smali` (10 cases). It covers
+an if, a throw guard, an early return, an infinite loop and a worker loop. The
+controls are a diamond and a terminating loop. There is also an AST case and
+the corpus `updateProgress` case. **8 mutants, each BUILT with a distinct `.so`
+md5, control asserted after: 7 killed, 1 equivalent.** The killed ones are: the
+rule removed, a return/throw end not counted as an exit, the use block not
+avoided, terminal cycles ignored, every cycle counted as a skip, a self-edge not
+counted as a cycle, and the same-block exemption removed. Ignoring terminal
+cycles reproduces the pre-review cut. The
+equivalent is "a def block with no successor is not an exit": the use is then
+reachable only by a catch edge, and dexllm#122's handler rule already refuses
+that move. The line is kept as the conservative answer.
+
+**Recorded, pre-existing, NOT fixed:**
+- **A throwing non-call instruction between the definition and its use.** For
+  example, an iget that throws NPE into a handler that returns. Such an
+  instruction is still transparent to ClearPath, in one block or across blocks,
+  so `next()` can move past it.
+- **A memory read (iget / sget) moved into a branch** changes only where an NPE
+  or a class initialisation happens, not single-thread values.
+
+Both reviewers raised them, and both are outside this rule.
+
 ### Production fix — reused `this` register materialised as a local (`this = X` → valid, 2026-07-03)
 
 When a method reuses its receiver register p0 (`this`) as a scratch local — reads `this` early, overwrites it (`move-result` / `const`), reads the new value later, the two merging at a shared use (e.g. `return`) — `GroupVariables` binds the param-def and reuse-defs into ONE version (they share the merge use), so `SplitVariables` leaves it unsplit and it keeps its `ThisParam` identity. DAD (and our 1:1 port) then emit **`this = <value>`** — always invalid Java (you cannot assign to `this`). **Confirmed identical bug in androguard DAD**, so this is a beyond-DAD production divergence. Dominant real-corpus invalid-Java bucket (269 occurrences bundled, above every other). **Fix — `MaterializeReusedThis` ([dataflow.cpp](native/dad_cpp/dataflow.cpp), declared in [dataflow.h](native/dad_cpp/include/dataflow.h)), runs AFTER SplitVariables and BEFORE the chain consumers:** allocate a fresh local `vX`, rewrite every graph reference to the receiver → `vX`, and inject `vX = this` at the entry block head — the sole remaining `this` is that copy's rhs → `<Ret> vX = this; … vX = …; return vX;` (valid). `findFragmentByWho` (the canonical repro) becomes byte-valid: `Fragment v7 = this; if(!p2.equals(this.mWho)){ if(this.mChildFragmentManager==null){ v7 = null; } else { v7 = this.mChildFragmentManager.findFragmentByWho(p2); } } return v7;` (reads stay `this.mWho` because RP propagates the entry copy for uses it dominates; `v7 = 0` renders `null` via the existing reference-lhs null-render). **Type safety (two adversarial-review rounds, 4 reviewers):** `vX` is typed as the method **RETURN type** — the one assignability anchor valid Dalvik gives (everything reaching a `return` is assignable to it). The pass is a **validate-then-mutate** (atomic — Phase A reads only, so every early bail leaves the graph pristine) that fires ONLY when (a) the return type is a reference, (b) the receiver is RETURNED, and (c) every reassignment rhs is a reference whose type **EXACTLY equals** ret_type, or the narrow-integer constant 0 (null). Exact equality (not just `is_ref`) is REQUIRED: the unsplit phi-web can bind a def reaching only an intermediate use (never the return) with an unrelated type — `vX = getBar()` where `Bar ⊄ Foo` (adversarial CONFIRMED) — the merge-point-assignability property does NOT hold per-def, and there is no type hierarchy to check assignability. A **void-invoke artifact** (`this = super.onDraw()` — a void call DAD wrongly models as defining the receiver; DAD keeps the `this` name so its later `this.getScrollX()` reads accidentally render correctly, and renaming would EXPOSE the artifact as `v.getScrollX()` on a void result — strictly worse), a non-reference return, a non-returned reuse, a genuine primitive (`this = 5`), or a non-exact reference reuse all bail → left as DAD's (invalid but **no-worse**) `this = X`. The receiver's ThisParam type is CORRUPTED during Construct (each `this = X` AssignExpression ctor does `this_param.set_type(X.get_type())`) so it is restored to the class before seeding the copy. On a `true` return the caller `number_ins()` + recomputes `BuildDefUse` (the injected copy + renumbered locs) before DCE/RP/PlaceDeclarations; `FixInitResultTypes` runs between (graph-only, no chain access, safe). Excludes `<init>` (super()/this() uses the receiver specially). **Measured (a/b off vs on, bundled corpus):** `this =` **269 → 218** (51 genuine reuses materialised valid; residual 218 = void-invoke artifacts + non-provable reuses, correctly left), **90 valid `<Ref> vX = this;` seeds**; **ALL other invalid-Java buckets byte-unchanged** (prim-used-as-object 55, ref-declared-int 23, `v<op>null` 3, `prim=new` 2), the pre-existing separate `void v=this` move-into-conflated-local bug **40→40 unchanged**, parity 28/28, 0-crash/25,309-class. No `*DADFaithful` sibling (parity suites don't assert method bodies — return-literal/catch-clamp precedent). Remaining (deferred, no-worse-than-DAD): the void-invoke-defines-receiver DAD bug itself, and genuine multi-type phi-web merges (need a real version split). Regression test `tests/test_this_reuse.py` (materialisation valid + active + the Fragment repro).
