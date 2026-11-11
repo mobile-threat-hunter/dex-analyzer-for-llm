@@ -332,3 +332,26 @@
     invoke-static {v0}, LD;->useI(I)V
     return-void
 .end method
+
+.field public static A:[I
+
+# a static read inside an expression whose other operand is a constant: the
+# expression names no register either (javac/d8: `int x = G + 1; G = 7; ...`)
+.method public static sgetPlusThenPut()I
+    .registers 2
+    sget v0, LD;->G:I
+    add-int/lit8 v0, v0, 0x1
+    const/4 v1, 0x7
+    sput v1, LD;->G:I
+    return v0
+.end method
+
+# an array length of a static array, past a store that replaces the array
+.method public static sgetLengthThenPut()I
+    .registers 2
+    sget-object v0, LD;->A:[I
+    array-length v0, v0
+    const/4 v1, 0x0
+    sput-object v1, LD;->A:[I
+    return v0
+.end method

@@ -2046,7 +2046,12 @@ effect or a loop).
    rendered `F = 7; use(F)`. It is now checked with the sentinel
    `kStaticReadReg`, which `ClearPathNode` reads as "blocked only by a call or
    an `sput`" — an `aput` or `new X[]` cannot write a static field
-   (`sgetPastArrayStore`). The first cut keyed this on "the rhs uses no
+   (`sgetPastArrayStore`). It fires when the rhs tree CONTAINS a static read
+   (`ContainsStaticRead`, a walk over `var_map`): the pre-release correctness
+   review CONFIRMED that a bare-`sget` test left `int x = F + 1; F = 7;
+   return x;` rendering `F = 7; return (F + 1);` — an `sget` folded into a
+   constant expression names no register either (`sgetPlusThenPut`,
+   `sgetLengthThenPut`; 2 corpus classes move, `COS_45` arithmetic). The first cut keyed this on "the rhs uses no
    register", which also caught a bare `new X` and split it from its `<init>`
    (`v0_5(this, …)`, invalid Java, 533 classes) — the a/b's call-multiset
    check caught it; a second cut blocked on every side effect and hoisted 257
@@ -2075,9 +2080,9 @@ it once); plus 42 classes of static reads kept before a call. javac over the
 inspected: an unresolved APP type now named by a hoisted declaration
 (`ReviewBuilder v2_1 = new ReviewBuilder()`, `Symbol v0 = …RESUME_TOKEN`) or a
 pre-existing stale type made visible (`IllegalStateException v0_1 = new
-MutableCallSite(...)` in invoke-custom `Main`). parity 29/29, pytest 2080 passed / 24 skipped, TRUE
-corpus-less (`test_apk` moved aside, restore asserted) 1637 / 467 / 0,
-narrowed to `tests/data/multidex.apk` 1946 passed, sweep 21,374-class 0-crash
+MutableCallSite(...)` in invoke-custom `Main`). parity 29/29, pytest 2082 passed / 24 skipped, TRUE
+corpus-less (`test_apk` moved aside, restore asserted) 1639 / 467 / 0,
+narrowed to `tests/data/multidex.apk` 1948 passed, sweep 21,374-class 0-crash
 GATE: PASS at 18.5 s (unchanged), determinism 3 `PYTHONHASHSEED`s → one
 digest, lint trio and boundary clean. Cost on a crafted single loop of 6k
 blocks: 2.1 s against HEAD's 1.0 s — a constant factor over HEAD's own
@@ -2085,16 +2090,17 @@ quadratic `BuildPath`, both ending in the existing emit-depth error.
 
 **Guards:** [tests/test_move_side_effect.py](tests/test_move_side_effect.py)
 on the fourteenth AUTHORED fixture `tests/data/move-side-effect.smali`
-(24 cases): constructor / call before a store, the no-store control, a copy
+(26 cases): constructor / call before a store, the no-store control, a copy
 across a folded call, a copy whose source is redefined first, a field read
 across a call, a copy in a loop, the two one-block loops (with and without a
 call), a call / a field read / a plain copy / a re-running definition around a
 loop, a body ending in `goto`, a call read in a loop through an add, a static
 read before a store (straight-line and around a loop), across a call and
-across an array store, a folded call read inside a try; the AST order; and
+across an array store and inside a constant expression, a folded call read
+inside a try; the AST order; and
 the `distributeKeyframes` corpus case. `typed-positions.smali`'s `forwardKeep`
 gained a read so its copy survives propagation, and six `test_init_alias.py`
-pins moved (copies #121 re-made now fold). **19 mutants, each BUILT with a
+pins moved (copies #121 re-made now fold). **21 mutants, each BUILT with a
 distinct `.so` md5, control asserted after: all killed** — pre-fix (`.so` =
 HEAD's exactly), the folded move without its side effect, a copy blocked by
 side effects (DAD), every move a copy, side effects never blocking, the
@@ -2102,7 +2108,8 @@ redefinition check off, the cycle rule off, applied on any cycle, the tail one
 short, side effects ignored for a non-copy, a call allowed into the loop, the
 side-effect branch without the loop info, `CycleBlocks` missing self-edges or
 multi-block SCCs, RP passing no loop info, the static-read check off, blocked
-by any side effect, not blocked by an `sput`, not blocked by a call. M1, M8,
+by any side effect, not blocked by an `sput`, not blocked by a call, only a
+bare static read checked, the static-read walk stopping at the root. M1, M8,
 M13 and three static-read mutants survived earlier matrices and are why
 `callIntoTry`, `loopGoto`, `callIntoLoopArith`, `sgetPastCall` and
 `sgetPastArrayStore` exist.
@@ -2117,7 +2124,16 @@ attacks (a redefinition elsewhere on the cycle is in `BuildPath`'s set, a
 def-block-on-the-cycle re-runs), found the `sget` hole (rule 4), and measured
 the rule at ~2x HEAD on a crafted 6k-block loop (`ReachesAvoiding` is now
 memoised per block pair; the factor stays, see above). Recorded,
-pre-existing and unchanged: a use BEFORE its definition in the same block of
+pre-existing and unchanged: **a call NESTED in an expression** — in a cast, a
+unary, `.length`, an array load, an `if` condition, or the value of an
+`iput`/`aput` — is not a side effect to any of these rules, because DAD's
+`has_side_effect()` / `is_call()` do not recurse (the pre-release adversarial
+review CONFIRMED it on ordinary javac + d8 code: `long t = (long) next(); for
+(…) sink(t);` puts `next()` in the loop, `int x = F; if (next() > 0) return
+x;` reads `F` after the call, and a folded `(long) foo()` moves into a try).
+So the three rules above hold for a call or static read that stands as its
+own statement, not inside another expression — **dexllm#124**, filed
+pre-release with the user's agreement. Also recorded: a use BEFORE its definition in the same block of
 a loop (`use(v0); v0 = v1 + 10; v1++`, the def's own value reaching around —
 needs `v0` undefined on entry, which ART's runtime verifier rejects and
 `verify()` does not); a definition reached only over an exception edge before

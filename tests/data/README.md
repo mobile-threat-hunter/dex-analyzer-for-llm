@@ -386,7 +386,7 @@ declaration-hoisting cases:
 
 It is part of this project and carries this project's licence.
 
-`move-side-effect.dex` (md5 `c94d463d9e1ef2feee353677a192ec5c`) was written for
+`move-side-effect.dex` (md5 `1c92f43e076134210c049915ac777931`) was written for
 dexllm#123 and assembled from the committed `move-side-effect.smali` the same
 way. Each method puts a call folded into a move next to a side-effecting
 statement: a constructor and a call before a static store, the control with
@@ -398,6 +398,6 @@ loop: a call, a field read the loop changes, a plain copy, and a definition that
 re-runs on the way round; plus a loop body ending in a `goto` and a call whose
 result the loop reads through an add; and a static field read before a store to
 the field (straight-line and around a loop), across a call and across an array
-store; and a folded call read inside a try.
+store, and inside an expression of constants (`G + 1`, `A.length`); and a folded call read inside a try.
 
 It is part of this project and carries this project's licence.

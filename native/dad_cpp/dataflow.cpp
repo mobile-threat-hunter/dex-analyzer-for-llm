@@ -368,6 +368,17 @@ static bool SameExceptionHandlers(Graph& graph, int a, int b) {
     return ha->second == hb->second;
 }
 
+// Beyond-DAD (dexllm#123): does the expression tree read a static field?
+// Children are reached through `var_map`, as every IR node keys its operands.
+static bool ContainsStaticRead(const IRForm* e, int depth = 0) {
+    if (!e || depth > 256) return e != nullptr;  // too deep: assume it might
+    if (dynamic_cast<const StaticExpression*>(e)) return true;
+    for (const auto& [k, child] : e->var_map)
+        if (child.get() != e && ContainsStaticRead(child.get(), depth + 1))
+            return true;
+    return false;
+}
+
 void RegisterPropagation(Graph& graph, ChainMap& du, ChainMap& ud) {
     // Beyond-DAD (dexllm#123): the CFG does not change during RP.
     LoopInfo loops{CycleBlocks(graph), {}};
@@ -448,13 +459,15 @@ void RegisterPropagation(Graph& graph, ChainMap& du, ChainMap& ud) {
                         }
                         if (!safe) continue;
                         // Beyond-DAD (dexllm#123): a static field read names
-                        // no register, so it never reached the loop above and
+                        // no register — alone or inside an expression whose
+                        // other operands are constants (`F + 1`, `A.length`)
+                        // — so it never reached the loop above and
                         // nothing kept it from moving past a store to the
                         // field it reads (`int x = F; F = 7; use(x)` became
                         // `F = 7; use(F)`). It reads memory, so a side effect
                         // between that can write a static field blocks it: a
                         // call or an sput (kStaticReadReg says so to ClearPath).
-                        if (dynamic_cast<StaticExpression*>(rhs.get()) &&
+                        if (ContainsStaticRead(rhs.get()) &&
                             !ClearPath(graph, kStaticReadReg, loc, i, true,
                                        &loops))
                             continue;

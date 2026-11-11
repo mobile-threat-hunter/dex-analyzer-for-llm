@@ -184,6 +184,9 @@ EXPECTED = {
     "sgetPastCall()V": ["int v0 = D.G;", "D.make();", "D.useI(v0);", "return;"],
     # an array store cannot, so the read still folds
     "sgetPastArrayStore([I)V": ["p2[0] = 0;", "D.useI(D.G);", "return;"],
+    # a static read inside an expression of constants names no register either
+    "sgetPlusThenPut()I": ["int v0_1 = (D.G + 1);", "D.G = 7;", "return v0_1;"],
+    "sgetLengthThenPut()I": ["int v0_1 = D.A.length;", "D.A = null;", "return v0_1;"],
 }
 
 
