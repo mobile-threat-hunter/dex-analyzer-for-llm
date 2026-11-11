@@ -202,6 +202,12 @@ bool AssignExpression::is_propagable() const noexcept {
     return rhs_ ? rhs_->is_propagable() : true;
 }
 // DAD: instruction.py:212
+bool IRForm::has_side_effect() const noexcept {
+    for (const auto& [k, child] : var_map)
+        if (child && child.get() != this && child->has_side_effect()) return true;
+    return false;
+}
+
 bool AssignExpression::is_call() const noexcept {
     return rhs_ ? rhs_->is_call() : false;
 }

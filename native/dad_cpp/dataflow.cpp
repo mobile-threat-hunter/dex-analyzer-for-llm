@@ -216,13 +216,27 @@ void DeadCodeElimination(Graph& graph, ChainMap& du, ChainMap& ud) {
 // =============================================================================
 // clear_path_node / clear_path — DAD dataflow.py:148/162
 // =============================================================================
+// Beyond-DAD (dexllm#124): does the instruction run a call anywhere in its
+// tree — as itself, as an assignment's rhs, or nested in an operand
+// (`this.g = bump()`, `if (next() > 0)`)? `is_call()` answers for the root.
+static bool ContainsCall(const IRForm* e, int depth = 0) {
+    if (!e) return false;
+    if (depth > 256 || e->is_call()) return true;  // too deep: assume it might
+    for (const auto& [k, child] : e->var_map)
+        if (child.get() != e && ContainsCall(child.get(), depth + 1)) return true;
+    for (const auto& r : e->get_rhs())
+        if (r.get() != e && ContainsCall(r.get(), depth + 1)) return true;
+    return false;
+}
+
 bool ClearPathNode(Graph& graph, const std::string& reg, int loc1, int loc2,
                    bool side_effects_block) {
     for (int loc = loc1; loc < loc2; ++loc) {
         IRFormPtr ins = graph.get_ins_from_loc(loc);
         if (!ins) continue;
         if (reg == kStaticReadReg) {
-            if (ins->is_call() || dynamic_cast<StaticInstruction*>(ins.get()))
+            if (ContainsCall(ins.get()) ||
+                dynamic_cast<StaticInstruction*>(ins.get()))
                 return false;
             continue;
         }
@@ -368,6 +382,49 @@ static bool SameExceptionHandlers(Graph& graph, int a, int b) {
     return ha->second == hb->second;
 }
 
+// Beyond-DAD (dexllm#124): how many times does `ins` read `vid`? A node's
+// var_map keys each operand once, so a node that names one operand twice
+// (`invoke {v1, v3, v0, v0}`, `v0 * v0`, `{v0, v0}`, `a[v0] = v0`,
+// `v0.next = v0`, `v0 != v0`) says so through its own operand list. An assignment's lhs is not a read, so it starts at the rhs.
+static int DirectRefs(const IRForm* e, const std::string& vid) {
+    if (auto* inv = dynamic_cast<const InvokeInstruction*>(e))
+        return static_cast<int>(std::count(inv->args().begin(), inv->args().end(), vid)) +
+               (inv->base() == vid ? 1 : 0);
+    if (auto* fa = dynamic_cast<const FilledArrayExpression*>(e))
+        return static_cast<int>(std::count(fa->args().begin(), fa->args().end(), vid));
+    if (auto* be = dynamic_cast<const BinaryExpression*>(e))
+        return (be->arg1_id() == vid ? 1 : 0) + (be->arg2_id() == vid ? 1 : 0);
+    if (auto* ce = dynamic_cast<const ConditionalExpression*>(e))
+        return (ce->arg1_id() == vid ? 1 : 0) + (ce->arg2_id() == vid ? 1 : 0);
+    if (auto* as = dynamic_cast<const ArrayStoreInstruction*>(e))
+        return (as->rhs_id() == vid ? 1 : 0) + (as->array_id() == vid ? 1 : 0) +
+               (as->index_id() == vid ? 1 : 0);
+    if (auto* ii = dynamic_cast<const InstanceInstruction*>(e))
+        return (ii->lhs_id() == vid ? 1 : 0) + (ii->rhs_id() == vid ? 1 : 0);
+    return 1;
+}
+static int SubtreeUses(const IRForm* e, const std::string& vid, int depth) {
+    if (!e || depth > 256) return 0;
+    int n = 0;
+    for (const auto& [k, child] : e->var_map) {
+        if (!child || child.get() == e) continue;
+        if (k == vid && child->is_ident()) n += DirectRefs(e, vid);
+        else n += SubtreeUses(child.get(), vid, depth + 1);
+    }
+    return n;
+}
+static int UseCount(const IRFormPtr& ins, const std::string& vid) {
+    auto rhs = ins->get_rhs();
+    if (rhs.empty()) return SubtreeUses(ins.get(), vid, 0);
+    int n = 0;
+    for (const auto& r : rhs) {
+        if (!r) continue;
+        if (r->is_ident() && r->Vid() == vid) ++n;
+        else n += SubtreeUses(r.get(), vid, 1);
+    }
+    return n;
+}
+
 // Beyond-DAD (dexllm#123): does the expression tree read a static field?
 // Children are reached through `var_map`, as every IR node keys its operands.
 static bool ContainsStaticRead(const IRForm* e, int depth = 0) {
@@ -473,6 +530,11 @@ void RegisterPropagation(Graph& graph, ChainMap& du, ChainMap& ud) {
                             continue;
                     }
                     if (orig_ins->has_side_effect()) {
+                        // Beyond-DAD (dexllm#124): an instruction that reads
+                        // the register twice (`invoke {v1, v3, v0, v0}`) would
+                        // get the definition at both places, so a call made
+                        // once would run twice. DAD substitutes it anyway.
+                        if (UseCount(ins, var) > 1) continue;
                         if (!ClearPath(graph, /*reg=*/{}, loc, i, true, &loops))
                             continue;
                         // Beyond-DAD (dexllm#122): a call can throw, and which

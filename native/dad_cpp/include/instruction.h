@@ -126,8 +126,13 @@ public:
     virtual std::string get_type() const { return type; }
     virtual void set_type(std::string_view t) { type = std::string{t}; }
 
-    // DAD: instruction.py:47 has_side_effect
-    virtual bool has_side_effect() const noexcept { return false; }
+    // DAD: instruction.py:47 has_side_effect — DAD returns False here and
+    // only BinaryExpression looks at its operands. Beyond-DAD (dexllm#124):
+    // an expression has a side effect when any operand does, so a call folded
+    // INTO a cast, unary, `.length`, array load, field read, condition or
+    // return (the operands every node keys in `var_map`) is still one.
+    // Statements and calls override this with `true`.
+    virtual bool has_side_effect() const noexcept;
 
     // DAD: instruction.py:50 get_used_vars — list of variable IDs (the `v` field).
     virtual std::vector<std::string> get_used_vars() const { return {}; }
@@ -854,6 +859,9 @@ public:
     FillArrayExpression(IRFormPtr reg, std::vector<int64_t> value);
 
     bool is_propagable() const noexcept override { return false; }
+    // Beyond-DAD (dexllm#124): it WRITES the array, so a read of the array
+    // must not move past it (`int x = a[0]; fill a; use(x)` read the new a[0]).
+    bool has_side_effect() const noexcept override { return true; }
     std::vector<std::string> get_used_vars() const override;
     void replace_var(const std::string& old_v, const IRFormPtr& new_node) override;
     void replace(const std::string& old_v, const IRFormPtr& new_node) override;

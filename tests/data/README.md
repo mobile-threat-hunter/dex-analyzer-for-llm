@@ -401,3 +401,15 @@ the field (straight-line and around a loop), across a call and across an array
 store, and inside an expression of constants (`G + 1`, `A.length`); and a folded call read inside a try.
 
 It is part of this project and carries this project's licence.
+
+`nested-side-effect.dex` (md5 `529b624cfdf1d0ef88779398aa248b62`) was written
+for dexllm#124 and assembled from the committed `nested-side-effect.smali` the
+same way. Each method is what javac + d8 emit for the Java in its comment: a call
+nested in a cast, a `.length`, a condition, a field store's value or an
+assignment's rhs, moved into a loop, past a call, into a try or past a static
+read; one call whose value an instruction reads twice (as two arguments, as
+`x * x`, as an array index and value, as a field's object and value, and in a
+condition); an array read before a `fill-array-data` that writes the array;
+and the control, a nested call read once that still folds.
+
+It is part of this project and carries this project's licence.

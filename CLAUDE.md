@@ -2133,12 +2133,95 @@ review CONFIRMED it on ordinary javac + d8 code: `long t = (long) next(); for
 x;` reads `F` after the call, and a folded `(long) foo()` moves into a try).
 So the three rules above hold for a call or static read that stands as its
 own statement, not inside another expression — **dexllm#124**, filed
-pre-release with the user's agreement. Also recorded: a use BEFORE its definition in the same block of
+pre-release with the user's agreement (FIXED in the section below). Also recorded: a use BEFORE its definition in the same block of
 a loop (`use(v0); v0 = v1 + 10; v1++`, the def's own value reaching around —
 needs `v0` undefined on entry, which ART's runtime verifier rejects and
 `verify()` does not); a definition reached only over an exception edge before
 it ran (`excBack`, mis-structured on HEAD too); and `MoveResultExpression`
 excluded from `plain_copy` is untested (equivalent: `tmpN` is written once).
+
+### A call nested in an expression is a side effect too (dexllm#124, 2026-11-11)
+
+Filed from v0.31.0's pre-release adversarial review: DAD's `has_side_effect()`
+answers from a node's own kind, and only `BinaryExpression` looks at its
+operands, so once RegisterPropagation folded a call INTO a cast, unary,
+`.length`, array load, field read, condition, return or stored value, the call
+stopped counting. #123's three rules and #122's handler check never saw it.
+Ordinary javac + d8 code was wrong: `long t = (long) next(); for (…) sink(t);`
+put `next()` in the loop, `int x = F; if (next() > 0) return x;` read `F` after
+the call, a folded `(long) foo()` moved into a `try`. Pre-existing, inherited
+from DAD; all beyond-DAD, no `*DADFaithful` sibling.
+
+1. **`IRForm::has_side_effect()`'s base default recurses into `var_map`**
+   ([instruction.cpp](native/dad_cpp/instruction.cpp)) — an expression has a
+   side effect when any operand does, DAD's own `BinaryExpression` rule made
+   general. Statements and calls keep their `true` overrides. The correctness
+   review enumerated every class that takes the default: none holds an lhs,
+   itself or a parent in `var_map`, so the answer is exact and the walk
+   terminates on the (#76-acyclic) IR. DCE runs before RP, when nothing is
+   folded yet, so its verdicts cannot change.
+2. **The static-read blocker walks the tree** (`ContainsCall`, dataflow.cpp —
+   `var_map` plus an assignment's `get_rhs()`, failing closed past depth
+   256): `this.g = next()` and `long t = (long) next()` between a static read
+   and its use now block it (`staticPastFieldStore`, `staticPastAssignedCall`).
+3. **A side-effecting definition is not substituted into an instruction that
+   reads the register twice** (`UseCount` / `DirectRefs` / `SubtreeUses`). A
+   node keys each operand once in `var_map`, so DAD's `replace()` put one call
+   at both places: `invoke {v1, v3, v0, v0}` printed `inflate(...)` twice
+   (Snackbar), `mul-int v0, v0, v0` printed `getX() … * getX() …`. Each node
+   that can name one operand twice says so through its own operand ids —
+   invoke args + base, filled-array args, binary, condition, aput, iput (the
+   last three added after the correctness review CONFIRMED `a[i] = i`,
+   `n.next = n` and `o == o` still duplicated; the adversarial review found the
+   same four independently).
+4. **`fill-array-data` writes the array** (`FillArrayExpression::has_side_effect`
+   true — adversarial-review PLAUSIBLE, reproduced: `int x = a[0]; <fill a>;
+   use(x)` read the new `a[0]`).
+
+**Measured (a/b OFF=`3162f420` = v0.31.0 vs ON=`e5636ed7`, SAME capture):**
+961 classes change on 18 sources (the new fixture included), 548 method ASTs;
+**306 call tokens leave the text and 0 are added** — the correctness reviewer
+resolved every one of the 306 against the class's smali `invoke` count: OFF
+printed more calls than the bytecode makes, ON never fewer (CardViewApi21Impl
+`ceil` 4 → 2 = smali 2, ViewPager `getWidth` 18 → 17 = 17, …). The other
+changed classes move no call: a propagation now blocked by the deeper check
+keeps the bytecode's order (a field read no longer moved past an `if
+(getMode()…)`, `requestFocus()` no longer folded into `&& isLoggingEnabled(2)`
+where it ran only with logging on — FragmentStateManager, a wrong answer on
+HEAD; `getDeclaredField` kept inside its `try` — DynamiteModule). javac over
+the 658 changed classes: 46,557 → 46,654, every added error a type spelling
+(`package reflect does not exist` 625 → 697, the #111 family) or an app
+package off the classpath, introduced by a newly hoisted declaration; 0 new
+errors of a semantic kind. Cost ~1–2% (correctness reviewer, best-of-2).
+parity 29/29, pytest 2100 passed / 24 skipped, TRUE corpus-less
+1657 / 467 / 0, narrowed 1966 passed, sweep 21,374-class 0-crash GATE: PASS
+(20.0 s), determinism 3 `PYTHONHASHSEED`s → one digest, lint trio and boundary
+clean.
+
+**Guards:** [tests/test_nested_side_effect.py](tests/test_nested_side_effect.py)
+on the fifteenth AUTHORED fixture `tests/data/nested-side-effect.smali`
+(17 cases): a nested call into a loop (cast, `.length`), past a call, into a
+try; a static / field read before a call in a condition, a field store's value
+and an assignment's rhs; one call read twice as two arguments, `x * x`, an
+array index and value, a field's object and value, and in a condition; an
+array read before `fill-array-data`; the control (read once, still folds); and
+the AST. **12 mutants, each BUILT with a distinct `.so` md5, control asserted
+after: all killed** — pre-fix (`.so` = v0.31.0's exactly), the shallow DAD
+default, the shallow static-read blocker, the double-read check off, each of
+the five operand counts collapsed to one, `ContainsCall` stopping at the root
+or ignoring an assignment's rhs, `fill-array-data` without its side effect. N7
+(the rhs walk) survived the first matrix — the fixture's only intervening call
+was blocked by another call — and is why `staticPastAssignedCall` stores to
+fields instead.
+
+**Recorded, pre-existing, NOT fixed:** argument evaluation order — a call
+folded into an EARLIER argument runs before a value read in a later one
+(`sget F; v1 = next(); use((long) v1, F)` renders `use(((long) next()), F)`,
+reading `F` after `next()`), because by the time the read is substituted the
+call is already inside the target instruction and `ClearPath` scans only
+`[loc, i)`; both reviewers confirmed it is unchanged by this fix. And
+`monitor-enter` / `monitor-exit` still report no side effect (DAD), so a
+memory read can cross a lock boundary (concurrency, not single-thread value).
 
 ### Production fix — reused `this` register materialised as a local (`this = X` → valid, 2026-07-03)
 
