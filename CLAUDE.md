@@ -2219,7 +2219,7 @@ folded into an EARLIER argument runs before a value read in a later one
 (`sget F; v1 = next(); use((long) v1, F)` renders `use(((long) next()), F)`,
 reading `F` after `next()`), because by the time the read is substituted the
 call is already inside the target instruction and `ClearPath` scans only
-`[loc, i)`; both reviewers confirmed it is unchanged by this fix. And
+`[loc, i)`; both reviewers confirmed it is unchanged by this fix. FIXED in dexllm#125 (section below). And
 `monitor-enter` / `monitor-exit` still report no side effect (DAD), so a
 memory read can cross a lock boundary (concurrency, not single-thread value).
 
@@ -2287,6 +2287,77 @@ that move. The line is kept as the conservative answer.
   or a class initialisation happens, not single-thread values.
 
 Both reviewers raised them, and both are outside this rule.
+
+
+### Java's operand order is the bytecode's order, for every memory-touching step (dexllm#125, 2026-11-12)
+
+Found in the dexllm#124 reviews. Java evaluates a call's receiver and arguments, an operator's operands and a store's array/index/value left to right. RegisterPropagation folded a definition into an operand without asking what the operands Java evaluates BEFORE it already held, so
+
+```
+sget v0, F ; v1 = next() ; useJI((long) v1, v0)
+```
+
+rendered `useJI(((long) next()), W.F)`. That reads `F` after `next()` has changed it, which is the wrong value. ClearPath scans only the instructions between a definition and its use, so it cannot see a call that has already been folded into the use. Pre-existing, and DAD does the same.
+
+**Three parts, all in [dataflow.cpp](native/dad_cpp/dataflow.cpp), beyond-DAD:**
+
+1. **`ReordersMemory`.** Before a substitution, the target instruction is flattened into evaluation steps in Java order.
+   - `EvalOrderOperands` gives each IR class's operand order (JLS 15.12.4 / 15.26.1 / 15.7), including single-operand nodes.
+   - Each single-operand node names its operand explicitly. A correctness reviewer found that `MoveExpression::replace` and `UnaryExpression::replace` leave a stale key in `var_map`. Counting `var_map` then saw two operands of unknown order and needlessly blocked folds on 22 classes.
+   - An `origins` map records the loc each folded expression came from.
+   - The substitution is refused when a write (a call or a store) and a write-or-read (a field or array read) would end up in the opposite order to the bytecode.
+
+2. **A call is not moved past a memory read.** A side-effecting definition is also blocked by an intervening non-stable memory read (`ContainsMemoryRead` in ClearPathNode, through `LoopInfo::reads_block`). This is the mirror case:
+   ```
+   x = next() ; W r = OBJ ; r.m(x)
+   ```
+   rendered `W v0 = W.OBJ; v0.m(W.next())`, because ClearPath used to stop a call only at another side effect.
+
+3. **A stable final field is exempt.** The new port method `IDexCodeSource::IsStableFinalField` defaults to false, the conservative answer. `DexItemCodeSource` answers it from a per-class table built once under a mutex. A field is in the table when the declaring class's class_data declares it FINAL AND no method of that class other than an `<init>`/`<clinit>` writes it (iput* / sput* scan).
+   - ART lets any method of the declaring class write its own final field (method_verifier.cc, the `GetDeclaringClass()` check on a final put). Both reviewers built `x = this.ff; use(bump(), x)` with `bump()` writing `ff`, so `ACC_FINAL` alone is not enough.
+   - [decompile.cpp](native/dad_cpp/decompile.cpp) also refuses the exemption in two cases:
+     - inside the field class's own `<init>`/`<clinit>`;
+     - for a static field of another class. Its first read runs that class's `<clinit>`, so moving the read past a call moves the initializer too (adversarial review).
+   - The first cut scanned linearly on every question. An adversarial review measured 0.03 s → 33.5 s for one method over a 65,000-field class; with the table it takes 0.14 s.
+
+**Measured (a/b OFF = the shipped #126 build `8b7f3250` vs ON `7b78304c`, SAME capture):**
+- **Output:** 56 sources → **1,315 classes change on 22 sources**, 617,205 → 620,353 lines in them. The call-name multiset is identical in every changed class.
+- **Reviewer re-derivation:** a correctness reviewer re-derived the a/b on its own builds of the pre-response cut (1,287 / 22). Its smali spot checks put every new local in bytecode order, for example:
+  - `TooltipDrawable.loadFromAttributes`: OFF had swapped two `getColor` calls;
+  - `PagerTabStrip.updateTextPositions`: OFF had moved a field read ahead of `getLeft()`.
+- **Text vs AST:** the order of declared locals agrees on 39,429 methods. The 4 mismatches are pre-existing and byte-identical on OFF.
+- **What the changes are:** most of them are the old dx compiler having scheduled a field read or a pure call AFTER a call, which the output now keeps. Calls on both sides of a refused pair that are pure JDK methods (`Math`, `String`, boxing, `SystemClock`) account for about 16% of the refusals. An exact purity whitelist could fold those again; that is not done here.
+- **javac over the 993 changed top-level classes:** errors 79,958 → 80,427, almost all `cannot find symbol`. A hoisted local now names a type #111's spelling cannot resolve.
+  - Newly visible pre-existing typing defects: `int v = p6[1]` on a `float[]` (ColorUtils), and `IllegalArgumentException v = new ConstraintAttribute(...)`.
+  - One valid → invalid line: a call hoisted ahead of `super(...)` in `zzbfo.<init>`. The bytecode really does evaluate it first, and Java cannot express that order.
+- **Gates:** parity 29/29, pytest 2135 passed / 24 skipped, TRUE corpus-less 1691 / 468 / 0, narrowed 2001, sweep 21,374-class 0-crash GATE: PASS, determinism 3 `PYTHONHASHSEED`s → one digest, lint trio and boundary clean.
+- **Cost:** about 3–8% on real APKs, measured by the adversarial reviewer before the cache; the crafted cases are back to OFF's order of magnitude.
+
+**Guards:**
+- [tests/test_arg_order.py](tests/test_arg_order.py) on the seventeenth AUTHORED fixture `tests/data/arg-order.smali` + `arg-order-v.smali` (23 cases). Shapes covered:
+  - static, instance and array reads before a call;
+  - two calls swapped;
+  - binary operands;
+  - array-store order;
+  - a receiver read after the call;
+  - a call past a read, and past a final read;
+  - final instance and static fields;
+  - a final written by another method of its class (`gg`, and the static `HH`);
+  - a static final of another class with a `<clinit>`;
+  - a final read inside its own `<init>`;
+  - a copy chain (the stale-key case);
+  - controls;
+  - an AST case.
+- **20 mutants, each BUILT with a distinct `.so` md5, control asserted after: 16 killed, 4 equivalent.**
+  - **P1, origins not recorded.** The correctness reviewer measured 0 corpus classes differ. Argument: ClearPath now blocks call↔read crossings in both directions, so a folded subtree that came from before the def cannot sit in a conflicting pair. The map is kept as defence in depth.
+  - **P2, equal origins.** A def step and a use step cannot share a loc.
+  - **P7, the declared bit.** An undeclared field's flags slot is 0.
+  - **P8, the unordered-operand path.** Reachable only past depth 256 or for a future IR class, since every class now has an explicit arm.
+
+**Recorded, pre-existing, NOT fixed:**
+- **Exceptions are not modelled.** `use(next(), p.ff)` with a null `p`, `p / q`, and `.length` can still be reordered relative to a call. This is the same residual recorded under #126.
+- **`new R(next())`.** Java runs allocation and class init before the arguments.
+- **The DAD `ArrayStoreInstruction::replace` index→array bug.** `p4[int v2] = …` already renders garbage, and it can hide the array operand from `EvalOrderOperands`.
 
 ### Production fix — reused `this` register materialised as a local (`this = X` → valid, 2026-07-03)
 

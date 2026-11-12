@@ -40,6 +40,12 @@ public:
         std::function<bool(std::string_view sub, std::string_view super)>;
     void SetIsAssignable(IsAssignableFn f) { is_assignable_ = std::move(f); }
 
+    // dexllm#125 — field-finality oracle (cls, name, type), injected from the
+    // IDexCodeSource. Unset means "unknown" for every field (conservative).
+    using IsStableFinalFieldFn = std::function<bool(
+        std::string_view cls, std::string_view name, std::string_view type)>;
+    void SetIsStableFinalField(IsStableFinalFieldFn f) { is_stable_final_field_ = std::move(f); }
+
     // Runs the full pipeline. Idempotent if called twice; second call is
     // currently not supported (mutable state). Throws on malformed IR.
     void Process();
@@ -68,6 +74,7 @@ private:
 
     std::shared_ptr<const MethodSnapshot> snap_;
     IsAssignableFn is_assignable_;
+    IsStableFinalFieldFn is_stable_final_field_;
     Vmap vmap_;
     std::vector<int> lparams_;
     // dexllm#86 — each parameter's DECLARED descriptor, keyed by its

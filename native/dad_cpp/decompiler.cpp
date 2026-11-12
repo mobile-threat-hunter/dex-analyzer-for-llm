@@ -169,6 +169,10 @@ std::string Decompiler::RunPipeline(
         dv.SetIsAssignable([this](std::string_view sub, std::string_view super) {
             return source_.IsAssignable(sub, super);
         });
+        dv.SetIsStableFinalField([this](std::string_view cls, std::string_view name,
+                                  std::string_view type) {
+            return source_.IsStableFinalField(cls, name, type);
+        });
         dv.Process();
         result = dv.GetSource();
         if (pc_map) *pc_map = dv.GetPcMap();
@@ -257,6 +261,10 @@ Decompiler::DecompileMethodAst(std::string_view descriptor, bool include_source)
         DvMethod dv(snap);
         dv.SetIsAssignable([this](std::string_view sub, std::string_view super) {
             return source_.IsAssignable(sub, super);
+        });
+        dv.SetIsStableFinalField([this](std::string_view cls, std::string_view name,
+                                  std::string_view type) {
+            return source_.IsStableFinalField(cls, name, type);
         });
         ast.ast = dv.ProcessAst();
         ast.ast_pc_map = dv.GetPcMap();  // D-3 — (statement_seq ↔ offset)

@@ -9,6 +9,8 @@
 
 #pragma once
 
+#include <unordered_set>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -48,6 +50,8 @@ public:
     FieldInfo          GetFieldInfo(uint16_t, uint32_t) override;
     bool               IsAssignable(std::string_view sub,
                                     std::string_view super) override;
+    bool               IsStableFinalField(std::string_view cls, std::string_view name,
+                                    std::string_view type) override;
 
 private:
     // Per-(dex_id, proto_idx) proto descriptor cache. Strings are owned by
@@ -57,6 +61,12 @@ private:
 
     dexkit::DexKit& core_;
     std::mutex proto_cache_mutex_;
+    // dexllm#125 — per-class set of "name:type" for final fields no
+    // non-initializer method of the class writes (see IsStableFinalField).
+    std::mutex final_field_mutex_;
+    std::unordered_map<std::string,
+                       std::shared_ptr<const std::unordered_set<std::string>>>
+        final_field_cache_;
     std::unordered_map<uint64_t, std::string> proto_cache_;
     static uint64_t ProtoKey(uint16_t dex_id, uint32_t proto_idx) {
         return (static_cast<uint64_t>(dex_id) << 32) | proto_idx;

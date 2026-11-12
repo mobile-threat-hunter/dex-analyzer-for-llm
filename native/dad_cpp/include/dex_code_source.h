@@ -71,6 +71,20 @@ public:
         return sub == super;
     }
 
+    // dexllm#125 — is the field `cls->name:type` one whose value no call or
+    // store can change outside its own class's `<init>` / `<clinit>`? True for a
+    // field a loaded dex declares FINAL that no OTHER method of its class
+    // writes (ART lets any method of the declaring class write the class's own
+    // final field, so ACC_FINAL alone is not enough). RegisterPropagation may
+    // then move its read past a call. Defaulted to false — "unknown", which
+    // keeps every read ordered — so a source without access flags (the test
+    // Mock) stays conservative.
+    virtual bool IsStableFinalField(std::string_view /*cls*/,
+                                    std::string_view /*name*/,
+                                    std::string_view /*type*/) {
+        return false;
+    }
+
     // ─── Const-pool resolution (string_views point into source's tables) ─
     // dexllm#60: one proto by PROTO index, as "(params)Ret". Distinct from
     // GetMethodProto, which takes a METHOD index — invoke-polymorphic's second

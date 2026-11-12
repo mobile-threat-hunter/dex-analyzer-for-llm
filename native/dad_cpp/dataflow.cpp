@@ -229,8 +229,44 @@ static bool ContainsCall(const IRForm* e, int depth = 0) {
     return false;
 }
 
+// Beyond-DAD (dexllm#125): does the instruction read memory a call can
+// change — a field (unless `stable_field` says it cannot change) or an array
+// element — anywhere in its tree?
+static bool ContainsMemoryRead(const IRForm* e, const StableFieldFn* stable_field,
+                               int depth = 0) {
+    if (!e) return false;
+    if (depth > 256) return true;  // too deep: assume it might
+    if (dynamic_cast<const ArrayLoadExpression*>(e)) return true;
+    if (auto* ie = dynamic_cast<const InstanceExpression*>(e))
+        if (!stable_field || !*stable_field ||
+            !(*stable_field)(ie->clsdesc(), ie->name(), ie->ftype(), false))
+            return true;
+    if (auto* se = dynamic_cast<const StaticExpression*>(e))
+        if (!stable_field || !*stable_field ||
+            !(*stable_field)(se->clsdesc(), se->name(), se->ftype(), true))
+            return true;
+    for (const auto& [k, child] : e->var_map)
+        if (child.get() != e &&
+            ContainsMemoryRead(child.get(), stable_field, depth + 1))
+            return true;
+    for (const auto& r : e->get_rhs())
+        if (r.get() != e && ContainsMemoryRead(r.get(), stable_field, depth + 1))
+            return true;
+    return false;
+}
+
+static bool ClearPathNode(Graph& graph, const std::string& reg, int loc1,
+                          int loc2, bool side_effects_block,
+                          const LoopInfo* loops);
+
 bool ClearPathNode(Graph& graph, const std::string& reg, int loc1, int loc2,
                    bool side_effects_block) {
+    return ClearPathNode(graph, reg, loc1, loc2, side_effects_block, nullptr);
+}
+
+static bool ClearPathNode(Graph& graph, const std::string& reg, int loc1,
+                          int loc2, bool side_effects_block,
+                          const LoopInfo* loops) {
     for (int loc = loc1; loc < loc2; ++loc) {
         IRFormPtr ins = graph.get_ins_from_loc(loc);
         if (!ins) continue;
@@ -243,6 +279,9 @@ bool ClearPathNode(Graph& graph, const std::string& reg, int loc1, int loc2,
         std::string lhs = GetLhsKey(ins);
         if (!reg.empty() && lhs == reg) return false;
         if (side_effects_block && ins->has_side_effect()) return false;
+        if (reg.empty() && loops && loops->reads_block &&
+            ContainsMemoryRead(ins.get(), loops->stable_field))
+            return false;
     }
     return true;
 }
@@ -341,16 +380,16 @@ bool ClearPath(Graph& graph, const std::string& reg, int loc1, int loc2,
         auto* bb2 = dynamic_cast<BasicBlock*>(node2);
         if (!bb2 || !bb2->has_ins_range ||
             !ClearPathNode(graph, reg, loc2, bb2->ins_range_hi,
-                           side_effects_block))
+                           side_effects_block, loops))
             return false;
     }
     if (node1 == node2) {
-        return ClearPathNode(graph, reg, loc1 + 1, loc2, side_effects_block);
+        return ClearPathNode(graph, reg, loc1 + 1, loc2, side_effects_block, loops);
     }
     auto* bb1 = dynamic_cast<BasicBlock*>(node1);
     if (!bb1 || !bb1->has_ins_range) return false;
     if (!ClearPathNode(graph, reg, loc1 + 1, bb1->ins_range_hi,
-                       side_effects_block))
+                       side_effects_block, loops))
         return false;
     auto path = BuildPath(graph, node1, node2);
     for (NodeBase* p : path) {
@@ -359,7 +398,7 @@ bool ClearPath(Graph& graph, const std::string& reg, int loc1, int loc2,
         const int lo = bb->ins_range_lo;
         const int hi = bb->ins_range_hi;
         const int end_loc = (lo <= loc2 && loc2 <= hi) ? loc2 : hi;
-        if (!ClearPathNode(graph, reg, lo, end_loc, side_effects_block))
+        if (!ClearPathNode(graph, reg, lo, end_loc, side_effects_block, loops))
             return false;
     }
     return true;
@@ -511,11 +550,175 @@ static bool ExitsAvoiding(Graph& graph, NodeBase* from, NodeBase* through) {
     return false;
 }
 
-void RegisterPropagation(Graph& graph, ChainMap& du, ChainMap& ud) {
+// Beyond-DAD (dexllm#125): the operands of `e` in the order Java evaluates
+// them. A node keys each operand once in `var_map`, by the id its own operand
+// list names, so a substituted expression is found under the id it replaced.
+// `*ordered` is false for a node with more than one operand whose order this
+// does not know.
+static std::vector<const IRForm*> EvalOrderOperands(const IRForm* e,
+                                                    bool* ordered) {
+    std::vector<const IRForm*> out;
+    *ordered = true;
+    auto get = [&](const std::string& id) {
+        auto it = e->var_map.find(id);
+        if (it != e->var_map.end() && it->second && it->second.get() != e)
+            out.push_back(it->second.get());
+    };
+    if (auto* as = dynamic_cast<const AssignExpression*>(e)) {
+        if (as->rhs()) out.push_back(as->rhs().get());
+    } else if (auto* inv = dynamic_cast<const InvokeInstruction*>(e)) {
+        if (!inv->base().empty()) get(inv->base());
+        for (const auto& a : inv->args()) get(a);
+    } else if (auto* fa = dynamic_cast<const FilledArrayExpression*>(e)) {
+        for (const auto& a : fa->args()) get(a);
+    } else if (auto* be = dynamic_cast<const BinaryExpression*>(e)) {
+        get(be->arg1_id());
+        get(be->arg2_id());
+    } else if (auto* ce = dynamic_cast<const ConditionalExpression*>(e)) {
+        get(ce->arg1_id());
+        get(ce->arg2_id());
+    } else if (auto* st = dynamic_cast<const ArrayStoreInstruction*>(e)) {
+        get(st->array_id());
+        get(st->index_id());
+        get(st->rhs_id());
+    } else if (auto* ii = dynamic_cast<const InstanceInstruction*>(e)) {
+        get(ii->lhs_id());
+        get(ii->rhs_id());
+    } else if (auto* al = dynamic_cast<const ArrayLoadExpression*>(e)) {
+        get(al->array_id());
+        get(al->idx_id());
+    // Single-operand nodes name their operand explicitly: a `replace` that
+    // re-points the operand to a new ident (MoveExpression, UnaryExpression)
+    // leaves the old key in `var_map`, so counting `var_map` would see two.
+    } else if (auto* mv = dynamic_cast<const MoveExpression*>(e)) {
+        get(mv->rhs_id());
+    } else if (auto* un = dynamic_cast<const UnaryExpression*>(e)) {
+        get(un->arg_id());
+    } else if (auto* cz = dynamic_cast<const ConditionalZExpression*>(e)) {
+        get(cz->arg_id());
+    } else if (auto* cc = dynamic_cast<const CheckCastExpression*>(e)) {
+        get(cc->arg_id());
+    } else if (auto* sw = dynamic_cast<const SwitchExpression*>(e)) {
+        get(sw->src_id());
+    } else if (auto* rt = dynamic_cast<const ReturnInstruction*>(e)) {
+        if (rt->arg()) get(*rt->arg());
+    } else if (auto* na = dynamic_cast<const NewArrayExpression*>(e)) {
+        get(na->size_id());
+    } else if (auto* fl = dynamic_cast<const FillArrayExpression*>(e)) {
+        get(fl->reg_id());
+    } else if (auto* rf = dynamic_cast<const RefExpression*>(e)) {
+        get(rf->ref_id());
+    } else if (auto* ie = dynamic_cast<const InstanceExpression*>(e)) {
+        get(ie->arg_id());
+    } else if (auto* si = dynamic_cast<const StaticInstruction*>(e)) {
+        get(si->rhs_id());
+    } else if (auto* ln = dynamic_cast<const ArrayLengthExpression*>(e)) {
+        get(ln->array_id());
+    } else {
+        const auto lhs = e->GetLhsId();
+        for (const auto& [k, child] : e->var_map) {
+            if (!child || child.get() == e || (lhs && k == *lhs)) continue;
+            out.push_back(child.get());
+        }
+        if (out.size() > 1) *ordered = false;
+    }
+    return out;
+}
+
+// Beyond-DAD (dexllm#125): one evaluation step of an instruction tree, in
+// Java order. `origin` is the loc of the instruction the step came from (an
+// expression RegisterPropagation folded in keeps the loc it was defined at).
+struct EvalStep {
+    int origin;
+    bool writes;  // a call or a store: can change memory
+    bool reads;   // reads memory a write can change (a field or an element)
+    bool from_def;
+};
+
+static void CollectEvalSteps(
+    const IRForm* e, int origin, const std::string& var, const IRForm* def,
+    int def_loc, bool from_def,
+    const std::unordered_map<const IRForm*, int>& origins,
+    const StableFieldFn& stable_field,
+    std::vector<EvalStep>& out, bool* ordered, int depth) {
+    if (!e) return;
+    if (depth > 256) { *ordered = false; return; }
+    auto oit = origins.find(e);
+    if (oit != origins.end()) origin = oit->second;
+    bool node_ordered = true;
+    auto ops = EvalOrderOperands(e, &node_ordered);
+    for (const IRForm* op : ops) {
+        if (!from_def && op->is_ident() && op->Vid() == var) {
+            // The use of `var` the definition would replace.
+            if (!node_ordered) *ordered = false;
+            CollectEvalSteps(def, def_loc, var, def, def_loc, true, origins,
+                             stable_field, out, ordered, depth + 1);
+            continue;
+        }
+        CollectEvalSteps(op, origin, var, def, def_loc, from_def, origins,
+                         stable_field, out, ordered, depth + 1);
+    }
+    const bool writes = (e->is_call() &&
+                         !dynamic_cast<const AssignExpression*>(e)) ||
+                        dynamic_cast<const ArrayStoreInstruction*>(e) ||
+                        dynamic_cast<const StaticInstruction*>(e) ||
+                        dynamic_cast<const InstanceInstruction*>(e) ||
+                        dynamic_cast<const FillArrayExpression*>(e);
+    // A read of a field no write in this method can change (a final field
+    // read outside its own class's initializer) is not ordered against
+    // anything; the oracle answers false when it does not know.
+    bool reads = dynamic_cast<const ArrayLoadExpression*>(e) != nullptr;
+    if (auto* ie = dynamic_cast<const InstanceExpression*>(e))
+        reads = !stable_field ||
+                !stable_field(ie->clsdesc(), ie->name(), ie->ftype(), false);
+    if (auto* se = dynamic_cast<const StaticExpression*>(e))
+        reads = !stable_field ||
+                !stable_field(se->clsdesc(), se->name(), se->ftype(), true);
+    if (writes || reads) out.push_back({origin, writes, reads, from_def});
+}
+
+// Beyond-DAD (dexllm#125): would substituting `def` (defined at `def_loc`)
+// for `var` in `ins` (at `use_loc`) make Java evaluate two memory-touching
+// steps in the opposite order to the bytecode? An operand Java evaluates
+// earlier may already hold an expression folded in from a LATER bytecode
+// position (`use(((long) next()), F)` — `next()` ran after `F` was read), and
+// ClearPath, which scans only the instructions between the two locs, cannot
+// see inside the use. A conflict is a write ordered against a write or a read.
+static bool ReordersMemory(const IRFormPtr& ins, int use_loc,
+                           const std::string& var, const IRFormPtr& def,
+                           int def_loc,
+                           const std::unordered_map<const IRForm*, int>& origins,
+                           const StableFieldFn& stable_field) {
+    std::vector<EvalStep> steps;
+    bool ordered = true;
+    CollectEvalSteps(ins.get(), use_loc, var, def.get(), def_loc, false,
+                     origins, stable_field, steps, &ordered, 0);
+    bool def_touches = false;
+    for (const auto& s : steps) def_touches |= s.from_def;
+    if (!def_touches) return false;
+    if (!ordered) return true;
+    for (size_t a = 0; a < steps.size(); ++a) {
+        for (size_t b = a + 1; b < steps.size(); ++b) {
+            const EvalStep& x = steps[a];
+            const EvalStep& y = steps[b];
+            if (x.from_def == y.from_def) continue;
+            if (x.origin <= y.origin) continue;
+            if ((x.writes && (y.writes || y.reads)) || (y.writes && x.reads))
+                return true;
+        }
+    }
+    return false;
+}
+
+void RegisterPropagation(Graph& graph, ChainMap& du, ChainMap& ud,
+                         const StableFieldFn& stable_field) {
     // Beyond-DAD (dexllm#123): the CFG does not change during RP.
     LoopInfo loops{CycleBlocks(graph), {}};
+    loops.stable_field = &stable_field;
     // Beyond-DAD (dexllm#126): memo of ExitsAvoiding(def block, use block).
     std::map<std::pair<NodeBase*, NodeBase*>, bool> exits_avoiding;
+    // Beyond-DAD (dexllm#125): where each folded expression came from.
+    std::unordered_map<const IRForm*, int> origins;
     bool change = true;
     while (change) {
         change = false;
@@ -612,8 +815,14 @@ void RegisterPropagation(Graph& graph, ChainMap& du, ChainMap& ud) {
                         // get the definition at both places, so a call made
                         // once would run twice. DAD substitutes it anyway.
                         if (UseCount(ins, var) > 1) continue;
-                        if (!ClearPath(graph, /*reg=*/{}, loc, i, true, &loops))
-                            continue;
+                        // Beyond-DAD (dexllm#125): nor past a memory read --
+                        // the read ran after the call (`x = next(); W r = OBJ;
+                        // r.m(x)` is not `OBJ.m(next())`).
+                        loops.reads_block = true;
+                        const bool clear =
+                            ClearPath(graph, /*reg=*/{}, loc, i, true, &loops);
+                        loops.reads_block = false;
+                        if (!clear) continue;
                         // Beyond-DAD (dexllm#122): a call can throw, and which
                         // handler catches it is a property of the block it is
                         // in. Moving it into a block with different handlers
@@ -641,7 +850,14 @@ void RegisterPropagation(Graph& graph, ChainMap& du, ChainMap& ud) {
                             if (it->second) continue;
                         }
                     }
-                    if (rhs) ins->replace(var, rhs);
+                    if (!rhs_is_const && rhs &&
+                        ReordersMemory(ins, i, var, rhs, loc, origins,
+                                       stable_field))
+                        continue;
+                    if (rhs) {
+                        if (!rhs_is_const) origins.emplace(rhs.get(), loc);
+                        ins->replace(var, rhs);
+                    }
 
                     EraseFirst(ud[ud_key], loc);
                     if (ud[ud_key].empty()) ud.erase(ud_key);

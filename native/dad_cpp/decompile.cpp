@@ -159,7 +159,24 @@ bool DvMethod::BuildProcessedGraph() {
     }
     FixInitResultTypes(*graph_, m.ret_type, declared_params_, &chains.ud);
     DeadCodeElimination(*graph_, chains.du, chains.ud);
-    RegisterPropagation(*graph_, chains.du, chains.ud);
+    // dexllm#125: a read of a field no call or store in this method can
+    // change. The oracle answers for a final field no non-initializer method
+    // of its class writes; inside that class's own `<init>` / `<clinit>` it is
+    // still being written. A static field of ANOTHER class is not stable
+    // either: its first read runs that class's `<clinit>`, so moving the read
+    // past a call moves the initializer too.
+    StableFieldFn stable_field;
+    if (is_stable_final_field_) {
+        stable_field = [this](std::string_view cls, std::string_view name,
+                              std::string_view type, bool is_static) {
+            const auto& m = snap_->meta;
+            if (m.cls_name == cls && (m.name == "<init>" || m.name == "<clinit>"))
+                return false;
+            if (is_static && m.cls_name != cls) return false;
+            return is_stable_final_field_(cls, name, type);
+        };
+    }
+    RegisterPropagation(*graph_, chains.du, chains.ud, stable_field);
 
     // dvars for PlaceDeclarations — string-keyed mirror of lvars.
     std::unordered_map<std::string, IRFormPtr> dvars;

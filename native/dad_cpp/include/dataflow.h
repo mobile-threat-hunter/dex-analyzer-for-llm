@@ -26,6 +26,7 @@
 
 #pragma once
 
+#include <string_view>
 #include <cstddef>
 #include <functional>
 #include <memory>
@@ -109,9 +110,21 @@ std::unordered_set<NodeBase*> CycleBlocks(Graph& graph);
 //   `reg` is empty string when DAD passes None (side-effect-only check).
 // Beyond-DAD (dexllm#123): what ClearPath needs to know about loops — the
 // blocks on a CFG cycle (CycleBlocks) and a memo of ReachesAvoiding queries.
+// Beyond-DAD (dexllm#125): is the field (declaring class, name, type) one no
+// write in the method being decompiled can change? Empty, or false, means
+// unknown: the read is ordered against every call and store.
+using StableFieldFn = std::function<bool(std::string_view cls,
+                                         std::string_view name,
+                                         std::string_view type,
+                                         bool is_static)>;
 struct LoopInfo {
     std::unordered_set<NodeBase*> cycles;
     std::map<std::pair<NodeBase*, NodeBase*>, bool> reaches_avoiding;
+    // Beyond-DAD (dexllm#125): set by RegisterPropagation. When non-null, a
+    // side-effecting definition (`reg` empty) is also blocked by a memory read
+    // it would move past: the read ran after the call in the bytecode.
+    const StableFieldFn* stable_field = nullptr;
+    bool reads_block = false;
 };
 // `loops` (optional, dexllm#123): when the use's block is on a cycle that
 // returns to it without passing the definition's block, the use runs again
@@ -123,7 +136,8 @@ bool ClearPath(Graph& graph, const std::string& reg, int loc1, int loc2,
                bool side_effects_block = true, LoopInfo* loops = nullptr);
 
 // DAD: dataflow.py:190 register_propagation.
-void RegisterPropagation(Graph& graph, ChainMap& du, ChainMap& ud);
+void RegisterPropagation(Graph& graph, ChainMap& du, ChainMap& ud,
+                         const StableFieldFn& stable_field = {});
 
 // Beyond-DAD (dexllm) — type the result of a `vRes = vBase.<init>()` constructor
 // call as the constructed object. split_variables derives a version's type from

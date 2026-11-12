@@ -15,6 +15,7 @@
 #include "mmap.h"  // dexkit::MemMap (GetDexImageRange bounds)
 #include "slicer/dex_format.h"
 #include "slicer/reader.h"
+#include "utils/opcode_util.h"  // GetBytecodeWidth (dexllm#125 final-write scan)
 #include "util.h"    // dad::GetType — TYPE/ENUM EncodedValue rendering
 #include "writer.h"  // dad::EscapeJavaString — STRING EncodedValue (dexllm#83)
 
@@ -1238,6 +1239,78 @@ bool DexItemCodeSource::IsAssignable(std::string_view sub,
         }
     }
     return false;
+}
+
+// dexllm#125 — see IDexCodeSource::IsStableFinalField. Answered from a per-class
+// table built once (the decompiler asks it for every field read, so a linear
+// scan per question was an adversarial review's 1000x slowdown on a class of
+// 65,000 fields). A field is in the table when the dex declaring its class
+// (first-wins, as every descriptor-keyed lookup) declares it FINAL in that
+// class's class_data AND no method of the class other than an `<init>` /
+// `<clinit>` writes it. ART's verifier lets ANY method of the declaring class
+// write the class's own final field (method_verifier.cc, the
+// GetDeclaringClass() check on a final put), so ACC_FINAL alone does not make
+// a read stable. A write from another class is rejected by ART and is not
+// looked for. A field only referenced through the class (inherited) is not
+// declared there and answers false.
+bool DexItemCodeSource::IsStableFinalField(std::string_view cls, std::string_view name,
+                                     std::string_view type) {
+    std::shared_ptr<const std::unordered_set<std::string>> stable;
+    {
+        std::lock_guard lock(final_field_mutex_);
+        auto it = final_field_cache_.find(std::string(cls));
+        if (it != final_field_cache_.end()) stable = it->second;
+    }
+    if (!stable) {
+        auto built = std::make_shared<std::unordered_set<std::string>>();
+        auto [item, type_idx] = core_.GetClassDeclaredPair(cls);
+        if (item != nullptr) {
+            const auto& reader = item->GetReader();
+            const auto& strings = item->GetStrings();
+            const auto& type_names = item->GetTypeNames();
+            const auto field_ids = reader.FieldIds();
+            const auto method_ids = reader.MethodIds();
+            const auto& flags = item->GetFieldAccessFlags();
+            const auto& declared = item->GetFieldAccessFlagsDeclared();
+            std::unordered_set<uint32_t> finals;
+            for (uint32_t fidx : item->GetClassFieldIds(type_idx)) {
+                if (fidx < field_ids.size() && fidx < flags.size() &&
+                    fidx < declared.size() && declared[fidx] &&
+                    (flags[fidx] & dex::kAccFinal) != 0)
+                    finals.insert(fidx);
+            }
+            if (!finals.empty()) {
+                for (uint32_t midx : item->GetClassMethodIds(type_idx)) {
+                    if (midx >= method_ids.size()) continue;
+                    const auto mname = strings[method_ids[midx].name_idx];
+                    if (mname == "<init>" || mname == "<clinit>") continue;
+                    const dex::Code* code = item->GetMethodCode(midx);
+                    if (code == nullptr) continue;
+                    const dex::u2* p = code->insns;
+                    const dex::u2* end_p = p + code->insns_size;
+                    while (p < end_p) {
+                        const auto op = static_cast<uint8_t>(*p);
+                        const size_t width = GetBytecodeWidth(p);
+                        if (width == 0) break;
+                        // iput* 0x59-0x5f, sput* 0x67-0x6d: field index in unit 1
+                        if (((op >= 0x59 && op <= 0x5f) || (op >= 0x67 && op <= 0x6d)) &&
+                            p + 1 < end_p)
+                            finals.erase(p[1]);
+                        p += width;
+                    }
+                }
+                for (uint32_t fidx : finals) {
+                    const auto& f = field_ids[fidx];
+                    built->insert(std::string(strings[f.name_idx]) + ":" +
+                                  std::string(type_names[f.type_idx]));
+                }
+            }
+        }
+        std::lock_guard lock(final_field_mutex_);
+        stable = final_field_cache_.emplace(std::string(cls), std::move(built))
+                     .first->second;
+    }
+    return stable->count(std::string(name) + ":" + std::string(type)) != 0;
 }
 
 // DAD: decompile.py:367 DvClass.get_source — per-field name + type + access.

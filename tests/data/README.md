@@ -421,3 +421,15 @@ infinite loop and a loop left only by an exception; and two controls whose use
 runs on every path, a diamond and a loop with an exit edge.
 
 It is part of this project and carries this project's licence.
+
+`arg-order.dex` (md5 `39d41bd5befbb00396a48aa934f973ad`) was written for dexllm#125 and assembled from the
+committed `arg-order.smali` and `arg-order-v.smali` together (`... a
+arg-order.smali arg-order-v.smali -o arg-order.dex`). Each method puts a memory
+read and a call in an order Java's left-to-right operand evaluation would
+reverse: static, instance and array reads before a call, two calls swapped,
+binary operands, an array store, a receiver read after the call, a call past a
+read; and the final-field exemption with its exceptions (a final written by
+another method of its class, a static final of another class with a
+`<clinit>`, a final read inside its own `<init>`), a copy chain, and controls.
+
+It is part of this project and carries this project's licence.
