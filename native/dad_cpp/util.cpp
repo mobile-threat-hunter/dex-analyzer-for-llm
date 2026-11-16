@@ -127,7 +127,8 @@ unsigned GetTypeSize(std::string_view param) noexcept {
 
 // DAD: util.py:205 get_type — fixed variant.
 //
-// Strips the "java/lang/" prefix as a proper prefix (not char-set).
+// Strips the "java/lang/" prefix as a proper prefix (not char-set), and only
+// for a class directly in java.lang (dexllm#111).
 // DAD upstream has a char-set strip bug; the bug-compatible variant for
 // parity testing lives in `GetTypeDADFaithful` below.
 std::string GetType(std::string_view atype, uint32_t size) {
@@ -142,9 +143,14 @@ std::string GetType(std::string_view atype, uint32_t size) {
             return std::string{atype};
         }
         std::string body{atype.substr(1, atype.size() - 2)};
+        // Only a class DIRECTLY in java.lang is implicitly imported, so only
+        // there may the package go (dexllm#111). A subpackage keeps its full
+        // name: `java.lang.reflect.Method`, never `reflect.Method`, which
+        // names no class at all.
         constexpr std::string_view kJavaLang = "java/lang/";
         if (body.size() >= kJavaLang.size() &&
-            body.compare(0, kJavaLang.size(), kJavaLang) == 0) {
+            body.compare(0, kJavaLang.size(), kJavaLang) == 0 &&
+            body.find('/', kJavaLang.size()) == std::string::npos) {
             body.erase(0, kJavaLang.size());
         }
         for (char& c : body) {

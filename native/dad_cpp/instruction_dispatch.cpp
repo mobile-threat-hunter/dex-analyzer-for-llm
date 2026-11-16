@@ -106,8 +106,9 @@ MethodRef BuildMethodRef(const MethodConst& mc) {
 // AST schema is unchanged and the text and the AST agree by construction.
 //
 // TWO DELIBERATE DIFFERENCES FROM jadx, both to stay consistent with THIS
-// writer: a class name is rendered by `GetType` (so `java.lang.invoke.X` prints
-// as `invoke.X`, as it already does everywhere else), and `MethodHandle.invoke`
+// writer: a class name is rendered by `GetType` (fully qualified, no imports —
+// `java.lang.invoke.X`, which printed as `invoke.X` until dexllm#111), and
+// `MethodHandle.invoke`
 // is typed from the call site rather than as `Object` + a cast at each use —
 // the same call-site-over-declaration choice dexllm#60 made for 0xFA.
 // `Foo.class` / `Integer.TYPE`. Typed `Ljava/lang/Class;` so `Constant::Accept`

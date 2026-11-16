@@ -202,21 +202,21 @@ _EXPRESSIONS = [
         0x15,
         bytes([_PROTO_0]),
         f"static final int {_FIELD0} = "
-        "invoke.MethodType.methodType(Double.TYPE, TestInvocationKinds.class);",
+        "java.lang.invoke.MethodType.methodType(Double.TYPE, TestInvocationKinds.class);",
     ),
     (
         "mt_ii_i",
         0x15,
         bytes([_PROTO_II_I]),
         f"static final int {_FIELD0} = "
-        "invoke.MethodType.methodType(Integer.TYPE, Integer.TYPE, Integer.TYPE);",
+        "java.lang.invoke.MethodType.methodType(Integer.TYPE, Integer.TYPE, Integer.TYPE);",
     ),
     (
         "mt_mixed",
         0x15,
         bytes([_PROTO_MIXED]),
         f"static final int {_FIELD0} = "
-        "invoke.MethodType.methodType(Integer.TYPE, Integer.TYPE, "
+        "java.lang.invoke.MethodType.methodType(Integer.TYPE, Integer.TYPE, "
         "String.class, Double.class);",
     ),
     ("arr", 0x1C, bytes([1, 0x04, 7]), f"static final int {_FIELD0} = {{7}};"),

@@ -77,11 +77,24 @@ int main() {
     check_str("get_type(Ljava/lang/Object;)",
               dad::GetType("Ljava/lang/Object;"), "Object");
     check_str("get_type(Ljava/lang/annotation/Foo;) [FIXED]",
-              dad::GetType("Ljava/lang/annotation/Foo;"), "annotation.Foo");
+              dad::GetType("Ljava/lang/annotation/Foo;"), "java.lang.annotation.Foo");
     check_str("get_type(Lcom/x/Y;)",
               dad::GetType("Lcom/x/Y;"), "com.x.Y");
     check_str("get_type(Ljava/lang/reflect/Method;) [FIXED]",
-              dad::GetType("Ljava/lang/reflect/Method;"), "reflect.Method");
+              dad::GetType("Ljava/lang/reflect/Method;"), "java.lang.reflect.Method");
+    // dexllm#111: only a class DIRECTLY in java.lang loses the package; a
+    // nested java.lang class keeps its binary `$`, and a package that merely
+    // starts with the letters "java/lang" is not java.lang.
+    check_str("get_type(Ljava/lang/Thread$State;) [#111]",
+              dad::GetType("Ljava/lang/Thread$State;"), "Thread$State");
+    check_str("get_type(Ljava/lang/invoke/MethodHandles$Lookup;) [#111]",
+              dad::GetType("Ljava/lang/invoke/MethodHandles$Lookup;"),
+              "java.lang.invoke.MethodHandles$Lookup");
+    check_str("get_type(Ljava/langx/Foo;) [#111]",
+              dad::GetType("Ljava/langx/Foo;"), "java.langx.Foo");
+    check_str("get_type([Ljava/lang/ref/WeakReference;) [#111]",
+              dad::GetType("[Ljava/lang/ref/WeakReference;"),
+              "java.lang.ref.WeakReference[]");
 
     // get_type (DAD-faithful) — char-set lstrip bug preserved for byte-match
     // comparison against androguard DAD.

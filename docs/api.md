@@ -595,7 +595,7 @@ widening to float).
 | a negative `VALUE_SHORT` / `VALUE_INT` / `VALUE_LONG` | its UNSIGNED bit pattern — `-1` stored in one byte reads `255`, `Long.MIN_VALUE` reads `9223372036854775808` | the signed value, sign-extended from the stored bytes; `VALUE_CHAR` stays zero-extended (dexllm#91) |
 | a `VALUE_LONG` | the bare decimal — `946728000000` does not lex | the method body's spelling, `L` suffixed whatever the value (`5L`, dexllm#92) |
 | `VALUE_TYPE` / `VALUE_FIELD` / `VALUE_ENUM` | a raw descriptor / a Python list | `pkg.Cls.class` / `pkg.Cls.NAME` |
-| `VALUE_METHOD_TYPE` / `VALUE_METHOD_HANDLE` | the raw payload as an integer | `invoke.MethodType.methodType(…)` / a trailing `// = Cls::name` comment (dexllm#64) |
+| `VALUE_METHOD_TYPE` / `VALUE_METHOD_HANDLE` | the raw payload as an integer | `java.lang.invoke.MethodType.methodType(…)` / a trailing `// = Cls::name` comment (dexllm#64) |
 | `VALUE_METHOD` | a Python list — `['LMain;', '<init>', ['()', 'V']]` | a trailing `// = Main::new` comment (dexllm#64) |
 | `VALUE_ARRAY` / `VALUE_ANNOTATION` | a **memory address** — different every run | `{a, b}` / a trailing `// = @Foo(…)` comment (dexllm#64) |
 | a `"` inside a `String` | ends the literal early | escaped as `\"` (dexllm#22) |

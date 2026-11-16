@@ -189,8 +189,8 @@ def test_the_silently_dropped_call_is_back_and_the_wrong_value_is_gone() -> None
 
 _ADD = (
     "TestLinkerMethodMinimalArguments.linkerMethod("
-    'invoke.MethodHandles.lookup(), "_add", '
-    "invoke.MethodType.methodType(Integer.TYPE, Integer.TYPE, Integer.TYPE))"
+    'java.lang.invoke.MethodHandles.lookup(), "_add", '
+    "java.lang.invoke.MethodType.methodType(Integer.TYPE, Integer.TYPE, Integer.TYPE))"
     ".dynamicInvoker().invoke(p4, p5) /* invoke-custom */"
 )
 
@@ -301,6 +301,8 @@ def test_the_smali_view_is_untouched() -> None:
     for token in (
         "/* invoke-custom */",
         ".dynamicInvoker()",
+        # The short form is a substring of the full one (dexllm#111), so it
+        # catches either spelling leaking into the listing.
         "invoke.MethodHandles.lookup()",
         "invoke.MethodType.methodType(",
     ):
@@ -368,8 +370,9 @@ def test_two_bootstrap_arguments_that_print_alike_stay_distinct(tmp_path) -> Non
     out = _crafted(tmp_path, {els[5].payload_off: bytes([2])}, "alike")
     dk = dexllm.DexKit(str(out))
     src = dk.decompile_class("LTestBadBootstrapArguments;")
-    assert '"extraArguments", invoke.MethodType.methodType(Void.TYPE), 1, "2", 2)' in (
-        src
+    assert (
+        '"extraArguments", java.lang.invoke.MethodType.methodType(Void.TYPE), 1, "2", 2)'
+        in (src)
     ), [ln for ln in src.splitlines() if "extraArguments" in ln]
 
 

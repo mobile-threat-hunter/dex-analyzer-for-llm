@@ -50,8 +50,9 @@ unsigned GetTypeSize(std::string_view param) noexcept;
 // DAD: util.py:205 get_type — Dalvik type descriptor → human Java type string.
 //
 // Production behavior: strips the "java/lang/" prefix properly (real prefix
-// strip, not Python char-set strip). So both `Ljava/lang/Override;` → "Override"
-// and `Ljava/lang/annotation/Foo;` → "annotation.Foo".
+// strip, not Python char-set strip), and only for a class DIRECTLY in
+// java.lang (dexllm#111): `Ljava/lang/Override;` → "Override", but
+// `Ljava/lang/annotation/Foo;` → "java.lang.annotation.Foo".
 //
 // DAD upstream has a bug here: `atype[1:-1].lstrip('java/lang/')` is a
 // char-set strip, mangling `Ljava/lang/annotation/Foo;` into "otation.Foo".

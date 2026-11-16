@@ -130,7 +130,7 @@ Tools updated to use both the cap and the safe wrapper: `/tmp/full_sweep.py` (co
 
 Policy: now that the port reaches DAD parity, real DAD bugs with observable production impact get fixed in our production path. A `*DADFaithful` sibling is retained for byte-identical parity comparison against androguard DAD output. Dual-track parity tests assert **both** the fixed output (for production) and the buggy output (for DAD-compat).
 
-- **`util.py:205 get_type`** — `atype[1:-1].lstrip('java/lang/')` is Python char-set strip, not prefix strip. DAD mangles `Ljava/lang/annotation/Foo;` → `otation.Foo` (and similar lowercase-leading subpackages). **Production `GetType` ([util.cpp:128](native/dad_cpp/util.cpp#L128)) now does proper `"java/lang/"` prefix strip** — emits `annotation.Foo`. DAD-faithful variant `GetTypeDADFaithful` ([util.cpp:174](native/dad_cpp/util.cpp#L174)) kept for parity test ([util_parity_test.cpp:88-92](tests/parity/util_parity_test.cpp#L88-L92)). Effect: 7,539-class scan across 3 APKs shows 102 spec-correct hits, 0 mangled residues; match-rate vs DAD unaffected on random-200/APK bench (mangle cases under-represented in random sample but always fixed when they occur).
+- **`util.py:205 get_type`** — `atype[1:-1].lstrip('java/lang/')` is Python char-set strip, not prefix strip. DAD mangles `Ljava/lang/annotation/Foo;` → `otation.Foo` (and similar lowercase-leading subpackages). **Production `GetType` ([util.cpp](native/dad_cpp/util.cpp)) now does proper `"java/lang/"` prefix strip** — emitted `annotation.Foo` until dexllm#111, which limits the strip to a class DIRECTLY in `java.lang`, so it is `java.lang.annotation.Foo` now. DAD-faithful variant `GetTypeDADFaithful` ([util.cpp](native/dad_cpp/util.cpp)) kept for parity test ([util_parity_test.cpp](tests/parity/util_parity_test.cpp)). Effect: 7,539-class scan across 3 APKs shows 102 spec-correct hits, 0 mangled residues; match-rate vs DAD unaffected on random-200/APK bench (mangle cases under-represented in random sample but always fixed when they occur).
 - **`core/dex/__init__.py:1860 _getintvalue` for EncodedValue FLOAT/DOUBLE** — DAD reads `VALUE_FLOAT (0x10)` and `VALUE_DOUBLE (0x11)` payload bytes as little-endian unsigned int, then `DvClass.get_source` emits them as a Python int literal (invalid Java; androguard's own `# TODO: parse floats/doubles correctly`). **DexKit decodes IEEE754** ([dexitem_code_source.cpp:DecodeEncodedValueText](native/core_ext/dexitem_code_source.cpp)) — the payload's stored bytes are the MOST significant ones ("zero-extended to the right", ART's `fill_on_right`), so they go to the MSB end of a 4/8-byte buffer and the LOW end is zero-padded, then reinterpreted as `float`/`double`. Output uses `%.9gf` (binary32 round-trip) / `%.17g` (binary64 round-trip). NaN/Infinity emit as `Float.NaN` / `Float.POSITIVE_INFINITY` / `Double.NEGATIVE_INFINITY` etc. — valid Java literals. No `*DADFaithful` sibling because the decoder lives in core_ext (Dexkit-side) not dad_cpp; parity tests for this case are not byte-match-vs-DAD but smoke checks (e.g. `Float.MAX_VALUE` field emits `3.40282347e+38f`). **This paragraph asserted the OPPOSITE rule until dexllm#70** — "payload goes into LSB end … MSB end zero-padded" — and the code matched the prose, so the two corroborated each other for a year; and the "smoke check" it names is not a test that exists anywhere in the repo (the `Float.MAX_VALUE` rendering is real, the assertion of it was never written) — the property it gestures at, that a FULL-WIDTH encoding is the one width where both readings agree, is pinned by dexllm#70's `test_a_full_width_float_still_renders`. See the dexllm#70 section below.
 - **EncodedValue `VALUE_NULL (0x1e)` / `VALUE_BOOLEAN (0x1f)`** ([dexitem_code_source.cpp:DecodeEncodedValueText](native/core_ext/dexitem_code_source.cpp)) — DAD emits the **Python literals** `None` / `True` / `False` for null-reference and boolean static-field initializers (e.g. `public static final int[] FontFamily = None;`) — not valid Java. **DexKit emits spec-correct `null` / `true` / `false`.** Same core_ext / no-`*DADFaithful` precedent as the IEEE754 fix above. Found via a 2026-06-05 cross-tool comparison (614 `= None` lines on a single APK → 0). Sweep regression: 0-crash unchanged, 25 parity unchanged.
 - **`_getintvalue` for EncodedValue `VALUE_SHORT (0x02)` / `VALUE_INT (0x04)` / `VALUE_LONG (0x06)` (dexllm#91, 2026-10-08)** — androguard reads every integer-family payload as an UNSIGNED little-endian int, so a NEGATIVE static initializer rendered as its bit pattern: `-1` stored in one byte as `255`, `0xff000000` as `4278190080`, `Long.MIN_VALUE` as `9223372036854775808` (confirmed by running androguard on the fixture). `DecodeEncodedValueText` had ported that bug-compatibly — one arm, `std::to_string(ReadIntLE(...))` into a `uint64_t`. The dex spec sign-extends SHORT / INT / LONG from `value_arg + 1` bytes and zero-extends only CHAR, exactly the split dexllm#67 already made in `ParseCallSiteArg`. **Fix:** SHORT / INT / LONG call that file's existing `SignExtend` (forward-declared, not re-derived — dexllm#70's lesson for this file); CHAR keeps its own zero-extended arm. Consumption is byte-for-byte unchanged, so the dexllm#71 lockstep is untouched. Same core_ext / no-`*DADFaithful` precedent as the two bullets above. **Measured (a/b OFF=`97f4e777` vs ON=`c86ffd57`, SAME script, the pre-fix source rebuilds to the OFF md5 exactly):** 41 sources / 2,317,346 decompiled lines → **exactly 1,076 changed, every one a static field declaration** (non-`final` statics too — `AppCompatDelegate.sDefaultNightMode = -1`), and an independent raw-dex oracle (class_data static-field indices walked in lockstep with `static_values`, names resolved through `field_ids`, no dexllm code) agrees on **1,076 / 1,076** across 15 sources. parity 29/29, pytest 1605/24, TRUE corpus-less (`test_apk` MOVED aside) 1182/447/0 — 18 of the 19 new cases run there — narrowed to `tests/data/multidex.apk` 1489/140, sweep 21,374-class 0-crash GATE: PASS, determinism 3 `PYTHONHASHSEED`s → one digest, lint trio + boundary clean. LONG literals still lacked the `L` suffix — dexllm#92, unchanged here and pinned so #92 moved it deliberately (FIXED in dexllm#92: the pins now read `-1L` etc.). Guards: [tests/test_negative_static_ints.py](tests/test_negative_static_ints.py) on the sixth AUTHORED fixture `tests/data/negative-statics.dex` (no committed fixture carried a negative static before it): one value per branch at the widths d8 chooses (1, 2, 4, 5 and 8 bytes), positive controls whose top encoded byte has its high bit set (`128` = `80 00`, `255L` = `ff 00`), a CHAR `0x80` that must stay `128`, the field-precise oracle over the fixture and the corpus, and a source pin that the arm CALLS `SignExtend`. 6 mutants built and run, all killed: unsigned (12 fail), CHAR sign-extended (5), extend from 8 bytes (11), from a fixed 4 (10), LONG narrowed to `int32` (4), and a correct inline DUPLICATE of the rule (1 — the source pin alone); plus a pure re-wrap of the call, which compiles to the control md5 and must — and does — PASS. **Two reviewers; 0 defects in the production change** (one diffed `SignExtend` against verbatim copies of ART's `ReadSignedInt`/`ReadSignedLong` over 16M inputs under UBSan, 0 mismatch; both re-derived the a/b to the digit). **One CONFIRMED crafted-only valid→invalid, accepted and recorded:** `CheckStaticFieldTypes` (ART :1289) is not ported, so the gate accepts an INT `encoded_value` on a `char` field; the old unsigned read printed `char C = 65535;`, the signed one prints `= -1;`. Real compilers encode by field type and ART rejects the dex, so it is unreachable from compiled code — the same gap the `{7}`-on-an-`int` note (dexllm#64) and the `0x17`→`0x18` craft in `test_mutf8_identifiers.py` already sit in; making the decoder field-type-aware is that port's job, not this fix's. Guard fixes from review: the corpus case reported via `apk.name` on a `str` (an `AttributeError` swallowed the mismatch list), ran its corpus floor BEFORE its assertion (a narrowed sample with no negatives skipped the values it had checked), and the source pin is now whitespace-normalised and word-bounded. Scope of the corpus guard, stated: `loadable_apks` is `.apk` only, so bare `.dex` samples and nested ARRAY/ANNOTATION integers are covered by the recorded a/b, not by the shipped test. **Hack gate ([docs/hack-gate.md](docs/hack-gate.md)), run after shipping by a third, adversarial reviewer: NOT A HACK on all eight criteria.** HG1 — `DecodeEncodedValueText` is where the bytes become the initializer text and nothing downstream rewrites it (array / annotation elements recurse into the same arm). HG2 — every reader of an integer `encoded_value`, walked inward from the binding: `ParseCallSiteArg` already sign-extends; the slicer's `ParseIntValue<int16/32/64>` does too and feeds only the vendored annotation bean/matcher, which no dexllm surface reads values from; the string scanners and the gate consume WIDTH only; no public surface still exposes an unsigned value. HG3 was the one gap: the declaration was compared to the raw bytes but to no other VIEW. The fixture now carries `all()`, which READS every constant — javac inlines each read as a `const*`, so the method body states the same values through the IR builder's const handlers — and `test_the_declaration_and_the_inlined_read_agree` compares the two by value. It is load-bearing: a reviewer's `Const16` mutant in `opcode_ins.cpp` (`bbbb & 0xFFFF`) passes every other case and fails only this one (`-32768` vs `32768`), and it adds one kill to each of M0–M4. Its coverage is thinner than one-per-field (d8 shares one `const/4 #-1` across the SHORT, INT and BYTE reads) and the docstring says so; its regex already tolerates the `L` suffix dexllm#92 since added. The rebuilt fixture is byte-reproducible (md5 `b21f0bab…`, independently rebuilt). **Found while adding it, pre-existing, NOT fixed:** the body rendered as `return new Object[] {v1, Byte.valueOf(-1)});` — thirteen elements fell out as bare `X.valueOf(n);` statements (the DAD-faithful `filled-new-array/range` two-register limitation; androguard DAD emits the same — FIXED in dexllm#97) and the line carried an unbalanced extra `)` — FIXED in dexllm#96 (the line now reads `return new Object[] {v1, Byte.valueOf(((byte) -1))};`; the missing elements were dexllm#97, FIXED: the line now holds all fifteen).
@@ -1279,7 +1279,7 @@ user:** the cast spells its type the way the rest of the output does
 `reflect.Method` (a stripped `java.lang` subpackage, 21) — where a bare `null`
 compiled. The output already carries the same spelling at 4,640 declarations
 and 3,263 casts; the project-wide fix belongs to **dexllm#111** (type spelling),
-not to this cast. parity **29/29**, pytest **1827 passed / 24 skipped**,
+not to this cast (#111 fixed the subpackage half; the `$` half is a separate decision). parity **29/29**, pytest **1827 passed / 24 skipped**,
 TRUE corpus-less **1400 / 451 / 0**, narrowed to `tests/data/multidex.apk`
 **1707 passed**, sweep **21,374-class 0-crash, GATE: PASS**, determinism 3
 `PYTHONHASHSEED`s → one digest, lint trio clean.
@@ -2412,6 +2412,57 @@ Reading the variable's live type at emit time was the root of both, and the reco
 - **A fill target that RegisterPropagation folded an expression into** renders as an assignment to an expression, `A.FF = {1f}` / `F.obj() = {…}`. This is DAD's shape and invalid Java. The `x = {…}` form after `new T[n]` is itself not valid Java either (it needs `new T[] {…}`). Both are pre-existing.
 - **A crafted `int[]` filled with 8-byte elements** now prints `{5L}`; ART rejects such a dex.
 
+### A `java.lang` subpackage keeps its package (dexllm#111, 2026-11-17)
+
+`GetType` ([util.cpp](native/dad_cpp/util.cpp)) drops the `java.lang.` prefix
+because a class directly in `java.lang` is implicitly imported. It dropped it from
+every class whose package merely STARTS with `java/lang/`, so
+`java.lang.reflect.Method` rendered as `reflect.Method`, a name that resolves to no
+class (`private static reflect.Method sClipToWindowEnabledMethod;` in
+`ListPopupWindow`). DAD's own `lstrip` does the same. **Fix:** strip only when no `/`
+follows the prefix. The AST (`ParseDescriptor`) never stripped, so the text now
+agrees with it.
+
+**Scope decided with the user:** only the subpackage half. The issue's other half
+(nested `Outer$Inner` → `Outer.Inner`, and what anonymous `Outer$1` should say) is
+kept as `$`. It would break the cross-view naming dexllm#28 chose (`list_classes`,
+smali, every descriptor-valued API say `$`), and a `$` is a nesting separator only
+when InnerClass / EnclosingClass annotations or an SDK class list say so. A
+jadx-style rendering (imports, `.` for proven nesting, inner classes nested into
+the outer class, anonymous classes inlined) is planned as separate work.
+
+**Measured (a/b OFF = HEAD `b6fc49ae`, ON = `a2a345f1`, SAME capture):** 58 sources
+→ **820 classes on 20 sources, 3,095 lines, 0 line counts moved, 0 AST diffs, call
+multiset identical.** Every changed line equals OFF with `java.lang.` inserted before
+a subpackage segment (0 unexplained): `reflect` 2,265, `ref` 787, `invoke` 315,
+`annotation` 14, `instrument` 2. javac over the 550 changed top-level classes:
+errors **27,562 → 25,847**; `package reflect/ref/invoke does not exist` 2,383 → 1
+(the 1 is `kotlin.reflect`). New errors are lines javac can now type-check, all
+pre-existing: unreported checked exceptions (no `throws` clause), and catch
+variables typed as a non-Throwable (`catch (java.lang.reflect.Method v7_7)` in
+`Chip`, formerly `catch (reflect.Method v7_7)`). parity 29/29, pytest 2164 passed /
+24 skipped, TRUE corpus-less (`test_apk` moved aside, restore asserted) 1720 / 468 / 0,
+narrowed to `tests/data/multidex.apk` 2030 passed, sweep 21,374-class 0-crash GATE:
+PASS, determinism 3 `PYTHONHASHSEED`s → one digest, lint trio and boundary clean.
+
+**Two reviewers, 0 defects in the change.** Findings were in the record and the
+guards: a stale `util.h` comment and two CLAUDE.md mirrors still showing `invoke.X`;
+a smali-view guard this change had narrowed (its short token is a substring of the
+full one, so it is restored); and the per-type guard, which banned only the old short
+form, so a third wrong prefix (`lang.invoke.X`) passed. It now requires every
+package-qualified spelling of the class to be the full one. **Recorded, pre-existing:**
+the class header (`extends` / `implements`) never strips `java.lang` at all, so a
+header reads `java.lang.Thread` while the body reads `Thread`.
+
+**Guards:** [tests/test_type_spelling.py](tests/test_type_spelling.py) (6) on the
+committed `invoke-custom.dex` / `method_handles.dex` / `const-method-handle.dex`,
+with the dex's own external type refs as the oracle; four `GetType` checks in
+`util_parity_test.cpp` (`Thread$State` keeps `$`, `java/langx` is not java.lang, an
+array of a subpackage type). Eight pinned literals in `test_invoke_custom_ir.py` /
+`test_static_initializer_rendering.py` moved to `java.lang.invoke.`. 2 mutants BUILT,
+both killed: the old prefix-only strip (its `.so` is OFF's md5 exactly; 10 failures +
+parity) and a strip that never fires (5 failures + parity).
+
 ### Production fix — reused `this` register materialised as a local (`this = X` → valid, 2026-07-03)
 
 When a method reuses its receiver register p0 (`this`) as a scratch local — reads `this` early, overwrites it (`move-result` / `const`), reads the new value later, the two merging at a shared use (e.g. `return`) — `GroupVariables` binds the param-def and reuse-defs into ONE version (they share the merge use), so `SplitVariables` leaves it unsplit and it keeps its `ThisParam` identity. DAD (and our 1:1 port) then emit **`this = <value>`** — always invalid Java (you cannot assign to `this`). **Confirmed identical bug in androguard DAD**, so this is a beyond-DAD production divergence. Dominant real-corpus invalid-Java bucket (269 occurrences bundled, above every other). **Fix — `MaterializeReusedThis` ([dataflow.cpp](native/dad_cpp/dataflow.cpp), declared in [dataflow.h](native/dad_cpp/include/dataflow.h)), runs AFTER SplitVariables and BEFORE the chain consumers:** allocate a fresh local `vX`, rewrite every graph reference to the receiver → `vX`, and inject `vX = this` at the entry block head — the sole remaining `this` is that copy's rhs → `<Ret> vX = this; … vX = …; return vX;` (valid). `findFragmentByWho` (the canonical repro) becomes byte-valid: `Fragment v7 = this; if(!p2.equals(this.mWho)){ if(this.mChildFragmentManager==null){ v7 = null; } else { v7 = this.mChildFragmentManager.findFragmentByWho(p2); } } return v7;` (reads stay `this.mWho` because RP propagates the entry copy for uses it dominates; `v7 = 0` renders `null` via the existing reference-lhs null-render). **Type safety (two adversarial-review rounds, 4 reviewers):** `vX` is typed as the method **RETURN type** — the one assignability anchor valid Dalvik gives (everything reaching a `return` is assignable to it). The pass is a **validate-then-mutate** (atomic — Phase A reads only, so every early bail leaves the graph pristine) that fires ONLY when (a) the return type is a reference, (b) the receiver is RETURNED, and (c) every reassignment rhs is a reference whose type **EXACTLY equals** ret_type, or the narrow-integer constant 0 (null). Exact equality (not just `is_ref`) is REQUIRED: the unsplit phi-web can bind a def reaching only an intermediate use (never the return) with an unrelated type — `vX = getBar()` where `Bar ⊄ Foo` (adversarial CONFIRMED) — the merge-point-assignability property does NOT hold per-def, and there is no type hierarchy to check assignability. A **void-invoke artifact** (`this = super.onDraw()` — a void call DAD wrongly models as defining the receiver; DAD keeps the `this` name so its later `this.getScrollX()` reads accidentally render correctly, and renaming would EXPOSE the artifact as `v.getScrollX()` on a void result — strictly worse), a non-reference return, a non-returned reuse, a genuine primitive (`this = 5`), or a non-exact reference reuse all bail → left as DAD's (invalid but **no-worse**) `this = X`. The receiver's ThisParam type is CORRUPTED during Construct (each `this = X` AssignExpression ctor does `this_param.set_type(X.get_type())`) so it is restored to the class before seeding the copy. On a `true` return the caller `number_ins()` + recomputes `BuildDefUse` (the injected copy + renumbered locs) before DCE/RP/PlaceDeclarations; `FixInitResultTypes` runs between (graph-only, no chain access, safe). Excludes `<init>` (super()/this() uses the receiver specially). **Measured (a/b off vs on, bundled corpus):** `this =` **269 → 218** (51 genuine reuses materialised valid; residual 218 = void-invoke artifacts + non-provable reuses, correctly left), **90 valid `<Ref> vX = this;` seeds**; **ALL other invalid-Java buckets byte-unchanged** (prim-used-as-object 55, ref-declared-int 23, `v<op>null` 3, `prim=new` 2), the pre-existing separate `void v=this` move-into-conflated-local bug **40→40 unchanged**, parity 28/28, 0-crash/25,309-class. No `*DADFaithful` sibling (parity suites don't assert method bodies — return-literal/catch-clamp precedent). Remaining (deferred, no-worse-than-DAD): the void-invoke-defines-receiver DAD bug itself, and genuine multi-type phi-web merges (need a real version split). Regression test `tests/test_this_reuse.py` (materialisation valid + active + the Fragment repro).
@@ -2460,15 +2511,16 @@ finding below; it is true now, and it was not.)
 
 ```java
 TestLinkerMethodMinimalArguments.assertEquals((p4 + p5),
-    TestLinkerMethodMinimalArguments.linkerMethod(invoke.MethodHandles.lookup(), "_add",
-        invoke.MethodType.methodType(Integer.TYPE, Integer.TYPE, Integer.TYPE))
+    TestLinkerMethodMinimalArguments.linkerMethod(java.lang.invoke.MethodHandles.lookup(), "_add",
+        java.lang.invoke.MethodType.methodType(Integer.TYPE, Integer.TYPE, Integer.TYPE))
     .dynamicInvoker().invoke(p4, p5) /* invoke-custom */);
 ```
 
 **Two deliberate differences from jadx, both to stay consistent with THIS writer:**
-a class name goes through `GetType`, so `java.lang.invoke.X` prints as `invoke.X` —
+a class name goes through `GetType`, so `java.lang.invoke.X` printed as `invoke.X` —
 which is what every existing `invoke.CallSite` / `invoke.MethodHandles$Lookup` in the
-same file already reads (a pre-existing repo-wide rendering, not a new one); and
+same file already read (a pre-existing repo-wide rendering, not a new one; dexllm#111
+since made it `java.lang.invoke.X`, and the snippet above reads that way now); and
 `MethodHandle.invoke` is typed from the CALL SITE rather than as `Object` plus a cast
 at each use, the same call-site-over-declaration choice dexllm#60 made for 0xFA (it is
 also what makes the two float registers render `2f, 0.5f` instead of raw bits).
@@ -2607,7 +2659,7 @@ EXIT STATUS (a `try/except` cannot see a SIGSEGV) — `data_off` at/past the end
 table, 3,000 append-and-repoint iterations, a 64 MB pad — **0 signals, 0 hangs, 0
 unbounded allocations**, and the extent bound proven EXACT (one-past-fit rejected,
 exactly-fits accepted). The reconstruction shape matches jadx 1.5.0 byte for byte modulo
-the documented `invoke.X` prefix; `set_synthetic_vid` is provably inert; the AST schema
+the documented fully-qualified `java.lang.invoke.X` (no imports; `invoke.X` until dexllm#111); `set_synthetic_vid` is provably inert; the AST schema
 gains no node type; the chain survives RegisterPropagation / DCE / PlaceDeclarations; the
 CONCATENATED-source case (dexllm#25) was verified rather than assumed; and every headline
 a/b number re-derives.
@@ -4724,7 +4776,7 @@ committed fixture) run through **jadx 1.5.0**:
 
 | type | androguard / DAD | jadx 1.5.0 | dexllm before | dexllm now |
 |---|---|---|---|---|
-| `0x15 METHOD_TYPE` | the raw payload as an int | **whole CLASS fails** (`Can't decode value`) | dropped | `invoke.MethodType.methodType(Double.TYPE, TestInvocationKinds.class)` |
+| `0x15 METHOD_TYPE` | the raw payload as an int | **whole CLASS fails** (`Can't decode value`) | dropped | `java.lang.invoke.MethodType.methodType(Double.TYPE, TestInvocationKinds.class)` |
 | `0x16 METHOD_HANDLE` | the raw payload as an int | **whole CLASS fails** | dropped | `// = TestBadBootstrapArguments::bsm` |
 | `0x1a METHOD` | `['LMain;', '<init>', ['()', 'V']]` (the proto NESTS) | `= ;` (a syntax error) | dropped | `// = Main::new` |
 | `0x1c ARRAY` | a **memory address** | `= {7}` | dropped | `= {7}` |
