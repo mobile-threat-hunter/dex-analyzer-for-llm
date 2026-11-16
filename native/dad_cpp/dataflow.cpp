@@ -550,6 +550,46 @@ static bool ExitsAvoiding(Graph& graph, NodeBase* from, NodeBase* through) {
     return false;
 }
 
+void RecordFillArrayTypes(
+    Graph& graph, const ChainMap& ud,
+    const std::unordered_map<std::string, std::string>& declared_params) {
+    for (NodeBase* node : graph.nodes) {
+        for (const auto& [i, ins] : LocWithIns(node)) {
+            auto* fill = dynamic_cast<FillArrayExpression*>(ins.get());
+            if (!fill) continue;
+            auto rit = fill->var_map.find(fill->reg_id());
+            if (rit == fill->var_map.end() || !rit->second) continue;
+            const IRForm* reg = rit->second.get();
+            std::string agreed;
+            bool unknown = false;
+            auto take = [&](const std::string& t) {
+                if (t.empty()) { unknown = true; return; }
+                if (agreed.empty()) agreed = t;
+                else if (agreed != t) unknown = true;
+            };
+            auto dit = ud.find(VarLocKey{fill->reg_id(), i});
+            if (dit == ud.end() || dit->second.empty()) {
+                unknown = true;
+            } else {
+                for (int def : dit->second) {
+                    if (def < 0) {
+                        // a parameter's incoming value: its DECLARED type
+                        auto dp = declared_params.find(reg->Vid());
+                        take(dp != declared_params.end() ? dp->second
+                                                         : std::string());
+                        continue;
+                    }
+                    IRFormPtr d = graph.get_ins_from_loc(def);
+                    auto rhs = d ? d->get_rhs() : std::vector<IRFormPtr>{};
+                    take(rhs.empty() || !rhs[0] ? std::string()
+                                                : rhs[0]->get_type());
+                }
+            }
+            fill->set_array_type(unknown ? std::string("?") : agreed);
+        }
+    }
+}
+
 // Beyond-DAD (dexllm#125): the operands of `e` in the order Java evaluates
 // them. A node keys each operand once in `var_map`, by the id its own operand
 // list names, so a substituted expression is found under the id it replaced.

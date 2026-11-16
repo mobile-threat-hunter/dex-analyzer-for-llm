@@ -856,7 +856,9 @@ private:
 // string. Document callers should use the latter for FillArray.
 class FillArrayExpression : public ArrayExpression {
 public:
-    FillArrayExpression(IRFormPtr reg, std::vector<int64_t> value);
+    // `element_width` is the payload's (1, 2, 4 or 8 bytes); 0 = unknown.
+    FillArrayExpression(IRFormPtr reg, std::vector<int64_t> value,
+                        uint16_t element_width = 0);
 
     bool is_propagable() const noexcept override { return false; }
     // Beyond-DAD (dexllm#124): it WRITES the array, so a read of the array
@@ -868,10 +870,19 @@ public:
 
     const std::string& reg_id() const noexcept { return reg_; }
     const std::vector<int64_t>& value() const noexcept { return value_; }
+    uint16_t element_width() const noexcept { return element_width_; }
+    // dexllm#93 — the array's type, recorded by DvMethod once the type passes
+    // have run (a parameter's DECLARED type: writing a parameter register
+    // later corrupts the shared `Param`'s own type). Empty = not recorded;
+    // FillArrayElementType then reads the array variable's type.
+    const std::string& array_type() const noexcept { return array_type_; }
+    void set_array_type(std::string t) { array_type_ = std::move(t); }
 
 private:
     std::string reg_;
     std::vector<int64_t> value_;
+    uint16_t element_width_ = 0;
+    std::string array_type_;
     void Accept(Visitor& v) override;
 };
 
@@ -1262,5 +1273,15 @@ std::string ArrayStorePositionType(std::string_view kind,
 // its bits exactly as a plain `aput` into such an array is, and a `[Z` / `[J`
 // one is left as written — garbage in, consistently.
 std::string FilledArrayElementPositionType(std::string_view array_type);
+
+// Beyond-DAD (dexllm#93): the element type of a `fill-array-data` payload, as
+// one primitive descriptor char. The payload is untyped bytes (a `float[]` and
+// an `int[]` both carry 4-byte elements), so the type is the ARRAY's: taken
+// when the array is a one-dimensional primitive array whose element has the
+// payload's width (or the width is unknown), else decided by the width alone
+// — 8 bytes are a `long`, anything else an `int`. Both emitters spell each
+// element by it: `F` / `D` reinterpret the stored bits (`1065353216` is `1f`),
+// `J` takes the `L` suffix.
+char FillArrayElementType(const FillArrayExpression& fill);
 
 }  // namespace dexkit::dad

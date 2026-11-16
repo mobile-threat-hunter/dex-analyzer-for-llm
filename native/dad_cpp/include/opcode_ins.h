@@ -243,7 +243,7 @@ IRFormPtr FilledNewArrayRange(int64_t count, std::string_view type_desc,
 // DAD: opcode_ins.py:421 fill-array-data — `value` is the payload (vector
 // of int64_t covering all DAD payload widths).
 IRFormPtr FillArrayData(std::string_view aa, std::vector<int64_t> value,
-                        Vmap& vmap);
+                        Vmap& vmap, uint16_t element_width = 0);
 
 // DAD: opcode_ins.py:427 fill-array-data-payload — DAD's body is wrong here:
 // `return FillArrayExpression(None)` — would crash. Reproduce faithfully:

@@ -440,12 +440,14 @@ IRFormPtr DispatchInstruction(const RawIns& ri,
 
         case K::FillArrayData: {
             std::vector<int64_t> values;
+            uint16_t width = 0;
             if (payload) {
                 if (auto* pa = std::get_if<PayloadFillArray>(payload)) {
                     values = FillArrayValues(*pa);
+                    width = pa->element_width;
                 }
             }
-            return FillArrayData(vA, std::move(values), vmap);
+            return FillArrayData(vA, std::move(values), vmap, width);
         }
 
         // ── Throw ──────────────────────────────────────────────────────

@@ -1191,8 +1191,9 @@ void FilledArrayExpression::replace(const std::string& old_v,
 // ---- FillArrayExpression ---------------------------------------------------
 
 FillArrayExpression::FillArrayExpression(IRFormPtr reg,
-                                         std::vector<int64_t> value)
-    : value_(std::move(value)) {
+                                         std::vector<int64_t> value,
+                                         uint16_t element_width)
+    : value_(std::move(value)), element_width_(element_width) {
     reg_ = reg->Vid();
     var_map[reg_] = reg;
 }
@@ -1738,6 +1739,28 @@ std::string ArrayStorePositionType(std::string_view kind,
                    ? std::string(elem) : std::string("Ljava/lang/Object;");
     if (elem == "F" || elem == "D") return std::string(elem);
     return {};
+}
+
+char FillArrayElementType(const FillArrayExpression& fill) {
+    std::string t = fill.array_type();
+    if (t.empty()) {
+        auto it = fill.var_map.find(fill.reg_id());
+        if (it != fill.var_map.end() && it->second) t = it->second->get_type();
+    }
+    const char elem = (t.size() == 2 && t[0] == '[') ? t[1] : 0;
+    auto width_of = [](char c) -> unsigned {
+        switch (c) {
+            case 'F': case 'I': return 4;
+            case 'D': case 'J': return 8;
+            case 'S': case 'C': return 2;
+            case 'B': case 'Z': return 1;
+            default: return 0;
+        }
+    };
+    const unsigned w = fill.element_width();
+    if (elem && width_of(elem) != 0 && (w == 0 || width_of(elem) == w))
+        return elem;
+    return w == 8 ? 'J' : 'I';
 }
 
 std::string FilledArrayElementPositionType(std::string_view array_type) {

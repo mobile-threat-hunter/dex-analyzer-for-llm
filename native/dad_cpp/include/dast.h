@@ -155,7 +155,7 @@ private:
     // the rule writer.cpp emit_const_at shares, so the AST agrees with the text.
     AstValue visit_const_at(ConstContext ctx, std::string_view target,
                             IRForm* operand);
-    AstValue visit_arr_data(const std::vector<int64_t>& value);
+    AstValue visit_arr_data(const std::vector<int64_t>& value, char elem = 'I');
     AstValue visit_decl(Variable* var, AstValue init = AstValue::Null());
 
     // ── context stack (DAD's `with self as body:` pattern) ──────────────────

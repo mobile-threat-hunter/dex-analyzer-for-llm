@@ -433,3 +433,13 @@ another method of its class, a static final of another class with a
 `<clinit>`, a final read inside its own `<init>`), a copy chain, and controls.
 
 It is part of this project and carries this project's licence.
+
+`fill-array.dex` (md5 `095ef21f18a10ef755e0c4b18ff472be`) was written for dexllm#93 and assembled from the
+committed `fill-array.smali` the same way. Each method fills an array from a
+`fill-array-data` payload: `float[]`, `double[]` and `long[]`, `int[]` and
+`char[]` controls, a high `char`, `boolean[]`, an `Object` target, a type that
+disagrees with the payload width, an `int[]` parameter whose register is later
+reused, a branch merge with one fill per branch, and a fill after a merge of
+two array types (in both branch orders).
+
+It is part of this project and carries this project's licence.

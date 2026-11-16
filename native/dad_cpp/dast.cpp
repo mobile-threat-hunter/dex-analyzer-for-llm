@@ -1038,7 +1038,8 @@ AstValue JSONWriter::visit_expr(IRForm* op) {
     }
     if (auto* x = dynamic_cast<FillArrayExpression*>(op)) {
         AstValue arr = visit_expr(MapGet(x, x->reg_id()));
-        return Assignment(std::move(arr), visit_arr_data(x->value()));
+        return Assignment(std::move(arr),
+                          visit_arr_data(x->value(), FillArrayElementType(*x)));
     }
     if (auto* x = dynamic_cast<FilledArrayExpression*>(op)) {
         AstValue tn = ParseDescriptor(x->type);
@@ -1161,9 +1162,30 @@ AstValue JSONWriter::visit_expr(IRForm* op) {
 }
 
 // DAD: dast.py:583 visit_arr_data — our payload is pre-decoded ints.
-AstValue JSONWriter::visit_arr_data(const std::vector<int64_t>& value) {
+// Beyond-DAD (dexllm#93): each element is spelled by the array's element type
+// (FillArrayElementType), as the text Writer does.
+AstValue JSONWriter::visit_arr_data(const std::vector<int64_t>& value,
+                                    char elem) {
     std::vector<AstValue> tab;
-    for (int64_t x : value) tab.push_back(LiteralInt(x));
+    for (int64_t x : value) {
+        if (elem == 'F') {
+            const uint32_t bits = static_cast<uint32_t>(x);
+            float f; std::memcpy(&f, &bits, sizeof(f));
+            tab.push_back(LiteralFloatChecked(f));
+        } else if (elem == 'D') {
+            const uint64_t bits = static_cast<uint64_t>(x);
+            double d; std::memcpy(&d, &bits, sizeof(d));
+            tab.push_back(LiteralDoubleChecked(d));
+        } else if (elem == 'J') {
+            tab.push_back(LiteralLong(x));
+        } else if (elem == 'C') {
+            tab.push_back(LiteralInt(static_cast<uint16_t>(x)));
+        } else if (elem == 'Z' && (x == 0 || x == 1)) {
+            tab.push_back(LiteralBool(x != 0));
+        } else {
+            tab.push_back(LiteralInt(x));
+        }
+    }
     return ArrayInitializer(std::move(tab));
 }
 

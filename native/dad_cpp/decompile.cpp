@@ -159,6 +159,9 @@ bool DvMethod::BuildProcessedGraph() {
     }
     FixInitResultTypes(*graph_, m.ret_type, declared_params_, &chains.ud);
     DeadCodeElimination(*graph_, chains.du, chains.ud);
+    // dexllm#93: record each fill-array-data target's type now that the type
+    // passes have run, before RegisterPropagation can fold into the target.
+    RecordFillArrayTypes(*graph_, chains.ud, declared_params_);
     // dexllm#125: a read of a field no call or store in this method can
     // change. The oracle answers for a final field no non-initializer method
     // of its class writes; inside that class's own `<init>` / `<clinit>` it is

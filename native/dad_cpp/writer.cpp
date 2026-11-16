@@ -504,10 +504,30 @@ public:
         visit_ins(array);
         w_->Write(" = {");
         if (owner) {
+            // Beyond-DAD (dexllm#93): DAD writes each element as the integer
+            // the payload holds, so a `float[]` read `1065353216` for `1f`.
+            const char elem = FillArrayElementType(*owner);
             const auto& values = owner->value();
             for (size_t i = 0; i < values.size(); ++i) {
                 if (i > 0) w_->Write(", ");
-                w_->Write(std::to_string(values[i]));
+                if (elem == 'F') {
+                    const uint32_t bits = static_cast<uint32_t>(values[i]);
+                    float f; std::memcpy(&f, &bits, sizeof(f));
+                    w_->Write(FormatFloatLiteral(f));
+                } else if (elem == 'D') {
+                    const uint64_t bits = static_cast<uint64_t>(values[i]);
+                    double d; std::memcpy(&d, &bits, sizeof(d));
+                    w_->Write(FormatDoubleLiteral(d));
+                } else if (elem == 'J') {
+                    w_->Write(FormatLongLiteral(values[i]));
+                } else if (elem == 'C') {
+                    // a char is unsigned; the payload was read as a signed u2
+                    w_->Write(std::to_string(static_cast<uint16_t>(values[i])));
+                } else if (elem == 'Z' && (values[i] == 0 || values[i] == 1)) {
+                    w_->Write(values[i] ? "true" : "false");
+                } else {
+                    w_->Write(std::to_string(values[i]));
+                }
             }
         }
         w_->Write("}");

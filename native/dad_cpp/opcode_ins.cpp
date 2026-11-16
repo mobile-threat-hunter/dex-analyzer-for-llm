@@ -312,9 +312,9 @@ IRFormPtr FilledNewArrayRange(int64_t count, std::string_view type_desc,
 
 // DAD: opcode_ins.py:421 fill-array-data.
 IRFormPtr FillArrayData(std::string_view aa, std::vector<int64_t> value,
-                        Vmap& vmap) {
+                        Vmap& vmap, uint16_t element_width) {
     return std::make_shared<FillArrayExpression>(
-        GetVariable(vmap, aa), std::move(value));
+        GetVariable(vmap, aa), std::move(value), element_width);
 }
 
 // DAD: opcode_ins.py:427 fill-array-data-payload — bug-faithful: DAD body

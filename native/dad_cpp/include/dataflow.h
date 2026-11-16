@@ -136,6 +136,18 @@ bool ClearPath(Graph& graph, const std::string& reg, int loc1, int loc2,
                bool side_effects_block = true, LoopInfo* loops = nullptr);
 
 // DAD: dataflow.py:190 register_propagation.
+// Beyond-DAD (dexllm#93): record on each FillArrayExpression the type of the
+// array it fills (FillArrayExpression::set_array_type), from the definitions
+// that reach it: every reaching definition must agree on one type, or the
+// recorded type is "?" (unknown) and the payload width decides. A parameter's
+// type is its DECLARED one (`declared_params`), since a later write to the
+// register corrupts the shared `Param`'s own type; a merged version
+// (`int[]` on one branch, `float[]` on another) has no single type. Run after
+// the type passes and before RegisterPropagation.
+void RecordFillArrayTypes(
+    Graph& graph, const ChainMap& ud,
+    const std::unordered_map<std::string, std::string>& declared_params);
+
 void RegisterPropagation(Graph& graph, ChainMap& du, ChainMap& ud,
                          const StableFieldFn& stable_field = {});
 
