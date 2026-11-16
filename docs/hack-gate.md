@@ -624,7 +624,7 @@ each criterion was checked rather than assumed.
   `const-wide` at an F/D position is reinterpreted by `ConstantAt` BEFORE
   `Accept`; smali prints its own `#value`. Not covered, and recorded: a
   `long[]` fill-array payload (`FillArrayExpression` has no element type —
-  dexllm#93's problem). PASS with that residual.
+  dexllm#93's problem, FIXED in dexllm#93). PASS with that residual.
 * **HG3 views agree.** Text `NL` tokens vs AST `.long` nodes, per method, over
   201,670 corpus methods: 5,805 = 5,805, 0 mismatches. Before the change they
   disagreed on every one. PASS.

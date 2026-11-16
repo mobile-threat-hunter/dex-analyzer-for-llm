@@ -836,7 +836,7 @@ requirement and the worklist shape of the move rule are pinned at SOURCE level.
 negative `static final` integers print UNSIGNED, so the value is wrong (1,076
 values, dexllm#91) — **FIXED in dexllm#91**; `long` literals lack the `L` suffix (896 lines, dexllm#92 — **FIXED in dexllm#92**); a
 `float[]` fill-array payload renders its elements as int bits (216 lines,
-dexllm#93); an int `Math.min(II)I` result can be declared `float` when its
+dexllm#93 — **FIXED in dexllm#93**); an int `Math.min(II)I` result can be declared `float` when its
 register was earlier a float — the opposite direction, 10 lines (dexllm#94) — **FIXED in dexllm#94**;
 and DAD renders a `cmp` outside an `if` as `return v0 cmp p3;` (0 in the corpus,
 dexllm#95).
@@ -1476,7 +1476,7 @@ An invoke-custom LONG bootstrap argument is a `J` Constant, so it moves with the
 body. Unaffected: the AST (already `L`), a `const-wide` at a float/double
 position (`ConstantAt` reinterprets it first), smali. **Out of scope:** a
 `long[]` fill-array payload — `FillArrayExpression` carries no element type, the
-#93 problem.
+#93 problem (FIXED in dexllm#93: it prints `L` now).
 
 **The review's finding, and why a conversion / negation is now a typed
 position.** An adversarial reviewer built `double-to-int` and `neg-double` over a
@@ -1525,7 +1525,7 @@ skipping `ConstantAt`, `Accept` passing no type, a cast reading its RESULT type)
 die on the fixture. Full table in [docs/hack-gate.md](docs/hack-gate.md).
 
 **Accepted and recorded:** a `long[]` fill-array payload still prints bare
-(`FillArrayExpression` has no element type — #93; the corpus's two `long[]`
+(`FillArrayExpression` has no element type — #93, FIXED there; the corpus's two `long[]`
 payloads fit an int); a LONG-encoded initializer on an `int`/`char` field
 (crafted only — `CheckStaticFieldTypes`, ART :1289, is not ported) now renders
 `int I = 5L;`, the dexllm#91 precedent; and an I-typed `const/4` widened into a
