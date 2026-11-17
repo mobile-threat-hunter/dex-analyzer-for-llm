@@ -22,6 +22,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -59,9 +60,52 @@ unsigned GetTypeSize(std::string_view param) noexcept;
 // The bug-compatible variant lives in `GetTypeDADFaithful` and is used by
 // parity tests only.
 //
+// A `$` becomes `.` only where the class is a PROVEN member class
+// (dexllm#127): while a `ScopedMemberClassNames` is active on this thread, its
+// oracle names each member class, and `Landroid/view/View$OnClickListener;`
+// renders "android.view.View.OnClickListener". With no scope active (the
+// parity tests, the Mock) the `$` stays, as it always did.
+//
 // `size` is used only when atype begins with '[' (array). Pass UINT32_MAX
 // to defer to the default `T[]` rendering; any other value emits `T[N]`.
 std::string GetType(std::string_view atype, uint32_t size = UINT32_MAX);
+
+// dexllm#127 — what is known about a class's nesting. `nested`: the class is
+// declared INSIDE the class its descriptor names before the last `$` (a
+// member, an anonymous or a local class). `name`: its Java simple name when
+// it is a PROVEN member, else "". A top-level class, unknown or merely
+// spelled with `$`, is {"" , false}. The view must outlive the scope.
+struct MemberClassInfo {
+    std::string_view name;
+    bool nested = false;
+};
+
+// The oracle `GetType` consults for member-class spelling.
+using MemberClassNameFn = std::function<MemberClassInfo(std::string_view)>;
+
+// Installs `fn` for the current thread until destruction, restoring the
+// previous one (scopes nest). The decompiler holds one across a whole
+// pipeline run, so every GetType of that run, IR build and emit alike,
+// spells a type the same way; a string compared between the two (a cast
+// target against a receiver class) must not see two spellings.
+class ScopedMemberClassNames {
+public:
+    explicit ScopedMemberClassNames(MemberClassNameFn fn);
+    ~ScopedMemberClassNames();
+    ScopedMemberClassNames(const ScopedMemberClassNames&) = delete;
+    ScopedMemberClassNames& operator=(const ScopedMemberClassNames&) = delete;
+
+private:
+    MemberClassNameFn fn_;
+    const MemberClassNameFn* prev_;
+};
+
+// dexllm#127 — the body of class descriptor `desc` (`Lpkg/Outer$Inner;` ->
+// `pkg/Outer.Inner`) with every proven member-class `$` turned into `.`,
+// walking outward one enclosing class at a time while each class is NESTED.
+// Slashes are left alone.
+// `desc` must be an `L...;` descriptor; anything else is returned as given.
+std::string MemberClassBody(std::string_view desc);
 
 // DAD-faithful variant of GetType — preserves the `lstrip('java/lang/')`
 // char-set quirk for byte-identical comparison against androguard DAD output.

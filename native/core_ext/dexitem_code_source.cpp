@@ -1335,4 +1335,169 @@ DexItemCodeSource::GetFieldInfo(uint16_t dex_id, uint32_t fidx) {
     return info;
 }
 
+// ─── dexllm#127 — proven member-class names ─────────────────────────────────
+namespace {
+
+struct SdkMember {
+    std::string_view desc;
+    std::string_view name;
+};
+// Sorted by descriptor (the generator sorts; a guard checks it).
+constexpr SdkMember kSdkMembers[] = {
+#include "sdk_member_classes.inc"
+};
+
+std::string_view SdkMemberName(std::string_view desc) {
+    const auto* first = std::begin(kSdkMembers);
+    const auto* last = std::end(kSdkMembers);
+    const auto* it = std::lower_bound(
+        first, last, desc,
+        [](const SdkMember& m, std::string_view k) { return m.desc < k; });
+    return (it != last && it->desc == desc) ? it->name : std::string_view{};
+}
+
+// One element value of a system annotation, read only as far as this needs:
+// a STRING / TYPE index, or NULL. Any other kind answers "not read" (kind 0),
+// so an annotation shaped in a way this does not expect proves nothing.
+struct ElemValue {
+    U1 kind = 0;
+    uint32_t idx = 0;
+};
+
+bool ReadElemValue(const U1*& p, const U1* end, ElemValue& out) {
+    if (p >= end) return false;
+    const U1 header = *p++;
+    const U1 type = header & dex::kEncodedValueTypeMask;
+    const size_t nbytes = static_cast<size_t>(header >> dex::kEncodedValueArgShift) + 1;
+    switch (type) {
+        case dex::kEncodedNull:
+        case dex::kEncodedBoolean:
+            out.kind = type;
+            return true;
+        case dex::kEncodedArray:
+        case dex::kEncodedAnnotation:
+            return false;  // never part of InnerClass / EnclosingClass
+        default: {
+            if (static_cast<size_t>(end - p) < nbytes) return false;
+            const uint64_t v = ReadIntLE(p, end, nbytes);
+            out.kind = type;
+            out.idx = v > UINT32_MAX ? UINT32_MAX : static_cast<uint32_t>(v);
+            return true;
+        }
+    }
+}
+
+// What the dex that declares `desc` says about its nesting. `nested`: it
+// carries an `InnerClass` annotation, which the dex format puts on every
+// class declared inside another (member, anonymous or local). The name is
+// PROVEN when that annotation names it N (anonymous classes carry a null name)
+// and an `EnclosingClass` annotation names `Outer`, with `desc` spelled
+// exactly `Outer$N`. A local class carries `EnclosingMethod` instead, and is
+// nested but not a member.
+std::pair<std::string, bool> ProvenMemberName(DexItem& item, uint32_t type_idx,
+                                              std::string_view desc) {
+    const uint32_t cdi = item.GetTypeDefIdx(type_idx);
+    const auto& reader = item.GetReader();
+    const auto class_defs = reader.ClassDefs();
+    if (cdi == dex::kNoIndex || cdi >= class_defs.size()) return {"", false};
+    const auto& cdef = class_defs[cdi];
+    if (cdef.annotations_off == 0) return {"", false};
+    const MemMap* img = item.GetImage();
+    if (img == nullptr) return {"", false};
+    const U1* base = reinterpret_cast<const U1*>(img->data());
+    const U1* end = base + img->len();
+    // An offset is resolved against the reader's own base, as everything here.
+    auto at = [&](uint32_t off) -> const U1* {
+        const U1* q = reader.dataPtr<U1>(off);
+        return (q != nullptr && q >= base && q < end) ? q : nullptr;
+    };
+    const U1* dir = at(cdef.annotations_off);
+    if (dir == nullptr ||
+        static_cast<size_t>(end - dir) < sizeof(dex::AnnotationsDirectoryItem)) {
+        return {"", false};
+    }
+    uint32_t set_off;
+    std::memcpy(&set_off, dir, sizeof(set_off));  // class_annotations_off
+    if (set_off == 0) return {"", false};
+    const U1* set = at(set_off);
+    if (set == nullptr || static_cast<size_t>(end - set) < sizeof(uint32_t)) return {"", false};
+    uint32_t n;
+    std::memcpy(&n, set, sizeof(n));
+    if (n > static_cast<size_t>(end - set - sizeof(uint32_t)) / sizeof(uint32_t)) return {"", false};
+
+    const auto& strings = item.GetStrings();
+    const auto& type_names = item.GetTypeNames();
+    std::string_view inner_name;
+    bool have_inner = false;
+    bool nested = false;
+    std::string_view enclosing;
+    for (uint32_t i = 0; i < n; ++i) {
+        uint32_t item_off;
+        std::memcpy(&item_off, set + sizeof(uint32_t) + i * sizeof(uint32_t),
+                    sizeof(item_off));
+        const U1* p = at(item_off);
+        if (p == nullptr || *p++ != dex::kVisibilitySystem) continue;
+        const uint32_t ann_type = ReadULeb128(p, end);
+        if (ann_type >= type_names.size()) continue;
+        const std::string_view atype = type_names[ann_type];
+        const bool is_inner = atype == "Ldalvik/annotation/InnerClass;";
+        const bool is_enclosing = atype == "Ldalvik/annotation/EnclosingClass;";
+        if (!is_inner && !is_enclosing) continue;
+        if (is_inner) nested = true;
+        const uint32_t nelem = ReadULeb128(p, end);
+        for (uint32_t e = 0; e < nelem && p < end; ++e) {
+            const uint32_t name_idx = ReadULeb128(p, end);
+            ElemValue v;
+            if (!ReadElemValue(p, end, v) || name_idx >= strings.size()) break;
+            const std::string_view ename = strings[name_idx];
+            if (is_inner && ename == "name") {
+                if (v.kind == dex::kEncodedString && v.idx < strings.size()) {
+                    inner_name = strings[v.idx];
+                    have_inner = true;
+                }
+            } else if (is_enclosing && ename == "value") {
+                if (v.kind == dex::kEncodedType && v.idx < type_names.size()) {
+                    enclosing = type_names[v.idx];
+                }
+            }
+        }
+    }
+    if (!have_inner || inner_name.empty() || enclosing.size() < 3) return {"", nested};
+    // desc == enclosing minus ';' + '$' + name + ';'
+    const size_t outer_len = enclosing.size() - 1;
+    if (desc.size() != outer_len + 1 + inner_name.size() + 1) return {"", nested};
+    if (desc.compare(0, outer_len, enclosing.substr(0, outer_len)) != 0 ||
+        desc[outer_len] != '$' ||
+        desc.compare(outer_len + 1, inner_name.size(), inner_name) != 0) {
+        return {"", nested};
+    }
+    return {std::string{inner_name}, true};
+}
+
+}  // namespace
+
+// dexllm#127 — see IDexCodeSource::MemberClass. The dex that declares the
+// class (first-wins, as every descriptor-keyed lookup) decides from its own
+// annotations; a class no loaded dex declares is decided by the SDK catalog,
+// whose every entry is a member (the catalog has no anonymous or local
+// classes). A class a dex declares WITHOUT the annotations is top-level, even
+// when the SDK has a class of that name: the dex's copy is the one being read.
+dexkit::dad::MemberClassInfo DexItemCodeSource::MemberClass(std::string_view class_descriptor) {
+    std::lock_guard lock(member_class_mutex_);
+    auto it = member_class_cache_.find(std::string(class_descriptor));
+    if (it == member_class_cache_.end()) {
+        std::pair<std::string, bool> known;
+        auto [item, type_idx] = core_.GetClassDeclaredPair(class_descriptor);
+        if (item != nullptr) {
+            known = ProvenMemberName(*item, type_idx, class_descriptor);
+        } else {
+            const std::string_view sdk = SdkMemberName(class_descriptor);
+            known = {std::string{sdk}, !sdk.empty()};
+        }
+        it = member_class_cache_.emplace(std::string(class_descriptor), std::move(known))
+                 .first;
+    }
+    return {it->second.first, it->second.second};
+}
+
 }  // namespace dexkit::ext

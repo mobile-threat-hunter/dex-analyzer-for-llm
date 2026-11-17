@@ -7,6 +7,7 @@
 
 #include <array>
 #include <unordered_map>
+#include <utility>
 
 namespace dexkit::dad {
 
@@ -131,6 +132,58 @@ unsigned GetTypeSize(std::string_view param) noexcept {
 // for a class directly in java.lang (dexllm#111).
 // DAD upstream has a char-set strip bug; the bug-compatible variant for
 // parity testing lives in `GetTypeDADFaithful` below.
+namespace {
+thread_local const MemberClassNameFn* tl_member_class_names = nullptr;
+}  // namespace
+
+ScopedMemberClassNames::ScopedMemberClassNames(MemberClassNameFn fn)
+    : fn_(std::move(fn)), prev_(tl_member_class_names) {
+    tl_member_class_names = &fn_;
+}
+
+ScopedMemberClassNames::~ScopedMemberClassNames() {
+    tl_member_class_names = prev_;
+}
+
+// beyond-DAD (dexllm#127): DAD spells every `$` as written.
+std::string MemberClassBody(std::string_view desc) {
+    if (desc.size() < 2 || desc.front() != 'L' || desc.back() != ';') {
+        return std::string{desc};
+    }
+    std::string body{desc.substr(1, desc.size() - 2)};
+    const MemberClassNameFn* names = tl_member_class_names;
+    if (names == nullptr || !*names) return body;
+    // `cur` is the descriptor of the class whose last `$` is examined. The
+    // walk goes outward only while `cur` is NESTED in the class before that
+    // `$`: an anonymous or local class keeps its own `$` but its enclosing
+    // member path still reads with `.` (`Outer.Inner$1`), while a TOP-LEVEL
+    // class stops the walk, so `P$B$C` declared top-level stays `P$B$C` even
+    // when `P$B` is a member — `P.B$C` would name a member that does not
+    // exist (a D8 `$$ExternalSyntheticLambda0` is the common case).
+    const size_t pkg_end = body.rfind('/') == std::string::npos
+                               ? 0 : body.rfind('/') + 1;  // index in body
+    std::string cur{desc};
+    for (;;) {
+        const size_t dollar = cur.rfind('$');
+        // `dollar - 1` indexes body; a `$` before the class name is in the
+        // package, and the first character of a name cannot be a separator.
+        if (dollar == std::string::npos || dollar < pkg_end + 2) break;
+        const MemberClassInfo info = (*names)(cur);
+        if (!info.nested) break;
+        const std::string_view name = info.name;
+        // The oracle's name must be exactly what follows this `$`: an
+        // annotation naming something else (an obfuscator's rename) proves
+        // nothing about THIS spelling, so it is not applied.
+        if (!name.empty() && cur.size() == dollar + name.size() + 2 &&
+            cur.compare(dollar + 1, name.size(), name) == 0) {
+            body[dollar - 1] = '.';  // body drops the leading 'L'
+        }
+        cur.resize(dollar);
+        cur += ';';
+    }
+    return body;
+}
+
 std::string GetType(std::string_view atype, uint32_t size) {
     if (atype.empty()) return std::string{atype};
     if (atype.size() == 1) {
@@ -142,7 +195,7 @@ std::string GetType(std::string_view atype, uint32_t size) {
         if (atype.size() < 2 || atype.back() != ';') {
             return std::string{atype};
         }
-        std::string body{atype.substr(1, atype.size() - 2)};
+        std::string body = MemberClassBody(atype);
         // Only a class DIRECTLY in java.lang is implicitly imported, so only
         // there may the package go (dexllm#111). A subpackage keeps its full
         // name: `java.lang.reflect.Method`, never `reflect.Method`, which

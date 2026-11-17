@@ -221,6 +221,13 @@ androguard gets wrong:
   broke correlation for anyone reading two views of the same class side by side, or pasting a class
   name into a hooking script. A BMP identifier (`A한ysisTest`) always rendered readably, so the old
   behaviour was inconsistent as well: it survived by unit count rather than by rule.
+  The one deliberate exception is the NESTING separator (dexllm#127): where a class is a
+  PROVEN member class — its own `InnerClass` + `EnclosingClass` annotations, or the SDK
+  catalog for a framework class — the Java view writes `View.OnClickListener` where smali,
+  the AST and `list_classes()` write `View$OnClickListener`, because `$` is not how Java
+  names a member class and javac cannot resolve it. An unproven `$` (an anonymous `Outer$1`,
+  a local class, a top-level class such as D8's `$$ExternalSyntheticLambda0`) stays as
+  written, and so does a class header's own name.
 - **Literals** — boolean `return false/true` (not `return 0/1`), `return null` for a null reference,
   IEEE-754 `float`/`double` literals (`1.0f`, `Double.NaN`) where androguard prints the raw integer
   bits, and `null`/`true`/`false` field initializers (not Python `None`/`True`/`False`).

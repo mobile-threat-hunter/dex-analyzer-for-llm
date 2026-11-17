@@ -279,7 +279,7 @@ _CORPUS = {
         "move-result v14",
         (
             "float v14_1 = androidx.core.content.res.TypedArrayUtils.getNamedFloat("
-            'v2_6, p29, "centerY", androidx.core.R$styleable.GradientColor_android_centerY, 0f);',
+            'v2_6, p29, "centerY", androidx.core.R.styleable.GradientColor_android_centerY, 0f);',
         ),
     ),
     # NOT a #88 site — OFF already declares it `float` (prim→WIDER). It pins

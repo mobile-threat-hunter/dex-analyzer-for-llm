@@ -318,7 +318,8 @@ def test_def_anchor_priority_over_return_sink():
     PRIORITY over the return-sink anchor whenever every reassignment is `new C`
     of one class C and the entry `this` is never read. `ViewPager.generateDefault
     LayoutParams` returns `ViewGroup$LayoutParams` but allocates the subtype
-    `ViewPager$LayoutParams`; it must render `return new ViewPager$LayoutParams()`
+    `ViewPager$LayoutParams`; it must render `return new ViewPager.LayoutParams()`
+    (a proven member class reads with `.` in the Java view, dexllm#127)
     — no `this =`. (The framework-transitive variant, e.g. an obfuscated
     `generateDefaultLayoutParams` allocating the pure-framework
     `ViewGroup$MarginLayoutParams`, is the case that FAILS without the priority:
@@ -341,7 +342,7 @@ def test_def_anchor_priority_over_return_sink():
         assert not _THIS_ASSIGN.search(out), out[:400]
         # the def-anchor injects no `<X> vX = this;` seed (entry value is dead)
         assert not _GOOD_MAT.search(out), out[:400]
-        assert re.search(r"return\s+new\s+[\w.$]*ViewPager\$LayoutParams\(", out), out[
+        assert re.search(r"return\s+new\s+[\w.]*ViewPager\.LayoutParams\(", out), out[
             :400
         ]
         return

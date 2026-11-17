@@ -52,6 +52,7 @@ public:
                                     std::string_view super) override;
     bool               IsStableFinalField(std::string_view cls, std::string_view name,
                                     std::string_view type) override;
+    dexkit::dad::MemberClassInfo MemberClass(std::string_view class_descriptor) override;
 
 private:
     // Per-(dex_id, proto_idx) proto descriptor cache. Strings are owned by
@@ -68,6 +69,10 @@ private:
                        std::shared_ptr<const std::unordered_set<std::string>>>
         final_field_cache_;
     std::unordered_map<uint64_t, std::string> proto_cache_;
+    // dexllm#127 — descriptor -> (proven member simple name, nested). Node-based,
+    // so a returned view stays valid while the source lives.
+    std::mutex member_class_mutex_;
+    std::unordered_map<std::string, std::pair<std::string, bool>> member_class_cache_;
     static uint64_t ProtoKey(uint16_t dex_id, uint32_t proto_idx) {
         return (static_cast<uint64_t>(dex_id) << 32) | proto_idx;
     }

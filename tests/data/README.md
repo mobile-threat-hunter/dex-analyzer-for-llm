@@ -443,3 +443,22 @@ reused, a branch merge with one fill per branch, and a fill after a merge of
 two array types (in both branch orders).
 
 It is part of this project and carries this project's licence.
+
+`member-classes.dex` (dexllm#127) is authored the same way, from
+`member-classes.java`. It carries one class per member-class spelling rule: a
+static member and a member of a member (`Outer$Nested$Deep`), an inner member, an
+anonymous class at top level and inside a member, a LOCAL class (which carries
+`EnclosingMethod`, not `EnclosingClass`), a top-level class whose name merely
+contains `$` (`Weird$Name`, no InnerClass annotation), a field and a class header
+naming member types, and references to framework members (`Map.Entry`,
+`Thread.State`) that only the SDK catalog proves. The class is `public`, so the
+source is copied to `Outer.java` first. `member-classes-sdkname.java` adds a
+top-level class DECLARED as `android.view.View$OnClickListener` — an SDK member
+name, but with no annotations — so the dex's copy, not the SDK, decides:
+
+```
+cp member-classes.java Outer.java
+cp member-classes-sdkname.java 'View$OnClickListener.java'
+javac -source 8 -target 8 -d cls Outer.java 'View$OnClickListener.java'   # javac 17.0.17
+d8 --release --min-api 26 --output out cls/mc/*.class cls/android/view/*.class  # D8 8.10.9-dev, build-tools 36.0.0
+```

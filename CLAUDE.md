@@ -1279,7 +1279,7 @@ user:** the cast spells its type the way the rest of the output does
 `reflect.Method` (a stripped `java.lang` subpackage, 21) — where a bare `null`
 compiled. The output already carries the same spelling at 4,640 declarations
 and 3,263 casts; the project-wide fix belongs to **dexllm#111** (type spelling),
-not to this cast (#111 fixed the subpackage half; the `$` half is a separate decision). parity **29/29**, pytest **1827 passed / 24 skipped**,
+not to this cast (#111 fixed the subpackage half; #127 the `$` half, for proven member classes). parity **29/29**, pytest **1827 passed / 24 skipped**,
 TRUE corpus-less **1400 / 451 / 0**, narrowed to `tests/data/multidex.apk`
 **1707 passed**, sweep **21,374-class 0-crash, GATE: PASS**, determinism 3
 `PYTHONHASHSEED`s → one digest, lint trio clean.
@@ -2429,7 +2429,9 @@ kept as `$`. It would break the cross-view naming dexllm#28 chose (`list_classes
 smali, every descriptor-valued API say `$`), and a `$` is a nesting separator only
 when InnerClass / EnclosingClass annotations or an SDK class list say so. A
 jadx-style rendering (imports, `.` for proven nesting, inner classes nested into
-the outer class, anonymous classes inlined) is planned as separate work.
+the outer class, anonymous classes inlined) is planned as separate work —
+dexllm#127 has since done the `.` half (see its section below; the cross-view
+claim is narrowed there), and #128 / #129 are the nesting and inlining halves.
 
 **Measured (a/b OFF = HEAD `b6fc49ae`, ON = `a2a345f1`, SAME capture):** 58 sources
 → **820 classes on 20 sources, 3,095 lines, 0 line counts moved, 0 AST diffs, call
@@ -2462,6 +2464,78 @@ array of a subpackage type). Eight pinned literals in `test_invoke_custom_ir.py`
 `test_static_initializer_rendering.py` moved to `java.lang.invoke.`. 2 mutants BUILT,
 both killed: the old prefix-only strip (its `.so` is OFF's md5 exactly; 10 failures +
 parity) and a strip that never fires (5 failures + parity).
+
+### The Java view spells a PROVEN member class with `.` (dexllm#127, 2026-11-17)
+
+The `$` half dexllm#111 left. The Java view wrote a member class the dex way,
+`android.view.View$OnClickListener`, which javac cannot resolve (`$` is not how
+Java names a member). **User decision:** narrow dexllm#28's cross-view claim —
+the Java view spells proven nesting with `.`, while `list_classes()`, smali, the
+AST's descriptors and every descriptor-valued API keep `$`.
+
+**A `$` is a nesting separator only when something proves it**, so the rule is
+evidence, not a guess. For a class a loaded dex declares (first-wins,
+`GetClassDeclaredPair`): its own `InnerClass` annotation names it N (non-null)
+and `EnclosingClass` names `Outer`, with the descriptor exactly `Outer$N`. For a
+class no dex declares: the SDK catalog (`component_bases.json`'s `sdk_classes`,
+where a `$` is a separator exactly when the prefix is itself an SDK class),
+compiled in as [native/core_ext/sdk_member_classes.inc](native/core_ext/sdk_member_classes.inc)
+by `scripts/gen_sdk_member_classes.py`. Each `$` is decided on its own, walking
+outward only while the class is NESTED (carries `InnerClass`): an anonymous or
+local class keeps its own `$` but its member path is dotted
+(`mc.Outer.Nested$1`); a TOP-LEVEL class stops the walk. A class a dex declares
+without the annotations is top-level even if the SDK has that name.
+
+**Mechanism:** port `IDexCodeSource::MemberClass` → `MemberClassInfo{name,
+nested}` (default: unknown, not nested, so the Mock and the parity suites see no
+change); `DexItemCodeSource` reads the two system annotations from raw bytes
+(bounded, cached under a mutex); `dad::GetType` consults a `thread_local`
+oracle through `MemberClassBody`, installed by `ScopedMemberClassNames` in
+`RunPipeline`, `DecompileMethodAst` and `DecompileClass`, so every `GetType` of
+one run — IR build and emit alike — spells a type the same way (writer.cpp
+compares a cast target against `invokeInstr->cls()`). Header `extends` /
+`implements` follow the rule; a header's own name and constructor names keep
+`$` until dexllm#128. The `java_*` helpers (`java_type`, `descriptor_to_java`)
+still spell `$` — they have no dex to prove anything.
+
+**Measured (a/b OFF = HEAD `a2a345f1`, ON = `e1d97f61`, SAME capture):** 22
+sources → **14,462 classes, 94,528 lines, 111,311 `$`→`.` substitutions, 0
+other changes, 0 line counts moved, 0 AST diffs, 0 inside string literals**.
+What keeps `$`: anonymous / Kotlin local-lambda classes, D8
+`$$ExternalSyntheticLambda` classes, `TestArr$ays`-style top-level names. javac
+over the 5,610 changed top-level classes: errors **119,900 → 106,297**,
+`cannot find symbol` 88,927 → 72,534. parity 29/29, pytest 2190 passed / 24
+skipped, narrowed to `tests/data/multidex.apk` 2055 passed, sweep 21,374-class
+0-crash GATE: PASS, determinism 3 `PYTHONHASHSEED`s → one digest, lint trio and
+boundary clean. Cost ~1.5–2% (correctness reviewer).
+
+**Guards:** [tests/test_member_class_spelling.py](tests/test_member_class_spelling.py)
+(25) on the nineteenth AUTHORED fixture `tests/data/member-classes.java` (+
+`member-classes-sdkname.java`), with an independent raw-annotation oracle:
+members, a member of a member, inner, anonymous at top and inside a member, a
+local class, `Weird$Name`, a top-level `Outer$Nested$Top`, a declared
+`android.view.View$OnClickListener` without annotations, `Map.Entry` /
+`Thread.State` from the SDK, a field type, a header, every method entry point,
+two crafted proofs that fail (a renamed `InnerClass`, an `EnclosingClass`
+pointing at the same-length `Lmc/Other;`), a corpus agreement check, the
+generator reproduction and a `thread_local` source pin; 11 `GetType` checks in
+`util_parity_test.cpp`. **Mutants, each BUILT with a distinct `.so` md5,
+control asserted after: 16, 14 killed, 2 equivalent.** M4a (the adapter's name
+check) is masked by util's suffix check, which M4b kills in C++; M10 (any value
+kind read as a name) is unreachable, since a NULL name's index 0 never spells
+the text after `$`. M3 (EnclosingClass not checked) survived until `Other`
+existed — a different-length enclosing type was rejected by the length check
+first.
+
+**Two reviewers.** Correctness: 0 production defects, an independent a/b over
+17,138 classes (0 unjustified, 0 missed), and four guard holes (method entry
+points masked by `decompile_class`'s scope, the SDK-name-without-annotations
+rule, `thread_local`, the dangling CLAUDE.md reference) — all closed. Adversarial:
+one CONFIRMED wrong answer — the walk dotted the `$` before a proven outer even
+when the class itself was top-level (`u.P.B$C`; 169 corpus occurrences, all D8
+synthetics) — fixed by the `nested` bit; memory safety (2,900 fuzzed annotation
+mutations, 0 signals), IR-vs-emit, threading (1 vs 8 threads byte-identical),
+determinism and performance REFUTED.
 
 ### Production fix — reused `this` register materialised as a local (`this = X` → valid, 2026-07-03)
 

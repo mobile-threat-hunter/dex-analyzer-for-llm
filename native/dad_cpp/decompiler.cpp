@@ -158,10 +158,16 @@ bool Decompiler::LocateMethod(std::string_view descriptor,
     return true;
 }
 
+// dexllm#127 — the oracle every pipeline run spells member classes with.
+MemberClassNameFn Decompiler::MemberClassNames() {
+    return [this](std::string_view desc) { return source_.MemberClass(desc); };
+}
+
 std::string Decompiler::RunPipeline(
     uint16_t dex_id, uint32_t method_idx,
     std::vector<std::pair<uint32_t, uint32_t>>* pc_map) {
     std::string result;
+    ScopedMemberClassNames member_names(MemberClassNames());
     try {
         auto snap = MethodSnapshotBuilder::BuildShared(
             source_, dex_id, method_idx);
@@ -251,6 +257,7 @@ Decompiler::DecompileMethodAst(std::string_view descriptor, bool include_source)
     // (DAD dast.py JSONWriter). The snapshot is cheap; the pipeline is the
     // same one DecompileMethod runs, but emits AstValue instead of text.
     try {
+        ScopedMemberClassNames member_names(MemberClassNames());
         auto snap = MethodSnapshotBuilder::BuildShared(source_, dex_id, method_idx);
         ast.cls_name = snap->meta.cls_name;
         ast.name = snap->meta.name;
@@ -285,6 +292,9 @@ Decompiler::DecompileMethodAst(std::string_view descriptor, bool include_source)
 // (EncodedValue → text) is a Phase-2 follow-up; FieldInfo.init_text is
 // currently always empty so fields emit as `Type name;`.
 std::string Decompiler::DecompileClass(std::string_view class_descriptor) {
+    // Field types and static initializers are spelled under the same
+    // member-class oracle as the method bodies (dexllm#127).
+    ScopedMemberClassNames member_names(MemberClassNames());
     auto info_opt = source_.GetClassInfo(class_descriptor);
     if (!info_opt) {
         // Class not defined in this dex (external ref / wrong descriptor).
@@ -345,7 +355,7 @@ std::string Decompiler::DecompileClass(std::string_view class_descriptor) {
     // extends — Object is implicit and omitted (DAD convention).
     if (!info.superclass.empty() &&
         info.superclass != "Ljava/lang/Object;") {
-        std::string sc{info.superclass.substr(1, info.superclass.size() - 2)};
+        std::string sc = MemberClassBody(info.superclass);
         prototype += " extends ";
         prototype += SanitizeUtf8(slash_to_dot(sc));
     }
@@ -355,7 +365,7 @@ std::string Decompiler::DecompileClass(std::string_view class_descriptor) {
         for (size_t i = 0; i < info.interfaces.size(); ++i) {
             if (i > 0) prototype += ", ";
             std::string_view iv = info.interfaces[i];
-            prototype += SanitizeUtf8(slash_to_dot(std::string{iv.substr(1, iv.size() - 2)}));
+            prototype += SanitizeUtf8(slash_to_dot(MemberClassBody(iv)));
         }
     }
 

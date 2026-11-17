@@ -21,6 +21,7 @@
 
 #include "dast.h"
 #include "dex_code_source.h"
+#include "util.h"
 
 namespace dexkit::dad {
 
@@ -94,6 +95,10 @@ public:
 private:
     bool LocateMethod(std::string_view descriptor,
                       uint16_t& dex_id, uint32_t& method_idx);
+
+    // dexllm#127 — source_.MemberClass as the oracle GetType consults
+    // while a ScopedMemberClassNames is held.
+    MemberClassNameFn MemberClassNames();
 
     // D-3 — shared decompile body: build snapshot → DvMethod::Process →
     // SanitizeUtf8. Fills *pc_map (line ↔ offset) when non-null. Used by the

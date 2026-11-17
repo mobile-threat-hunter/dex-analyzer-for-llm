@@ -311,6 +311,31 @@ readably, so the old rule held by unit count rather than by principle. A LONE
 surrogate still escapes — it has no UTF-8 form — but the verifier rejects one in a
 name, so it cannot occur there.
 
+**The nesting separator is the one place the Java view spells a class
+differently (dexllm#127).** A `$` becomes `.` only where the class is a PROVEN
+member class: a class a loaded dex declares, whose `InnerClass` annotation names
+it `N` (a non-null name) and whose `EnclosingClass` annotation names `Outer`,
+with the descriptor spelled exactly `Outer$N`; or a class no loaded dex declares
+that the bundled SDK catalog lists as a member of an SDK class. So the Java view
+reads `android.view.View.OnClickListener`, `Thread.State`,
+`mc.Outer.Nested.Deep`, while `list_classes()`, `render_*_smali`,
+`decompile_method_ast`'s descriptors and every descriptor-valued API keep
+`$`. Each `$` is decided on its own: an anonymous class keeps its own `$` but its
+proven outer path is dotted (`mc.Outer.Nested$1`); a local class (`Outer$1Loc`,
+which carries `EnclosingMethod`), a top-level class whose name merely contains
+`$`, and an annotation that names some other spelling all keep `$`. A class
+header's own name and its constructors' names are unchanged (`class
+Outer$Nested`, `Outer$Nested(...)`) — emitting an inner class inside its outer is
+dexllm#128 — but its `extends` / `implements` follow the rule. The walk goes
+outward only while a class is NESTED (it carries an `InnerClass` annotation): a
+top-level class whose name extends a member's, such as D8's
+`Outer$Inner$$ExternalSyntheticLambda0`, keeps every `$`. The dotted `java_*`
+helpers (`ExternalTypeRef.java_type`, `java_signature`, `java_class`,
+`descriptor_to_java`) still spell `$`: they work from a descriptor alone, with no
+dex to prove anything, so a name copied from the Java view maps back through
+`list_classes()`, not through `java_to_descriptor`. The first declaring dex decides (first-wins), and a class it declares
+WITHOUT the annotations is unproven even if the SDK has a class of that name.
+
 The two directions are exact inverses for **everything a loadable dex can hold**,
 and that is enforced rather than assumed. Two encodings would break it — a LONE
 surrogate and a non-NUL OVERLONG both decode to something that cannot be encoded

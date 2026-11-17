@@ -96,6 +96,50 @@ int main() {
               dad::GetType("[Ljava/lang/ref/WeakReference;"),
               "java.lang.ref.WeakReference[]");
 
+    // dexllm#127 — member-class spelling. With no oracle installed a `$`
+    // stays (the Thread$State check above runs without one); with one, only a
+    // `$` the oracle proves becomes `.`, each `$` decided on its own.
+    {
+        auto oracle = [](std::string_view d) -> dad::MemberClassInfo {
+            if (d == "Ljava/lang/Thread$State;") return {"State", true};
+            if (d == "La/Outer$Inner;") return {"Inner", true};
+            if (d == "La/Outer$Inner$Deep;") return {"Deep", true};
+            if (d == "La/Outer$Inner$1;") return {"", true};     // anonymous
+            if (d == "La/Outer$Renamed;") return {"Other", true}; // name mismatch
+            if (d == "Lx$y/C$D;") return {"D", true};
+            if (d == "La/$Lead;") return {"Lead", true};          // `$` opens the name
+            return {};  // top-level / unknown (incl. La/Outer$Inner$Top;)
+        };
+        dad::ScopedMemberClassNames names(oracle);
+        check_str("get_type(Thread$State) [#127]",
+                  dad::GetType("Ljava/lang/Thread$State;"), "Thread.State");
+        check_str("get_type(Outer$Inner$Deep) [#127]",
+                  dad::GetType("La/Outer$Inner$Deep;"), "a.Outer.Inner.Deep");
+        check_str("get_type(Outer$Inner$1) [#127] anonymous keeps $",
+                  dad::GetType("La/Outer$Inner$1;"), "a.Outer.Inner$1");
+        check_str("get_type(Outer$Renamed) [#127] mismatched name keeps $",
+                  dad::GetType("La/Outer$Renamed;"), "a.Outer$Renamed");
+        check_str("get_type(x$y/C$D) [#127] package $ untouched",
+                  dad::GetType("Lx$y/C$D;"), "x$y.C.D");
+        check_str("get_type($Lead) [#127] leading $ is the name",
+                  dad::GetType("La/$Lead;"), "a.$Lead");
+        check_str("get_type(Outer$Inner$Top) [#127] a top-level class stops the walk",
+                  dad::GetType("La/Outer$Inner$Top;"), "a.Outer$Inner$Top");
+        check_str("get_type([Outer$Inner) [#127] array",
+                  dad::GetType("[La/Outer$Inner;"), "a.Outer.Inner[]");
+        {
+            dad::ScopedMemberClassNames none([](std::string_view) {
+                return dad::MemberClassInfo{};
+            });
+            check_str("get_type(Outer$Inner) [#127] inner scope wins",
+                      dad::GetType("La/Outer$Inner;"), "a.Outer$Inner");
+        }
+        check_str("get_type(Outer$Inner) [#127] outer scope restored",
+                  dad::GetType("La/Outer$Inner;"), "a.Outer.Inner");
+    }
+    check_str("get_type(Outer$Inner) [#127] no scope keeps $",
+              dad::GetType("La/Outer$Inner;"), "a.Outer$Inner");
+
     // get_type (DAD-faithful) — char-set lstrip bug preserved for byte-match
     // comparison against androguard DAD.
     check_str("get_type_faithful(Ljava/lang/Object;)",

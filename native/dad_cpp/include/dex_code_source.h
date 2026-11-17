@@ -19,6 +19,8 @@
 #include <utility>
 #include <vector>
 
+#include "util.h"  // MemberClassInfo (dexllm#127)
+
 // Forward-declare slicer's dex::Code to avoid pulling its full header into
 // the public interface. Implementations include the real header.
 namespace dex { struct Code; }
@@ -83,6 +85,17 @@ public:
                                     std::string_view /*name*/,
                                     std::string_view /*type*/) {
         return false;
+    }
+
+    // dexllm#127 — the nesting of `class_descriptor` (see MemberClassInfo):
+    // whether it is declared inside the class its descriptor names before the
+    // last `$`, and its simple name when it is a PROVEN member
+    // (`Lpkg/Outer$Inner;` -> "Inner"). The Java view spells a proven member
+    // with `.`; everything unproven keeps its `$`. Defaulted to "unknown, not
+    // nested" so a source with no annotations (the test Mock) renders every
+    // `$` as written, which is what every source did before.
+    virtual MemberClassInfo MemberClass(std::string_view /*class_descriptor*/) {
+        return {};
     }
 
     // ─── Const-pool resolution (string_views point into source's tables) ─
