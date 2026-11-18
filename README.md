@@ -227,7 +227,8 @@ androguard gets wrong:
   the AST and `list_classes()` write `View$OnClickListener`, because `$` is not how Java
   names a member class and javac cannot resolve it. An unproven `$` (an anonymous `Outer$1`,
   a local class, a top-level class such as D8's `$$ExternalSyntheticLambda0`) stays as
-  written, and so does a class header's own name.
+  written, and so does the header of a class asked for alone. `decompile_class` renders a
+  proven member inside its outer class, under its simple name (dexllm#128).
 - **Literals** — boolean `return false/true` (not `return 0/1`), `return null` for a null reference,
   IEEE-754 `float`/`double` literals (`1.0f`, `Double.NaN`) where androguard prints the raw integer
   bits, and `null`/`true`/`false` field initializers (not Python `None`/`True`/`False`).

@@ -98,6 +98,16 @@ public:
         return {};
     }
 
+    // dexllm#128 — the member classes `outer` declares that a loaded dex can
+    // render inside it: listed by `outer` itself and proven by the member's
+    // own annotations to be `outer$name`, in the order `outer` lists them.
+    // `access_flags` are the member's SOURCE modifiers (static / private /
+    // protected survive there, not in its class_def). Defaulted to none, so a
+    // source with no annotations (the test Mock) nests nothing.
+    virtual std::vector<NestedMember> NestedMemberClasses(std::string_view /*outer*/) {
+        return {};
+    }
+
     // ─── Const-pool resolution (string_views point into source's tables) ─
     // dexllm#60: one proto by PROTO index, as "(params)Ret". Distinct from
     // GetMethodProto, which takes a METHOD index — invoke-polymorphic's second

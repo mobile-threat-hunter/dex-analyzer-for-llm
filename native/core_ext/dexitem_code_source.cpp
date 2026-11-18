@@ -1387,23 +1387,35 @@ bool ReadElemValue(const U1*& p, const U1* end, ElemValue& out) {
     }
 }
 
-// What the dex that declares `desc` says about its nesting. `nested`: it
-// carries an `InnerClass` annotation, which the dex format puts on every
-// class declared inside another (member, anonymous or local). The name is
-// PROVEN when that annotation names it N (anonymous classes carry a null name)
-// and an `EnclosingClass` annotation names `Outer`, with `desc` spelled
-// exactly `Outer$N`. A local class carries `EnclosingMethod` instead, and is
-// nested but not a member.
-std::pair<std::string, bool> ProvenMemberName(DexItem& item, uint32_t type_idx,
-                                              std::string_view desc) {
+// What a class's own system annotations say about its nesting (dexllm#127,
+// dexllm#128). `nested`: it carries an `InnerClass` annotation, which the dex
+// format puts on every class declared inside another (member, anonymous or
+// local). `inner_name` / `inner_access`: that annotation's `name` (null for an
+// anonymous class) and `accessFlags` — the SOURCE-level modifiers, which keep
+// `static` / `private` / `protected` where the class_def's own flags cannot.
+// `enclosing`: the `EnclosingClass` value. `members`: the `MemberClasses`
+// value, the member classes the class itself lists. A local class carries
+// `EnclosingMethod` instead, and is nested but not a member. Anything shaped
+// in a way this does not expect is simply not read.
+struct NestingFacts {
+    bool nested = false;
+    bool have_inner = false;
+    std::string_view inner_name;
+    std::optional<uint32_t> inner_access;
+    std::string_view enclosing;
+    std::vector<std::string_view> members;
+};
+
+NestingFacts ReadNestingFacts(DexItem& item, uint32_t type_idx) {
+    NestingFacts f;
     const uint32_t cdi = item.GetTypeDefIdx(type_idx);
     const auto& reader = item.GetReader();
     const auto class_defs = reader.ClassDefs();
-    if (cdi == dex::kNoIndex || cdi >= class_defs.size()) return {"", false};
+    if (cdi == dex::kNoIndex || cdi >= class_defs.size()) return f;
     const auto& cdef = class_defs[cdi];
-    if (cdef.annotations_off == 0) return {"", false};
+    if (cdef.annotations_off == 0) return f;
     const MemMap* img = item.GetImage();
-    if (img == nullptr) return {"", false};
+    if (img == nullptr) return f;
     const U1* base = reinterpret_cast<const U1*>(img->data());
     const U1* end = base + img->len();
     // An offset is resolved against the reader's own base, as everything here.
@@ -1414,23 +1426,19 @@ std::pair<std::string, bool> ProvenMemberName(DexItem& item, uint32_t type_idx,
     const U1* dir = at(cdef.annotations_off);
     if (dir == nullptr ||
         static_cast<size_t>(end - dir) < sizeof(dex::AnnotationsDirectoryItem)) {
-        return {"", false};
+        return f;
     }
     uint32_t set_off;
     std::memcpy(&set_off, dir, sizeof(set_off));  // class_annotations_off
-    if (set_off == 0) return {"", false};
+    if (set_off == 0) return f;
     const U1* set = at(set_off);
-    if (set == nullptr || static_cast<size_t>(end - set) < sizeof(uint32_t)) return {"", false};
+    if (set == nullptr || static_cast<size_t>(end - set) < sizeof(uint32_t)) return f;
     uint32_t n;
     std::memcpy(&n, set, sizeof(n));
-    if (n > static_cast<size_t>(end - set - sizeof(uint32_t)) / sizeof(uint32_t)) return {"", false};
+    if (n > static_cast<size_t>(end - set - sizeof(uint32_t)) / sizeof(uint32_t)) return f;
 
     const auto& strings = item.GetStrings();
     const auto& type_names = item.GetTypeNames();
-    std::string_view inner_name;
-    bool have_inner = false;
-    bool nested = false;
-    std::string_view enclosing;
     for (uint32_t i = 0; i < n; ++i) {
         uint32_t item_off;
         std::memcpy(&item_off, set + sizeof(uint32_t) + i * sizeof(uint32_t),
@@ -1442,36 +1450,73 @@ std::pair<std::string, bool> ProvenMemberName(DexItem& item, uint32_t type_idx,
         const std::string_view atype = type_names[ann_type];
         const bool is_inner = atype == "Ldalvik/annotation/InnerClass;";
         const bool is_enclosing = atype == "Ldalvik/annotation/EnclosingClass;";
-        if (!is_inner && !is_enclosing) continue;
-        if (is_inner) nested = true;
+        const bool is_members = atype == "Ldalvik/annotation/MemberClasses;";
+        if (!is_inner && !is_enclosing && !is_members) continue;
+        if (is_inner) f.nested = true;
         const uint32_t nelem = ReadULeb128(p, end);
         for (uint32_t e = 0; e < nelem && p < end; ++e) {
             const uint32_t name_idx = ReadULeb128(p, end);
-            ElemValue v;
-            if (!ReadElemValue(p, end, v) || name_idx >= strings.size()) break;
+            if (name_idx >= strings.size()) break;
             const std::string_view ename = strings[name_idx];
+            if (is_members) {
+                // `value` is an encoded_array of TYPE values, the one shape
+                // read here that ReadElemValue declines. It is the only
+                // element MemberClasses has, so a misread ends the walk.
+                if (ename != "value" || p >= end ||
+                    (*p & dex::kEncodedValueTypeMask) != dex::kEncodedArray) {
+                    break;
+                }
+                ++p;
+                const uint32_t count = ReadULeb128(p, end);
+                for (uint32_t k = 0; k < count && p < end; ++k) {
+                    ElemValue v;
+                    if (!ReadElemValue(p, end, v)) break;
+                    if (v.kind == dex::kEncodedType && v.idx < type_names.size()) {
+                        f.members.push_back(type_names[v.idx]);
+                    }
+                }
+                break;
+            }
+            ElemValue v;
+            if (!ReadElemValue(p, end, v)) break;
             if (is_inner && ename == "name") {
                 if (v.kind == dex::kEncodedString && v.idx < strings.size()) {
-                    inner_name = strings[v.idx];
-                    have_inner = true;
+                    f.inner_name = strings[v.idx];
+                    f.have_inner = true;
                 }
+            } else if (is_inner && ename == "accessFlags") {
+                if (v.kind == dex::kEncodedInt) f.inner_access = v.idx;
             } else if (is_enclosing && ename == "value") {
                 if (v.kind == dex::kEncodedType && v.idx < type_names.size()) {
-                    enclosing = type_names[v.idx];
+                    f.enclosing = type_names[v.idx];
                 }
             }
         }
     }
-    if (!have_inner || inner_name.empty() || enclosing.size() < 3) return {"", nested};
+    return f;
+}
+
+// The name is PROVEN when the InnerClass annotation names the class N and an
+// EnclosingClass annotation names `Outer`, with `desc` spelled exactly
+// `Outer$N`.
+bool IsProvenMember(const NestingFacts& f, std::string_view desc) {
+    if (!f.have_inner || f.inner_name.empty() || f.enclosing.size() < 3) return false;
+    // A descriptor segment may contain no `/`, but a crafted InnerClass name
+    // can, and then `Outer$x/Y` would "prove" a member named `x/Y`.
+    if (f.inner_name.find('/') != std::string_view::npos) return false;
     // desc == enclosing minus ';' + '$' + name + ';'
-    const size_t outer_len = enclosing.size() - 1;
-    if (desc.size() != outer_len + 1 + inner_name.size() + 1) return {"", nested};
-    if (desc.compare(0, outer_len, enclosing.substr(0, outer_len)) != 0 ||
-        desc[outer_len] != '$' ||
-        desc.compare(outer_len + 1, inner_name.size(), inner_name) != 0) {
-        return {"", nested};
-    }
-    return {std::string{inner_name}, true};
+    const size_t outer_len = f.enclosing.size() - 1;
+    if (desc.size() != outer_len + 1 + f.inner_name.size() + 1) return false;
+    return desc.compare(0, outer_len, f.enclosing.substr(0, outer_len)) == 0 &&
+           desc[outer_len] == '$' &&
+           desc.compare(outer_len + 1, f.inner_name.size(), f.inner_name) == 0;
+}
+
+std::pair<std::string, bool> ProvenMemberName(DexItem& item, uint32_t type_idx,
+                                              std::string_view desc) {
+    const NestingFacts f = ReadNestingFacts(item, type_idx);
+    if (!IsProvenMember(f, desc)) return {"", f.nested};
+    return {std::string{f.inner_name}, true};
 }
 
 }  // namespace
@@ -1498,6 +1543,30 @@ dexkit::dad::MemberClassInfo DexItemCodeSource::MemberClass(std::string_view cla
                  .first;
     }
     return {it->second.first, it->second.second};
+}
+
+// dexllm#128 — see IDexCodeSource::NestedMemberClasses. Both sides must agree:
+// the outer class LISTS the member (MemberClasses), and the member's own dex
+// PROVES it is `outer$Name` declared in `outer` (InnerClass + EnclosingClass)
+// and says its source modifiers (accessFlags). A member no loaded dex declares
+// has no body to nest, so the SDK catalog is not consulted here.
+std::vector<dexkit::dad::NestedMember>
+DexItemCodeSource::NestedMemberClasses(std::string_view outer) {
+    std::vector<dexkit::dad::NestedMember> out;
+    if (outer.size() < 3 || outer.front() != 'L' || outer.back() != ';') return out;
+    auto [item, type_idx] = core_.GetClassDeclaredPair(outer);
+    if (item == nullptr) return out;
+    const NestingFacts outer_facts = ReadNestingFacts(*item, type_idx);
+    std::unordered_set<std::string_view> seen;
+    for (std::string_view m : outer_facts.members) {
+        if (!seen.insert(m).second) continue;
+        auto [mitem, mtype] = core_.GetClassDeclaredPair(m);
+        if (mitem == nullptr) continue;
+        const NestingFacts f = ReadNestingFacts(*mitem, mtype);
+        if (!IsProvenMember(f, m) || f.enclosing != outer || !f.inner_access) continue;
+        out.push_back({std::string{m}, std::string{f.inner_name}, *f.inner_access});
+    }
+    return out;
 }
 
 }  // namespace dexkit::ext

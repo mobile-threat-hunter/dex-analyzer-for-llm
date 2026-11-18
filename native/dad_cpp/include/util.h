@@ -80,6 +80,34 @@ struct MemberClassInfo {
     bool nested = false;
 };
 
+// dexllm#128 — a member class `decompile_class` renders inside its outer
+// class (see IDexCodeSource::NestedMemberClasses).
+struct NestedMember {
+    std::string descriptor;
+    std::string name;
+    uint32_t access_flags = 0;
+};
+
+// dexllm#128 — while held, a constructor of class `cls` is written with
+// `name` instead of the descriptor's last segment: inside its outer class a
+// member's constructor is `Inner(...)`, not `Outer$Inner(...)`. Scopes nest;
+// the views must outlive the scope.
+class ScopedConstructorName {
+public:
+    ScopedConstructorName(std::string_view cls, std::string_view name);
+    ~ScopedConstructorName();
+    ScopedConstructorName(const ScopedConstructorName&) = delete;
+    ScopedConstructorName& operator=(const ScopedConstructorName&) = delete;
+
+private:
+    std::string_view cls_, name_;
+    const ScopedConstructorName* prev_;
+    friend std::string_view ConstructorNameFor(std::string_view cls);
+};
+
+// The innermost active override for `cls`, or "" when none applies.
+std::string_view ConstructorNameFor(std::string_view cls);
+
 // The oracle `GetType` consults for member-class spelling.
 using MemberClassNameFn = std::function<MemberClassInfo(std::string_view)>;
 

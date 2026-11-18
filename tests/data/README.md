@@ -462,3 +462,28 @@ cp member-classes-sdkname.java 'View$OnClickListener.java'
 javac -source 8 -target 8 -d cls Outer.java 'View$OnClickListener.java'   # javac 17.0.17
 d8 --release --min-api 26 --output out cls/mc/*.class cls/android/view/*.class  # D8 8.10.9-dev, build-tools 36.0.0
 ```
+
+`deep-members.dex` (dexllm#128) is authored from `deep-members.java`: a chain of
+66 static member classes, two levels past `decompile_class`'s nesting depth
+limit of 64. Names are one or two characters so the deepest class file name stays
+under 255 bytes:
+
+```
+cp deep-members.java Chain.java
+javac -source 8 -target 8 -d cls Chain.java                          # javac 17.0.17
+d8 --release --min-api 26 --output out cls/dm/*.class                # D8 8.10.9-dev, build-tools 36.0.0
+```
+
+`nested-kinds.dex` (dexllm#128) is assembled from the smali files in
+`nested-kinds/`, because javac cannot write a member named like a class enclosing
+it. It carries one member per header kind — an interface, an enum, an annotation
+type, a private, a protected (whose class_def says public) and an abstract class —
+two members named `K` (inside `K` and inside `K$P`) that must not be nested, and
+two siblings that each declare a member `Z`. Byte-reproducible (rebuilt twice,
+identical md5):
+
+```
+java -cp jadx-1.5.3-all.jar com.android.tools.smali.smali.Main \
+     a nested-kinds -o nested-kinds.dex                 # smali 3.0.9, OpenJDK 21
+```
+

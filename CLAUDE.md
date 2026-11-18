@@ -2431,7 +2431,8 @@ when InnerClass / EnclosingClass annotations or an SDK class list say so. A
 jadx-style rendering (imports, `.` for proven nesting, inner classes nested into
 the outer class, anonymous classes inlined) is planned as separate work —
 dexllm#127 has since done the `.` half (see its section below; the cross-view
-claim is narrowed there), and #128 / #129 are the nesting and inlining halves.
+claim is narrowed there), #128 did the nesting half (see its section below) and
+#129 is the inlining half.
 
 **Measured (a/b OFF = HEAD `b6fc49ae`, ON = `a2a345f1`, SAME capture):** 58 sources
 → **820 classes on 20 sources, 3,095 lines, 0 line counts moved, 0 AST diffs, call
@@ -2495,7 +2496,8 @@ oracle through `MemberClassBody`, installed by `ScopedMemberClassNames` in
 one run — IR build and emit alike — spells a type the same way (writer.cpp
 compares a cast target against `invokeInstr->cls()`). Header `extends` /
 `implements` follow the rule; a header's own name and constructor names keep
-`$` until dexllm#128. The `java_*` helpers (`java_type`, `descriptor_to_java`)
+`$` when the class is asked for alone (dexllm#128 nests it, with its simple
+name, inside its outer). The `java_*` helpers (`java_type`, `descriptor_to_java`)
 still spell `$` — they have no dex to prove anything.
 
 **Measured (a/b OFF = HEAD `a2a345f1`, ON = `e1d97f61`, SAME capture):** 22
@@ -2536,6 +2538,94 @@ when the class itself was top-level (`u.P.B$C`; 169 corpus occurrences, all D8
 synthetics) — fixed by the `nested` bit; memory safety (2,900 fuzzed annotation
 mutations, 0 signals), IR-vs-emit, threading (1 vs 8 threads byte-identical),
 determinism and performance REFUTED.
+
+### `decompile_class` renders a proven member class inside its outer (dexllm#128, 2026-11-19)
+
+The step after #127. `decompile_class(Outer)` emitted only `Outer`, so a
+`.`-spelled `mc.Outer.Inner` named a class the text did not contain. Each PROVEN
+member class is now rendered inside its outer, after the outer's methods, one
+indent level deeper, after a blank line, its own members inside it in turn.
+
+**A member is proven when both sides agree**
+(`DexItemCodeSource::NestedMemberClasses`, through the new defaulted port
+`IDexCodeSource::NestedMemberClasses`): the outer LISTS it in its
+`MemberClasses` annotation, and the member's own first-wins dex PROVES it is
+`outer$name` with `EnclosingClass == outer` and an `InnerClass.accessFlags`. The
+annotation walk is one reader, `ReadNestingFacts`, which #127's
+`ProvenMemberName` now uses too (`IsProvenMember`, the old predicate verbatim
+plus a refused `/` in the name).
+
+**The header** has no package line, takes the simple name, and takes visibility
+and `static` from `InnerClass` (a member's class_def cannot carry `private`,
+`protected` or `static`) and everything else — the kind, `final`, `abstract` —
+from the class_def. That split is a review finding: InnerClass flags go stale
+after R8 (weardrawers' `zzffu$zzg` claims `enum` there and is a plain final class
+in its class_def), and taking them wholesale made the nested header contradict
+the standalone one. jadx prints the stale `enum`; this does not.
+
+**Constructors** inside a nested class take the simple name through a
+thread-local `ScopedConstructorName` the Writer consults; `DecompileMethod`'s LRU
+key gets `\0name` for a CONSTRUCTOR only while one applies, so the nested and the
+standalone rendering never share an entry (the first cut split the key for every
+method of a member class, which a reviewer measured at ~13% of the sweep cost
+with byte-identical output).
+
+**User decision:** a member asked for by its own descriptor still renders ALONE,
+as before (`package …; class Outer$Inner`, `Outer$Inner(…)`), and nests its own
+members. So a `list_classes()` loop sees a member's text twice.
+
+**Refusals, each SAID rather than dropped:** a member named like a class
+enclosing it (`a$a` named `a` — R8 can produce it, JLS 8.1 rejects it) gets
+`// member class a not nested: it has the name of a class enclosing it`; past 64
+levels, `// N member class(es) not nested: nesting depth limit`.
+
+**Measured (a/b OFF = HEAD `e1d97f61` — the #127 build, bit-reproduced — vs ON
+`8c2bdae9`, SAME capture):** the bundled corpus plus the committed fixtures,
+27,057 classes → **3,805 change, every one a pure insertion before the final
+`}`**. An androguard-based oracle (annotations read independently, expected text
+rebuilt from each member's standalone render) agrees on all of them: **10,906
+nested members, 0 mismatches** (its only disagreements are the two new fixtures'
+depth-cap and same-name refusals, which it does not model). A correctness
+reviewer re-derived both with its own harness and found **25,545 method bodies
+byte-identical** OFF vs ON, captured after every `decompile_class`, so #127 and
+the method cache are untouched. javac over the changed top-level classes, OFF
+given each member as its own `Outer$Inner.java`: **154,094 → 107,745 errors,
+`cannot find symbol` 112,649 → 61,429**; the categories that rise (`interface
+annotation is already defined`, `enum … already defined`, bridge-method
+duplicates) are pre-existing header defects that now share one file. Sweep
+21,374-class 0-crash GATE: PASS, 21.3 s → 21.2–21.5 s; its method-block count
+rises 180,879 → 236,211 because nested methods appear inside their outer too.
+parity 29/29, pytest 2231/24, TRUE corpus-less 1785/470/0, narrowed to
+`tests/data/multidex.apk` 2095/160, determinism 3 `PYTHONHASHSEED`s → one digest,
+lint trio and boundary clean.
+
+**Guards:** [tests/test_nested_member_classes.py](tests/test_nested_member_classes.py)
+(39) on `member-classes.dex` plus two new authored fixtures:
+`deep-members.dex` (javac + d8, a 66-level chain) and `nested-kinds.dex` (smali —
+javac cannot write a member named like its outer): an interface, an enum, an
+annotation, a private, a protected (class_def public) and an abstract member, two
+same-name refusals, and two siblings each holding a `Z`. Crafted annotation
+patches cover a stale `final`, `private static`, a foreign `EnclosingClass`, an
+unlisted member, a duplicate listing, a grandchild listed by the grandparent, and
+a mismatched name; an independent byte-level oracle is checked on every fixture
+and across the corpus. **23 mutants, each BUILT with a distinct `.so` md5,
+control asserted after, all run in the CI shape (`test_apk` moved aside): 21
+killed, 2 equivalent** — the constructor override matching any class (only the
+scoped class's own methods are rendered while it is innermost) and the cache key
+split for every method (output-identical by construction; it was the perf
+finding). Three survived earlier matrices and are why `test_a_listed_member_of_a_member…`,
+the kinds fixture (a reviewer's nested-interface mutant passed the CI leg) and
+`test_a_sibling_member_name_does_not_hide_another` exist.
+
+**Two reviewers, 0 defects in what nests;** the findings were the cache cost, the
+stale-flag header, crafted names (`x/Y`, a sign-extended `-1` flag — moot now
+that only the low four bits are read from InnerClass), the silent depth cap, the
+same-name invalid Java and the CI guard gap, all fixed above. **Accepted,
+recorded:** the text grows (members print twice across `list_classes()`;
+`com.google.android.material.R` ~100 B → ~470 KB, past the MCP hard cap — members
+come last, so `max_chars` truncation cuts members, not the class's own body); the
+pre-existing `enum class` / `interface annotation` header spellings are unchanged
+and now appear inside outers too.
 
 ### Production fix — reused `this` register materialised as a local (`this = X` → valid, 2026-07-03)
 

@@ -49,7 +49,9 @@ _EXPECTED = {
     "BYTE_MINUS_ONE": "-0x1",
 }
 
-_DECL = re.compile(r"^\s+.*\bstatic (?:final )?\S+ (\w+) = (.+);$")
+# Exactly one indent level: the class's OWN fields. A member class's fields are
+# nested one level deeper since dexllm#128, and may reuse a name.
+_DECL = re.compile(r"^ {4}(?! ).*\bstatic (?:final )?\S+ (\w+) = (.+);$")
 
 
 def _decls(text: str) -> dict[str, str]:

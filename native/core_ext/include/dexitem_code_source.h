@@ -53,6 +53,8 @@ public:
     bool               IsStableFinalField(std::string_view cls, std::string_view name,
                                     std::string_view type) override;
     dexkit::dad::MemberClassInfo MemberClass(std::string_view class_descriptor) override;
+    std::vector<dexkit::dad::NestedMember>
+                       NestedMemberClasses(std::string_view outer) override;
 
 private:
     // Per-(dex_id, proto_idx) proto descriptor cache. Strings are owned by

@@ -324,9 +324,10 @@ reads `android.view.View.OnClickListener`, `Thread.State`,
 proven outer path is dotted (`mc.Outer.Nested$1`); a local class (`Outer$1Loc`,
 which carries `EnclosingMethod`), a top-level class whose name merely contains
 `$`, and an annotation that names some other spelling all keep `$`. A class
-header's own name and its constructors' names are unchanged (`class
-Outer$Nested`, `Outer$Nested(...)`) — emitting an inner class inside its outer is
-dexllm#128 — but its `extends` / `implements` follow the rule. The walk goes
+header's own name and its constructors' names are unchanged when the class is
+asked for alone (`class Outer$Nested`, `Outer$Nested(...)`); rendered inside its
+outer class (dexllm#128) it takes its simple name (`class Nested`,
+`Nested(...)`). Its `extends` / `implements` follow the rule either way. The walk goes
 outward only while a class is NESTED (it carries an `InnerClass` annotation): a
 top-level class whose name extends a member's, such as D8's
 `Outer$Inner$$ExternalSyntheticLambda0`, keeps every `$`. The dotted `java_*`
@@ -605,6 +606,33 @@ dk.decompile_method_with_pc_map(M)
 Full Java class text — `package`, class header (access + extends + implements),
 static→instance field declarations with decoded EncodedValue initializers, then
 method bodies.
+
+**Member classes are rendered inside it (dexllm#128).** After the methods, each
+PROVEN member class follows, indented one level, after a blank line, with its own
+members inside it in turn. A member is proven when both sides agree: the class
+lists it in its `MemberClasses` annotation, and the member's own `InnerClass` (a
+non-null name, its `accessFlags`) and `EnclosingClass` annotations say it is
+`Outer$Name` declared in this class. A nested member has no `package` line; its
+header takes its simple name, its visibility and `static` from `InnerClass` (a
+member's class_def cannot carry `private`, `protected` or `static`), and what
+kind of class it is plus `final` / `abstract` from its class_def — the flags the
+body and the runtime reflect, so the nested header never contradicts the
+standalone one; its constructors take the simple name too. Anonymous and local
+classes are not nested (dexllm#129).
+
+- A member class asked for by its own descriptor still renders ALONE, as it did
+  before (`package …; class Outer$Inner`, constructor `Outer$Inner(…)`), and nests
+  its own members. So a loop over `list_classes()` sees a member's text twice: once
+  inside its outer and once on its own.
+- A member named like a class enclosing it (`a$a` named `a`, which a shrinker can
+  produce and Java rejects) is not nested, and a comment says so:
+  `// member class a not nested: it has the name of a class enclosing it`.
+- Nesting stops 64 levels down, with
+  `// N member class(es) not nested: nesting depth limit`.
+- The text grows: members print inside their outer, so a class like
+  `com.google.android.material.R` goes from ~100 bytes to ~470 KB. The members
+  come last, so a truncated read (the MCP tool's `max_chars`) cuts members, never
+  the class's own body.
 
 The header+fields region was ported from androguard `DvClass.get_source()` and
 follows its structure, but it is **not** byte-for-byte equal to it. Every

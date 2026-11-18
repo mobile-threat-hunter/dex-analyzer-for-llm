@@ -3,7 +3,9 @@
 
 #include "decompiler.h"
 
+#include <algorithm>
 #include <exception>
+#include <optional>
 #include <string>
 #include <utility>
 
@@ -192,7 +194,19 @@ std::string Decompiler::RunPipeline(
 }
 
 std::string Decompiler::DecompileMethod(std::string_view descriptor) {
-    const std::string key(descriptor);
+    // dexllm#128 — a method rendered inside its outer class may be spelled
+    // differently (its constructor name), so that rendering has its own key.
+    std::string key(descriptor);
+    const auto arrow = descriptor.find("->");
+    // Only a constructor is spelled differently, so only it gets the key.
+    const bool is_ctor = arrow != std::string_view::npos &&
+        descriptor.substr(arrow + 2).rfind("<init>(", 0) == 0;
+    const std::string_view ctor_name =
+        is_ctor ? ConstructorNameFor(descriptor.substr(0, arrow)) : std::string_view{};
+    if (!ctor_name.empty()) {
+        key += '\0';
+        key.append(ctor_name.data(), ctor_name.size());
+    }
     {
         // Shared-lock fast path: hit moves entry to LRU front (which mutates
         // the list, so we need a unique_lock on hit).
@@ -291,10 +305,23 @@ Decompiler::DecompileMethodAst(std::string_view descriptor, bool include_source)
 // (DAD also hard-codes `self.inner = False`). Field initializer rendering
 // (EncodedValue → text) is a Phase-2 follow-up; FieldInfo.init_text is
 // currently always empty so fields emit as `Type name;`.
+//
+// dexllm#128 — a PROVEN member class (IDexCodeSource::NestedMemberClasses) is
+// rendered inside its outer class, after the outer's methods, as jadx does.
+// Asked for by its own descriptor, a member class still renders alone, as it
+// always did (user decision): each class stays individually addressable.
 std::string Decompiler::DecompileClass(std::string_view class_descriptor) {
     // Field types and static initializers are spelled under the same
     // member-class oracle as the method bodies (dexllm#127).
     ScopedMemberClassNames member_names(MemberClassNames());
+    std::vector<std::string> enclosing;
+    return RenderClass(class_descriptor, /*nested=*/nullptr, enclosing);
+}
+
+std::string Decompiler::RenderClass(std::string_view class_descriptor,
+                                    const NestedMember* nested,
+                                    std::vector<std::string>& enclosing) {
+    const int depth = static_cast<int>(enclosing.size());
     auto info_opt = source_.GetClassInfo(class_descriptor);
     if (!info_opt) {
         // Class not defined in this dex (external ref / wrong descriptor).
@@ -329,8 +356,20 @@ std::string Decompiler::DecompileClass(std::string_view class_descriptor) {
     } else {
         name = SanitizeUtf8(body);
     }
+    if (nested != nullptr) name = SanitizeUtf8(nested->name);
 
+    // A member's visibility and `static` exist only in its InnerClass flags
+    // (its class_def is package-private or public, and never static); what
+    // KIND of class it is, and final / abstract, come from the class_def,
+    // the flags the body and the runtime reflect. InnerClass flags can be
+    // stale after shrinking (an R8 class_def no longer an enum, still
+    // claiming one there), and then the nested header must not contradict
+    // the class's own standalone one (dexllm#128 review).
+    constexpr uint32_t kSourceOnly = 0x1 | 0x2 | 0x4 | 0x8;
     uint32_t access = info.access_flags;
+    if (nested != nullptr) {
+        access = (nested->access_flags & kSourceOnly) | (info.access_flags & ~kSourceOnly);
+    }
     constexpr uint32_t kAccInterface = 0x200;
     constexpr uint32_t kAccAbstract  = 0x400;
     bool is_interface = (access & kAccInterface) != 0;
@@ -370,7 +409,7 @@ std::string Decompiler::DecompileClass(std::string_view class_descriptor) {
     }
 
     std::string out;
-    if (!package.empty()) {
+    if (nested == nullptr && !package.empty()) {
         out += "package ";
         out += package;
         out += ";\n";
@@ -422,7 +461,10 @@ std::string Decompiler::DecompileClass(std::string_view class_descriptor) {
         out += "\n";
     }
 
-    // Methods — reuse the existing per-method decompile path.
+    // Methods — reuse the existing per-method decompile path. Nested, a
+    // constructor takes the member's simple name (dexllm#128).
+    std::optional<ScopedConstructorName> ctor_name;
+    if (nested != nullptr) ctor_name.emplace(class_descriptor, nested->name);
     auto methods = source_.LocateClassMethods(class_descriptor);
     for (const auto& loc : methods) {
         auto cls = source_.GetMethodClassName(loc.dex_id, loc.method_idx);
@@ -444,6 +486,51 @@ std::string Decompiler::DecompileClass(std::string_view class_descriptor) {
             out += e.what();
             out += "\n";
         }
+    }
+
+    // dexllm#128 — proven member classes, each indented one level. Every line
+    // of the member's text is prefixed: a line break in it is a `\n` the
+    // emitters wrote (a literal's own controls are escaped), so this cannot
+    // split a token. The descriptor of a member strictly lengthens its
+    // outer's, so nesting cannot cycle; the cap only bounds the recursion.
+    constexpr int kMaxNestingDepth = 64;
+    const auto members = source_.NestedMemberClasses(class_descriptor);
+    if (depth >= kMaxNestingDepth && !members.empty()) {
+        // Say so rather than drop them: each is still decompile_class-able.
+        out += "    // ";
+        out += std::to_string(members.size());
+        out += " member class(es) not nested: nesting depth limit\n";
+    }
+    if (depth < kMaxNestingDepth) {
+        // This class's own simple name, as its header spells it.
+        enclosing.push_back(nested != nullptr
+                                ? nested->name
+                                : std::string{last_slash == std::string_view::npos
+                                                  ? body : body.substr(last_slash + 1)});
+        for (const auto& m : members) {
+            if (std::find(enclosing.begin(), enclosing.end(), m.name) != enclosing.end()) {
+                // A member may not share a name with a class enclosing it
+                // (JLS 8.1); a shrinker can produce one (`a$a`, named `a`).
+                // It stays decompile_class-able on its own; say so.
+                out += "    // member class ";
+                out += SanitizeUtf8(m.name);
+                out += " not nested: it has the name of a class enclosing it\n";
+                continue;
+            }
+            std::string inner = RenderClass(m.descriptor, &m, enclosing);
+            if (inner.empty()) continue;
+            out += '\n';
+            size_t start = 0;
+            while (start < inner.size()) {
+                size_t nl = inner.find('\n', start);
+                if (nl == std::string::npos) nl = inner.size();
+                if (nl > start) out += "    ";
+                out.append(inner, start, nl - start);
+                out += '\n';
+                start = nl + 1;
+            }
+        }
+        enclosing.pop_back();
     }
 
     out += "}\n";

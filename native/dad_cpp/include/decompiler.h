@@ -93,6 +93,17 @@ public:
     static constexpr std::size_t kDefaultCacheCapacity = 4096;
 
 private:
+    // dexllm#128 — one class's text. `nested` is null for the class asked for
+    // (package line, class_def modifiers, descriptor's last segment as name)
+    // and names the member otherwise (no package line, the member's source
+    // modifiers, its simple name). Proven member classes are rendered inside,
+    // indented, up to `depth` levels.
+    // `enclosing` holds the simple names of the classes it is rendered
+    // inside: a member named like one of them is not nested (Java rejects it).
+    std::string RenderClass(std::string_view class_descriptor,
+                            const NestedMember* nested,
+                            std::vector<std::string>& enclosing);
+
     bool LocateMethod(std::string_view descriptor,
                       uint16_t& dex_id, uint32_t& method_idx);
 

@@ -853,10 +853,17 @@ void Writer::WriteMethod() {
             Write(" ");
         }
         if (is_constructor_) {
+            // dexllm#128 — inside its outer class a member's constructor
+            // takes the member's simple name, as its header does.
+            const std::string_view nested_name = ConstructorNameFor(m.cls_name);
             std::string cls_desc(StripClassDesc(m.cls_name));
             auto slash = cls_desc.rfind('/');
-            Write(slash == std::string::npos ? cls_desc
-                                             : cls_desc.substr(slash + 1));
+            if (!nested_name.empty()) {
+                Write(std::string(nested_name));
+            } else {
+                Write(slash == std::string::npos ? cls_desc
+                                                 : cls_desc.substr(slash + 1));
+            }
         } else {
             Write(JavaType(m.ret_type));
             Write(" ");

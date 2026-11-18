@@ -1193,6 +1193,10 @@ class DexKit:
     def decompile_class(self, class_descriptor: str) -> str:
         r"""Decompile a whole class: package, header, fields, method bodies.
 
+        Each proven member class follows, rendered inside it with its simple
+        name (dexllm#128); a member asked for by its own descriptor still
+        renders alone, so it appears in both texts.
+
         **Split the result on ``"\\n"``, never ``str.splitlines()``** - a string
         literal may carry a raw U+0085 / U+2028 / U+2029, which ``splitlines()``
         treats as a line break and the emitter does not. True of a method body

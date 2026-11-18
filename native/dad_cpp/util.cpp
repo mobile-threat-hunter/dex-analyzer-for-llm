@@ -146,6 +146,24 @@ ScopedMemberClassNames::~ScopedMemberClassNames() {
 }
 
 // beyond-DAD (dexllm#127): DAD spells every `$` as written.
+namespace {
+thread_local const ScopedConstructorName* tl_ctor_name = nullptr;
+}  // namespace
+
+ScopedConstructorName::ScopedConstructorName(std::string_view cls, std::string_view name)
+    : cls_(cls), name_(name), prev_(tl_ctor_name) {
+    tl_ctor_name = this;
+}
+
+ScopedConstructorName::~ScopedConstructorName() { tl_ctor_name = prev_; }
+
+std::string_view ConstructorNameFor(std::string_view cls) {
+    for (const ScopedConstructorName* s = tl_ctor_name; s != nullptr; s = s->prev_) {
+        if (s->cls_ == cls) return s->name_;
+    }
+    return {};
+}
+
 std::string MemberClassBody(std::string_view desc) {
     if (desc.size() < 2 || desc.front() != 'L' || desc.back() != ';') {
         return std::string{desc};
