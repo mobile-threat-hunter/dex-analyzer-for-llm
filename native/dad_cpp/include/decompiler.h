@@ -25,7 +25,7 @@
 
 namespace dexkit::dad {
 
-class Decompiler {
+class Decompiler : private AnonymousInliner {
 public:
     // `source` is borrowed; caller ensures lifetime exceeds Decompiler.
     explicit Decompiler(IDexCodeSource& source);
@@ -117,6 +117,18 @@ private:
     // DecompileMethodWithPcMap (map returned), so the two can't drift.
     std::string RunPipeline(uint16_t dex_id, uint32_t method_idx,
                             std::vector<std::pair<uint32_t, uint32_t>>* pc_map);
+    // RunPipeline without the final SanitizeUtf8: text that is inserted into
+    // another method's output (an inlined anonymous body, dexllm#129) is
+    // sanitised once, with the output it lands in.
+    std::string RunPipelineRaw(uint16_t dex_id, uint32_t method_idx,
+                               std::vector<std::pair<uint32_t, uint32_t>>* pc_map);
+
+    static std::vector<std::string>& WritingClasses();
+    // dexllm#129 — AnonymousInliner, installed by every pipeline run.
+    std::optional<AnonymousClassInfo> Find(std::string_view anon,
+                                           std::string_view site) override;
+    std::optional<std::string> RenderBody(const AnonymousClassInfo& info,
+                                          const std::vector<std::string>& captures) override;
 
     // LRU bookkeeping: list nodes hold (key, value); map keys are
     // string_views into the list's key strings so we don't double-store the

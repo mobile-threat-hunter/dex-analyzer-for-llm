@@ -55,6 +55,8 @@ public:
     dexkit::dad::MemberClassInfo MemberClass(std::string_view class_descriptor) override;
     std::vector<dexkit::dad::NestedMember>
                        NestedMemberClasses(std::string_view outer) override;
+    std::optional<dexkit::dad::AnonymousClassInfo>
+                       AnonymousClass(std::string_view class_descriptor) override;
 
 private:
     // Per-(dex_id, proto_idx) proto descriptor cache. Strings are owned by
@@ -75,6 +77,11 @@ private:
     // so a returned view stays valid while the source lives.
     std::mutex member_class_mutex_;
     std::unordered_map<std::string, std::pair<std::string, bool>> member_class_cache_;
+    std::optional<dexkit::dad::AnonymousClassInfo>
+        ComputeAnonymousClass(std::string_view class_descriptor);
+    std::mutex anonymous_mutex_;
+    std::unordered_map<std::string, std::optional<dexkit::dad::AnonymousClassInfo>>
+        anonymous_cache_;
     static uint64_t ProtoKey(uint16_t dex_id, uint32_t proto_idx) {
         return (static_cast<uint64_t>(dex_id) << 32) | proto_idx;
     }

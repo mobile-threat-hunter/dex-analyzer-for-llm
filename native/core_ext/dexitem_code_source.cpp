@@ -1404,6 +1404,10 @@ struct NestingFacts {
     std::optional<uint32_t> inner_access;
     std::string_view enclosing;
     std::vector<std::string_view> members;
+    // dexllm#129: the InnerClass `name` is the null value (an anonymous class),
+    // and the `EnclosingMethod` value, a method_ids index of the same dex.
+    bool inner_name_null = false;
+    std::optional<uint32_t> enclosing_method;
 };
 
 NestingFacts ReadNestingFacts(DexItem& item, uint32_t type_idx) {
@@ -1451,7 +1455,8 @@ NestingFacts ReadNestingFacts(DexItem& item, uint32_t type_idx) {
         const bool is_inner = atype == "Ldalvik/annotation/InnerClass;";
         const bool is_enclosing = atype == "Ldalvik/annotation/EnclosingClass;";
         const bool is_members = atype == "Ldalvik/annotation/MemberClasses;";
-        if (!is_inner && !is_enclosing && !is_members) continue;
+        const bool is_enc_method = atype == "Ldalvik/annotation/EnclosingMethod;";
+        if (!is_inner && !is_enclosing && !is_members && !is_enc_method) continue;
         if (is_inner) f.nested = true;
         const uint32_t nelem = ReadULeb128(p, end);
         for (uint32_t e = 0; e < nelem && p < end; ++e) {
@@ -1483,12 +1488,19 @@ NestingFacts ReadNestingFacts(DexItem& item, uint32_t type_idx) {
                 if (v.kind == dex::kEncodedString && v.idx < strings.size()) {
                     f.inner_name = strings[v.idx];
                     f.have_inner = true;
+                } else if (v.kind == dex::kEncodedNull) {
+                    f.inner_name_null = true;
                 }
             } else if (is_inner && ename == "accessFlags") {
                 if (v.kind == dex::kEncodedInt) f.inner_access = v.idx;
             } else if (is_enclosing && ename == "value") {
                 if (v.kind == dex::kEncodedType && v.idx < type_names.size()) {
                     f.enclosing = type_names[v.idx];
+                }
+            } else if (is_enc_method && ename == "value") {
+                if (v.kind == dex::kEncodedMethod &&
+                    v.idx < item.GetReader().MethodIds().size()) {
+                    f.enclosing_method = v.idx;
                 }
             }
         }
@@ -1566,6 +1578,280 @@ DexItemCodeSource::NestedMemberClasses(std::string_view outer) {
         if (!IsProvenMember(f, m) || f.enclosing != outer || !f.inner_access) continue;
         out.push_back({std::string{m}, std::string{f.inner_name}, *f.inner_access});
     }
+    return out;
+}
+
+// dexllm#129 — see IDexCodeSource::AnonymousClass. Every condition below is a
+// reason the `new Base(args) { body }` rendering would assert something the
+// bytecode does not say, so each one that fails leaves the class rendered as
+// it always was: `new Outer$1(args)` plus its own decompile_class.
+std::optional<dexkit::dad::AnonymousClassInfo>
+DexItemCodeSource::AnonymousClass(std::string_view desc) {
+    {
+        std::lock_guard lock(anonymous_mutex_);
+        auto it = anonymous_cache_.find(std::string(desc));
+        if (it != anonymous_cache_.end()) return it->second;
+    }
+    std::optional<dexkit::dad::AnonymousClassInfo> result = ComputeAnonymousClass(desc);
+    std::lock_guard lock(anonymous_mutex_);
+    return anonymous_cache_.emplace(std::string(desc), std::move(result)).first->second;
+}
+
+namespace {
+
+// A class a Java source can NAME: not anonymous, not local. A class no loaded
+// dex declares is a framework or library class, and is nameable.
+bool IsNameable(dexkit::DexKit& core, std::string_view desc) {
+    auto [item, type_idx] = core.GetClassDeclaredPair(desc);
+    if (item == nullptr) return true;
+    const NestingFacts f = ReadNestingFacts(*item, type_idx);
+    return !f.nested || IsProvenMember(f, desc);
+}
+
+}  // namespace
+
+std::optional<dexkit::dad::AnonymousClassInfo>
+DexItemCodeSource::ComputeAnonymousClass(std::string_view desc) {
+    if (desc.size() < 3 || desc.front() != 'L' || desc.back() != ';') return std::nullopt;
+    auto [item, type_idx] = core_.GetClassDeclaredPair(desc);
+    if (item == nullptr) return std::nullopt;
+    // Anonymous: an InnerClass whose `name` is null, enclosed by a method or a
+    // class (a class initializer or a field initializer has no method).
+    const NestingFacts f = ReadNestingFacts(*item, type_idx);
+    if (!f.nested || !f.inner_name_null) return std::nullopt;
+    const uint16_t dex_id = static_cast<uint16_t>(item->GetDexId());
+    std::string enclosing_method;
+    std::string enclosing_class;
+    if (f.enclosing_method) {
+        const auto t = GetMethodRefTriple(dex_id, *f.enclosing_method);
+        enclosing_class = std::string(t[0]);
+        enclosing_method = enclosing_class + "->" + std::string(t[1]) + std::string(t[2]);
+    } else if (!f.enclosing.empty()) {
+        enclosing_class = std::string(f.enclosing);
+    } else {
+        return std::nullopt;
+    }
+    // A class enclosing itself would be written inside its own body.
+    if (enclosing_class == desc) return std::nullopt;
+
+    auto info = GetClassInfo(desc);
+    if (!info) return std::nullopt;
+    constexpr uint32_t kNotAClass = 0x200 | 0x400 | 0x2000 | 0x4000;  // iface abstract anno enum
+    if ((info->access_flags & kNotAClass) != 0) return std::nullopt;
+    // `new Base() {}` names ONE type: the superclass, or the single interface
+    // of a class that extends Object. A Java anonymous class has no other shape.
+    dexkit::dad::AnonymousClassInfo out;
+    out.descriptor = std::string(desc);
+    const std::string_view super = info->superclass;
+    if (super.empty()) return std::nullopt;
+    if (super == "Ljava/lang/Object;" && info->interfaces.size() == 1) {
+        out.base = std::string(info->interfaces[0]);
+    } else if (info->interfaces.empty()) {
+        out.base = std::string(super);
+    } else {
+        return std::nullopt;
+    }
+    if (!IsNameable(core_, out.base)) return std::nullopt;
+    out.site_this_nameable = IsNameable(core_, enclosing_class);
+
+    // Exactly one constructor, whose body only hands its parameters to fields
+    // of this class and to ONE superclass constructor call.
+    const auto& reader = item->GetReader();
+    const auto method_ids = reader.MethodIds();
+    const auto field_ids = reader.FieldIds();
+    const auto& strings = item->GetStrings();
+    const auto& type_names = item->GetTypeNames();
+    std::optional<uint32_t> ctor;
+    for (uint32_t midx : item->GetClassMethodIds(type_idx)) {
+        if (midx >= method_ids.size()) return std::nullopt;
+        if (strings[method_ids[midx].name_idx] != "<init>") continue;
+        if (ctor) return std::nullopt;
+        ctor = midx;
+    }
+    if (!ctor) return std::nullopt;
+    const dex::Code* code = item->GetMethodCode(*ctor);
+    if (code == nullptr || code->ins_size == 0 || code->ins_size > code->registers_size) {
+        return std::nullopt;
+    }
+    const auto params = dad::ParseParamsType(GetMethodProto(dex_id, *ctor));
+    const uint32_t this_reg = code->registers_size - code->ins_size;
+    // reg -> parameter index, for the FIRST register of each parameter.
+    std::unordered_map<uint32_t, uint32_t> param_at;
+    std::vector<uint32_t> width(params.size());
+    {
+        uint32_t r = this_reg + 1;
+        for (uint32_t i = 0; i < params.size(); ++i) {
+            width[i] = dad::GetTypeSize(params[i]);
+            param_at[r] = i;
+            r += width[i];
+        }
+        if (r != code->registers_size) return std::nullopt;
+    }
+    out.captured_field.assign(params.size(), {});
+    std::vector<bool> used(params.size(), false);
+    bool super_called = false;
+    const dex::u2* p = code->insns;
+    const dex::u2* end_p = p + code->insns_size;
+    while (p < end_p) {
+        const auto op = static_cast<uint8_t>(*p);
+        const size_t w = GetBytecodeWidth(p);
+        if (w == 0 || p + w > end_p) return std::nullopt;
+        if (op == 0x0e) {                    // return-void, and nothing after it
+            if (p + w != end_p || !super_called) return std::nullopt;
+        } else if (op == 0x00) {             // nop — a payload is not expected here
+            if (*p != 0) return std::nullopt;
+        } else if (op >= 0x59 && op <= 0x5f) {  // iput* vA, vB, field@CCCC
+            const uint32_t a = (*p >> 8) & 0xF, b = (*p >> 12) & 0xF, fidx = p[1];
+            auto it = param_at.find(a);
+            if (b != this_reg || it == param_at.end() || used[it->second]) return std::nullopt;
+            if (fidx >= field_ids.size() || field_ids[fidx].class_idx != type_idx) {
+                return std::nullopt;
+            }
+            // A captured value is final: a field the site (or anything) can
+            // write after construction would not hold what the site passed.
+            const auto& facc = item->GetFieldAccessFlags();
+            const auto& fdecl = item->GetFieldAccessFlagsDeclared();
+            if (fidx >= facc.size() || fidx >= fdecl.size() || !fdecl[fidx] ||
+                (facc[fidx] & dex::kAccFinal) == 0) {
+                return std::nullopt;
+            }
+            const std::string_view fname = strings[field_ids[fidx].name_idx];
+            for (const auto& c : out.captured_field) {
+                if (c == fname) return std::nullopt;  // one field, one parameter
+            }
+            used[it->second] = true;
+            out.captured_field[it->second] = std::string(fname);
+        } else if (op == 0x70 || op == 0x76) {  // invoke-direct[/range]
+            if (super_called) return std::nullopt;
+            super_called = true;
+            const uint32_t midx = p[1];
+            if (midx >= method_ids.size() ||
+                strings[method_ids[midx].name_idx] != "<init>" ||
+                type_names[method_ids[midx].class_idx] != super) {
+                return std::nullopt;
+            }
+            std::vector<uint32_t> regs;
+            if (op == 0x70) {
+                const uint32_t count = (*p >> 12) & 0xF;
+                const uint32_t cdef = p[2];
+                const uint32_t all[5] = {cdef & 0xF, (cdef >> 4) & 0xF, (cdef >> 8) & 0xF,
+                                         (cdef >> 12) & 0xF, (*p >> 8) & 0xFu};
+                if (count > 5) return std::nullopt;
+                regs.assign(all, all + count);
+            } else {
+                const uint32_t count = (*p >> 8) & 0xFF, first = p[2];
+                for (uint32_t k = 0; k < count; ++k) regs.push_back(first + k);
+            }
+            if (regs.empty() || regs[0] != this_reg) return std::nullopt;
+            out.super_params = dad::ParseParamsType(GetMethodProto(dex_id, midx));
+            for (size_t k = 1; k < regs.size();) {
+                auto it = param_at.find(regs[k]);
+                if (it == param_at.end() || used[it->second]) return std::nullopt;
+                const uint32_t pi = it->second;
+                if (width[pi] == 2 && (k + 1 >= regs.size() || regs[k + 1] != regs[k] + 1)) {
+                    return std::nullopt;
+                }
+                // In parameter order: the site evaluates its arguments in
+                // that order, and `new Base(a, b)` must not reorder them.
+                if (!out.super_args.empty() && pi < out.super_args.back()) return std::nullopt;
+                used[pi] = true;
+                out.super_args.push_back(pi);
+                k += width[pi];
+            }
+        } else {
+            return std::nullopt;  // any other work: not a plain anonymous constructor
+        }
+        p += w;
+    }
+    if (!super_called || p != end_p) return std::nullopt;
+
+    // The one construction site, and NO other use of the type. Once the
+    // class is written inline it has no name, so nothing else may need one:
+    // a cast or `instanceof` naming it, an access to a member only it
+    // declares (a Kotlin continuation's `label` / `L$0` through a local), a
+    // field or signature of its type. Counted in the enclosing class only:
+    // Java can name an anonymous class nowhere else, though a shrinker could.
+    int sites = 0;
+    // The members the class itself declares: one of them used from outside
+    // needs the class's own type, while an inherited one is the base's too.
+    std::unordered_set<std::string> own;
+    for (uint32_t midx : item->GetClassMethodIds(type_idx)) {
+        own.insert("m:" + std::string(strings[method_ids[midx].name_idx]) +
+                   GetMethodProto(dex_id, midx));
+    }
+    for (uint32_t fidx : info->field_ids) {
+        auto fi = GetFieldInfo(dex_id, fidx);
+        own.insert("f:" + std::string(fi.name) + ":" + std::string(fi.type));
+    }
+    auto names_it = [&](std::string_view t) {
+        while (!t.empty() && t.front() == '[') t.remove_prefix(1);
+        return t == desc;
+    };
+    {
+        auto ec = GetClassInfo(enclosing_class);
+        if (!ec) return std::nullopt;
+        for (uint32_t fidx : ec->field_ids) {
+            if (names_it(GetFieldInfo(ec->dex_id, fidx).type)) return std::nullopt;
+        }
+    }
+    for (const auto& loc : LocateClassMethods(enclosing_class)) {
+        for (const auto& t : dad::ParseParamsType(GetMethodProto(loc.dex_id, loc.method_idx))) {
+            if (names_it(t)) return std::nullopt;
+        }
+        const std::string proto = GetMethodProto(loc.dex_id, loc.method_idx);
+        if (names_it(std::string_view(proto).substr(proto.rfind(')') + 1))) return std::nullopt;
+        const dex::Code* c = GetMethodCode(loc.dex_id, loc.method_idx);
+        if (c == nullptr) continue;
+        DexItem* mitem = SafeGetDexItem(core_, loc.dex_id);
+        if (mitem == nullptr) continue;
+        const auto& mtypes = mitem->GetTypeNames();
+        const auto mfields = mitem->GetReader().FieldIds();
+        const dex::u2* q = c->insns;
+        const dex::u2* qend = q + c->insns_size;
+        bool here = false;
+        int news = 0;
+        while (q < qend) {
+            const size_t w = GetBytecodeWidth(q);
+            if (w == 0 || q + w > qend) break;
+            const auto op = static_cast<uint8_t>(*q);
+            const uint32_t idx = w >= 2 ? q[1] : 0;
+            if ((op >= 0x6e && op <= 0x72) || (op >= 0x74 && op <= 0x78) ||
+                op == 0xfa || op == 0xfb) {               // invoke*
+                const auto t = GetMethodRefTriple(loc.dex_id, idx);
+                if (t[0] == desc) {
+                    if (t[1] == "<init>" && (op == 0x70 || op == 0x76)) {
+                        ++sites;
+                        here = true;
+                    } else if (own.count("m:" + std::string(t[1]) + std::string(t[2]))) {
+                        return std::nullopt;
+                    }
+                }
+            } else if (op >= 0x52 && op <= 0x6d) {       // iget* / iput* / sget* / sput*
+                if (idx < mfields.size() && mfields[idx].class_idx < mtypes.size() &&
+                    names_it(mtypes[mfields[idx].class_idx])) {
+                    const auto fr = GetFieldRefTriple(loc.dex_id, idx);
+                    if (own.count("f:" + std::string(fr[1]) + ":" + std::string(fr[2]))) {
+                        return std::nullopt;
+                    }
+                }
+            } else if (op == 0x1c || op == 0x1f || op == 0x20 || op == 0x22 ||
+                       op == 0x23 || op == 0x24 || op == 0x25) {  // type operands
+                if (idx < mtypes.size() && names_it(mtypes[idx])) {
+                    if (op != 0x22) return std::nullopt;   // only `new-instance`
+                    ++news;
+                }
+            }
+            q += w;
+        }
+        if (news > 1) return std::nullopt;
+        if (here) {
+            out.site = std::string(GetMethodClassName(loc.dex_id, loc.method_idx)) + "->" +
+                       std::string(GetMethodName(loc.dex_id, loc.method_idx)) +
+                       GetMethodProto(loc.dex_id, loc.method_idx);
+        }
+    }
+    if (sites != 1) return std::nullopt;
+    if (!enclosing_method.empty() && out.site != enclosing_method) return std::nullopt;
     return out;
 }
 

@@ -228,7 +228,9 @@ androguard gets wrong:
   names a member class and javac cannot resolve it. An unproven `$` (an anonymous `Outer$1`,
   a local class, a top-level class such as D8's `$$ExternalSyntheticLambda0`) stays as
   written, and so does the header of a class asked for alone. `decompile_class` renders a
-  proven member inside its outer class, under its simple name (dexllm#128).
+  proven member inside its outer class, under its simple name (dexllm#128), and an anonymous
+  class is written where it is constructed, `new Runnable() { … }`, with `Outer.this` and
+  the captured names in its body (dexllm#129; the AST keeps the construction).
 - **Literals** — boolean `return false/true` (not `return 0/1`), `return null` for a null reference,
   IEEE-754 `float`/`double` literals (`1.0f`, `Double.NaN`) where androguard prints the raw integer
   bits, and `null`/`true`/`false` field initializers (not Python `None`/`True`/`False`).

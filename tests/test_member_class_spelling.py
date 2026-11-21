@@ -176,7 +176,10 @@ def test_the_oracle_sees_exactly_the_member_classes_the_fixture_declares():
         "public mc.Outer.Inner makeInner()",
         "    return new mc.Outer.Inner(this);",
         "    mc.Outer.Nested.Deep.X = 1;",
-        "    return new mc.Outer$1();",
+        # dexllm#129 inlines an anonymous class at its one construction
+        # site, so its `$` spelling is pinned where it is NOT inlined:
+        # test_anonymous_inline.py's Holder$1.
+        "    return new Runnable() {",
         "    return new mc.Outer$1Loc();",
         "    return (((((v1_0 + mc.Weird$Name.y) + v3_1) + v3_2) + v3_3) + v0);",
     ],
@@ -201,8 +204,11 @@ def test_a_class_header_names_its_supertypes_the_same_way():
 
 
 def test_an_anonymous_class_in_a_member_keeps_only_its_own_dollar():
-    text = _fixture_session().decompile_class("Lmc/Outer$Nested;")
-    assert "    return new mc.Outer.Nested$1();" in text.split("\n")
+    # Outer$Nested$1 is inlined (dexllm#129); a member's anonymous class whose
+    # constructor runs a field initializer is not, and is spelled by name.
+    fixture = Path(__file__).parent / "data" / "anon-classes.dex"
+    text = dexllm.DexKit(str(fixture)).decompile_class("Lac/Anon;")
+    assert "        return new ac.Anon.Holder$1();" in text.split("\n")
 
 
 def test_the_class_header_keeps_its_dex_name():

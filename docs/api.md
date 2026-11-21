@@ -618,7 +618,8 @@ member's class_def cannot carry `private`, `protected` or `static`), and what
 kind of class it is plus `final` / `abstract` from its class_def — the flags the
 body and the runtime reflect, so the nested header never contradicts the
 standalone one; its constructors take the simple name too. Anonymous and local
-classes are not nested (dexllm#129).
+classes are not nested; an anonymous class is written where it is constructed
+instead (dexllm#129, below).
 
 - A member class asked for by its own descriptor still renders ALONE, as it did
   before (`package …; class Outer$Inner`, constructor `Outer$Inner(…)`), and nests
@@ -633,6 +634,91 @@ classes are not nested (dexllm#129).
   `com.google.android.material.R` goes from ~100 bytes to ~470 KB. The members
   come last, so a truncated read (the MCP tool's `max_chars`) cuts members, never
   the class's own body.
+
+**An anonymous class is written at its construction site (dexllm#129).** In
+`decompile_method`, `decompile_method_with_pc_map` and `decompile_class` alike,
+`new Outer$1(this, v2)` of an anonymous class constructed at exactly one site
+reads `new Base(super_args) { body }`, as jadx writes it:
+
+```java
+public Runnable capture(int p2)
+{
+    return new Runnable() {
+
+        public void run()
+        {
+            int v1 = p2;
+            if (ac.Anon.this.count > v1) {
+                ac.Anon.this.count = v1;
+            }
+            return;
+        }
+    };
+}
+```
+
+`Base` is the superclass, or the one interface of a class extending `Object`.
+The body is the class's own fields and methods without its constructor and
+without the fields its constructor fills from captured values; inside it
+`this.this$0` reads `Outer.this` and `this.val$x` reads the name the site
+passed (`p2`, `v3`). The body is the class rendered on its own with only those
+substitutions — no statement in it is re-derived.
+
+The class is left as it was — constructed by name, with its own
+`decompile_class` — whenever that rendering would assert something the bytecode
+does not say:
+
+- its annotations do not say anonymous (`InnerClass` with a null `name`, plus
+  `EnclosingMethod` or `EnclosingClass`), or it is an interface, abstract,
+  annotation or enum class (an enum constant with a body is one);
+- its base cannot be named (a local or anonymous class), or it names a
+  superclass AND an interface;
+- its constructor does anything but store parameters into its own `final`
+  fields and pass parameters, in parameter order, to one superclass constructor
+  call on itself (a field initializer or an instance initializer runs code
+  there);
+- its enclosing class constructs it at no site or at several (a shrinker can
+  produce several; Java cannot), or names it anywhere else: a cast or
+  `instanceof`, a field or signature of its type, or an access to a member the
+  anonymous class declares itself (a Kotlin continuation's `label` / `L$0` read
+  through a local, a method only it has). Once inlined the class has no name,
+  so nothing may need one; an INHERITED member reached through it
+  (`new Thread() { … }.start()`) is the base's too and does not count;
+- a value the body would read again is not a plain name at the site — a call
+  folded into the argument would run once per read — or the name does not hold
+  that value for the whole method (a parameter written in it, a local written
+  more than once, such as a loop variable), or the site's receiver is itself an
+  anonymous class, which no `X.this` names;
+- a name in the body (a parameter, a local, a catch variable, one of its own
+  fields, a field it inherits from a class a loaded dex declares) is spelled
+  like a captured name and would shadow it, or the body writes a captured
+  field, or reads one through another object;
+- one of its methods does not decompile (`// DECOMPILE ERROR`), it declares a
+  member class, or it would be written inside itself (a class enclosing itself,
+  or two that construct each other); at most 3 levels are inlined inside the
+  constructing method (the bundled corpus never needs more than 1).
+
+A superclass argument whose type differs from the superclass constructor's
+declared parameter is cast to it (`new Over(((Object) s)) {`, a String constant
+included), since Java's overload rules would otherwise pick the constructor by
+the argument's own type.
+A local that holds the object is declared with `Base`, the type the inline text
+names (`Runnable v0_1 = new Runnable() {`): no source can name the anonymous
+class itself. Fields a FRAMEWORK base declares are not visible to the check
+above, so a framework field spelled like `p1` or `v0` could still shadow a
+capture.
+
+The AST is unchanged (user decision): `decompile_method_ast(...)["ast"]` keeps
+the `ClassInstanceCreation` of `Outer$1` with its constructor arguments, while
+its `"source"` is the text above. `pc_map` maps the statement that opens the
+body and every line after it; the body's own lines carry offsets of the
+anonymous class's methods, so they are not mapped. The anonymous class asked for
+by its own descriptor still renders alone (`class Outer$1 implements Runnable`,
+with `this$0` and its constructor), so a loop over `list_classes()` sees the
+body twice. A text scan that reads one method's text as ONE name scope must
+leave an inline body out (its names belong to another method), as the test
+helper `fold_inline_anonymous` does. A construction from a class other than the
+enclosing one is not counted, which Java cannot write but a shrinker could.
 
 The header+fields region was ported from androguard `DvClass.get_source()` and
 follows its structure, but it is **not** byte-for-byte equal to it. Every

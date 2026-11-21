@@ -126,11 +126,12 @@ public:
         std::string vt = var->get_type();
         if (vt.empty()) vt = "unknownType";
         w_->WriteIndent();
-        w_->Write(GetType(vt));
+        w_->Write(GetType(declared_type(vt)));
         w_->Write(" v");
         std::string nm = var->name;
         if (!nm.empty() && nm.front() == 'v') nm.erase(0, 1);
         w_->Write(nm);
+        NoteWrittenName(w_->snap_->meta.cls_name, "v" + nm);  // dexllm#129
         w_->EndIns();
         var->declared = true;
     }
@@ -186,7 +187,7 @@ public:
         if (!var->declared) {
             std::string vt = var->get_type();
             if (vt.empty()) vt = "unknownType";
-            w_->Write(GetType(vt));
+            w_->Write(GetType(declared_type(vt)));
             w_->Write(" ");
             var->declared = true;
         }
@@ -197,6 +198,7 @@ public:
         if (!nm.empty() && nm.front() == 'v') nm.erase(0, 1);
         w_->Write("v");
         w_->Write(nm);
+        NoteWrittenName(w_->snap_->meta.cls_name, "v" + nm);  // dexllm#129
     }
 
     // ─── visit_param: DAD writer.py:484 ──────────────────────────────────
@@ -206,6 +208,7 @@ public:
         // Strip the leading 'v' if present so output is "pN".
         if (!name.empty() && name.front() == 'v') name.remove_prefix(1);
         w_->Write(name);
+        NoteWrittenName(w_->snap_->meta.cls_name, "p" + std::string(name));  // dexllm#129
     }
 
     void visit_this() override { w_->Write("this"); }
@@ -279,6 +282,7 @@ public:
     void visit_put_instance(IRForm* lhs, std::string_view name,
                             std::string_view ftype, IRForm* rhs,
                             std::string_view owner) override {
+        NoteCapturedFieldWrite(w_->snap_->meta.cls_name, owner, name);  // dexllm#129
         w_->WriteIndent();
         emit_base_maybe_cast(lhs, owner);  // `((Owner) v).field = …` for Object v
         w_->Write(".");
@@ -316,12 +320,171 @@ public:
         }
     }
 
+    // dexllm#129 — the text a captured value is written as inside the body:
+    // the site's own name for it. Only a value with no side effect can be
+    // read again there; anything else leaves the class un-inlined.
+    std::string pure_text(IRForm* a, const AnonymousClassInfo& info) {
+        if (dynamic_cast<ThisParam*>(a)) {
+            if (!info.site_this_nameable) return {};
+            return GetType(w_->snap_->meta.cls_name) + ".this";
+        }
+        // The body reads the value as it was at construction, so the name
+        // must hold that value for the whole method: a parameter never
+        // written, a local written once.
+        if (auto* pa = dynamic_cast<Param*>(a)) {
+            if (defs_of(pa->Vid()) != 0) return {};
+            std::string nm = pa->v();  // visit_param writes the register
+            if (!nm.empty() && nm.front() == 'v') nm.erase(0, 1);
+            return "p" + nm;
+        }
+        if (auto* v = dynamic_cast<Variable*>(a)) {
+            if (!v->declared || defs_of(v->Vid()) != 1) return {};
+            std::string nm = v->name;
+            if (!nm.empty() && nm.front() == 'v') nm.erase(0, 1);
+            return "v" + nm;
+        }
+        return {};
+    }
+
+    // How many instructions of this method define `vid`.
+    int defs_of(const std::string& vid) const {
+        int n = 0;
+        for (const auto& [loc, ins] : w_->graph_->loc_to_ins) {
+            if (!ins) continue;
+            if (auto lhs = ins->GetLhsId(); lhs && *lhs == vid) ++n;
+        }
+        return n;
+    }
+
+    // dexllm#129 — a variable of an anonymous class written inline in this
+    // method is declared with the type the inline text names (its base): no
+    // source can name the anonymous class itself.
+    std::string declared_type(const std::string& vt) {
+        AnonymousInliner* inliner = CurrentAnonymousInliner();
+        if (inliner == nullptr || vt.size() < 3 || vt.front() != 'L') return vt;
+        const MethodMeta& m = w_->snap_->meta;
+        auto info = inliner->Find(vt, m.cls_name + "->" + m.name + m.proto);
+        return info ? info->base : vt;
+    }
+
+    // dexllm#129 — `new Outer$1(args)` of an anonymous class constructed only
+    // here is written as `new Base(super_args) { body }`, as jadx does.
+    bool try_inline_anonymous(IRForm* base, const std::vector<std::string>& ptype,
+                              const std::vector<IRForm*>& args) {
+        auto* ni = dynamic_cast<NewInstance*>(base);
+        AnonymousInliner* inliner = CurrentAnonymousInliner();
+        if (ni == nullptr || inliner == nullptr) return false;
+        const MethodMeta& m = w_->snap_->meta;
+        const std::string site = m.cls_name + "->" + m.name + m.proto;
+        auto info = inliner->Find(ni->get_type(), site);
+        if (!info || args.size() != info->captured_field.size()) return false;
+        std::vector<bool> to_super(args.size(), false);
+        for (uint32_t i : info->super_args) {
+            if (i >= args.size()) return false;
+            to_super[i] = true;
+        }
+        std::vector<std::string> captures(args.size());
+        for (size_t i = 0; i < args.size(); ++i) {
+            if (to_super[i]) continue;
+            // A captured value is read again in the body, and a dropped one
+            // not at all: neither may have a side effect.
+            std::string t = args[i] ? pure_text(args[i], *info) : std::string{};
+            if (t.empty()) return false;
+            if (!info->captured_field[i].empty()) captures[i] = std::move(t);
+        }
+        std::optional<std::string> body;
+        try {
+            body = inliner->RenderBody(*info, captures);
+        } catch (const std::exception&) {
+            return false;  // the class stays by name, as it does when refused
+        }
+        if (!body) return false;
+        // Each superclass argument at the type the bytecode's constructor
+        // declares: `new Base(x)` is resolved by Java overload rules, and an
+        // argument of another type could bind another constructor.
+        if (info->super_params.size() != info->super_args.size()) return false;
+        w_->Write("new ");
+        w_->Write(GetType(info->base));
+        w_->Write("(");
+        for (size_t k = 0; k < info->super_args.size(); ++k) {
+            if (k > 0) w_->Write(", ");
+            const uint32_t i = info->super_args[k];
+            const std::string& declared = info->super_params[k];
+            // An integer constant is spelled for its position by emit_arg_at
+            // (a null cast, a narrowing cast, a literal); a String or a
+            // class literal is not, and an Object-typed variable is cast there.
+            const std::string at = args[i] ? args[i]->get_type() : std::string{};
+            const bool int_const = dynamic_cast<Constant*>(args[i]) != nullptr &&
+                                   at.size() == 1;
+            const bool cast = args[i] && !int_const && at != declared &&
+                              at != "Ljava/lang/Object;";
+            if (cast) {
+                w_->Write("((");
+                w_->Write(GetType(declared));
+                w_->Write(") ");
+            }
+            emit_arg_at(args[i], declared);
+            if (cast) w_->Write(")");
+        }
+        w_->Write(") {\n");
+        const std::string indent = w_->Space() + "    ";
+        std::string_view rest = *body;
+        while (!rest.empty()) {
+            size_t nl = rest.find('\n');
+            std::string_view line = rest.substr(0, nl);
+            if (!line.empty()) {
+                w_->Write(indent);
+                w_->Write(line);
+            }
+            w_->Write("\n");
+            if (nl == std::string_view::npos) break;
+            rest.remove_prefix(nl + 1);
+        }
+        w_->Write(w_->Space());
+        w_->Write("}");
+        return true;
+    }
+
+    // One invocation argument, as visit_invoke writes it.
+    void emit_arg(size_t i, const std::vector<std::string>& ptype,
+                  const std::vector<IRForm*>& args) {
+        // A float/double param passed a raw-IEEE-bits int constant — emit
+        // the literal (e.g. `Math.pow(x, 2.4)` not `Math.pow(x, raw-bits)`).
+        emit_arg_at(args[i], i < ptype.size() ? std::string_view(ptype[i])
+                                              : std::string_view());
+    }
+
+    // One argument at a position of declared type `pt`.
+    void emit_arg_at(IRForm* arg, std::string_view pt) {
+        // Beyond-DAD (LLM-comprehension): a genuinely-conflated register is
+        // typed `Object` (see InferCascadeTypes). Where it is passed at a
+        // MORE SPECIFIC reference-parameter position, emit an explicit
+        // `(Type) v` cast so the consuming LLM sees its real type at THIS
+        // use (the original dex reused one register for two types; the cast
+        // makes each use's type explicit instead of a misleading single
+        // declaration).
+        if (arg && !pt.empty() && (pt.front() == 'L' || pt.front() == '[')
+            && pt != "Ljava/lang/Object;"
+            && arg->get_type() == "Ljava/lang/Object;") {
+            w_->Write("((");
+            w_->Write(GetType(std::string(pt)));
+            w_->Write(") ");
+            visit_ins(arg);
+            w_->Write(")");
+            return;
+        }
+        // dexllm#102: an invocation context — Z / reference / F / D, and an
+        // explicit narrowing cast at a B / S / C parameter.
+        if (!emit_const_at(ConstContext::Argument, pt, arg)) visit_ins(arg);
+    }
+
     // ─── visit_invoke: DAD writer.py:542 ─────────────────────────────────
     void visit_invoke(std::string_view name, IRForm* base,
                       const std::vector<std::string>& ptype,
                       std::string_view /*rtype*/,
                       const std::vector<IRForm*>& args,
                       InvokeInstruction* invokeInstr) override {
+        if (name == "<init>" && try_inline_anonymous(base, ptype, args)) return;
         if (auto* tp = dynamic_cast<ThisParam*>(base)) {
             if (name == "<init>") {
                 if (constructor_ && args.empty()) {
@@ -371,31 +534,7 @@ public:
         for (size_t i = 0; i < args.size(); ++i) {
             if (!first) w_->Write(", ");
             first = false;
-            // A float/double param passed a raw-IEEE-bits int constant — emit
-            // the literal (e.g. `Math.pow(x, 2.4)` not `Math.pow(x, raw-bits)`).
-            const std::string_view pt = i < ptype.size()
-                                            ? std::string_view(ptype[i])
-                                            : std::string_view();
-            // Beyond-DAD (LLM-comprehension): a genuinely-conflated register is
-            // typed `Object` (see InferCascadeTypes). Where it is passed at a
-            // MORE SPECIFIC reference-parameter position, emit an explicit
-            // `(Type) v` cast so the consuming LLM sees its real type at THIS
-            // use (the original dex reused one register for two types; the cast
-            // makes each use's type explicit instead of a misleading single
-            // declaration).
-            if (args[i] && !pt.empty() && (pt.front() == 'L' || pt.front() == '[')
-                && pt != "Ljava/lang/Object;"
-                && args[i]->get_type() == "Ljava/lang/Object;") {
-                w_->Write("((");
-                w_->Write(GetType(std::string(pt)));
-                w_->Write(") ");
-                visit_ins(args[i]);
-                w_->Write(")");
-                continue;
-            }
-            // dexllm#102: an invocation context — Z / reference / F / D, and an
-            // explicit narrowing cast at a B / S / C parameter.
-            if (!emit_const_at(ConstContext::Argument, pt, args[i])) visit_ins(args[i]);
+            emit_arg(i, ptype, args);
         }
         w_->Write(")");
         // dexllm#67 (beyond-DAD): an invoke-custom's bootstrap chain is a
@@ -563,6 +702,7 @@ public:
         std::string nm = var->name;
         if (!nm.empty() && nm.front() == 'v') nm.erase(0, 1);
         w_->Write(nm);
+        NoteWrittenName(w_->snap_->meta.cls_name, "v" + nm);  // dexllm#129
     }
 
     void visit_monitor_enter(IRForm* ref) override {
@@ -707,6 +847,13 @@ public:
     void visit_get_instance(IRForm* arg, std::string_view name,
                             std::string_view /*ftype*/,
                             std::string_view owner) override {
+        // dexllm#129 — inside an inlined anonymous body, a captured value.
+        if (const std::string* t = CapturedFieldText(
+                w_->snap_->meta.cls_name, owner, name,
+                dynamic_cast<ThisParam*>(arg) != nullptr)) {
+            w_->Write(*t);
+            return;
+        }
         emit_base_maybe_cast(arg, owner);  // `((Owner) v).field` for Object v
         w_->Write(".");
         w_->Write(name);
@@ -887,6 +1034,7 @@ void Writer::WriteMethod() {
                 int reg = start + num_param;
                 Write(JavaType(parsed_params[i]));
                 Write(" p" + std::to_string(reg));
+                NoteWrittenName(m.cls_name, "p" + std::to_string(reg));  // dexllm#129
                 num_param += static_cast<int>(GetTypeSize(parsed_params[i]));
             }
         }

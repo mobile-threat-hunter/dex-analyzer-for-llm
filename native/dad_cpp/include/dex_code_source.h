@@ -108,6 +108,17 @@ public:
         return {};
     }
 
+    // dexllm#129 — the class as an ANONYMOUS class the text emitters render at
+    // its one construction site, or nullopt to render it as before (a
+    // separate class, constructed by name). Eligible when its annotations say
+    // anonymous (InnerClass name null), it names one base type, its one
+    // constructor only stores parameters into its own fields and passes
+    // parameters to one superclass constructor, and exactly one method of its
+    // enclosing class constructs it. Defaulted to none (the test Mock).
+    virtual std::optional<AnonymousClassInfo> AnonymousClass(std::string_view /*desc*/) {
+        return std::nullopt;
+    }
+
     // ─── Const-pool resolution (string_views point into source's tables) ─
     // dexllm#60: one proto by PROTO index, as "(params)Ret". Distinct from
     // GetMethodProto, which takes a METHOD index — invoke-polymorphic's second

@@ -487,3 +487,37 @@ java -cp jadx-1.5.3-all.jar com.android.tools.smali.smali.Main \
      a nested-kinds -o nested-kinds.dex                 # smali 3.0.9, OpenJDK 21
 ```
 
+`anon-classes.dex` (dexllm#129) is authored from `anon-classes.java`: anonymous
+classes that are written at their construction site (capturing the outer instance,
+a parameter, a static method's parameter, a wide value; superclass constructor
+arguments; a framework superclass; a construction used as a statement; one inside
+another) and ones that must be left by name (the body's parameter shadows the
+captured name, a field initializer, a local-class base, a call folded into a
+captured argument, a member class inside the body, an enum constant body, and an
+anonymous class inside a member — whose `$` spelling dexllm#127 pins):
+
+```
+cp anon-classes.java Anon.java
+javac -source 8 -target 8 -d cls Anon.java                            # javac 17.0.17
+d8 --release --min-api 26 --output out cls/ac/*.class                 # D8 8.10.9-dev, build-tools 36.0.0
+```
+
+`anon-sites.dex` (dexllm#129) is assembled from the smali files in `anon-sites/`,
+for the shapes Java cannot write, or that javac writes only alongside another
+reason to refuse (so the guard for each rule needs its own case): two
+construction sites; a field of its own or of its base named like the capture; a
+captured-field write, a read through another object, a non-final captured field;
+constructors that run an initializer, call a non-super `<init>`, call super
+twice or on another object, store one parameter twice, pass parameters in
+reverse order, return before super, or come in pairs; an enum flag, a local-class
+base, a self-enclosing class, a non-decompiling body; a catch variable or a body
+local shadowing the capture; a loop-merged parameter; a site using the class's
+own field or method, `instanceof`, or a field of its type; and controls (one
+site, two inlined levels, an inherited method through the class, a String
+argument cast to the superclass's `Object`):
+
+```
+java -cp jadx-1.5.3-all.jar com.android.tools.smali.smali.Main \
+     a anon-sites -o anon-sites.dex                     # smali 3.0.9, OpenJDK 21
+```
+

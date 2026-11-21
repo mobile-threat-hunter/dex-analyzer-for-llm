@@ -95,6 +95,63 @@ def smali_offsets(dk, desc):
     return offs
 
 
+_INLINE_OPEN = re.compile(r"new [\w.$]+\(")
+
+
+def inline_anonymous_blocks(text):
+    """The anonymous-class bodies dexllm#129 writes inline in a method's text,
+    as ``(start line, end line)`` index pairs into ``text.split("\n")``: a line
+    ending ``new Base(args) {`` up to the line at the same indent that starts
+    with ``}``. Not nested: an inner block lies inside an outer one."""
+    lines = text.split("\n")
+    out = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        opens = False
+        if line.endswith(") {"):
+            for m in _INLINE_OPEN.finditer(line):
+                depth = 0
+                for k in range(m.end() - 1, len(line)):
+                    if line[k] == "(":
+                        depth += 1
+                    elif line[k] == ")":
+                        depth -= 1
+                        if depth == 0:
+                            break
+                if line[k + 1 :] == " {":
+                    opens = True
+        if not opens or (out and out[-1][0] == i):
+            i += 1
+            continue
+        indent = len(line) - len(line.lstrip(" "))
+        j = i + 1
+        while j < len(lines) and not (
+            lines[j].startswith(" " * indent + "}")
+            and len(lines[j]) - len(lines[j].lstrip(" ")) == indent
+        ):
+            j += 1
+        out.append((i, j))
+        # the closing line may open the next block: `}, new Executor() {`
+        i = j
+    return out
+
+
+def fold_inline_anonymous(text):
+    """``text`` with every inlined anonymous-class body removed (dexllm#129).
+
+    A scan that reads a method's text as ONE name scope must not see the
+    body's own locals: they belong to another method, which the scan reaches
+    through that class's own ``decompile_*`` anyway."""
+    if not text:
+        return text
+    lines = text.split("\n")
+    drop = set()
+    for i, j in inline_anonymous_blocks(text):
+        drop.update(range(i + 1, j))
+    return "\n".join(line for k, line in enumerate(lines) if k not in drop)
+
+
 def committed_container():
     """``(zip_bytes, bare_dex_bytes)`` from the one container this repo commits.
 

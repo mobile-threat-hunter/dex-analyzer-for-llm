@@ -1160,6 +1160,10 @@ class DexKit:
         cached; the GIL is released, so this parallelizes across threads. In
         batch code use ``dexllm.safe_decompile_method`` (a wall-clock deadline).
 
+        An anonymous class constructed only here is written in place, as
+        ``new Base(args) { body }`` with ``Outer.this`` and the captured names in
+        its body (dexllm#129); the AST keeps the construction.
+
         Example::
 
             >>> print(dk.decompile_method(
@@ -1195,7 +1199,9 @@ class DexKit:
 
         Each proven member class follows, rendered inside it with its simple
         name (dexllm#128); a member asked for by its own descriptor still
-        renders alone, so it appears in both texts.
+        renders alone, so it appears in both texts. An anonymous class
+        constructed at exactly one site is written there, as
+        ``new Base(args) { body }`` (dexllm#129; see ``decompile_method``).
 
         **Split the result on ``"\\n"``, never ``str.splitlines()``** - a string
         literal may carry a raw U+0085 / U+2028 / U+2029, which ``splitlines()``

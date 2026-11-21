@@ -23,8 +23,11 @@
 
 #include <cstdint>
 #include <functional>
+#include <optional>
 #include <string>
 #include <string_view>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace dexkit::dad {
@@ -107,6 +110,89 @@ private:
 
 // The innermost active override for `cls`, or "" when none applies.
 std::string_view ConstructorNameFor(std::string_view cls);
+
+// dexllm#129 — an anonymous class the text emitters can render where it is
+// constructed, as `new Base(super_args) { body }` (see
+// IDexCodeSource::AnonymousClass for what makes one eligible).
+struct AnonymousClassInfo {
+    std::string descriptor;    // "Lcom/foo/Outer$1;"
+    std::string base;          // the type `new Base(...) {` names
+    std::string site;          // the one method that constructs it
+    bool site_this_nameable = false;  // `Site.this` names the site's receiver
+    // Per constructor parameter: the field of the class it is stored into
+    // (a captured value), or "" when it is not stored.
+    std::vector<std::string> captured_field;
+    // The constructor parameters passed on to the superclass constructor, in
+    // parameter order, and that constructor's declared parameter types.
+    std::vector<uint32_t> super_args;
+    std::vector<std::string> super_params;
+};
+
+// Installed by the decompiler for a pipeline run; the Writer asks it at a
+// `new X(args)` whether X is rendered inline there, and for its body.
+class AnonymousInliner {
+public:
+    virtual ~AnonymousInliner() = default;
+    // The class's info when `site` is its one construction site.
+    virtual std::optional<AnonymousClassInfo> Find(std::string_view anon,
+                                                   std::string_view site) = 0;
+    // The class body (fields and methods, not the constructor), with
+    // `this.<captured_field[i]>` written as `captures[i]`; nullopt when the
+    // body cannot be written that way (a name it would capture is shadowed).
+    virtual std::optional<std::string> RenderBody(
+        const AnonymousClassInfo& info, const std::vector<std::string>& captures) = 0;
+};
+
+class ScopedAnonymousInliner {
+public:
+    explicit ScopedAnonymousInliner(AnonymousInliner* inliner);
+    ~ScopedAnonymousInliner();
+    ScopedAnonymousInliner(const ScopedAnonymousInliner&) = delete;
+    ScopedAnonymousInliner& operator=(const ScopedAnonymousInliner&) = delete;
+
+private:
+    AnonymousInliner* prev_;
+};
+AnonymousInliner* CurrentAnonymousInliner();
+
+// While held, a method of class `cls` (Smali descriptor; `owner` is its Java
+// spelling, as a field access names its declaring class) reads
+// `this.<field>` as `fields[field]`. A name the method itself writes that
+// equals one of those texts would SHADOW it, and a write of such a field
+// would contradict it: either one fails the scope.
+class ScopedAnonymousCaptures {
+public:
+    ScopedAnonymousCaptures(std::string cls, std::string owner,
+                            std::unordered_map<std::string, std::string> fields);
+    ~ScopedAnonymousCaptures();
+    ScopedAnonymousCaptures(const ScopedAnonymousCaptures&) = delete;
+    ScopedAnonymousCaptures& operator=(const ScopedAnonymousCaptures&) = delete;
+    bool failed() const { return failed_; }
+    const std::string& cls() const { return cls_; }
+    ScopedAnonymousCaptures* prev_for_lookup() const { return prev_; }
+
+private:
+    std::string cls_, owner_;
+    std::unordered_map<std::string, std::string> fields_;
+    std::unordered_set<std::string> texts_;
+    bool failed_ = false;
+    ScopedAnonymousCaptures* prev_;
+    friend const std::string* CapturedFieldText(std::string_view, std::string_view,
+                                                std::string_view, bool);
+    friend void NoteWrittenName(std::string_view, std::string_view);
+    friend void NoteCapturedFieldWrite(std::string_view, std::string_view,
+                                       std::string_view);
+};
+// For a method of `cls` reading `<owner>.<field>` through a receiver (`via_this`
+// tells whether it is `this`): the text to write instead, or nullptr. A
+// captured field read through any OTHER receiver fails the scope.
+const std::string* CapturedFieldText(std::string_view cls, std::string_view owner,
+                                     std::string_view field, bool via_this);
+// A method of `cls` wrote the identifier `name`.
+void NoteWrittenName(std::string_view cls, std::string_view name);
+// A method of `cls` wrote `this.<field>`.
+void NoteCapturedFieldWrite(std::string_view cls, std::string_view owner,
+                            std::string_view field);
 
 // The oracle `GetType` consults for member-class spelling.
 using MemberClassNameFn = std::function<MemberClassInfo(std::string_view)>;

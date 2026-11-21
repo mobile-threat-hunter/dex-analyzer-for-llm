@@ -164,6 +164,63 @@ std::string_view ConstructorNameFor(std::string_view cls) {
     return {};
 }
 
+// dexllm#129 — the inliner of the current pipeline run, and the capture
+// scopes of the anonymous bodies being written on this thread.
+namespace {
+thread_local AnonymousInliner* tl_anon_inliner = nullptr;
+thread_local ScopedAnonymousCaptures* tl_anon_captures = nullptr;
+
+ScopedAnonymousCaptures* CaptureScopeFor(ScopedAnonymousCaptures* top, std::string_view cls) {
+    for (ScopedAnonymousCaptures* s = top; s != nullptr; s = s->prev_for_lookup()) {
+        if (s->cls() == cls) return s;
+    }
+    return nullptr;
+}
+}  // namespace
+
+ScopedAnonymousInliner::ScopedAnonymousInliner(AnonymousInliner* inliner)
+    : prev_(tl_anon_inliner) {
+    tl_anon_inliner = inliner;
+}
+ScopedAnonymousInliner::~ScopedAnonymousInliner() { tl_anon_inliner = prev_; }
+AnonymousInliner* CurrentAnonymousInliner() { return tl_anon_inliner; }
+
+ScopedAnonymousCaptures::ScopedAnonymousCaptures(
+    std::string cls, std::string owner, std::unordered_map<std::string, std::string> fields)
+    : cls_(std::move(cls)), owner_(std::move(owner)), fields_(std::move(fields)),
+      prev_(tl_anon_captures) {
+    for (const auto& [f, text] : fields_) texts_.insert(text);
+    tl_anon_captures = this;
+}
+ScopedAnonymousCaptures::~ScopedAnonymousCaptures() { tl_anon_captures = prev_; }
+
+const std::string* CapturedFieldText(std::string_view cls, std::string_view owner,
+                                     std::string_view field, bool via_this) {
+    ScopedAnonymousCaptures* s = CaptureScopeFor(tl_anon_captures, cls);
+    if (s == nullptr || owner != s->owner_) return nullptr;
+    auto it = s->fields_.find(std::string(field));
+    if (it == s->fields_.end()) return nullptr;
+    if (!via_this) {
+        // Another instance's copy of the value: not the captured local.
+        s->failed_ = true;
+        return nullptr;
+    }
+    return &it->second;
+}
+
+void NoteWrittenName(std::string_view cls, std::string_view name) {
+    ScopedAnonymousCaptures* s = CaptureScopeFor(tl_anon_captures, cls);
+    if (s != nullptr && s->texts_.count(std::string(name))) s->failed_ = true;
+}
+
+void NoteCapturedFieldWrite(std::string_view cls, std::string_view owner,
+                            std::string_view field) {
+    ScopedAnonymousCaptures* s = CaptureScopeFor(tl_anon_captures, cls);
+    if (s != nullptr && owner == s->owner_ && s->fields_.count(std::string(field))) {
+        s->failed_ = true;
+    }
+}
+
 std::string MemberClassBody(std::string_view desc) {
     if (desc.size() < 2 || desc.front() != 'L' || desc.back() != ';') {
         return std::string{desc};

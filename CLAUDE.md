@@ -2432,7 +2432,7 @@ jadx-style rendering (imports, `.` for proven nesting, inner classes nested into
 the outer class, anonymous classes inlined) is planned as separate work —
 dexllm#127 has since done the `.` half (see its section below; the cross-view
 claim is narrowed there), #128 did the nesting half (see its section below) and
-#129 is the inlining half.
+#129 the inlining half (its section below).
 
 **Measured (a/b OFF = HEAD `b6fc49ae`, ON = `a2a345f1`, SAME capture):** 58 sources
 → **820 classes on 20 sources, 3,095 lines, 0 line counts moved, 0 AST diffs, call
@@ -2626,6 +2626,153 @@ recorded:** the text grows (members print twice across `list_classes()`;
 come last, so `max_chars` truncation cuts members, not the class's own body); the
 pre-existing `enum class` / `interface annotation` header spellings are unchanged
 and now appear inside outers too.
+
+### An anonymous class is written where it is constructed (dexllm#129, 2026-11-22)
+
+The last step of the jadx-style rendering #111 started (#127 spelled proven
+members with `.`, #128 nested them). An anonymous class constructed at exactly
+one site is written THERE, in the Java text, as `new Base(super_args) { body }`:
+inside the body `this.this$0` reads `Outer.this` and `this.val$x` reads the name
+the site passed (`p2`, `v3`). Corpus: 4,882 anonymous classes, 4,447 of them
+constructed at exactly one site.
+
+**User decisions:** inline in `decompile_method` / `_with_pc_map` AND
+`decompile_class` (the class text is built from the method texts, so they agree);
+the AST is UNCHANGED — `decompile_method_ast(...)["ast"]` keeps the
+`ClassInstanceCreation` of `Outer$N`, while its `"source"` is the inlined text.
+The anonymous class asked for by its own descriptor still renders alone, so a
+`list_classes()` loop sees the body twice (the #128 precedent).
+
+**Mechanism.** `IDexCodeSource::AnonymousClass` (defaulted to none, so the Mock
+and the parity suites are untouched) decides eligibility from the bytecode, in
+`DexItemCodeSource::ComputeAnonymousClass`: `InnerClass` with a null `name`
+(`NestingFacts` now reads the null and `EnclosingMethod`), one nameable base (the
+superclass, or the single interface of an `Object` subclass), not
+interface/abstract/annotation/enum, exactly one `<init>` whose body only stores
+parameters into its own FINAL fields and passes parameters, in parameter order,
+to one superclass `<init>` on itself, ending in `return-void`; exactly one
+construction site among the enclosing class's methods, equal to
+`EnclosingMethod` when there is one, and NO other use of the type there (a cast,
+`instanceof`, a field or signature of its type, or a member the class declares
+itself — an inherited one is the base's too); not enclosing itself. The Writer
+(`try_inline_anonymous`, at `visit_invoke` `<init>` on a `NewInstance`) asks the
+pipeline's `AnonymousInliner` (the `Decompiler`, installed per run) for the
+class and its body. A captured value must be a NAME that holds it for the whole
+method (`pure_text`: `Site.this`, a parameter with no definition in the method,
+a declared local defined exactly once — counted over `loc_to_ins`); anything
+else, including a call RegisterPropagation folded into the argument, leaves the
+class by name. `RenderBody` writes the class's fields minus the captured ones and
+its methods minus `<init>`, each through `RunPipelineRaw` (RunPipeline without
+the final `SanitizeUtf8`, so the body is sanitised once, with the method it lands
+in; a mutant sanitising it twice is output-equivalent on every fixture,
+including an astral identifier, so this is a single pass, not a correctness
+requirement) under a
+`ScopedAnonymousCaptures`, which substitutes `this.<field>` in
+`visit_get_instance` and FAILS the body when a name it writes (variable,
+parameter, header parameter, catch variable, hoisted declaration) equals a
+capture text, when it writes a captured field, or reads one through another
+object. The body is also refused for a field of its own or one INHERITED from a
+dex-declared base named like a capture, a member class inside it, a method that
+does not decompile, and a class already being written on the thread
+(`WritingClasses`: two classes constructing each other); at most 3 levels are
+inlined. A superclass argument whose type differs from the superclass
+constructor's declared parameter is cast to it (`new Over(((Object) s)) {` —
+Java overload rules would otherwise bind `Over(String)`), and a local holding the
+object is declared with the base type (`Runnable v0_1 = new Runnable() {`), the
+only type a source can name.
+
+**Measured (a/b OFF = HEAD `8c2bdae9` — the shipped #128 build, bit-reproduced —
+vs ON `769cdc16`, SAME capture):** the bundled corpus plus the committed
+fixtures, 27,135 classes → **1,951 change; after folding every inline block back
+into a construction and normalising anonymous constructions, every changed class
+equals OFF except 238 declarations whose type moved from the anonymous class to
+its base.** 4,068 inline blocks; an independent body oracle checks that each body
+equals the anonymous class's own `decompile_class` minus its constructor and
+captured fields with only `this.<capture>` substituted — and, since review, that
+each substituted token is a name the constructing method itself has: **4,086 /
+4,086** (it folds a few nested shapes the block count does not). AST, smali and
+call-site digests identical on 50 sources; `\bp\d+_\d+\b` (a split-param name
+the site never declares) 0 on both halves. javac over the changed top-level
+classes (OFF given every anonymous class it constructs by name as its own file):
+**96,544 → 80,637 errors**, `cannot find symbol` 49,872 → 44,817. Full-APK
+decompile (`multiple_locale_appname_test.apk`, every class) 5.45 s → 5.7 s. parity
+29/29, pytest 2294 passed / 24 skipped, TRUE corpus-less (`test_apk` moved
+aside, restore asserted) 1847 / 471 / 0, narrowed to `tests/data/multidex.apk`
+2157 / 161, sweep 21,374-class 0-crash GATE: PASS (22.4 s), determinism 3
+`PYTHONHASHSEED`s → one digest, lint trio and boundary clean. The bundled corpus never nests an inline deeper than 1.
+
+**Guards:** [tests/test_anonymous_inline.py](tests/test_anonymous_inline.py) on
+two authored fixtures: `anon-classes.dex` (javac + d8: captures of the outer
+instance, a parameter, a static parameter, a wide value, superclass arguments, a
+framework superclass, a statement-position construction, one inside another, an
+astral identifier, the overload cast, the retyped local, a split parameter; and
+the fallbacks — shadowing parameter, field initializer, local-class base, folded
+argument, member inside, loop variable, enum constant body, an anonymous class in
+a member whose `$` spelling #127 pins) and `anon-sites.dex` (smali: two sites,
+shadowing own and inherited fields, a captured-field write, a read through
+another object, an instance initializer, a non-super `<init>`, one parameter in
+two fields, a reversed superclass argument order, two constructors, a non-final
+field, `return-void` before super, a non-decompiling body, a catch variable
+shadowing the capture, a loop-merged parameter, a self-enclosing class, two
+levels of inlining). `tests/conftest.py` gains `inline_anonymous_blocks` /
+`fold_inline_anonymous`, which `test_cascade_type.py` now applies: its
+method-scoped name heuristics would otherwise read the body's locals as the
+constructing method's. The `#127` pins for `new mc.Outer$1()` moved to the
+not-inlined `Holder$1`.
+
+**Two reviewers; 10 distinct confirmed findings and 4 plausible ones, all fixed
+here** (three were found by both): a captured parameter written as its
+split-version name `p5_0` (36 corpus tokens) — `pure_text` read `name` where
+`visit_param` writes the register; a captured loop variable read as the live
+register; a superclass argument binding another overload; catch variables and
+hoisted declarations not noted as names; inherited fields; superclass arguments
+reordered relative to the site; a non-final captured field the site writes after
+construction; 160+ declarations typed as the anonymous class; nine mutants that
+passed the first guard file, each masked by another condition on the Java
+fixture (hence the smali crafts); and the test helper missing a block that opens
+on the previous block's closing line (`}, new Executor() {`). Plausible, fixed
+anyway: the 16-level self-construction tower and mutual construction, erroring
+bodies inlined, a 16-level native recursion budget (now 3), and a constructor
+returning before its super call.
+
+**A DELTA review of those responses found four more, two of them created by the
+responses** [[review-responses-are-the-weak-spot]]: the declared-type retype
+applied to a local that ALSO held the anonymous type another way — 103 Kotlin
+suspend functions read the continuation's own `label` / `L$0` through it, so
+`ContinuationImpl v; v.label` stopped compiling, while the `instanceof` and the
+cast beside it still named the class that had just vanished into an inline body;
+the same for a `var` local calling a method only the class declares; a retype
+where the inline was later refused; and the superclass-argument cast skipping a
+String constant, so `new B("s")` bound `B(String)` where the bytecode calls
+`B(Object)`. One root closes the first three: a class still NAMED by anything in
+its enclosing class other than its construction is not inlined (and so not
+retyped), which makes the base-typed local sound — every remaining use of it
+reaches a member the base also has. An exception inside `RenderBody` now leaves
+the class by name instead of failing the constructing method.
+
+**Mutation matrix — 54 mutants, each BUILT with a distinct `.so` md5, control
+asserted before and after, run in the CI shape (`-k "not corpus"`): 47 killed
+alone; 4 survive alone and form two MASKING pairs, each pair killed when both
+are removed — the self-enclosing refusal and the `WritingClasses` cycle guard
+(either alone refuses a class enclosing itself), and the name noting in
+`visit_param` and in the method header (a body parameter is written in both
+places); 3 equivalent: `pure_text`'s `declared` test beside `defs_of == 1` (a
+once-defined local is declared at that definition before the site reads it),
+the capture scope matching any class (the innermost scope is always the class
+whose method is being written), and sanitising the body twice (output-identical
+on every fixture, an astral identifier included).** Thirteen of the 47 survived
+the first matrix and are why the smali fixture has the shapes it has.
+
+REFUTED by both: wide / `/range` mapping, pc_map (offsets identical, nothing
+inside a body mapped), threads (8 vs 1 identical), cache keys (bodies are never
+cached; the site's entry is context-free), sanitize-once, exceptions inside
+`RenderBody` (all scopes RAII).
+
+**Accepted, recorded:** a construction from a class other than the enclosing one
+is not counted (Java cannot write it); a FRAMEWORK base's fields are not visible
+to the shadow check; a captured name is the site's variable as rendered, so Java's
+effectively-final rule is the reader's to check where it holds; and the text
+grows (each inlined body prints twice across `list_classes()`).
 
 ### Production fix — reused `this` register materialised as a local (`this = X` → valid, 2026-07-03)
 

@@ -7,6 +7,7 @@
 #include <exception>
 #include <optional>
 #include <string>
+#include <unordered_set>
 #include <utility>
 
 #include "decompile.h"
@@ -168,8 +169,24 @@ MemberClassNameFn Decompiler::MemberClassNames() {
 std::string Decompiler::RunPipeline(
     uint16_t dex_id, uint32_t method_idx,
     std::vector<std::pair<uint32_t, uint32_t>>* pc_map) {
+    // Sanitize: non-ASCII MUTF-8 (incl. 0xED surrogate halves strict UTF-8
+    // rejects) → readable UTF-8 / \uXXXX so Python's strict decoder accepts it.
+    // Preserves '\n', so any captured pc_map line numbers stay valid.
+    return SanitizeUtf8(RunPipelineRaw(dex_id, method_idx, pc_map));
+}
+
+std::string Decompiler::RunPipelineRaw(
+    uint16_t dex_id, uint32_t method_idx,
+    std::vector<std::pair<uint32_t, uint32_t>>* pc_map) {
     std::string result;
     ScopedMemberClassNames member_names(MemberClassNames());
+    ScopedAnonymousInliner inliner(this);
+    // dexllm#129 — the classes whose methods are being written on this thread,
+    // outermost first (an inlined body is a pipeline run inside another).
+    struct Writing {
+        Writing(std::string_view cls) { WritingClasses().emplace_back(cls); }
+        ~Writing() { WritingClasses().pop_back(); }
+    } writing(source_.GetMethodClassName(dex_id, method_idx));
     try {
         auto snap = MethodSnapshotBuilder::BuildShared(
             source_, dex_id, method_idx);
@@ -187,10 +204,115 @@ std::string Decompiler::RunPipeline(
     } catch (const std::exception& e) {
         result = std::string("// DECOMPILE ERROR: ") + e.what() + "\n";
     }
-    // Sanitize: non-ASCII MUTF-8 (incl. 0xED surrogate halves strict UTF-8
-    // rejects) → readable UTF-8 / \uXXXX so Python's strict decoder accepts it.
-    // Preserves '\n', so any captured pc_map line numbers stay valid.
-    return SanitizeUtf8(result);
+    return result;
+}
+
+// dexllm#129 — the classes whose methods this thread is writing.
+std::vector<std::string>& Decompiler::WritingClasses() {
+    thread_local std::vector<std::string> classes;
+    return classes;
+}
+
+// dexllm#129 — an anonymous class constructed at exactly `site`.
+std::optional<AnonymousClassInfo> Decompiler::Find(std::string_view anon,
+                                                   std::string_view site) {
+    auto info = source_.AnonymousClass(anon);
+    if (!info || info->site != site) return std::nullopt;
+    return info;
+}
+
+// dexllm#129 — the body of an inlined anonymous class: its fields other than
+// the ones its constructor fills from captured values, then its methods other
+// than the constructor, each with `this.<captured field>` read as the value
+// the construction site passed. Raw (unsanitised) text: it is written into
+// the constructing method's output, which is sanitised once as a whole.
+std::optional<std::string> Decompiler::RenderBody(const AnonymousClassInfo& info,
+                                                  const std::vector<std::string>& captures) {
+    // A class one of whose methods is being written would be written inside
+    // itself (a crafted dex can make two anonymous classes construct each
+    // other); the cap bounds the nesting of distinct classes. Each level is a
+    // whole pipeline's emit recursion on the same native stack, so the cap is
+    // small: the bundled corpus never nests deeper than 1.
+    const auto& writing = WritingClasses();
+    constexpr size_t kMaxDepth = 4;
+    if (writing.size() >= kMaxDepth ||
+        std::find(writing.begin(), writing.end(), info.descriptor) != writing.end()) {
+        return std::nullopt;
+    }
+
+    auto cls = source_.GetClassInfo(info.descriptor);
+    if (!cls) return std::nullopt;
+    // A member class declared inside the anonymous body has nowhere to go.
+    if (!source_.NestedMemberClasses(info.descriptor).empty()) return std::nullopt;
+
+    std::unordered_map<std::string, std::string> fields;
+    std::unordered_set<std::string> texts;
+    for (size_t i = 0; i < info.captured_field.size() && i < captures.size(); ++i) {
+        if (info.captured_field[i].empty()) continue;
+        fields.emplace(info.captured_field[i], captures[i]);
+        texts.insert(captures[i]);
+    }
+
+    // A field the body inherits is found by an unqualified name before an
+    // enclosing method's local is. Only the classes a loaded dex declares
+    // can be read; a framework base's fields are not visible here.
+    {
+        std::vector<std::string> todo{info.base};
+        std::unordered_set<std::string> seen;
+        while (!todo.empty()) {
+            std::string c = std::move(todo.back());
+            todo.pop_back();
+            if (!seen.insert(c).second) continue;
+            auto ci = source_.GetClassInfo(c);
+            if (!ci) continue;
+            for (uint32_t fidx : ci->field_ids) {
+                if (texts.count(std::string(source_.GetFieldInfo(ci->dex_id, fidx).name))) {
+                    return std::nullopt;
+                }
+            }
+            if (!ci->superclass.empty()) todo.emplace_back(ci->superclass);
+            for (auto iface : ci->interfaces) todo.emplace_back(iface);
+        }
+    }
+
+    std::string out;
+    for (size_t i = 0; i < cls->field_ids.size(); ++i) {
+        auto finfo = source_.GetFieldInfo(cls->dex_id, cls->field_ids[i]);
+        const std::string fname{finfo.name};
+        if (fields.count(fname)) continue;
+        // An unqualified captured name would resolve to this field first.
+        if (texts.count(fname)) return std::nullopt;
+        // A value with no Java expression form is rendered as a comment that
+        // must be made safe AFTER sanitising, which this raw text cannot do.
+        if (i < cls->field_init_comments.size() && !cls->field_init_comments[i].empty()) {
+            return std::nullopt;
+        }
+        out += "    ";
+        for (const auto& a : GetAccessField(finfo.access_flags)) {
+            out += a;
+            out += ' ';
+        }
+        out += GetType(finfo.type);
+        out += ' ';
+        out += fname;
+        if (i < cls->field_init_texts.size() && !cls->field_init_texts[i].empty()) {
+            out += " = ";
+            out += cls->field_init_texts[i];
+        }
+        out += ";\n";
+    }
+
+    ScopedAnonymousCaptures scope(info.descriptor, GetType(info.descriptor), fields);
+    for (const auto& loc : source_.LocateClassMethods(info.descriptor)) {
+        if (source_.GetMethodName(loc.dex_id, loc.method_idx) == "<init>") continue;
+        std::string m = RunPipelineRaw(loc.dex_id, loc.method_idx, /*pc_map=*/nullptr);
+        // A method that did not decompile stays visible as its own class's
+        // error, not as an error inside the constructing method.
+        if (m.rfind("// DECOMPILE ERROR", 0) == 0) return std::nullopt;
+        out += m;
+    }
+    if (scope.failed()) return std::nullopt;
+    return out;
 }
 
 std::string Decompiler::DecompileMethod(std::string_view descriptor) {

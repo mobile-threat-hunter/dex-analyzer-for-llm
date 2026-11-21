@@ -27,7 +27,7 @@ import re
 from pathlib import Path
 
 import pytest
-from conftest import require_corpus_shape
+from conftest import fold_inline_anonymous, require_corpus_shape
 
 import dexllm
 from dexllm import is_timeout_marker, safe_decompile_method
@@ -146,7 +146,9 @@ def scanned():
                 # per-method: primitive names may legitimately collide ACROSS
                 # methods with reference names (split-version display aliasing),
                 # so object-use must be checked within one method's text only.
-                out = safe_decompile_method(dk, desc, timeout=10.0)
+                out = fold_inline_anonymous(
+                    safe_decompile_method(dk, desc, timeout=10.0)
+                )
                 if is_timeout_marker(out) or not out:
                     continue
                 for m in _REF_INT.finditer(out):
@@ -329,7 +331,9 @@ def test_prim_ref_mismatch_var_assign_bounded():
             except Exception:
                 continue
             for desc in methods:
-                out = safe_decompile_method(dk, desc, timeout=10.0)
+                out = fold_inline_anonymous(
+                    safe_decompile_method(dk, desc, timeout=10.0)
+                )
                 if is_timeout_marker(out) or not out:
                     continue
                 dt = {}
@@ -384,7 +388,7 @@ def test_use_bound_prim_to_ref_typing():
     dk, desc = _find_method("kotlinx/coroutines/channels/ActorKt", "actor$default")
     if desc is None:
         pytest.skip("ActorKt.actor$default not in the bundled corpus")
-    out = safe_decompile_method(dk, desc, timeout=10.0)
+    out = fold_inline_anonymous(safe_decompile_method(dk, desc, timeout=10.0))
     if is_timeout_marker(out) or not out:
         pytest.skip("actor$default did not decompile")
     # The merged version is now the reference param type, not `int`.
@@ -427,7 +431,9 @@ def test_conflated_register_typed_object_with_casts():
                 continue
             for m in d2.list_class_methods(c):
                 if "->loadFont(" in m and "Resources;" in m:
-                    o = safe_decompile_method(d2, m, timeout=10.0)
+                    o = fold_inline_anonymous(
+                        safe_decompile_method(d2, m, timeout=10.0)
+                    )
                     if o and not is_timeout_marker(o) and "Object v8" in o:
                         src = o
                         break
@@ -474,7 +480,9 @@ def test_object_typed_use_gets_explicit_cast():
             except Exception:
                 continue
             for desc in methods:
-                out = safe_decompile_method(dk, desc, timeout=10.0)
+                out = fold_inline_anonymous(
+                    safe_decompile_method(dk, desc, timeout=10.0)
+                )
                 if is_timeout_marker(out) or not out:
                     continue
                 # a specific-type cast on a variable/param (the A behaviour)
@@ -532,7 +540,9 @@ def test_object_typed_field_access_gets_owner_cast():
             except Exception:
                 continue
             for desc in methods:
-                out = safe_decompile_method(dk, desc, timeout=10.0)
+                out = fold_inline_anonymous(
+                    safe_decompile_method(dk, desc, timeout=10.0)
+                )
                 if is_timeout_marker(out) or not out:
                     continue
                 # `((Owner) v).field` — a cast immediately owning a field access
@@ -573,7 +583,7 @@ def test_array_used_variable_typed_as_array():
     if desc is None:
         # any method that indexes an array-typed local
         pytest.skip("clearSpans not in the bundled corpus")
-    src = safe_decompile_method(dk, desc, timeout=10.0)
+    src = fold_inline_anonymous(safe_decompile_method(dk, desc, timeout=10.0))
     if is_timeout_marker(src) or not src:
         pytest.skip("clearSpans did not decompile")
     # the array-used local is declared an array type, not bare Object.
@@ -613,7 +623,9 @@ def test_array_used_not_typed_object_bounded():
             except Exception:
                 continue
             for desc in methods:
-                out = safe_decompile_method(dk, desc, timeout=10.0)
+                out = fold_inline_anonymous(
+                    safe_decompile_method(dk, desc, timeout=10.0)
+                )
                 if is_timeout_marker(out) or not out:
                     continue
                 for v in set(re.findall(r"\bObject (v\w+)\s*[;=]", out)):
@@ -669,7 +681,9 @@ def test_reftype_eq_nonzero_int_bounded_mixed_version():
             except Exception:
                 continue
             for desc in methods:
-                out = safe_decompile_method(dk, desc, timeout=10.0)
+                out = fold_inline_anonymous(
+                    safe_decompile_method(dk, desc, timeout=10.0)
+                )
                 if is_timeout_marker(out) or not out:
                     continue
                 bad += len(_RX.findall(out))
