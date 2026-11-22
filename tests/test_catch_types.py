@@ -94,7 +94,11 @@ def _ast_catch_types(node, out):
         if node and node[0] == "TryStatement":
             _ast_catch_types(node[2], out)
             for decl, body in node[3]:
-                out.append(decl[0][1][0])
+                typen = decl[0]
+                if typen[0] == "UnionType":  # dexllm#132
+                    out.append(" | ".join(t[1][0] for t in typen[1]))
+                else:
+                    out.append(typen[1][0])
                 _ast_catch_types(body, out)
             return
         for v in node:

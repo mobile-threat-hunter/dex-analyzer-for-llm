@@ -542,3 +542,16 @@ build:
   which must keep their own type (the handler type wins only over null).
 
 It is part of this project and carries this project's licence.
+
+`multi-catch.dex` (md5 `9da357faab20596bfa2ed9aef26c98c8`) was written for dexllm#132 and
+assembled from the committed `multi-catch.smali` the same way. Every method
+has a handler block that several catch types share (or a control that does
+not): three types, the order reversed, no move-exception, a catch-all among
+them, one type, two handlers, the variable escaping, two try ranges, a handler
+opening with a test (split by `SplitIfNodes`), a bare-`goto` handler (alone,
+into another handler's block, into a catch-all's), the catch variable written
+in the handler (unsplit and split), a null merged with it, `Throwable` named
+explicitly, a primitive type, and two shared handlers on one register. On the
+pre-fix build each shared handler's clause names only its last type.
+
+It is part of this project and carries this project's licence.

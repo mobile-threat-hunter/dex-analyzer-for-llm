@@ -320,6 +320,10 @@ void SplitIfNodes(Graph& graph) {
 
         pre_node->CopyFrom(*cb);
         cond_node->CopyFrom(*cb);
+        // dexllm#132: Node::CopyFrom carries no catch fields. catch_type is
+        // re-propagated by add_catch_edge below; the handler's type list is
+        // not, so the head (which keeps the move-exception) takes it here.
+        pre_node->catch_alternatives = cb->catch_alternatives;
         for (const auto& var : cb->var_to_declare) {
             pre_node->add_variable_declaration(var);
         }
@@ -403,6 +407,11 @@ void Simplify(Graph& graph) {
                     if (any_switch) continue;
                     if (node == suc) continue;
                     node_map[node] = suc;
+                    // dexllm#132: whether suc was ALREADY a catch target, of
+                    // another handler whose type list it must keep.
+                    const auto rce = graph.reverse_catch_edges.find(suc);
+                    const bool suc_was_handler =
+                        rce != graph.reverse_catch_edges.end() && !rce->second.empty();
                     for (NodeBase* pred : graph.all_preds(node)) {
                         pred->UpdateAttributeWith(node_map);
                         const auto pred_sucs = graph.sucs(pred);
@@ -411,6 +420,23 @@ void Simplify(Graph& graph) {
                                       node) != pred_sucs.end();
                         if (!node_in_pred_sucs) {
                             graph.add_catch_edge(pred, suc);
+                            // dexllm#132: an empty handler block (a bare
+                            // `goto`) is replaced by its successor as the
+                            // catch target; its type list moves with it. A
+                            // successor that is already another handler's
+                            // block now catches both lists; one whose list is
+                            // empty is a catch-all and stays one.
+                            auto* sbb = dynamic_cast<BasicBlock*>(suc);
+                            if (sbb && !suc_was_handler) {
+                                if (sbb->catch_alternatives.empty())
+                                    sbb->catch_alternatives = bb->catch_alternatives;
+                            } else if (sbb && !sbb->catch_alternatives.empty()) {
+                                for (const auto& t : bb->catch_alternatives)
+                                    if (std::find(sbb->catch_alternatives.begin(),
+                                                  sbb->catch_alternatives.end(), t) ==
+                                        sbb->catch_alternatives.end())
+                                        sbb->catch_alternatives.push_back(t);
+                            }
                             continue;
                         }
                         graph.add_edge(pred, suc);
@@ -617,14 +643,51 @@ std::unique_ptr<Graph> Construct(const MethodSnapshot& snap,
     // STEP 1: Build BasicBlock for each RawBlock; index by block_id.
     // For catch-handler blocks, pass the catch type as exception_type
     // (DAD: build_node_from_block(block, vmap, gen_ret, _type)).
-    std::vector<std::string_view> exception_type_for(snap.blocks.size(),
-                                                      std::string_view{});
+    //
+    // Beyond-DAD (dexllm#132): a handler block several catch types share is
+    // one block with one move-exception, and DAD's last-wins assignment named
+    // only the LAST type, so the clause read `catch (IllegalAccessException
+    // v1)` for a handler of three. Every type reaching the block is collected
+    // (try-table order, deduplicated); the clause names them all as a
+    // multi-catch, and the catch VARIABLE takes their join, Throwable -- the
+    // join dexllm#130 already gives two handlers merged into one register. A
+    // catch-all among them makes the handler catch everything, so it is a
+    // plain Throwable clause. The list is the UNION over every try item that
+    // reaches the block: on the bundled corpus and every committed fixture
+    // each such block is reached by one identical type list from every try
+    // item, so the union is exact there; on a crafted dex whose try items
+    // disagree it over-states what one range catches. A multi-catch whose
+    // alternatives are related by subclassing (`FileNotFoundException |
+    // IOException`, crafted or from handler sharing; 0 in the corpus) is not
+    // Java -- javac rejects it -- and is left as the try table says, since
+    // the framework hierarchy is not known here.
+    std::vector<std::vector<std::string_view>> handler_types_for(snap.blocks.size());
+    std::vector<char> catch_all_for(snap.blocks.size(), 0);
     for (const auto& er : snap.exceptions) {
         for (const auto& ci : er.handlers) {
-            if (ci.handler_block_id < exception_type_for.size()) {
-                exception_type_for[ci.handler_block_id] = ci.catch_type;
+            if (ci.handler_block_id >= handler_types_for.size()) continue;
+            // Throwable named explicitly catches everything too, and a type
+            // that is not a reference (crafted: `.catch I`) is the dexllm#130
+            // clamp's case: both make the handler a plain Throwable clause --
+            // `A | Throwable` and `int | A` are not Java.
+            const std::string_view ct = ci.catch_type;
+            if (ct.empty() || ct == "Ljava/lang/Throwable;" ||
+                ct.size() < 2 || ct.front() != 'L' || ct.back() != ';') {
+                catch_all_for[ci.handler_block_id] = 1;
+                continue;
             }
+            auto& v = handler_types_for[ci.handler_block_id];
+            if (std::find(v.begin(), v.end(), ci.catch_type) == v.end())
+                v.push_back(ci.catch_type);
         }
+    }
+    std::vector<std::string_view> exception_type_for(snap.blocks.size(),
+                                                      std::string_view{});
+    for (size_t b = 0; b < handler_types_for.size(); ++b) {
+        const auto& v = handler_types_for[b];
+        if (catch_all_for[b] || v.empty()) continue;  // "" = catch-all
+        exception_type_for[b] = v.size() == 1 ? v.front()
+                                              : std::string_view{"Ljava/lang/Throwable;"};
     }
 
     // DAD graph.py:511-524 — `for block in bfs(start_block): make_node(...)`.
@@ -673,6 +736,9 @@ std::unique_ptr<Graph> Construct(const MethodSnapshot& snap,
             g->owned_nodes_.push_back(std::move(block_node));
             g->add_node(raw);
             nodes[bid] = raw;
+            if (!catch_all_for[bid])
+                for (std::string_view t : handler_types_for[bid])
+                    raw->catch_alternatives.emplace_back(t);
             // Only a block the bfs REACHES counts (dexllm#77): the marker says
             // control ENTERED at a non-instruction offset, so a block in dead
             // code — which is never built here — must not make the method

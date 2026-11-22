@@ -801,6 +801,16 @@ dk.decompile_method_ast(M).keys()
 | `ast` | `dict` | keys `{triple, flags, ret, params, comments, body}` — the DAD `get_ast()` nested-list tree (50+ node types). `comments` is `[]` in DAD and stays `[]` here except for the dexllm#75 and dexllm#77 markers, which it carries WITHOUT the leading `// ` (e.g. `['entry is not at offset 0']`, and both when a method earns both) so an `include_source=False` consumer can see the reinterpretation too |
 | `pc_map` | `list[tuple[int,int]]` | `(statement_seq, byte_off)` — sidechannel kept OUT of `ast` |
 
+**A catch declaration's type can be a union (dexllm#132).** A `TryStatement`'s
+catch pairs are `[[type, Local], body]`. `type` is a `TypeName`, except when
+the handler catches several types: then it is `['UnionType', [TypeName, ...]]`,
+in try-table order, and the Java text reads `catch (A | B | C v)`. DAD has no
+such node; a consumer that reads `type[1][0]` as a descriptor must handle it.
+The catch VARIABLE's own type in that case is `Throwable`. A multi-catch
+parameter cannot be assigned in Java, so when the variable is also written
+outside its clause the text reads `catch (Throwable v0 /* A | B */)`; the AST
+still carries the `UnionType`.
+
 ---
 
 ## 4. Smali rendering (baksmali-style, no JVM)

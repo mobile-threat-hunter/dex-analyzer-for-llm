@@ -107,6 +107,17 @@ std::string EscapeJavaString(std::string_view raw) {
 // since BasicBlock::Visit isn't yet wired.
 // ============================================================================
 
+// dexllm#132: `A | B | C`, the type part of a multi-catch clause, in
+// try-table order.
+static std::string MultiCatchText(const std::vector<std::string>& alts) {
+    std::string out;
+    for (size_t i = 0; i < alts.size(); ++i) {
+        if (i) out += " | ";
+        out += GetType(alts[i]);
+    }
+    return out;
+}
+
 // Helper: forward Writer's Visitor interface onto its EmitExpr replacement.
 class WriterImpl : public Visitor {
 public:
@@ -697,17 +708,24 @@ public:
         // the handler type wins over the variable's inferred type whenever it
         // is a reference. The variable's type is a reference that is not a
         // Throwable when the move-exception def never reached SplitVariables
-        // (its value is unused) or a merged def won the version's type. A
-        // handler block several catch types share carries only the LAST of
-        // them (graph.cpp's exception_type_for), so such a clause names one of
-        // the types it catches -- pre-existing, not resolved here.
+        // (its value is unused) or a merged def won the version's type.
         if (data && is_ref_catch(data->get_type())) vt = data->get_type();
         else if (!is_ref_catch(vt)) vt = "Ljava/lang/Throwable;";
-        w_->Write(GetType(vt));
+        // dexllm#132: a handler several catch types share is a multi-catch;
+        // the variable keeps their join (Throwable) as its own type.
+        const bool multi = catch_alts_ && catch_alts_->size() > 1;
+        // A multi-catch parameter cannot be assigned, so a reassigned one
+        // names the join and keeps the types in a comment.
+        if (multi && !(data && data->reassigned))
+            w_->Write(MultiCatchText(*catch_alts_));
+        else
+            w_->Write(GetType(vt));
         w_->Write(" v");
         std::string nm = var->name;
         if (!nm.empty() && nm.front() == 'v') nm.erase(0, 1);
         w_->Write(nm);
+        if (multi && data && data->reassigned)
+            w_->Write(" /* " + MultiCatchText(*catch_alts_) + " */");
         NoteWrittenName(w_->snap_->meta.cls_name, "v" + nm);  // dexllm#129
     }
 
@@ -946,6 +964,10 @@ private:
     Writer* w_;
 public:
     bool constructor_ = false;
+    // dexllm#132: the clause's catch types when its handler catches several
+    // (CatchBlock::catch_alternatives), set by EmitTry for the one visit of
+    // that clause's move-exception.
+    const std::vector<std::string>* catch_alts_ = nullptr;
 };
 
 // ============================================================================
@@ -1503,7 +1525,11 @@ void Writer::EmitTry(TryBlock* tb) {
         // `unknownType`.
         if (catch_block->exception_ins) {
             WriterImpl wi(this); wi.constructor_ = is_constructor_;
+            wi.catch_alts_ = &catch_block->catch_alternatives;
             catch_block->exception_ins->Accept(wi);
+        } else if (catch_block->catch_alternatives.size() > 1) {
+            Write(MultiCatchText(catch_block->catch_alternatives));  // dexllm#132
+            Write(" _");
         } else {
             std::string ctype = catch_block->catch_type.empty()
                 ? std::string("Ljava/lang/Throwable;")

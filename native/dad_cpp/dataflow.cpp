@@ -4176,6 +4176,25 @@ SplitConflatedVersion(const std::string& var_str,
     return {{defs_r, uses_r}, {defs_p, uses_p}};
 }
 
+// Beyond-DAD (dexllm#132): a catch variable whose version also has a def that
+// is not a move-exception is written outside its own clause (in the handler,
+// or as a null merged with it). Two move-exceptions in one version are two
+// clauses' parameters sharing a register, which needs no mark.
+template <class Defs>
+static void MarkReassignedCatch(Graph& graph, const Defs& defs) {
+    std::vector<MoveExceptionExpression*> mes;
+    bool other = false;
+    for (int loc : defs) {
+        IRFormPtr in = loc < 0 ? nullptr : graph.get_ins_from_loc(loc);
+        if (auto* me = dynamic_cast<MoveExceptionExpression*>(in.get()))
+            mes.push_back(me);
+        else
+            other = true;
+    }
+    if (other)
+        for (auto* me : mes) me->reassigned = true;
+}
+
 void SplitVariables(Graph& graph,
                     std::unordered_map<int, IRFormPtr>& lvars,
                     ChainMap& du, ChainMap& ud) {
@@ -4238,6 +4257,7 @@ void SplitVariables(Graph& graph,
             // → Throwable, the type every one of them is.
             std::string ct;
             bool all_catch = true;
+            MarkReassignedCatch(graph, versions[0].first);
             for (int loc : versions[0].first) {
                 IRFormPtr in = loc < 0 ? nullptr : graph.get_ins_from_loc(loc);
                 if (!in) { all_catch = false; break; }
@@ -4343,6 +4363,7 @@ void SplitVariables(Graph& graph,
             // write: `Math.min(II)I` into a register later reused for an
             // `aget-float` rendered `float v0_3 = Math.min(...)`, then `a[v0_3]`.
             std::string def_type;
+            MarkReassignedCatch(graph, defs_vec);
             std::string catch_type;  // dexllm#130: join of the handler types
             bool other_def = false;  // a def that is neither one nor null
             auto is_ref = [](const std::string& t) {

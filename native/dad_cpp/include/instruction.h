@@ -921,6 +921,12 @@ public:
     // DAD: instruction.py:1046 __str__ → 'MOVE_EXCEPT <ref>'
     std::string ToString() const override;
     void Accept(Visitor& v) override;
+
+    // Beyond-DAD (dexllm#132): the catch variable's version has a def that is
+    // not a move-exception (the variable is written in the handler, or merged
+    // with null), set by SplitVariables. A multi-catch parameter cannot be
+    // assigned (JLS 14.20), so the Writer then names the join instead.
+    bool reassigned = false;
 };
 
 // DAD: instruction.py:1050 MonitorEnterExpression — trivial RefExpression.

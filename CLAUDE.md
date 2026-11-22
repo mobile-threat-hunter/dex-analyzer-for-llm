@@ -2797,7 +2797,7 @@ the handler catches, and an unread catch variable never reaches `SplitVariables`
 at all. **Known limit, pre-existing:** a handler block several catch types share
 carries only the last of them (`graph.cpp` `exception_type_for`, last-wins), so
 its clause names one of the types it catches (12 such methods in the corpus and
-fixtures).
+fixtures). FIXED in dexllm#132 (section below): such a clause is a multi-catch.
 
 **Measured (a/b OFF = HEAD `769cdc16` vs ON `574ac16b`, SAME capture):** the
 bundled corpus plus the committed fixtures → **1,151 classes on 21 sources, 2,933
@@ -2844,8 +2844,88 @@ first cut let a move-exception override a nonzero `int` def (`IOException v0_1 =
 7`) — fixed by the null-only rule above, plus the M6 guard hole. Correctness: no
 production defect; re-derived the a/b and both oracles, and found this section's
 predecessor stale (fixed). **Residual, NOT fixed:** a move-copy of a catch
-variable keeps its stale type (`Class v1 = v0_0`; 2 corpus lines, unchanged), and
-the multi-type handler above.
+variable keeps its stale type (`Class v1 = v0_0`; 2 corpus lines, unchanged —
+dexllm#133), and the multi-type handler above (FIXED in dexllm#132).
+
+### A handler several catch types share is a multi-catch (dexllm#132, 2026-11-22)
+
+dexllm#130 made a catch clause name its handler's type, which exposed the next
+defect: `Graph::Construct` gave each handler BLOCK one type, the LAST the try
+table assigned it (`exception_type_for`, DAD's last-wins), so a handler of three
+types read `catch (IllegalAccessException v1)` (`method_handles.dex`
+`ExampleJavaJniFuzzer.fuzzerTestOneInput`). DAD does the same; beyond-DAD fix.
+
+**User decision: multi-catch** (`catch (A | B | C v)`), not one clause per type
+with the body duplicated. Construct collects every type reaching a handler
+block, in try-table order and deduplicated (`BasicBlock::catch_alternatives`,
+copied into `CatchBlock`); two or more make the clause a multi-catch in the
+Writer and a new AST node `['UnionType', [TypeName, ...]]` in dast (DAD has no
+such node; documented in docs/api.md). The catch VARIABLE takes their join,
+`Throwable` (dexllm#130's join for two handlers merged into one register).
+Plain `Throwable` clause instead when a catch-all, an explicit `Throwable`, or a
+non-reference type (crafted `.catch I`, dexllm#130's clamp) is among the types.
+
+**Three rules review forced** (all crafted-only, 0 in the corpus, each
+strict-verify-valid and each a valid->invalid or information-loss case):
+- the list must survive node surgery: `SplitIfNodes` (a handler opening with a
+  test) and `Simplify` (a bare-`goto` handler replaced by its successor) rebuild
+  the handler node, and `Node::CopyFrom` copies no catch field; both now carry
+  the list. A bare-goto handler whose successor is ANOTHER handler's block
+  unions the lists into it; into a catch-all block it stays a catch-all.
+- a multi-catch parameter cannot be assigned (JLS 14.20): a catch variable whose
+  version has a def that is not a move-exception (written in the handler, or
+  merged with null) is marked by SplitVariables (`MoveExceptionExpression::
+  reassigned`, both the split and the unsplit path), and the Writer then writes
+  `catch (Throwable v0 /* A | B */)`. The AST keeps the UnionType (what is
+  caught). Two move-exceptions in one version are two clauses' parameters
+  sharing a register and are not marked.
+- `A | Throwable` is not Java, so an explicit Throwable makes it a catch-all.
+
+**Measured (a/b OFF = v0.33.0 `574ac16b`, bit-reproduced from HEAD's sources,
+vs ON `988619ee`, SAME capture):** bundled corpus + committed fixtures (the new
+fixture excluded) -> **11 classes on 2 sources change, 28 lines, every one a
+single-type clause becoming a multi-catch that contains the old type, 0 line
+counts moved; 12 of 48,016 catch-bearing method ASTs change.** On real input
+every shared handler is reached by one identical type list from every try item
+and no catch-all is mixed in, so the union is exact (25 distinct try items
+across 12 methods; a correctness reviewer counted 30 without deduplicating the
+same method across sources). parity 29/29,
+pytest 2365 passed / 24 skipped, TRUE corpus-less (`test_apk` moved aside,
+restore asserted) 1918 / 471 / 0, narrowed to `tests/data/multidex.apk` 2228 /
+161, sweep 21,374-class 0-crash GATE: PASS, determinism 3 `PYTHONHASHSEED`s ->
+one digest, lint trio and boundary clean.
+
+**Guards:** [tests/test_multi_catch.py](tests/test_multi_catch.py) on the
+authored `tests/data/multi-catch.smali` (+ `.dex`): three types, reversed order,
+no move-exception, catch-all among them, a single-type and a two-handler
+control, the variable escaping, two try ranges, a handler opening with a test,
+a bare-goto handler (alone, into another handler, into a catch-all), the
+reassigned variable (unsplit and split), a null merged with it, explicit
+Throwable, a primitive type, and two shared handlers on one register; each
+clause pinned in text AND AST, plus a raw try-table oracle over three fixtures
+and the issue repro. **23 mutants, each BUILT with a distinct `.so` md5, control
+asserted after: all killed** (catch-all ignored, no dedupe, the variable's type
+last-wins, the list never set / reversed / not copied, each emitter ignoring it,
+a single type rendered as a union in either emitter, each node-surgery carry
+removed, the handler guard and the union removed, a catch-all successor made
+typed, each reassignment mark removed, two move-exceptions counted, the flag or
+the comment dropped, Throwable or a non-reference type kept). Six of them
+survived earlier matrices and are why `nullThenShared`, `gotoIntoCatchAll`,
+`reassignedSplit` and `twoSharedMerge` exist.
+
+**Two reviewers.** Adversarial: the SplitIfNodes and Simplify losses (fixed
+above), subclass-related alternatives (recorded below). Correctness: the a/b and
+text/AST agreement re-derived exactly; the reassigned parameter, the explicit
+Throwable and the non-reference type (fixed); "contiguous" in the first cut's
+comment was false (3 handler groups in `method_handles.dex` have their types in
+separated try items — harmless, the lists agree).
+
+**Residuals, recorded:** alternatives related by subclassing
+(`FileNotFoundException | IOException`, crafted or from handler sharing; javac
+rejects it) are rendered as the try table says, since the framework hierarchy is
+not known here; a crafted dex whose try items disagree over-states what one
+range catches (the union); a catch variable copied to another register keeps a
+stale type (dexllm#133).
 
 ### Production fix — reused `this` register materialised as a local (`this = X` → valid, 2026-07-03)
 

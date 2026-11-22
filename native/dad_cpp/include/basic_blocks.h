@@ -97,6 +97,10 @@ public:
     std::vector<IRFormPtr> var_to_declare;
     // DAD: None until set_catch_type. Empty string represents the None state.
     std::string catch_type;
+    // Beyond-DAD (dexllm#132): every exception type a HANDLER block catches,
+    // in try-table order (graph.cpp Construct); empty for a catch-all and for
+    // a block no handler names. Two or more make the clause a multi-catch.
+    std::vector<std::string> catch_alternatives;
 
     // DAD: BasicBlock has no __str__ — subclasses override. Default mimics
     // Python's `repr(self)` form `Block(name)` for diagnostics.
@@ -464,6 +468,7 @@ private:
         std::vector<IRFormPtr> block_ins;
         std::string name;
         std::string catch_type;
+        std::vector<std::string> catch_alternatives;
         BasicBlock* start = nullptr;
     };
     CatchBlock(InitData&& d);

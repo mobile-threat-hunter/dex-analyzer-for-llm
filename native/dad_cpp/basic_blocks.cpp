@@ -489,6 +489,7 @@ CatchBlock::InitData CatchBlock::PrepareInit(BasicBlock& node) {
     d.start = &node;
     d.name = "Catch-" + node.name;
     d.catch_type = node.catch_type;
+    d.catch_alternatives = node.catch_alternatives;  // dexllm#132
     if (!node.ins.empty()) {
         auto mex = std::dynamic_pointer_cast<MoveExceptionExpression>(
             node.ins.front());
@@ -510,6 +511,7 @@ CatchBlock::CatchBlock(InitData&& d)
       catch_start(d.start) {
     // DAD: basic_blocks.py:297 self.catch_type = node.catch_type
     catch_type = std::move(d.catch_type);
+    catch_alternatives = std::move(d.catch_alternatives);
 }
 
 void CatchBlock::Visit(Visitor& /*visitor*/) {

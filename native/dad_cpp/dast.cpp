@@ -146,6 +146,16 @@ AV ArrayAccess(AV arr, AV ind) {
 AV VarDecl(AV typen, AV var) {
     return AV::Arr({std::move(typen), std::move(var)});
 }
+
+// Beyond-DAD (dexllm#132): the type of a catch declaration. A handler that
+// several catch types share is a multi-catch, `['UnionType', [TypeName, ...]]`
+// in try-table order (DAD has no such node: its catch clause names one type).
+AV CatchTypeNode(const CatchBlock* cb, const std::string& single) {
+    if (cb->catch_alternatives.size() < 2) return ParseDescriptor(single);
+    std::vector<AV> alts;
+    for (const auto& t : cb->catch_alternatives) alts.push_back(ParseDescriptor(t));
+    return AV::Arr({AV::Str("UnionType"), AV::Arr(std::move(alts))});
+}
 // DAD: dast.py:726 method_invocation(triple, name, base, params)
 AV MethodInvocation(AV triple, std::string name, AV base, std::vector<AV> params) {
     if (base.is_null()) {
@@ -756,11 +766,11 @@ void JSONWriter::visit_try_node(TryBlock* tb) {
             const std::string ht = cb->exception_ins->get_type();
             if (is_ref_catch(ht)) ctype = ht;
             else if (!is_ref_catch(ctype)) ctype = "Ljava/lang/Throwable;";
-            catch_decl = VarDecl(ParseDescriptor(ctype), Local(name));
+            catch_decl = VarDecl(CatchTypeNode(cb, ctype), Local(name));
         } else {
             std::string ctype = cb->catch_type.empty()
                 ? std::string("Ljava/lang/Throwable;") : cb->catch_type;
-            catch_decl = VarDecl(ParseDescriptor(ctype), Local("_"));
+            catch_decl = VarDecl(CatchTypeNode(cb, ctype), Local("_"));
         }
         AstValue body = scope([&] { visit_node(cb->catch_start); });
         pairs.push_back(AstValue::Arr({std::move(catch_decl), std::move(body)}));
