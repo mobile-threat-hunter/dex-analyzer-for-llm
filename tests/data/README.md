@@ -521,3 +521,24 @@ java -cp jadx-1.5.3-all.jar com.android.tools.smali.smali.Main \
      a anon-sites -o anon-sites.dex                     # smali 3.0.9, OpenJDK 21
 ```
 
+
+`catch-types.dex` (md5 `da1ff61929edd86baee2a64f58635814`) was written for dexllm#130 and
+assembled from the committed `catch-types.smali` with the smali 3.0.9 assembler
+bundled in jadx 1.5.3 (`java -cp jadx-1.5.3-all.jar
+com.android.tools.smali.smali.Main a catch-types.smali -o catch-types.dex`,
+OpenJDK 17.0.17). The methods write the catch register with a type that is not
+the handler's; all but the two controls render a wrong catch type on the pre-fix
+build:
+- a read catch variable whose register is last written as a `Field`
+  (`AppCompatTextViewAutoSizeHelper.getTextViewField`, register for register);
+- an unread catch variable whose register is last written as a `String`;
+- two controls that rendered right already: an unread catch variable whose
+  other write is a `Class` constant, and a catch-all;
+- two handlers of different types that write one register and merge, alone, after
+  a null, and after a null in a register that also holds an unrelated value;
+- an unread catch variable whose register is last written as an `int` (the AST
+  rendered `catch (int v0)`);
+- a `String` and a nonzero `int` def merged with a handler in one split version,
+  which must keep their own type (the handler type wins only over null).
+
+It is part of this project and carries this project's licence.

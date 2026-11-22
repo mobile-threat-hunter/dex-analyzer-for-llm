@@ -4229,7 +4229,48 @@ void SplitVariables(Graph& graph,
     }
 
     for (auto& [var_str, versions] : variables) {
-        if (versions.size() == 1) continue;
+        if (versions.size() == 1) {
+            // dexllm#130, the unsplit half: a register whose ONLY version is
+            // defined by move-exception (and possibly the null constant, the
+            // `Throwable t = null; try {} catch (E e) { t = e; }` shape) takes
+            // the handler type rather than its last write elsewhere. Several
+            // handler types (one register reused across handlers that merge)
+            // → Throwable, the type every one of them is.
+            std::string ct;
+            bool all_catch = true;
+            for (int loc : versions[0].first) {
+                IRFormPtr in = loc < 0 ? nullptr : graph.get_ins_from_loc(loc);
+                if (!in) { all_catch = false; break; }
+                if (const auto* me =
+                        dynamic_cast<const MoveExceptionExpression*>(in.get())) {
+                    const std::string t = me->get_type();
+                    ct = ct.empty() || ct == t ? t : "Ljava/lang/Throwable;";
+                    continue;
+                }
+                auto rhs = in->get_rhs();
+                const auto* c = rhs.empty() ? nullptr
+                                            : dynamic_cast<Constant*>(rhs[0].get());
+                if (!c || c->get_int_value() != 0 ||
+                    (!c->get_type().empty() && c->get_type().front() == 'L')) {
+                    all_catch = false;
+                    break;
+                }
+            }
+            if (all_catch && !ct.empty()) {
+                std::string_view sv{var_str};
+                if (!sv.empty() && sv.front() == 'v') sv.remove_prefix(1);
+                try {
+                    auto it = lvars.find(std::stoi(std::string{sv}));
+                    // A Param's entry def has loc < 0, so all_catch is already
+                    // false for one; the exclusion keeps a Param's declared
+                    // type safe if that ever changes.
+                    if (it != lvars.end() && it->second &&
+                        !dynamic_cast<Param*>(it->second.get()))
+                        it->second->set_type(ct);
+                } catch (...) {}
+            }
+            continue;
+        }
         // var_str is "vN" — strip leading 'v' for the int-keyed lvars lookup
         // (same fix as in_lvars in GroupVariables above).
         std::string_view sv{var_str};
@@ -4302,6 +4343,8 @@ void SplitVariables(Graph& graph,
             // write: `Math.min(II)I` into a register later reused for an
             // `aget-float` rendered `float v0_3 = Math.min(...)`, then `a[v0_3]`.
             std::string def_type;
+            std::string catch_type;  // dexllm#130: join of the handler types
+            bool other_def = false;  // a def that is neither one nor null
             auto is_ref = [](const std::string& t) {
                 return !t.empty() && (t.front() == 'L' || t.front() == '[');
             };
@@ -4310,6 +4353,28 @@ void SplitVariables(Graph& graph,
                 IRFormPtr ins = graph.get_ins_from_loc(loc);
                 if (!ins) continue;
                 ins->replace_lhs(new_version);
+                // Beyond-DAD (dexllm#130): a `move-exception` def has no rhs, so
+                // the version kept the register's LAST write and a catch
+                // variable read `catch (java.lang.reflect.Method v)`. Its own
+                // type is the handler's exception type (Throwable for a
+                // catch-all, opcode_ins MoveException). Two handler types in one
+                // version join to Throwable. It is applied after the loop, and
+                // only when every other def is the null constant -- the rule
+                // the unsplit pass above applies -- so a real def of another
+                // type (a String, a nonzero int) keeps the type it gave.
+                if (const auto* me =
+                        dynamic_cast<const MoveExceptionExpression*>(ins.get())) {
+                    std::string t = me->get_type();
+                    if (is_ref(t))
+                        catch_type = catch_type.empty() || catch_type == t
+                                         ? t : "Ljava/lang/Throwable;";
+                } else {
+                    auto r = ins->get_rhs();
+                    const auto* c = r.empty() ? nullptr
+                                              : dynamic_cast<Constant*>(r[0].get());
+                    if (!c || c->get_int_value() != 0 || is_ref(c->get_type()))
+                        other_def = true;
+                }
                 auto rhs = ins->get_rhs();
                 if (!rhs.empty() && rhs[0]) {
                     std::string t = rhs[0]->get_type();
@@ -4331,6 +4396,7 @@ void SplitVariables(Graph& graph,
                     du[VarLocKey{nv, loc}] = std::move(val);
                 }
             }
+            if (!catch_type.empty() && !other_def) def_type = catch_type;
             if (dmin >= 0 && !def_type.empty()) {
                 // Beyond-DAD (mixed-version conflation): among a multi-version
                 // register, a version that is itself a genuine ref+nonzero-int

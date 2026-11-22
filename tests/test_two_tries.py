@@ -165,8 +165,9 @@ NOT_HOISTED = {
 LEFT_ALONE = {
     # NESTED: the outer handler also covers the inner try's block. The stale
     # follow is what keeps the inner try inside the outer; remapping it would
-    # take use3() out of the outer handler's protection. (The outer catch's
-    # type is the pre-existing shared-register catch-type defect.)
+    # take use3() out of the outer handler's protection. The outer catch names
+    # its handler's type, Exception (it read IOException, the shared
+    # register's last write, until dexllm#130).
     "nestedTry()V": [
         "try {",
         "T.use2();",
@@ -176,7 +177,7 @@ LEFT_ALONE = {
         "}",
         "T.after();",
         "return;",
-        "} catch (java.io.IOException v0) {",
+        "} catch (Exception v0) {",
         "return;",
         "}",
     ],
@@ -354,7 +355,7 @@ def test_hoisted_declarations_come_out_in_one_fixed_order(dk):
 def test_a_catch_variable_is_never_hoisted(dk):
     """catchVarShared: a sibling handler writes the catch variable. Hoisting it
     printed `Throwable v0;` beside `catch (Throwable v0)` -- javac: already
-    defined."""
+    defined. The clause names h1's type, IOException (dexllm#130)."""
     body = _body(dk.decompile_method("LT;->catchVarShared()V"))
     assert "Throwable v0;" not in body, body
-    assert "} catch (Throwable v0) {" in body, body
+    assert "} catch (java.io.IOException v0) {" in body, body

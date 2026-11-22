@@ -746,7 +746,16 @@ void JSONWriter::visit_try_node(TryBlock* tb) {
                 ctype = var->get_type();
                 name = VarLocalName(var->name);
             }
-            if (ctype.empty()) ctype = cb->exception_ins->get_type();
+            // dexllm#130: the clause names the handler's class (the Writer's
+            // visit_move_exception applies the same rule), never the
+            // variable's last-write type, which may be a primitive or a
+            // non-Throwable reference.
+            auto is_ref_catch = [](const std::string& t) {
+                return t.size() >= 2 && t.front() == 'L' && t.back() == ';';
+            };
+            const std::string ht = cb->exception_ins->get_type();
+            if (is_ref_catch(ht)) ctype = ht;
+            else if (!is_ref_catch(ctype)) ctype = "Ljava/lang/Throwable;";
             catch_decl = VarDecl(ParseDescriptor(ctype), Local(name));
         } else {
             std::string ctype = cb->catch_type.empty()

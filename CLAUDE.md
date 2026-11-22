@@ -243,7 +243,7 @@ On exception-heavy obfuscated methods, `IfStruct` could select a **catch-handler
 
 ### Production fix — invalid `catch (primitive)`/`catch (Object[])` → Throwable (2026-06-17)
 
-On obfuscated dex, type inference sometimes lands a primitive (`I`/`Z`/…) or array (`[…`) descriptor on a move-exception (catch) variable, producing **uncompilable** `catch (int v)` / `catch (Object[] v)`. DAD emits these verbatim; we deliberately diverge (a real Dalvik catch target is always a Throwable subclass, so a non-`Lcls;` descriptor there is a type-inference artifact). **Fix:** in `visit_move_exception` ([writer.cpp](native/dad_cpp/writer.cpp)), if the catch variable's descriptor isn't a reference type (`Lcls;`), prefer the actual catch-handler type carried on the `MoveExceptionExpression`, else `Ljava/lang/Throwable;`. Measured on an obfuscated APK: `catch(primitive)` + `catch(array)` **→ 0** (was thousands corpus-wide); valid class catches (`catch (IOException v)` etc.) untouched (4444 preserved). parity 26/26, sweep 0-crash. This is a beyond-DAD production divergence (no `*DADFaithful` sibling needed — the parity suites don't assert catch emission, and DvClass e2e parity *improves* where DAD was invalid).
+On obfuscated dex, type inference sometimes lands a primitive (`I`/`Z`/…) or array (`[…`) descriptor on a move-exception (catch) variable, producing **uncompilable** `catch (int v)` / `catch (Object[] v)`. DAD emits these verbatim; we deliberately diverge (a real Dalvik catch target is always a Throwable subclass, so a non-`Lcls;` descriptor there is a type-inference artifact). **Fix:** in `visit_move_exception` ([writer.cpp](native/dad_cpp/writer.cpp)), if the catch variable's descriptor isn't a reference type (`Lcls;`), prefer the actual catch-handler type carried on the `MoveExceptionExpression`, else `Ljava/lang/Throwable;`. Measured on an obfuscated APK: `catch(primitive)` + `catch(array)` **→ 0** (was thousands corpus-wide); valid class catches (`catch (IOException v)` etc.) untouched (4444 preserved). parity 26/26, sweep 0-crash. This is a beyond-DAD production divergence (no `*DADFaithful` sibling needed — the parity suites don't assert catch emission, and DvClass e2e parity *improves* where DAD was invalid). **Superseded by dexllm#130** (section below): the clause now takes the handler type whenever it is a reference, not only when the variable's type is not one, so the "valid class catches untouched" half no longer holds (2,882 corpus clauses moved, each to the type the try table names); the move-exception VERSION is typed from its handler in SplitVariables; and the AST, which had no clamp at all and rendered `catch (int v)`, applies the same rule.
 
 ### Production fix — return-type-mismatched integer constants (Z/ref/F/D) (2026-06-18)
 
@@ -2443,7 +2443,7 @@ errors **27,562 → 25,847**; `package reflect/ref/invoke does not exist` 2,383 
 (the 1 is `kotlin.reflect`). New errors are lines javac can now type-check, all
 pre-existing: unreported checked exceptions (no `throws` clause), and catch
 variables typed as a non-Throwable (`catch (java.lang.reflect.Method v7_7)` in
-`Chip`, formerly `catch (reflect.Method v7_7)`). parity 29/29, pytest 2164 passed /
+`Chip`, formerly `catch (reflect.Method v7_7)`; FIXED in dexllm#130). parity 29/29, pytest 2164 passed /
 24 skipped, TRUE corpus-less (`test_apk` moved aside, restore asserted) 1720 / 468 / 0,
 narrowed to `tests/data/multidex.apk` 2030 passed, sweep 21,374-class 0-crash GATE:
 PASS, determinism 3 `PYTHONHASHSEED`s → one digest, lint trio and boundary clean.
@@ -2773,6 +2773,79 @@ is not counted (Java cannot write it); a FRAMEWORK base's fields are not visible
 to the shadow check; a captured name is the site's variable as rendered, so Java's
 effectively-final rule is the reader's to check where it holds; and the text
 grows (each inlined body prints twice across `list_classes()`).
+
+### A catch variable takes its handler's exception type (dexllm#130, 2026-11-22)
+
+Found by dexllm#111: once `reflect.Method` spelled `java.lang.reflect.Method`,
+javac could type-check `} catch (java.lang.reflect.Method v7_7) {` (`Chip`). A
+`move-exception` def has no rhs, so `SplitVariables` gave its version the
+register's LAST write, and the 2026-06-17 clamp (above) replaced only a primitive
+or array type. The defect was wider than the issue: the same last write also put
+a WRONG Throwable on a clause (`two-tries.dex`'s `nestedTry` named its
+`Exception` handler `IOException`), and the AST had no clamp at all
+(`catch (int v)`).
+
+**Fix, at the dataflow layer first** ([dataflow.cpp](native/dad_cpp/dataflow.cpp)
+`SplitVariables`, beyond-DAD): a split version defined by a move-exception takes
+the handler type (two handler types join to `Throwable`) when every other def is
+the null constant — a real def of another type (a `String`, a nonzero `int`)
+keeps its own type. An unsplit register whose defs are only move-exceptions and
+null constants takes the handler type the same way (never a `Param`). Then both
+emitters (Writer `visit_move_exception`, dast `visit_try_node`) spell the CLAUSE
+with the handler type whenever it is a reference: a catch clause names the class
+the handler catches, and an unread catch variable never reaches `SplitVariables`
+at all. **Known limit, pre-existing:** a handler block several catch types share
+carries only the last of them (`graph.cpp` `exception_type_for`, last-wins), so
+its clause names one of the types it catches (12 such methods in the corpus and
+fixtures).
+
+**Measured (a/b OFF = HEAD `769cdc16` vs ON `574ac16b`, SAME capture):** the
+bundled corpus plus the committed fixtures → **1,151 classes on 21 sources, 2,933
+lines, 0 line counts moved**: 2,882 change only a clause type, the other 51 are
+the same catch variables now typed `Throwable` (`int v7_2 = 0;` → `Throwable v7_2
+= null;` with `== 0` → `== null`, dropped `((Throwable) v)` casts, a leaked
+declaration naming the right handler). Clause types that are not a Throwable
+subclass: **1,600 → 0** (the 31 left by a name heuristic all extend an
+Exception). A raw try-table oracle (handler types parsed from the code item,
+never from dexllm): clauses naming a type the method's own try table does not
+list **670 → 3** (the 3 are dexllm#129 inlined anonymous bodies, whose catch is
+another method's); a correctness reviewer's per-occurrence oracle gave 1,148 →
+12, the same classes. Text vs AST catch types now agree (AST primitive clauses
+38 → 0). javac over the changed classes: 54,005 → 50,626 errors; the one category
+that rises, `exception X is never thrown in body` (71 → 169), is a mis-scoped try
+body now visible because the clause names the real type. parity 29/29, pytest
+2323 passed / 24 skipped, TRUE corpus-less (`test_apk` moved aside, restore
+asserted) 1876 / 471 / 0, narrowed to `tests/data/multidex.apk` 2186 / 161, sweep
+21,374-class 0-crash GATE: PASS (22.1 s), determinism 3 `PYTHONHASHSEED`s → one
+digest, lint trio and boundary clean.
+
+**Guards:** [tests/test_catch_types.py](tests/test_catch_types.py) on the authored
+`tests/data/catch-types.smali` (a read catch variable over a `Field` last write,
+`getTextViewField` register for register; an unread one over a `String`; a
+catch-all; two merging handlers alone, after a null, and after a null on the
+split path; an `int` last write that the AST rendered `catch (int v0)`; a
+`String` and a nonzero `int` def merged with a handler), each clause pinned in the
+text AND the AST, the merged declarations pinned, and the try-table oracle over
+five committed fixtures. Two `test_two_tries.py` pins that had encoded the defect
+moved (`nestedTry`'s outer handler is `Exception`, `catchVarShared`'s h1
+`IOException`). **Mutants, each BUILT with a distinct `.so` md5, control asserted
+after: 9 killed** — the split typing off, the split join off, the split always
+overriding a real def (the adversarial reviewer's M6, which passed the first
+guard file and printed `IOException v0_1 = "s"`), a nonzero constant counted as
+null, the unsplit block off, its null admission off, its join off, and each
+emitter's clause rule reverted. **Equivalent / masking, recorded:** the unsplit
+rule admitting any integer or a reference constant (reachable only when the
+constant is built after the handler, and then ART-invalid), and the `Param`
+exclusion and the `loc < 0` refusal, which mask each other (a param's entry def
+has no instruction).
+
+**Two reviewers.** Adversarial: one CONFIRMED crafted-only valid→invalid — the
+first cut let a move-exception override a nonzero `int` def (`IOException v0_1 =
+7`) — fixed by the null-only rule above, plus the M6 guard hole. Correctness: no
+production defect; re-derived the a/b and both oracles, and found this section's
+predecessor stale (fixed). **Residual, NOT fixed:** a move-copy of a catch
+variable keeps its stale type (`Class v1 = v0_0`; 2 corpus lines, unchanged), and
+the multi-type handler above.
 
 ### Production fix — reused `this` register materialised as a local (`this = X` → valid, 2026-07-03)
 

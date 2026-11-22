@@ -693,10 +693,16 @@ public:
         auto is_ref_catch = [](const std::string& t) {
             return t.size() >= 2 && t.front() == 'L' && t.back() == ';';
         };
-        if (!is_ref_catch(vt)) {
-            if (data && is_ref_catch(data->get_type())) vt = data->get_type();
-            else vt = "Ljava/lang/Throwable;";
-        }
+        // dexllm#130: a catch clause names the class the HANDLER catches, so
+        // the handler type wins over the variable's inferred type whenever it
+        // is a reference. The variable's type is a reference that is not a
+        // Throwable when the move-exception def never reached SplitVariables
+        // (its value is unused) or a merged def won the version's type. A
+        // handler block several catch types share carries only the LAST of
+        // them (graph.cpp's exception_type_for), so such a clause names one of
+        // the types it catches -- pre-existing, not resolved here.
+        if (data && is_ref_catch(data->get_type())) vt = data->get_type();
+        else if (!is_ref_catch(vt)) vt = "Ljava/lang/Throwable;";
         w_->Write(GetType(vt));
         w_->Write(" v");
         std::string nm = var->name;
