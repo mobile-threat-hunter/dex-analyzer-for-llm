@@ -4195,6 +4195,124 @@ static void MarkReassignedCatch(Graph& graph, const Defs& defs) {
         for (auto* me : mes) me->reassigned = true;
 }
 
+// Beyond-DAD (dexllm#133): a version that only COPIES a catch variable takes
+// the handler type. dexllm#130 types a version whose def IS a move-exception;
+// a `move-object vD, vS` whose source holds the exception was typed by the
+// move-source rule above, which reads vS's SHARED type -- its last write
+// anywhere in the method -- so `move-exception v0; move-object v11, v0;
+// move-object v0, v11` declared the copy `JobSupport v0_5 = v0_4` (the type
+// v11 holds elsewhere). Runs after every version is renamed, so `ud` is keyed
+// by final ids.
+//
+// Each def gets a value in a three-level lattice -- nothing < a handler type <
+// refused: a move-exception gives its handler type (a non-reference one, a
+// crafted `.catch I`, refuses -- dexllm#130's split path ignores one), the null
+// constant gives nothing, a `move-object` takes the join of the defs that reach
+// its source, and anything else (a parameter, a call, a String, a nonzero int)
+// refuses. Two DIFFERENT handler types refuse too: their least common
+// supertype needs the class hierarchy, and Throwable is not it --
+// `catch (FileNotFoundException e) { x = e; } catch (IOException e) { x = e; }
+// logio(x)` would be declared `Throwable x` and stop compiling. Only
+// `move-object` is followed: in verified Dalvik a plain or wide move cannot
+// carry a reference. The values are the least fixpoint, solved by a worklist,
+// so a back edge contributes what is known of it. A def's value changes at
+// most twice, and each change recomputes its dependents (each costs its own
+// fan-in), where a walk per version re-walked every path of a move diamond
+// (exponential on a crafted ladder) and every prefix of a move chain
+// (quadratic). A version is retyped only when EVERY def is a copy,
+// a move-exception or the null constant, at least one is a copy, and the join
+// is a handler type; a parameter keeps its declared type.
+static void TypeCatchCopies(Graph& graph, const ChainMap& ud) {
+    struct Val {
+        int level = 0;  // 0 nothing, 1 a handler type (`t`), 2 refused
+        std::string t;
+    };
+    auto join = [](Val& acc, const Val& v) {
+        if (v.level == 0 || acc.level == 2) return;
+        if (v.level == 2 || acc.level == 0) { acc = v; return; }
+        if (acc.t != v.t) acc = Val{2, {}};
+    };
+    auto copy_of = [](const IRFormPtr& in) -> const MoveExpression* {
+        const auto* mv = dynamic_cast<const MoveExpression*>(in.get());
+        if (!mv || dynamic_cast<const MoveResultExpression*>(in.get()) ||
+            mv->move_kind() != MoveKind::Object)
+            return nullptr;
+        return mv;
+    };
+    auto null_const = [](const IRFormPtr& in) {
+        if (dynamic_cast<const MoveExpression*>(in.get())) return false;
+        auto r = in->get_rhs();
+        const auto* c = r.empty() ? nullptr : dynamic_cast<Constant*>(r[0].get());
+        return c && c->get_int_value() == 0 &&
+               (c->get_type().empty() || c->get_type().front() != 'L');
+    };
+    const Val refused{2, {}};
+
+    std::map<std::string, std::vector<int>> defs_of;
+    std::unordered_map<int, Val> val;
+    // copy loc -> the defs reaching its source (empty: refused)
+    std::unordered_map<int, std::vector<int>> srcs;
+    std::unordered_map<int, std::vector<int>> dependents;
+    std::deque<int> work;
+    std::vector<int> locs_all;
+    for (const auto& [loc, in] : graph.loc_to_ins)
+        if (in && in->GetLhsId()) locs_all.push_back(loc);
+    std::sort(locs_all.begin(), locs_all.end());
+    for (int loc : locs_all) {
+        IRFormPtr in = graph.get_ins_from_loc(loc);
+        defs_of[*in->GetLhsId()].push_back(loc);
+        Val& v = val[loc];
+        if (const auto* me =
+                dynamic_cast<const MoveExceptionExpression*>(in.get())) {
+            const std::string& t = me->get_type();
+            if (!t.empty() && (t.front() == 'L' || t.front() == '['))
+                v = Val{1, t};
+            else
+                v = refused;
+        } else if (const auto* mv = copy_of(in)) {
+            auto it = ud.find(VarLocKey{mv->rhs_id(), loc});
+            if (it == ud.end() || it->second.empty()) {
+                v = refused;
+                continue;
+            }
+            srcs[loc] = it->second;
+            for (int d : it->second) dependents[d].push_back(loc);
+            work.push_back(loc);
+        } else if (!null_const(in)) {
+            v = refused;
+        }
+    }
+    while (!work.empty()) {
+        int loc = work.front();
+        work.pop_front();
+        Val nv;
+        for (int d : srcs[loc]) {
+            auto it = d < 0 ? val.end() : val.find(d);
+            join(nv, it == val.end() ? refused : it->second);
+        }
+        Val& cur = val[loc];
+        if (nv.level == cur.level && nv.t == cur.t) continue;
+        cur = nv;
+        for (int dep : dependents[loc]) work.push_back(dep);
+    }
+    for (auto& [vid, locs] : defs_of) {
+        Val ct;
+        IRFormPtr var;
+        bool any_copy = false;
+        for (int loc : locs) {
+            join(ct, val[loc]);
+            if (const auto* mv = copy_of(graph.get_ins_from_loc(loc))) {
+                any_copy = true;
+                auto vit = mv->var_map.find(vid);
+                if (vit != mv->var_map.end()) var = vit->second;
+            }
+        }
+        if (ct.level != 1 || !any_copy || !var) continue;
+        if (dynamic_cast<Param*>(var.get())) continue;  // ThisParam derives
+        var->set_type(ct.t);
+    }
+}
+
 void SplitVariables(Graph& graph,
                     std::unordered_map<int, IRFormPtr>& lvars,
                     ChainMap& du, ChainMap& ud) {
@@ -4453,6 +4571,7 @@ void SplitVariables(Graph& graph,
             }
         }
     }
+    TypeCatchCopies(graph, ud);
 }
 
 // =============================================================================

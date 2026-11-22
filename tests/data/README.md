@@ -554,4 +554,15 @@ in the handler (unsplit and split), a null merged with it, `Throwable` named
 explicitly, a primitive type, and two shared handlers on one register. On the
 pre-fix build each shared handler's clause names only its last type.
 
+`catch-copy.dex` (md5 `8361a81901c24dd8fa7cf5be7a5ad0bc`) was written for dexllm#133 and
+assembled from the committed `catch-copy.smali` the same way. Each method copies
+a catch variable into another register (or refuses to be such a copy): the
+issue's copy-out-and-back, a null merged with the copy (twice), copies around a
+loop (four), and the refusals — two different handler types (twice), a String
+constant, a call result, a parameter (one and two hops deep), a null-only copy,
+the parameter register as the destination, a plain `move` and a nonzero int (the
+last two crafted; ART's runtime verifier rejects them). On the pre-fix build the
+copy in `stale`, `loopStale`, `nullStale` and `loopBack` names the type its
+register holds elsewhere.
+
 It is part of this project and carries this project's licence.

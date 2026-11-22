@@ -2845,7 +2845,8 @@ first cut let a move-exception override a nonzero `int` def (`IOException v0_1 =
 production defect; re-derived the a/b and both oracles, and found this section's
 predecessor stale (fixed). **Residual, NOT fixed:** a move-copy of a catch
 variable keeps its stale type (`Class v1 = v0_0`; 2 corpus lines, unchanged —
-dexllm#133), and the multi-type handler above (FIXED in dexllm#132).
+dexllm#133, FIXED in the section below), and the multi-type handler above (FIXED
+in dexllm#132).
 
 ### A handler several catch types share is a multi-catch (dexllm#132, 2026-11-22)
 
@@ -2925,7 +2926,92 @@ separated try items — harmless, the lists agree).
 rejects it) are rendered as the try table says, since the framework hierarchy is
 not known here; a crafted dex whose try items disagree over-states what one
 range catches (the union); a catch variable copied to another register keeps a
-stale type (dexllm#133).
+stale type (dexllm#133, FIXED in the section below).
+
+### A copy of a catch variable takes the handler type (dexllm#133, 2026-11-23)
+
+dexllm#130 types a version whose def IS a `move-exception`. A version defined
+by a `move-object` FROM one was typed by SplitVariables' move-source rule, which
+trusts a reference rhs but reads the source register's SHARED type, i.e. its last
+write anywhere in the method: `move-exception v0; move-object v11, v0;
+move-object v0, v11` declared the copy `kotlinx.coroutines.JobSupport v0_5 =
+v0_4` (the type v11 holds elsewhere; `JobSupport.notifyCancelling`). Beyond-DAD.
+
+**Fix — `TypeCatchCopies` ([dataflow.cpp](native/dad_cpp/dataflow.cpp)), the last
+step of SplitVariables**, when `ud` is keyed by final ids. Each def gets a value
+in a three-level lattice (nothing < a handler type < refused): a move-exception
+gives its handler type (a non-reference one, a crafted `.catch I`, refuses), the
+null constant nothing, a `move-object` the join of the defs reaching its source,
+and anything else (a parameter, a call, a String, a nonzero int) refuses. The
+values are the least fixpoint, solved by a worklist over def locs, and a version
+is retyped only when EVERY def is a copy, a move-exception or the null constant,
+at least one is a copy, and every handler type reached is the SAME one. Only
+`move-object` is followed (a plain or wide move cannot carry a reference in
+verified Dalvik); a parameter keeps its declared type. Nothing but a handler's
+type is read, so the answer does not depend on visit order.
+
+**Two DIFFERENT handler types refuse, and that is a review finding.** The first
+cut joined them to Throwable, dexllm#130's join for two catch variables in one
+register. For a copy that is not a supertype join: `catch (FileNotFoundException
+e) { x = e; } catch (IOException e) { x = e; } logio(x);` (the d8 shape) became
+`Throwable x` and javac then rejected each `logio(x)` (`incompatible types`). The
+least common supertype needs the class hierarchy, which is not known here for
+framework types. So such a version keeps the type it had — often one of the
+handler types, wrong for the other arm (`IllegalStateException v` assigned an
+IOException, fixture `twoHandlers`), pre-existing and recorded.
+
+**Both first-round reviewers CONFIRMED the same HIGH in the first cut: an
+exponential walk.** It resolved each source by a recursive walk with a per-path
+visited set, which re-walked every path of a move diamond — a strict-verify-valid
+ladder of 25 `if`-armed copies took 53 s for one method (OFF 0.17 s), past
+`safe.py`'s 10 s deadline; and every version re-walked its whole chain, quadratic
+on an 8,000-move chain (206 s, OFF 12.5 s). With the worklist a def's value
+changes at most twice and each change recomputes its dependents (each at its own
+fan-in): the ladder and the chain run at OFF's time, and an 8,000-way fan-in into
+one copy costs ~10% over OFF. The correctness reviewer also found two guard holes
+(refusal two hops deep; the null-neutral branch), closed by `deepParam` and
+`nullStale`. A delta review of the rewrite found the Throwable regression above,
+and a mutant this section had called equivalent — re-queuing a def's dependents —
+which `loopBack` (a loop-head copy whose source copy comes later, over the back
+edge) now kills.
+
+**Measured (a/b OFF = `988619ee` — HEAD, bit-reproduced by disabling the call —
+vs ON `274f2207`, SAME capture):** the bundled corpus plus the committed fixtures
+(the multi-catch fixture excluded: the OFF capture predates its last rebuild) ->
+**3 classes on 2 corpus sources change, 11 lines, 0 line counts moved, 8 method
+ASTs**: the issue's two `JobSupport` copies -> `Throwable`; five
+`FlowKt__ReduceKt` copy declarations (`Object` x3, `NoSuchElementException` x2)
+-> `AbortFlowException`, the handler type (the three redundant
+`((AbortFlowException) v)` casts go with them); and `String v10_26 = null` ->
+`Throwable` (BitcoinJSONRPCClient, a catch-all copy merged with null). parity
+29/29, pytest 2402 passed / 24 skipped, TRUE corpus-less (`test_apk` moved aside,
+restore asserted) 1954 / 472 / 0, narrowed to `tests/data/multidex.apk` 2264 /
+162, sweep 21,374-class 0-crash GATE: PASS, determinism 3 `PYTHONHASHSEED`s -> one
+digest, lint trio and boundary clean. Harness `~/Project/r133-eval`.
+
+**Guards:** [tests/test_catch_copy.py](tests/test_catch_copy.py) on the authored
+`tests/data/catch-copy.smali`: the issue's shape, a null merged with the copy
+(twice), copies around a loop (four, `loopBack` the one the fixpoint needs), and
+the refusals — two different handler types (twice, `subtypes` the regression
+above), a String constant, a call result, a parameter (one and two hops deep), a
+null-only copy, the parameter register as the destination, and two crafted
+ART-invalid shapes (a plain `move`, a nonzero int); each declaration pinned in
+text AND AST, plus the issue repro. **15 mutants of the shipped form, each BUILT
+with a distinct `.so` md5, control asserted after: 10 killed, 5 equivalent, each
+measured output-identical over the corpus** — the `MoveResultExpression`
+exclusion (masked by the `move-object` kind check: a move-result is kind
+Unknown), a source with no reaching def refusing (a read of an unwritten
+register, ART-invalid), the copy-required check (a version of move-exceptions
+alone is dexllm#130's), the `Param` exclusion (rendered from the proto), and the
+non-reference handler refusing (crafted `.catch I` only).
+
+**Recorded, pre-existing, NOT fixed:** two different handler types copied into
+one register keep a type that is wrong for one arm (above); a genuine merge of a
+String (or a call result, or a parameter) with a catch copy is typed by the
+multi-def rule's first reference — `String v1; … v1 = v0;` with an IOException
+`v0`, `IOException v1 = p3`; and a loop reached only from a catch handler loses
+its body in the structuring (`loop` / `loopStale` / `loopCarry` render only the
+copy), identical before and after this change.
 
 ### Production fix — reused `this` register materialised as a local (`this = X` → valid, 2026-07-03)
 
