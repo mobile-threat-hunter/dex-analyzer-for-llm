@@ -768,9 +768,8 @@ void JSONWriter::visit_try_node(TryBlock* tb) {
             else if (!is_ref_catch(ctype)) ctype = "Ljava/lang/Throwable;";
             catch_decl = VarDecl(CatchTypeNode(cb, ctype), Local(name));
         } else {
-            std::string ctype = cb->catch_type.empty()
-                ? std::string("Ljava/lang/Throwable;") : cb->catch_type;
-            catch_decl = VarDecl(CatchTypeNode(cb, ctype), Local("_"));
+            catch_decl = VarDecl(CatchTypeNode(cb, UnboundCatchType(*cb)),
+                                 Local("_"));
         }
         AstValue body = scope([&] { visit_node(cb->catch_start); });
         pairs.push_back(AstValue::Arr({std::move(catch_decl), std::move(body)}));

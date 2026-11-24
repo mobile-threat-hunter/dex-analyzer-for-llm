@@ -566,3 +566,18 @@ copy in `stale`, `loopStale`, `nullStale` and `loopBack` names the type its
 register holds elsewhere.
 
 It is part of this project and carries this project's licence.
+
+`nested-handlers.dex` (md5 `18185d9678a80438a3c476455c879880`) was written for dexllm#137
+and assembled from the committed `nested-handlers.smali` the same way. Each method
+has a catch handler whose own block is covered by a try (or is a control that
+must stay as it was): the inner catch of a `synchronized` body, an inner
+try/catch inside an outer one, a nested handler with no move-exception, two
+variable-less handlers of one try (the first opening with an `if`, which
+`SplitIfNodes` splits), two tries sharing a handler with only one of
+them inside the enclosing try, and the two controls DAD's skip exists for -- the
+`$SwitchMap` chain whose handler is the next try's first block, and a catch-all
+that covers itself. On the pre-fix build every nested handler is dropped from
+the text, and a variable-less clause names another handler's type (both of
+`twoUnbound`'s read `IllegalStateException`).
+
+It is part of this project and carries this project's licence.

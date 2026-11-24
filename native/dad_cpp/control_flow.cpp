@@ -631,6 +631,49 @@ void WhileBlockStruct(Graph& graph,
 // =============================================================================
 // catch_struct — DAD control_flow.py:361
 // =============================================================================
+namespace {
+// Beyond-DAD (dexllm#137). DAD skips every handler that has catch edges of
+// its own, because such a block may be the START of another try region -- the
+// `$SwitchMap` <clinit> d8 emits hands each try's handler straight to the next
+// try's first block. But a handler can also be covered because it sits INSIDE
+// an enclosing try whose handlers also cover the code it catches for: a
+// `synchronized` body's catch-all covers an inner catch, as does a
+// try-with-resources close. Skipping that one drops the handler's code from
+// the text with no marker. Such a handler is nested when the handlers that
+// cover it also cover some block that throws into it -- it lies in that
+// block's enclosing region. One block is enough: two tries can share a
+// handler with only one of them inside the enclosing try, and requiring all
+// of them drops that handler's code again. The $SwitchMap start is not
+// nested: no block throwing into it is covered by the next try's handler --
+// unless that handler is a loop header WhileBlockStruct already removed, when
+// the start's list is empty and it is kept as an empty catch, which is what
+// the bytecode does.
+// A handler that is its own handler (a `synchronized` catch-all covering its
+// monitor-exit + rethrow) does not reach here in practice -- the self catch
+// edge makes it a loop, which WhileBlockStruct wraps and removes -- and is
+// refused anyway. That removal is also why `own` is often EMPTY here: the
+// catch-all of a `synchronized` body is gone by now, its edges with it, so the
+// inner handler it covered keeps a catch_edges key holding nothing. DAD skips
+// on the key alone; an empty list covers vacuously and the handler is kept.
+bool IsNestedHandler(const Graph& graph, NodeBase* handler,
+                     const std::vector<NodeBase*>& own) {
+    if (std::find(own.begin(), own.end(), handler) != own.end()) return false;
+    auto srcs = graph.reverse_catch_edges.find(handler);
+    if (srcs == graph.reverse_catch_edges.end()) return false;
+    for (NodeBase* s : srcs->second) {
+        auto ce = graph.catch_edges.find(s);
+        if (ce == graph.catch_edges.end()) continue;
+        bool covers = true;
+        for (NodeBase* h : own)
+            if (std::find(ce->second.begin(), ce->second.end(), h) ==
+                ce->second.end())
+                covers = false;
+        if (covers) return true;
+    }
+    return false;
+}
+}  // namespace
+
 void CatchStruct(Graph& graph,
                  const std::unordered_map<NodeBase*, NodeBase*>& idoms) {
     std::unordered_map<NodeBase*, TryBlock*> block_try_nodes;
@@ -649,8 +692,11 @@ void CatchStruct(Graph& graph,
 
     for (NodeBase* catch_block : catch_keys) {
         // Skip if this block itself has outgoing catch edges (handler of an
-        // inner try) — DAD: `if catch_block in graph.catch_edges: continue`.
-        if (graph.catch_edges.find(catch_block) != graph.catch_edges.end()) {
+        // inner try) — DAD: `if catch_block in graph.catch_edges: continue` —
+        // unless it is a handler nested in an enclosing try (dexllm#137).
+        if (auto own = graph.catch_edges.find(catch_block);
+            own != graph.catch_edges.end() &&
+            !IsNestedHandler(graph, catch_block, own->second)) {
             continue;
         }
         auto* cbb = dynamic_cast<BasicBlock*>(catch_block);

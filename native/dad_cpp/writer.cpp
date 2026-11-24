@@ -1531,10 +1531,7 @@ void Writer::EmitTry(TryBlock* tb) {
             Write(MultiCatchText(catch_block->catch_alternatives));  // dexllm#132
             Write(" _");
         } else {
-            std::string ctype = catch_block->catch_type.empty()
-                ? std::string("Ljava/lang/Throwable;")
-                : catch_block->catch_type;
-            Write(JavaType(ctype));
+            Write(JavaType(UnboundCatchType(*catch_block)));
             Write(" _");
         }
         Write(") {\n");

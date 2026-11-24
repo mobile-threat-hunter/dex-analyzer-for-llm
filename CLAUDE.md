@@ -3013,6 +3013,90 @@ multi-def rule's first reference — `String v1; … v1 = v0;` with an IOExcepti
 its body in the structuring (`loop` / `loopStale` / `loopCarry` render only the
 copy), identical before and after this change.
 
+### A catch handler nested in an enclosing try is rendered (dexllm#137, 2026-11-24)
+
+DAD's `catch_struct` skips every handler block that has catch edges of its
+own (`if catch_block in graph.catch_edges: continue`). That is right for the
+d8 `$SwitchMap` `<clinit>`, whose try handlers are each the NEXT try's first
+block. It is wrong for a handler that sits inside an enclosing try (the inner
+catch of a `synchronized` body, a try-with-resources close): its code, calls
+included, was dropped from the Java text with no marker. `zzbf.zzcr` lost
+`Log.wtf(...)`, `NotificationCompatJellybean.getAction` its `Log.e(...);
+return null`. A call-count scan (each invoked name's count in the smali vs
+`name(` in `decompile_method`) found 81 methods rendering fewer calls than
+their smali; 40 had this shape.
+
+**Fix 1 — `IsNestedHandler` ([control_flow.cpp](native/dad_cpp/control_flow.cpp)),
+beyond-DAD.** A handler with own catch edges is kept when it is not its own
+handler and SOME block throwing into it is covered by every handler in its own
+list. "Some", not "every": two tries can share a handler with only one inside
+the enclosing try (fixture `partlyNested`), and "every" drops that code again.
+The `$SwitchMap` start is refused because no thrower is covered by the next
+try's handler. In the corpus the handler's own list is often EMPTY: the
+`synchronized` catch-all covering its own `monitor-exit` + rethrow has a self
+catch edge, so loop detection (all_preds) makes it a loop header and
+`WhileBlockStruct` removes it before CatchStruct, leaving the inner handler a
+catch_edges key holding nothing. DAD skips on the key; an empty list counts as
+covered. Measured with an instrumented build (correctness reviewer): 177 calls,
+56 vacuous, 38 non-vacuous true, self-handler 0.
+
+**Fix 2 — `UnboundCatchType` ([basic_blocks.h](native/dad_cpp/include/basic_blocks.h)),
+read by the Writer and dast.** A clause with no catch variable (`catch (T _)`)
+read `catch_type`, which DAD's `Graph::add_catch_edge` copies from the thrower
+onto the handler on every catch edge — and SplitIfNodes / Simplify add edges
+again after Construct, so a handler opening with an `if` took the thrower's
+last-set type (another handler's). It now reads `catch_alternatives`, the try
+table's list for that block (dexllm#132): one type is that type, none is a
+catch-all. That fixed 6 PRE-EXISTING wrong clauses, each checked against the
+raw try table: `SimpleArrayMap.equals` named `NullPointerException` twice for a
+`ClassCastException` + `NullPointerException` pair, `SuggestionsAdapter`
+swapped `NumberFormatException` / `Resources.NotFoundException`,
+`FragmentManagerImpl.loadAnimation` and `NotificationManagerCompat
+.processListenerQueue` (twice, via #128 nesting) named a supertype or sibling.
+
+**Measured (a/b OFF = `274f2207` — v0.34.0, bit-reproduced by the M0 mutant —
+vs ON `86550d99`, SAME capture):** bundled corpus + committed fixtures (new
+fixture excluded) → **67 classes change**, 47,094 → 47,489 lines in them; no
+class loses a call token, call tokens +228, no method renders a callee more
+often than its smali; catch clauses 11,083 → 11,173; methods rendering fewer
+calls than their smali (test_apk population) **120 → 68 (81 → 58 distinct),
+0 new**. Both reviewers re-derived it on their own builds (adversarial: 0
+classes lose a statement over normalized statement multisets, braces balance;
+text vs AST catch types agree on 1,663 methods). parity 29/29, pytest 2427 /
+24, TRUE corpus-less (`test_apk` moved aside, restore asserted) 1976 / 475 / 0,
+narrowed to `tests/data/multidex.apk` 2289 / 162, sweep 21,374-class 0-crash
+GATE: PASS, determinism 3 `PYTHONHASHSEED`s → one digest, lint trio and
+boundary clean.
+
+**Guards:** [tests/test_nested_handlers.py](tests/test_nested_handlers.py) (24)
+on the authored `tests/data/nested-handlers.smali` (+ `.dex`): a `synchronized`
+inner catch, an inner try/catch, a nested handler with no move-exception, two
+variable-less handlers whose first opens with an `if` (both read
+`IllegalStateException` on HEAD), `partlyNested`, and the two controls (the
+`$SwitchMap` chain, a self-covering catch-all); text, AST, a raw try-table
+oracle, and three corpus cases (`zzcr`, `getAction`, `SuggestionsAdapter`).
+**12 mutants, each BUILT with a distinct `.so` md5, control asserted after: 10
+killed, 2 equivalent** — the self-handler refusal (M3: unreachable, see above;
+0 corpus diffs) and a thrower with no catch_edges entry refusing (M10:
+structurally impossible, `add_catch_edge` writes both directions and
+`remove_node` erases both). The "every thrower" variant (M4) is killed by
+`partlyNested`.
+
+**Recorded, pre-existing, NOT fixed** (now visible in more methods, because
+handler code that was dropped is rendered; each reproduces on HEAD in a handler
+that is not nested): a loop inside a handler is dropped and the handler can
+read as falling through (`catch (IOException v0) {}` for a handler running a
+loop and returning); a catch body ending at an enclosing follow reads as
+continuing into the code after the try — `zzcr`'s handler shows `Log.wtf` and
+then the `if (v0_2 != null)` it never reaches; a try whose block is a condition
+takes its follow from the if, so the body is scoped too narrowly
+(`ProviderInstaller.installIfNeeded`: `invoke(...)` rendered outside the
+`Exception` try, and a `String v0_5` declared in a branch and used outside it);
+nested regions render as sibling catches (`innerCatch`). A bare-goto catch-all
+merged by Simplify into a typed handler keeps the typed list (dexllm#132's
+union), so such a block reads as typed on both builds. And the `synchronized`
+block itself is still not rendered (monitor-enter/exit build Nops, DAD).
+
 ### Production fix — reused `this` register materialised as a local (`this = X` → valid, 2026-07-03)
 
 When a method reuses its receiver register p0 (`this`) as a scratch local — reads `this` early, overwrites it (`move-result` / `const`), reads the new value later, the two merging at a shared use (e.g. `return`) — `GroupVariables` binds the param-def and reuse-defs into ONE version (they share the merge use), so `SplitVariables` leaves it unsplit and it keeps its `ThisParam` identity. DAD (and our 1:1 port) then emit **`this = <value>`** — always invalid Java (you cannot assign to `this`). **Confirmed identical bug in androguard DAD**, so this is a beyond-DAD production divergence. Dominant real-corpus invalid-Java bucket (269 occurrences bundled, above every other). **Fix — `MaterializeReusedThis` ([dataflow.cpp](native/dad_cpp/dataflow.cpp), declared in [dataflow.h](native/dad_cpp/include/dataflow.h)), runs AFTER SplitVariables and BEFORE the chain consumers:** allocate a fresh local `vX`, rewrite every graph reference to the receiver → `vX`, and inject `vX = this` at the entry block head — the sole remaining `this` is that copy's rhs → `<Ret> vX = this; … vX = …; return vX;` (valid). `findFragmentByWho` (the canonical repro) becomes byte-valid: `Fragment v7 = this; if(!p2.equals(this.mWho)){ if(this.mChildFragmentManager==null){ v7 = null; } else { v7 = this.mChildFragmentManager.findFragmentByWho(p2); } } return v7;` (reads stay `this.mWho` because RP propagates the entry copy for uses it dominates; `v7 = 0` renders `null` via the existing reference-lhs null-render). **Type safety (two adversarial-review rounds, 4 reviewers):** `vX` is typed as the method **RETURN type** — the one assignability anchor valid Dalvik gives (everything reaching a `return` is assignable to it). The pass is a **validate-then-mutate** (atomic — Phase A reads only, so every early bail leaves the graph pristine) that fires ONLY when (a) the return type is a reference, (b) the receiver is RETURNED, and (c) every reassignment rhs is a reference whose type **EXACTLY equals** ret_type, or the narrow-integer constant 0 (null). Exact equality (not just `is_ref`) is REQUIRED: the unsplit phi-web can bind a def reaching only an intermediate use (never the return) with an unrelated type — `vX = getBar()` where `Bar ⊄ Foo` (adversarial CONFIRMED) — the merge-point-assignability property does NOT hold per-def, and there is no type hierarchy to check assignability. A **void-invoke artifact** (`this = super.onDraw()` — a void call DAD wrongly models as defining the receiver; DAD keeps the `this` name so its later `this.getScrollX()` reads accidentally render correctly, and renaming would EXPOSE the artifact as `v.getScrollX()` on a void result — strictly worse), a non-reference return, a non-returned reuse, a genuine primitive (`this = 5`), or a non-exact reference reuse all bail → left as DAD's (invalid but **no-worse**) `this = X`. The receiver's ThisParam type is CORRUPTED during Construct (each `this = X` AssignExpression ctor does `this_param.set_type(X.get_type())`) so it is restored to the class before seeding the copy. On a `true` return the caller `number_ins()` + recomputes `BuildDefUse` (the injected copy + renumbered locs) before DCE/RP/PlaceDeclarations; `FixInitResultTypes` runs between (graph-only, no chain access, safe). Excludes `<init>` (super()/this() uses the receiver specially). **Measured (a/b off vs on, bundled corpus):** `this =` **269 → 218** (51 genuine reuses materialised valid; residual 218 = void-invoke artifacts + non-provable reuses, correctly left), **90 valid `<Ref> vX = this;` seeds**; **ALL other invalid-Java buckets byte-unchanged** (prim-used-as-object 55, ref-declared-int 23, `v<op>null` 3, `prim=new` 2), the pre-existing separate `void v=this` move-into-conflated-local bug **40→40 unchanged**, parity 28/28, 0-crash/25,309-class. No `*DADFaithful` sibling (parity suites don't assert method bodies — return-literal/catch-clamp precedent). Remaining (deferred, no-worse-than-DAD): the void-invoke-defines-receiver DAD bug itself, and genuine multi-type phi-web merges (need a real version split). Regression test `tests/test_this_reuse.py` (materialisation valid + active + the Fragment repro).

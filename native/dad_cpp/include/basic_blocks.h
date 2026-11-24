@@ -491,6 +491,20 @@ public:
     BasicBlock* catch_start = nullptr;
 };
 
+// Beyond-DAD (dexllm#137): the type a catch clause with no catch variable
+// names. Not `catch_type`: Graph::add_catch_edge (DAD) copies that from the
+// thrower to the handler on every catch edge it adds, and SplitIfNodes and
+// Simplify add them again after Construct -- so a handler opening with an `if`
+// takes the thrower's last-set type (another handler's), and a handler that is
+// itself covered by a try passes its type on. `catch_alternatives`
+// is the try table's list for this handler block, set once in Construct: one
+// type is that type, none is a catch-all. (Two or more is a multi-catch,
+// dexllm#132, which both emitters render before reaching this.)
+inline std::string UnboundCatchType(const CatchBlock& cb) {
+    if (cb.catch_alternatives.size() == 1) return cb.catch_alternatives.front();
+    return "Ljava/lang/Throwable;";
+}
+
 // =============================================================================
 // build_node_from_block — DAD: basic_blocks.py:312
 // =============================================================================
