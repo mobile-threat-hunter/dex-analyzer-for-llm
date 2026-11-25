@@ -1127,11 +1127,43 @@ void Writer::WriteMethod() {
 
 // True when VisitNode(node) would return before writing anything — the same
 // early-return conditions, in the same order.
+// dexllm#138: the join node after an if / switch / try writes nothing at this
+// point -- none, the loop exit, the header, or code already written -- so
+// leaving the construct ends the loop body's chain here.
+bool Writer::FollowEndsBody(NodeBase* follow) const {
+    if (!follow || follow == loop_follow_.back() || follow == loop_head_.back())
+        return true;
+    auto* fn = dynamic_cast<Node*>(follow);
+    return fn && !fn->type.is_return() && visited_.count(follow);
+}
+
+// dexllm#138: `n` runs straight into the next switch case -- the path
+// EmitStatement ends with need_break_ = false so the case falls through. Only
+// at the case's own level: inside a loop in the case a `break` would leave the
+// loop instead.
+bool Writer::FallsToNextCase(NodeBase* n) const {
+    if (!next_case_ || loop_follow_.size() != case_loop_depth_) return false;
+    for (int i = 0; n && i < 64; ++i) {
+        if (n == next_case_) return true;
+        if (!dynamic_cast<StatementBlock*>(n) || visited_.count(n)) return false;
+        auto s = graph_->sucs(n);
+        if (s.size() != 1) return false;
+        n = s[0];
+    }
+    return false;
+}
+
+bool Writer::IsContinue(NodeBase* node) const {
+    return node && node == loop_head_.back() && !loop_tail_ &&
+           visited_.count(node);
+}
+
 bool Writer::EmitsNothing(NodeBase* node) const {
     if (!node) return true;
     if (node == if_follow_.back() || node == switch_follow_.back() ||
         node == loop_follow_.back() || node == latch_node_.back() ||
         node == try_follow_.back()) return true;
+    if (IsContinue(node)) return false;
     auto* nn = dynamic_cast<Node*>(node);
     return nn && !nn->type.is_return() && visited_.count(node);
 }
@@ -1156,6 +1188,16 @@ void Writer::VisitNode(NodeBase* node) {
     if (node == if_follow_.back() || node == switch_follow_.back() ||
         node == loop_follow_.back() || node == latch_node_.back() ||
         node == try_follow_.back()) return;
+    // Beyond-DAD (dexllm#138): a back edge to the enclosing loop's header from
+    // a point that does not fall off the end of the body. DAD has no
+    // `continue`: the visited header emitted nothing and the edge read as
+    // falling through to whatever the walk wrote next (an if's join code).
+    // Like a return, it ends a switch case, which then takes no `break`.
+    if (IsContinue(node)) {
+        need_break_ = false;
+        WriteIndent(); Write("continue"); EndIns();
+        return;
+    }
     auto* nn = dynamic_cast<Node*>(node);
     if (nn && !nn->type.is_return() && visited_.count(node)) return;
     visited_.insert(node);
@@ -1198,6 +1240,7 @@ void Writer::EmitReturn(ReturnBlock* ret) {
 }
 
 void Writer::EmitThrow(ThrowBlock* thr) {
+    need_break_ = false;  // dexllm#138: a throw ends the case like a return
     for (const auto& ins : thr->get_ins()) VisitIns(ins);
 }
 
@@ -1282,7 +1325,24 @@ void Writer::EmitIf(CondBlock* cond) {
         Write(") {\n");
         IncIndent();
         tail_pos_ = branch_tail;
+        // dexllm#138: need_break_ is "control reaches the end of what has been
+        // written". Each arm starts reachable, and the if completes normally
+        // when either arm does -- DAD let the LAST jump written in either arm
+        // decide, so `if (c) return;` (or `continue;`) took the switch case's
+        // `break;` with it.
+        // When exactly one arm falls into the next case, the other one's
+        // normal completion is a `break` of its own: one after the if would
+        // stop the falling arm too.
+        const bool t_falls = FallsToNextCase(cond->true_branch);
+        const bool f_falls = FallsToNextCase(cond->false_branch);
+        const bool split = t_falls != f_falls;
+        need_break_ = true;
         VisitNode(cond->true_branch);
+        if (split && !t_falls && need_break_) {
+            WriteIndent(); Write("break"); EndIns(); need_break_ = false;
+        }
+        bool reach = need_break_;
+        need_break_ = true;
         DecIndent();
         // DAD writes `} else {` here unconditionally, so an arm VisitNode
         // would emit nothing for (a follow guard, or an already-visited
@@ -1293,8 +1353,12 @@ void Writer::EmitIf(CondBlock* cond) {
             IncIndent();
             tail_pos_ = branch_tail;
             VisitNode(cond->false_branch);
+            if (split && !f_falls && need_break_) {
+                WriteIndent(); Write("break"); EndIns(); need_break_ = false;
+            }
             DecIndent();
         }
+        need_break_ = reach || need_break_;
         WriteIndent(); Write("}\n");
         tail_pos_ = entry_tail;
         return;
@@ -1305,10 +1369,21 @@ void Writer::EmitIf(CondBlock* cond) {
     // branches so we emit `if (cond) { body }` instead of
     // `if (!cond) { } else { body }`. Also fires for the `cond.num > true.num`
     // ordering heuristic (true branch would be a backward jump).
+    // dexllm#138: an arm falls off into the loop's back edge only when the
+    // join code after the if writes nothing (no follow, or the loop exit).
+    const bool entry_ltail = loop_tail_;
+    const bool arm_ltail = entry_ltail && FollowEndsBody(follow);
     if (follow != nullptr && cond->true_branch != nullptr) {
         bool true_is_follow = (cond->true_branch == follow);
         bool true_is_next_case = (cond->true_branch == next_case_);
         bool backward_true = cond->num > cond->true_branch->num;
+        // dexllm#138: a back edge to the loop header is backward, but beside a
+        // false-branch follow it is a `continue` arm; swapping it into the
+        // false position leaves it where no arm is written.
+        if (backward_true && !arm_ltail && cond->false_branch == follow &&
+            cond->true_branch == loop_head_.back() &&
+            visited_.count(cond->true_branch))
+            backward_true = false;
         if (true_is_follow || true_is_next_case || backward_true) {
             cond->neg();
             std::swap(cond->true_branch, cond->false_branch);
@@ -1321,12 +1396,16 @@ void Writer::EmitIf(CondBlock* cond) {
     cond->visit_cond(wi);
     Write(") {\n");
     IncIndent();
+    loop_tail_ = arm_ltail;
+    need_break_ = true;  // dexllm#138: see the no-follow path above
     if (cond->true_branch && cond->true_branch != follow) {
         if_follow_.push_back(follow);
         tail_pos_ = branch_tail;
         VisitNode(cond->true_branch);
         if_follow_.pop_back();
     }
+    bool reach = need_break_;
+    need_break_ = true;
     DecIndent();
     // DAD writer.py:335-340 — emit else only when (a) follow is NOT one of
     // the branches AND (b) cond.false has not already been visited. The
@@ -1337,7 +1416,8 @@ void Writer::EmitIf(CondBlock* cond) {
                      follow == cond->false_branch);
     if (is_else && cond->false_branch &&
         cond->false_branch != cond->true_branch &&
-        !visited_.count(cond->false_branch)) {
+        (!visited_.count(cond->false_branch) ||
+         IsContinue(cond->false_branch))) {
         WriteIndent(); Write("} else {\n");
         IncIndent();
         if_follow_.push_back(follow);
@@ -1346,7 +1426,9 @@ void Writer::EmitIf(CondBlock* cond) {
         if_follow_.pop_back();
         DecIndent();
     }
+    need_break_ = reach || need_break_;
     WriteIndent(); Write("}\n");
+    loop_tail_ = entry_ltail;
     tail_pos_ = entry_tail;  // the follow (join code) inherits the if's tail
     if (follow) VisitNode(follow);
 }
@@ -1360,6 +1442,10 @@ void Writer::EmitLoop(LoopBlock* loop) {
     // tail position — keep it (conservative). The follow inherits the loop's tail.
     const bool entry_tail = tail_pos_;
     tail_pos_ = false;
+    // dexllm#138: the body's own chain falls off into the back edge.
+    const bool entry_ltail = loop_tail_;
+    loop_head_.push_back(loop->looptype.is_posttest() ? nullptr : loop);
+    loop_tail_ = true;
 
     if (loop->looptype.is_pretest()) {
         // DAD: writer.py:241-243 — if true branch is the loop exit, negate
@@ -1392,7 +1478,7 @@ void Writer::EmitLoop(LoopBlock* loop) {
         // (any block type), NOT only a CondBlock; a StatementBlock header here
         // carries the entire loop body.
         if (loop->cond_node) VisitNode(loop->cond_node);
-        VisitNode(loop->latch);
+        if (!written_latches_.count(loop->latch)) VisitNode(loop->latch);
         loop_follow_.pop_back();
         DecIndent();
         WriteIndent(); Write("}\n");
@@ -1422,7 +1508,18 @@ void Writer::EmitLoop(LoopBlock* loop) {
             latch_cond->visit_cond(wi);
         }
         Write(");\n");
+        // dexllm#138: the latch is written now, as the loop's test. An outer
+        // loop can share it as its own back-edge source, and an endless outer
+        // loop visits its latch after the body -- it must not write it again.
+        // (Only that visit: a path reaching the latch through a handler still
+        // writes it, as DAD does.)
+        if (loop->latch) written_latches_.insert(loop->latch);
     }
+    loop_head_.pop_back();
+    loop_tail_ = entry_ltail;
+    // dexllm#138: a loop completes normally unless it is endless with no exit
+    // (a jump inside its body says nothing about what follows the loop).
+    need_break_ = !(loop->looptype.is_endless() && follow == nullptr);
     tail_pos_ = entry_tail;
     if (follow) VisitNode(follow);
 }
@@ -1444,6 +1541,11 @@ void Writer::EmitSwitch(SwitchBlock* sw) {
     auto sit = sw->follow.find("switch");
     if (sit != sw->follow.end()) follow = sit->second;
     switch_follow_.push_back(follow);
+    // dexllm#138: a case left by `break` reaches the loop's back edge only
+    // when nothing follows the switch; otherwise a back edge is `continue`.
+    const bool entry_ltail = loop_tail_;
+    loop_tail_ = entry_ltail && FollowEndsBody(follow);
+    const size_t entry_case_depth = case_loop_depth_;
     NodeBase* default_node = sw->default_case;
     for (size_t i = 0; i < sw->cases.size(); ++i) {
         NodeBase* case_node = sw->cases[i];
@@ -1465,6 +1567,8 @@ void Writer::EmitSwitch(SwitchBlock* sw) {
             default_node = nullptr;
         }
         IncIndent();
+        need_break_ = true;  // dexllm#138: a case starts reachable
+        case_loop_depth_ = loop_follow_.size();
         VisitNode(case_node);
         if (need_break_) { WriteIndent(); Write("break"); EndIns(); }
         else need_break_ = true;
@@ -1475,8 +1579,10 @@ void Writer::EmitSwitch(SwitchBlock* sw) {
         IncIndent(); VisitNode(default_node); DecIndent();
     }
     switch_follow_.pop_back();
+    case_loop_depth_ = entry_case_depth;
     DecIndent();
     WriteIndent(); Write("}\n");
+    loop_tail_ = entry_ltail;
     tail_pos_ = entry_tail;
     if (follow) VisitNode(follow);
 }
@@ -1492,6 +1598,10 @@ void Writer::EmitTry(TryBlock* tb) {
     // inherits the tail.
     const bool entry_tail = tail_pos_;
     tail_pos_ = false;
+    // dexllm#138: falling off a try or catch body reaches the loop's back
+    // edge only when nothing follows the try; otherwise one is `continue`.
+    const bool entry_ltail = loop_tail_;
+    loop_tail_ = entry_ltail && FollowEndsBody(tb->try_follow);
     // Beyond-DAD (dexllm#122): a local the try body defines and code outside it
     // reads is declared BEFORE the try -- Java scopes it to the block.
     if (graph_) {
@@ -1510,7 +1620,9 @@ void Writer::EmitTry(TryBlock* tb) {
     WriteIndent(); Write("try {\n");
     IncIndent();
     try_follow_.push_back(tb->try_follow);
+    need_break_ = true;  // dexllm#138: reachable after the try if any body is
     VisitNode(tb->try_start);
+    bool reach = need_break_;
     DecIndent();
     WriteIndent(); Write("}");
     for (NodeBase* catch_n : tb->catch_nodes) {
@@ -1536,12 +1648,16 @@ void Writer::EmitTry(TryBlock* tb) {
         }
         Write(") {\n");
         IncIndent();
+        need_break_ = true;
         VisitNode(catch_block->catch_start);
+        reach = reach || need_break_;
         DecIndent();
         WriteIndent(); Write("}");
     }
     Write("\n");
     try_follow_.pop_back();
+    need_break_ = reach;
+    loop_tail_ = entry_ltail;
     tail_pos_ = entry_tail;
     if (tb->try_follow) VisitNode(tb->try_follow);
 }

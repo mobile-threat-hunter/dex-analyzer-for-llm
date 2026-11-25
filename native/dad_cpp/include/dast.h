@@ -187,6 +187,22 @@ private:
     std::vector<NodeBase*> switch_follow_{nullptr};
     std::vector<NodeBase*> latch_node_{nullptr};
     std::vector<NodeBase*> try_follow_{nullptr};
+    // Beyond-DAD (dexllm#138): the Writer's loop_head_ / loop_tail_, same rule.
+    std::vector<NodeBase*> loop_head_{nullptr};
+    bool loop_tail_ = false;
+    std::unordered_set<NodeBase*> written_latches_;  // see Writer
+    size_t case_loop_depth_ = static_cast<size_t>(-1);  // see Writer
+    bool FallsToNextCase(NodeBase* n) const;
+    bool FollowEndsBody(NodeBase* follow) const {  // see Writer::FollowEndsBody
+        if (!follow || follow == loop_follow_.back() || follow == loop_head_.back())
+            return true;
+        auto* fn = dynamic_cast<Node*>(follow);
+        return fn && !fn->type.is_return() && visited_nodes_.count(follow);
+    }
+    bool IsContinue(NodeBase* node) const {
+        return node && node == loop_head_.back() && !loop_tail_ &&
+               visited_nodes_.count(node);
+    }
     std::unordered_set<NodeBase*> visited_nodes_;
     NodeBase* next_case_ = nullptr;
     bool need_break_ = true;

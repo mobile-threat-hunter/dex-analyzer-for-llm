@@ -511,6 +511,12 @@ void JSONWriter::visit_node(NodeBase* node) {
         node == loop_follow_.back() || node == latch_node_.back() ||
         node == try_follow_.back())
         return;
+    // Beyond-DAD (dexllm#138): see Writer::VisitNode.
+    if (IsContinue(node)) {
+        need_break_ = false;
+        add(JumpStmt("continue"));
+        return;
+    }
     auto* nn = dynamic_cast<Node*>(node);
     bool is_return = nn && nn->type.is_return();
     if (!is_return && visited_nodes_.count(node)) return;
@@ -558,6 +564,9 @@ void JSONWriter::visit_loop_node(LoopBlock* loop) {
         cond_expr = LiteralBool(true);
     }
 
+    const bool entry_ltail = loop_tail_;
+    loop_head_.push_back(loop->looptype.is_posttest() ? nullptr : loop);
+    loop_tail_ = true;
     AstValue body = scope([&] {
         loop_follow_.push_back(follow);
         if (loop->looptype.is_pretest()) {
@@ -574,10 +583,16 @@ void JSONWriter::visit_loop_node(LoopBlock* loop) {
             latch_node_.pop_back();
             if (auto* lc = dynamic_cast<CondBlock*>(loop->latch))
                 cond_expr = get_cond_block(lc);
-        } else {
+            // dexllm#138: see Writer::EmitLoop.
+            if (loop->latch) written_latches_.insert(loop->latch);
+        } else if (!written_latches_.count(loop->latch)) {
             visit_node(loop->latch);
         }
     });
+    loop_head_.pop_back();
+    loop_tail_ = entry_ltail;
+    // dexllm#138: see Writer::EmitLoop.
+    need_break_ = !(loop->looptype.is_endless() && follow == nullptr);
 
     // D-3 — pretest header ↔ loop cond offset; posttest ↔ latch offset;
     // endless (while(true)) has no source op.
@@ -618,34 +633,83 @@ void JSONWriter::visit_cond_node(CondBlock* cond) {
         add_off(IfStmt(std::move(cond_expr), std::move(scopes)),
                 CondReprOff(cond));  // D-3
     } else if (follow != nullptr) {
+        const bool entry_ltail = loop_tail_;
+        const bool arm_ltail = entry_ltail && FollowEndsBody(follow);
         bool true_is_follow_or_next =
             cond->true_branch == follow || cond->true_branch == next_case_;
         bool backward = cond->true_branch && cond->num > cond->true_branch->num;
+        // dexllm#138: see Writer::EmitIf.
+        if (backward && !arm_ltail && cond->false_branch == follow &&
+            cond->true_branch == loop_head_.back() &&
+            visited_nodes_.count(cond->true_branch))
+            backward = false;
         if (true_is_follow_or_next || backward) {
             cond->neg();
             std::swap(cond->true_branch, cond->false_branch);
         }
         if_follow_.push_back(follow);
+        loop_tail_ = arm_ltail;
         AstValue cond_expr = AstValue::Null();
+        // dexllm#138: see Writer::EmitIf -- the if completes normally when
+        // either arm does.
+        need_break_ = true;
         if (cond->true_branch) {
             cond_expr = get_cond_block(cond);
             scopes.push_back(scope([&] { visit_node(cond->true_branch); }));
         }
+        bool reach = need_break_;
+        need_break_ = true;
         bool is_else = !(follow == cond->true_branch || follow == cond->false_branch);
-        if (is_else && !visited_nodes_.count(cond->false_branch)) {
+        if (is_else && (!visited_nodes_.count(cond->false_branch) ||
+                        IsContinue(cond->false_branch))) {
             scopes.push_back(scope([&] { visit_node(cond->false_branch); }));
         }
+        need_break_ = reach || need_break_;
+        loop_tail_ = entry_ltail;
         if_follow_.pop_back();
         add_off(IfStmt(std::move(cond_expr), std::move(scopes)),
                 CondReprOff(cond));  // D-3
         visit_node(follow);
     } else {
         AstValue cond_expr = get_cond_block(cond);
-        scopes.push_back(scope([&] { visit_node(cond->true_branch); }));
-        scopes.push_back(scope([&] { visit_node(cond->false_branch); }));
+        // dexllm#138: see Writer::EmitIf
+        const bool t_falls = FallsToNextCase(cond->true_branch);
+        const bool f_falls = FallsToNextCase(cond->false_branch);
+        const bool split = t_falls != f_falls;
+        need_break_ = true;
+        scopes.push_back(scope([&] {
+            visit_node(cond->true_branch);
+            if (split && !t_falls && need_break_) {
+                add(JumpStmt("break"));
+                need_break_ = false;
+            }
+        }));
+        bool reach = need_break_;
+        need_break_ = true;
+        scopes.push_back(scope([&] {
+            visit_node(cond->false_branch);
+            if (split && !f_falls && need_break_) {
+                add(JumpStmt("break"));
+                need_break_ = false;
+            }
+        }));
+        need_break_ = reach || need_break_;
         add_off(IfStmt(std::move(cond_expr), std::move(scopes)),
                 CondReprOff(cond));  // D-3
     }
+}
+
+// dexllm#138: see Writer::FallsToNextCase.
+bool JSONWriter::FallsToNextCase(NodeBase* n) const {
+    if (!next_case_ || loop_follow_.size() != case_loop_depth_) return false;
+    for (int i = 0; n && i < 64; ++i) {
+        if (n == next_case_) return true;
+        if (!dynamic_cast<StatementBlock*>(n) || visited_nodes_.count(n)) return false;
+        auto s = graph_->sucs(n);
+        if (s.size() != 1) return false;
+        n = s[0];
+    }
+    return false;
 }
 
 // DAD: dast.py:238 visit_switch_node.
@@ -660,6 +724,9 @@ void JSONWriter::visit_switch_node(SwitchBlock* sw) {
     auto sit = sw->follow.find("switch");
     if (sit != sw->follow.end()) follow = sit->second;
     switch_follow_.push_back(follow);
+    const bool entry_ltail = loop_tail_;
+    loop_tail_ = entry_ltail && FollowEndsBody(follow);
+    const size_t entry_case_depth = case_loop_depth_;
     NodeBase* default_node = sw->default_case;
     const auto& cases = sw->cases;
     for (size_t i = 0; i < cases.size(); ++i) {
@@ -679,6 +746,8 @@ void JSONWriter::visit_switch_node(SwitchBlock* sw) {
         }
 
         AstValue body = scope([&] {
+            need_break_ = true;  // dexllm#138: a case starts reachable
+            case_loop_depth_ = loop_follow_.size();
             visit_node(node);
             if (need_break_) add(JumpStmt("break"));
             else need_break_ = true;
@@ -696,6 +765,8 @@ void JSONWriter::visit_switch_node(SwitchBlock* sw) {
     add_off(SwitchStmt(std::move(cond_expr), std::move(ksv_pairs)),
             lins.empty() ? UINT32_MAX : lins.back()->source_byte_off);  // D-3
     switch_follow_.pop_back();
+    case_loop_depth_ = entry_case_depth;
+    loop_tail_ = entry_ltail;
     visit_node(follow);
 }
 
@@ -733,10 +804,14 @@ void JSONWriter::visit_try_node(TryBlock* tb) {
             v->declared = true;
         }
     }
+    const bool entry_ltail = loop_tail_;
+    loop_tail_ = entry_ltail && FollowEndsBody(tb->try_follow);
+    need_break_ = true;  // dexllm#138: see Writer::EmitTry
     AstValue tryb = scope([&] {
         try_follow_.push_back(tb->try_follow);
         visit_node(tb->try_start);
     });
+    bool reach = need_break_;
     // DAD does NOT pop try_follow until the end (see dast.py:321). Mirror by
     // popping after the catch loop below.
 
@@ -771,11 +846,15 @@ void JSONWriter::visit_try_node(TryBlock* tb) {
             catch_decl = VarDecl(CatchTypeNode(cb, UnboundCatchType(*cb)),
                                  Local("_"));
         }
+        need_break_ = true;
         AstValue body = scope([&] { visit_node(cb->catch_start); });
+        reach = reach || need_break_;
         pairs.push_back(AstValue::Arr({std::move(catch_decl), std::move(body)}));
     }
 
     add(TryStmt(std::move(tryb), std::move(pairs)));
+    need_break_ = reach;
+    loop_tail_ = entry_ltail;
     NodeBase* tf = try_follow_.back();
     try_follow_.pop_back();
     visit_node(tf);
@@ -789,6 +868,7 @@ void JSONWriter::visit_return_node(ReturnBlock* ret) {
 
 // DAD: dast.py:328 visit_throw_node.
 void JSONWriter::visit_throw_node(ThrowBlock* thr) {
+    need_break_ = false;  // dexllm#138: see Writer::EmitThrow
     for (const auto& ins : thr->get_ins()) visit_ins(ins);
 }
 

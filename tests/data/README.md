@@ -581,3 +581,27 @@ the text, and a variable-less clause names another handler's type (both of
 `twoUnbound`'s read `IllegalStateException`).
 
 It is part of this project and carries this project's licence.
+
+`continue-loop.dex` (md5 `b4ea5ddb86861710a1b9603ce685b5f7`) was written for
+dexllm#138 and assembled from the committed `continue-loop.smali` the same way.
+Each method is a loop with a back edge that is not its closing test, or a switch
+case whose end the `break` rule must judge (or a control that must stay as it
+was): the issue's several-latch loop, a back edge out of an if with real join
+code (endless and pretest), a switch at the end of the body, an inner loop
+sharing its test with the outer header (pretest and do-while), a try at the end
+of the body and one with join code after it, a `continue` in one arm of a case's
+if and one before a switch, a latch test with no exit, two loops whose back edge
+runs through a catch handler (left to DAD), a case ending in `continue`, `throw`,
+a try, a loop, an if with one returning arm, a loop with no exit, and an if one
+of whose arms falls into the next case (both ways round, and from a loop in
+the case), plus a genuine
+do-while. On the pre-fix build the several-latch loop is a do-while that
+reads its first `continue` as `break` and drops `add(v0)`.
+
+`continue-loop-java.dex` (md5 `8d312d81c8a7efc6f6692a10e29f960b`) is
+`continue-loop-java.java` compiled with `javac 17.0.17 --release 8` and
+`d8 --release --min-api 26` (D8 8.10.9-dev, build-tools 36.0.0): javac's
+two-switch String switch inside a for-each loop, whose second switch's join is a
+node already written when the switch is.
+
+Both are part of this project and carry this project's licence.

@@ -54,6 +54,9 @@ public:
 private:
     // ─── Node-level emission ─────────────────────────────────────────────
     bool EmitsNothing(NodeBase* node) const;
+    bool IsContinue(NodeBase* node) const;
+    bool FollowEndsBody(NodeBase* follow) const;
+    bool FallsToNextCase(NodeBase* n) const;
     void VisitNode(NodeBase* node);
     void EmitStatement(StatementBlock* stmt);
     void EmitReturn(ReturnBlock* ret);
@@ -125,6 +128,15 @@ private:
     std::vector<NodeBase*> switch_follow_{nullptr};
     std::vector<NodeBase*> latch_node_{nullptr};
     std::vector<NodeBase*> try_follow_{nullptr};
+    // Beyond-DAD (dexllm#138): the LoopBlock whose header a back edge reaches
+    // as `continue` -- an endless or pretest loop; nullptr for a posttest one,
+    // whose back edge is its latch. loop_tail_: falling off here reaches that
+    // back edge, so the edge needs no statement (see Writer::VisitNode).
+    std::vector<NodeBase*> loop_head_{nullptr};
+    bool loop_tail_ = false;
+    std::unordered_set<NodeBase*> written_latches_;  // posttest tests written
+    // loop_follow_.size() when the current switch case began (dexllm#138)
+    size_t case_loop_depth_ = static_cast<size_t>(-1);
     std::unordered_set<NodeBase*> visited_;
     NodeBase* next_case_ = nullptr;
     bool need_break_ = true;

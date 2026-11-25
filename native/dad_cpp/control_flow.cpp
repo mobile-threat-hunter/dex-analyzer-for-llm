@@ -802,6 +802,38 @@ void CatchStruct(Graph& graph,
 // =============================================================================
 // identify_structures — DAD control_flow.py:411 (top-level driver)
 // =============================================================================
+namespace {
+// Beyond-DAD (dexllm#138). DAD types a loop posttest whenever its latch -- the
+// LAST back edge MarkLoop saw -- is a condition. A do-while has exactly one
+// back edge, its closing test, which either re-enters the header or leaves the
+// loop. A loop with a second back edge (a `continue` from mid-body) or whose
+// latch test stays inside the loop on both branches is not one: rendered as
+// `do { } while (latch)`, every other back edge was read as a fall-off, and
+// LoopFollow took the latch's other branch -- the header itself -- as the
+// loop's follow, so a branch back to the header became `break` and the body
+// after it was lost (ShortcutXmlParser.parseShortcutIds dropped List.add).
+bool ClosesDoWhile(Graph& graph, NodeBase* start, NodeBase* latch,
+                   const std::vector<NodeBase*>& nodes) {
+    auto* lc = dynamic_cast<CondBlock*>(latch);
+    if (!lc) return true;  // not a condition: LoopType ignores it anyway
+    // A latch reached only through a catch handler is the dexllm#134 family
+    // (the loop's structure is wrong whichever type it gets); left to DAD.
+    if (lc->in_catch) return true;
+    auto in_loop = [&](NodeBase* x) {
+        return x && std::find(nodes.begin(), nodes.end(), x) != nodes.end();
+    };
+    NodeBase* t = lc->true_branch;
+    NodeBase* f = lc->false_branch;
+    const bool closes = (t == start && f && !in_loop(f)) ||
+                        (f == start && t && !in_loop(t));
+    if (!closes) return false;
+    for (NodeBase* p : graph.all_preds(start)) {
+        if (p != latch && in_loop(p)) return false;
+    }
+    return true;
+}
+}  // namespace
+
 void IdentifyStructures(Graph& graph,
                         std::unordered_map<NodeBase*, NodeBase*>& idoms) {
     auto ds = DerivedSequenceOf(graph);
@@ -826,7 +858,12 @@ void IdentifyStructures(Graph& graph,
     for (NodeBase* n : loop_starts) {
         auto* nn = dynamic_cast<Node*>(n);
         if (nn) {
-            LoopType(n, nn->latch, nn->loop_nodes);
+            // Beyond-DAD (dexllm#138): a latch that cannot close a do-while is
+            // typed as if it were not a condition -- the loop is then endless
+            // (or pretest, when the header itself exits).
+            LoopType(n, ClosesDoWhile(graph, n, nn->latch, nn->loop_nodes)
+                            ? nn->latch : nullptr,
+                     nn->loop_nodes);
             LoopFollow(n, nn->latch, nn->loop_nodes);
         }
     }

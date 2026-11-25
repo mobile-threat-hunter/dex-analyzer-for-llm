@@ -3097,6 +3097,95 @@ merged by Simplify into a typed handler keeps the typed list (dexllm#132's
 union), so such a block reads as typed on both builds. And the `synchronized`
 block itself is still not rendered (monitor-enter/exit build Nops, DAD).
 
+### A loop with a second back edge is not a do-while; a back edge is `continue` (dexllm#138, 2026-11-26)
+
+DAD types a loop posttest whenever its latch -- the LAST back edge
+`MarkLoop` saw -- is a condition. A loop with a mid-body back edge, or whose
+latch test stays inside the loop on both branches, is not a do-while: the other
+back edges read as falling off the body, and `LoopFollow` took the latch's
+in-loop branch -- the header itself -- as the loop's follow, so a branch back
+to the header was written `break` and the body after it was lost
+(`ShortcutXmlParser.parseShortcutIds` dropped `List.add` and fell off its end).
+androguard DAD renders it identically. Beyond-DAD, no `*DADFaithful` sibling (no
+parity suite asserts loop typing or jumps).
+
+* **`ClosesDoWhile`** ([control_flow.cpp](native/dad_cpp/control_flow.cpp)):
+  the latch is passed to `LoopType` only when it can close a do-while -- one
+  branch is the header, the other leaves the loop, and no other in-loop node
+  reaches the header. Otherwise the loop is typed as if its latch were not a
+  test (endless, or pretest when the header exits). A latch reached only
+  through a catch handler is left to DAD (the dexllm#134 family, wrong either
+  way).
+* **`continue`** (Writer and JSONWriter, `loop_head_` / `loop_tail_`): a back
+  edge to an endless or pretest loop's header from a point that does not fall
+  off the end of the body is written `continue` (AST `['JumpStatement',
+  'continue', null]`, no new node type). DAD has no `continue`; such an edge
+  fell through into the if's join code (`SelectBuilderImpl.trySelectOther` ran
+  `doAfterSelect()` after a failed CAS instead of retrying). `FollowEndsBody`
+  decides when falling off an if arm, switch case or try body reaches the back
+  edge: the construct's join is none, the loop exit, the header, or a node
+  already written. The else arm is kept when it is a `continue`, the
+  backward-true swap is suppressed for a `continue` arm beside a false-branch
+  follow, and a posttest loop records its latch so an endless outer loop sharing
+  it does not write it again.
+* **`need_break_` means "control reaches here"** -- both reviewers CONFIRMED that
+  the first cut's `continue` cleared DAD's single global flag and dropped case
+  `break`s (31 corpus methods fell into the next case; `BidiFormatter
+  .getEntryDir` looped where the bytecode returns). DAD let the LAST jump
+  written decide, for `return` too. Now a case starts reachable, an if completes
+  normally when either arm does, a try when its body or a catch does, a loop
+  unless it is endless with no exit, and `throw` ends a case like `return`.
+  A delta review then CONFIRMED the OR rule's own hole (ordinary javac + d8
+  code): when ONE arm of a case's if falls into the next case and the other
+  completes, a `break` after the if stops the falling arm too (`if (p()) a();
+  else { b(); break; }` lost `c()` on the `a()` path; HEAD lost it on the other).
+  `FallsToNextCase` (a straight statement chain into `next_case_`, at the
+  case's own loop depth) now gives the completing arm its own `break`.
+
+**Measured (a/b OFF = HEAD `97290fc` behaviour vs ON `45a6d4d9`, SAME capture,
+bundled corpus + committed fixtures):** 1,293 classes change; methods writing
+fewer calls than their smali **68 -> 50 rows (58 -> 40 methods), 0 new**; case
+fall-throughs (a label not preceded by a jump) **602 -> 152, 0 classes worse**;
+statements right after a jump **163 -> 3**; `continue;` lines 0 -> 2,593. The 3
+classes that lose call tokens each now equal their smali count (OFF wrote a
+latch twice). parity 29/29, pytest 2526 passed / 24 skipped, TRUE corpus-less
+(`test_apk` moved aside, restore asserted) 2073 / 477 / 0, narrowed to
+`tests/data/multidex.apk` 2382 / 162, sweep 21,374-class 0-crash GATE: PASS,
+determinism 3 `PYTHONHASHSEED`s -> one digest, lint trio clean.
+
+**Guards:** [tests/test_continue_loop.py](tests/test_continue_loop.py) on the
+authored `tests/data/continue-loop.smali` (25 methods: every body pinned, text
+and AST jumps compared, the smali call-count oracle on text AND AST, the AST
+`break` placed inside the completing arm) and
+`continue-loop-java.dex` (javac's two-switch String switch). The
+`test_self_propagation.py` crafts ended their code item on the back-edge test,
+so the test's fall-through landed on the header (a loop with no exit, no longer
+a do-while); they now end one unit early, and the dexllm#76 guard mutant still
+fails 26 cases. **38 mutants, each BUILT with a distinct `.so` md5, control
+asserted after: 35 killed, 2 equivalent, 1 unexercised.** Equivalent: the
+case-start reset in each emitter (every construct sets the flag when it ends,
+and nothing is written after a return / throw / continue in the same chain;
+kept as defence). Unexercised: `FallsToNextCase`'s loop-depth condition, which
+only disables a split -- no input in reach leaves a loop straight into the next
+case's block (`loopToNextCase` tries; the next case is inlined first). Fourteen
+mutants survived earlier matrices and are why `noExit`, `handlerLatch*`,
+`caseContinue`, `caseThrow`, `tryInCase`, `ifInCase`, `exitlessInCase`,
+`sharedLatchDo`, `fallTrue` / `fallFalse`, the AST break-position case and the
+Java fixture exist.
+
+**Residuals, pre-existing, NOT fixed:** a `break` meant for the loop inside a
+switch nested in it exits the switch (needs a labeled break; the AST has no
+label node) -- the demotion exposes it in 4 more methods (`FlvExtractor.read`,
+`Mp4Extractor.read`, `BlockSort.fallbackSort`, gms `zzd.run`) -- dexllm#139; a posttest test
+is written without checking which branch is the back edge, so its polarity is
+inverted when the test's TRUE branch leaves (`sharedLatchDo`,
+`WebvttParserUtil`) -- dexllm#140; a labeled `continue` to an outer loop is not written (dexllm#141); a
+loop whose exit lands on a switch's join loses it (`loopInCase`);
+`next_case_` is a single member, not a stack, so a next case reached through an
+if arm is inlined and its label lost (`loopToNextCase`, dexllm#142); a switch none of whose
+cases completes is still followed by a `break` (dexllm#143); a declaration inside a loop used
+after it.
+
 ### Production fix — reused `this` register materialised as a local (`this = X` → valid, 2026-07-03)
 
 When a method reuses its receiver register p0 (`this`) as a scratch local — reads `this` early, overwrites it (`move-result` / `const`), reads the new value later, the two merging at a shared use (e.g. `return`) — `GroupVariables` binds the param-def and reuse-defs into ONE version (they share the merge use), so `SplitVariables` leaves it unsplit and it keeps its `ThisParam` identity. DAD (and our 1:1 port) then emit **`this = <value>`** — always invalid Java (you cannot assign to `this`). **Confirmed identical bug in androguard DAD**, so this is a beyond-DAD production divergence. Dominant real-corpus invalid-Java bucket (269 occurrences bundled, above every other). **Fix — `MaterializeReusedThis` ([dataflow.cpp](native/dad_cpp/dataflow.cpp), declared in [dataflow.h](native/dad_cpp/include/dataflow.h)), runs AFTER SplitVariables and BEFORE the chain consumers:** allocate a fresh local `vX`, rewrite every graph reference to the receiver → `vX`, and inject `vX = this` at the entry block head — the sole remaining `this` is that copy's rhs → `<Ret> vX = this; … vX = …; return vX;` (valid). `findFragmentByWho` (the canonical repro) becomes byte-valid: `Fragment v7 = this; if(!p2.equals(this.mWho)){ if(this.mChildFragmentManager==null){ v7 = null; } else { v7 = this.mChildFragmentManager.findFragmentByWho(p2); } } return v7;` (reads stay `this.mWho` because RP propagates the entry copy for uses it dominates; `v7 = 0` renders `null` via the existing reference-lhs null-render). **Type safety (two adversarial-review rounds, 4 reviewers):** `vX` is typed as the method **RETURN type** — the one assignability anchor valid Dalvik gives (everything reaching a `return` is assignable to it). The pass is a **validate-then-mutate** (atomic — Phase A reads only, so every early bail leaves the graph pristine) that fires ONLY when (a) the return type is a reference, (b) the receiver is RETURNED, and (c) every reassignment rhs is a reference whose type **EXACTLY equals** ret_type, or the narrow-integer constant 0 (null). Exact equality (not just `is_ref`) is REQUIRED: the unsplit phi-web can bind a def reaching only an intermediate use (never the return) with an unrelated type — `vX = getBar()` where `Bar ⊄ Foo` (adversarial CONFIRMED) — the merge-point-assignability property does NOT hold per-def, and there is no type hierarchy to check assignability. A **void-invoke artifact** (`this = super.onDraw()` — a void call DAD wrongly models as defining the receiver; DAD keeps the `this` name so its later `this.getScrollX()` reads accidentally render correctly, and renaming would EXPOSE the artifact as `v.getScrollX()` on a void result — strictly worse), a non-reference return, a non-returned reuse, a genuine primitive (`this = 5`), or a non-exact reference reuse all bail → left as DAD's (invalid but **no-worse**) `this = X`. The receiver's ThisParam type is CORRUPTED during Construct (each `this = X` AssignExpression ctor does `this_param.set_type(X.get_type())`) so it is restored to the class before seeding the copy. On a `true` return the caller `number_ins()` + recomputes `BuildDefUse` (the injected copy + renumbered locs) before DCE/RP/PlaceDeclarations; `FixInitResultTypes` runs between (graph-only, no chain access, safe). Excludes `<init>` (super()/this() uses the receiver specially). **Measured (a/b off vs on, bundled corpus):** `this =` **269 → 218** (51 genuine reuses materialised valid; residual 218 = void-invoke artifacts + non-provable reuses, correctly left), **90 valid `<Ref> vX = this;` seeds**; **ALL other invalid-Java buckets byte-unchanged** (prim-used-as-object 55, ref-declared-int 23, `v<op>null` 3, `prim=new` 2), the pre-existing separate `void v=this` move-into-conflated-local bug **40→40 unchanged**, parity 28/28, 0-crash/25,309-class. No `*DADFaithful` sibling (parity suites don't assert method bodies — return-literal/catch-clamp precedent). Remaining (deferred, no-worse-than-DAD): the void-invoke-defines-receiver DAD bug itself, and genuine multi-type phi-web merges (need a real version split). Regression test `tests/test_this_reuse.py` (materialisation valid + active + the Fragment repro).

@@ -216,7 +216,11 @@ def _craft(tmp_path: Path, target, name: str, body: dict[int, int]) -> str:
     """Write the fixture with one code item's words replaced.  Verdict ASSERTED."""
     co, units = target
     dex = bytearray(FIXTURE.read_bytes())
-    words = {(units + k) if k < 0 else k: w for k, w in body.items()}
+    # dexllm#138: every body ends one code unit early, so its back-edge test
+    # is followed by a `nop` the loop can leave to. Ending the code item on the
+    # test made its fall-through land back on the header: a loop with no exit,
+    # which is not the do-while these cases describe.
+    words = {(units + k - 1) if k < 0 else k: w for k, w in body.items()}
     assert all(0 <= k < units for k in words), (name, sorted(words))
     for k in range(units):
         struct.pack_into("<H", dex, co + 16 + 2 * k, words.get(k, 0))
