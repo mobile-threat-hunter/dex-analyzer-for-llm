@@ -199,7 +199,8 @@ BODIES = {
         "// }",
         "}",
     ],
-    # a back edge through a handler (dexllm#134): left to DAD -- this do-while is
+    # a back edge through a handler (the try is structured around the loop): left
+    # to DAD -- this do-while is
     # wrong, and unchanged; what is pinned is that no `continue` appears in it
     "handlerLatch()Z": [
         "do {",

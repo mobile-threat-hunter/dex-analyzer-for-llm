@@ -3010,8 +3010,9 @@ one register keep a type that is wrong for one arm (above); a genuine merge of a
 String (or a call result, or a parameter) with a catch copy is typed by the
 multi-def rule's first reference — `String v1; … v1 = v0;` with an IOException
 `v0`, `IOException v1 = p3`; and a loop reached only from a catch handler loses
-its body in the structuring (`loop` / `loopStale` / `loopCarry` render only the
-copy), identical before and after this change.
+its body in the structuring (`loop` / `loopStale` render only the copy;
+`loopCarry` was never affected), identical before and after this change --
+FIXED in dexllm#134.
 
 ### A catch handler nested in an enclosing try is rendered (dexllm#137, 2026-11-24)
 
@@ -3086,7 +3087,7 @@ structurally impossible, `add_catch_edge` writes both directions and
 handler code that was dropped is rendered; each reproduces on HEAD in a handler
 that is not nested): a loop inside a handler is dropped and the handler can
 read as falling through (`catch (IOException v0) {}` for a handler running a
-loop and returning); a catch body ending at an enclosing follow reads as
+loop and returning) -- FIXED in dexllm#134; a catch body ending at an enclosing follow reads as
 continuing into the code after the try — `zzcr`'s handler shows `Log.wtf` and
 then the `if (v0_2 != null)` it never reaches; a try whose block is a condition
 takes its follow from the if, so the body is scoped too narrowly
@@ -3114,8 +3115,8 @@ parity suite asserts loop typing or jumps).
   branch is the header, the other leaves the loop, and no other in-loop node
   reaches the header. Otherwise the loop is typed as if its latch were not a
   test (endless, or pretest when the header exits). A latch reached only
-  through a catch handler is left to DAD (the dexllm#134 family, wrong either
-  way).
+  through a catch handler is left to DAD (the try is structured around the
+  loop rather than inside it, wrong either way).
 * **`continue`** (Writer and JSONWriter, `loop_head_` / `loop_tail_`): a back
   edge to an endless or pretest loop's header from a point that does not fall
   off the end of the body is written `continue` (AST `['JumpStatement',
@@ -3185,6 +3186,81 @@ loop whose exit lands on a switch's join loses it (`loopInCase`);
 if arm is inlined and its label lost (`loopToNextCase`, dexllm#142); a switch none of whose
 cases completes is still followed by a `break` (dexllm#143); a declaration inside a loop used
 after it.
+
+### A loop entered only from a catch handler is rendered (dexllm#134, 2026-11-26)
+
+`WhileBlockStruct` replaces a loop header with a `LoopBlock` and re-points the
+edges into it, taking them from `Graph::preds`, which -- as DAD's `graph.py`
+does -- drops the `in_catch` predecessors. A loop inside a handler is reached
+ONLY through `in_catch` predecessors (Construct seeds the handler entry, and a
+block whose lower-numbered predecessors are all in_catch inherits it), so every
+edge into it, its back edge too, was dropped and the loop vanished from the
+Java text with no marker (`kotlin.concurrent.LocksKt.write`'s finally re-lock
+loop, `DataHolder.zza`'s close loop, exoplayer's `getCause()` walk). And a
+catch that returns to an enclosing loop's header lost the edge that makes its
+end a `continue`: `ConstraintLayout`'s `catch (NotFoundException) { v5_9++; }`
+fell into code reading an unassigned local. androguard DAD drops both
+identically. Beyond-DAD, no `*DADFaithful` sibling.
+
+* **`Graph::rewire_preds`** is what `WhileBlockStruct` re-points: every
+  normal-edge predecessor except a FORWARD in_catch edge into a header that is
+  not in_catch (`num` is the RPO index, so `header->num <= pred->num` is a back
+  edge). Kept: every edge into a loop wholly inside a handler, and the back edge
+  from a catch inside the loop. Dropped, as DAD: a handler's tail falling into a
+  loop that FOLLOWS the try -- the delta review CONFIRMED that re-pointing it
+  (the second cut, every edge) lets the catch walk claim the loop, so on plain
+  javac + d8 output (`try { get(); if (E) return; } catch (..) { log(e); }
+  while (D) x();`) the normal path after the try never ran it.
+  `MergeShortCircuit` makes the same `preds()` call and keeps it: the first cut
+  changed it too and pulled a2dp.Vol `main$14.onReceive`'s join code into the
+  catch.
+* **#138's `ClosesDoWhile` in_catch exclusion is scoped to a non-in_catch
+  header.** A handler loop's latch is in_catch, so the unscoped exclusion left
+  every handler loop to DAD's do-while typing -- reachable only now that those
+  loops render, and CONFIRMED by both reviewers (`do { log(); if (E) y(); }
+  while (D)` for a loop whose `!E` path re-enters unconditionally). A retry loop
+  whose back edge runs through a handler to a normal header is still left to
+  DAD.
+
+**Measured (a/b OFF = HEAD `bb9d33b` `.so` `45a6d4d9` vs ON `bfc30ae6`, SAME
+capture):** 20 corpus classes change, every one checked against its smali:
+13 restore a handler loop (methods writing fewer calls than their smali
+**50 -> 37 rows, 40 -> 27 methods, 0 new** -- exactly the handler-only-loop
+bucket of the dexllm#134 incidence count), the others add the `continue` that
+ends a catch inside a loop (and `zzfkq`'s `break` in a switch case becomes the
+`continue` its sibling cases use). Case fall-throughs and statements after a
+jump unchanged. parity 29/29, pytest 2544 passed / 24 skipped, TRUE corpus-less
+(`test_apk` moved aside, restore asserted) 2089 / 479 / 0, narrowed to
+`tests/data/multidex.apk` 2406 / 162, sweep 21,374-class 0-crash GATE: PASS,
+determinism 3 `PYTHONHASHSEED`s -> one digest, lint trio clean.
+
+**Guards:** [tests/test_handler_loop.py](tests/test_handler_loop.py) on the
+authored `tests/data/handler-loop.smali` (a do-while and a pretest loop with
+rethrow in a handler, a handler loop with a second back edge, a catch ending in
+`continue`, a loop after the try that the handler's tail also reaches, and two
+`&&`-test controls; bodies pinned, the smali call oracle on text AND AST) plus
+corpus cases (`LocksKt.write`, a2dp `main$14`).
+`test_catch_copy.py`'s `loop` / `loopStale` pins move: the copies are now
+declared inside the rendered loop, still with the handler type. **10 mutants, each BUILT with a distinct `.so` md5, control asserted after: 8
+killed, 1 equivalent, 1 unpinned** -- killed: pre-fix (`.so` = HEAD's exactly),
+`rewire_preds` = `preds`, every edge (the reviewed cut), the in_catch-header
+clause dropped, the back-edge clause dropped, `WhileBlockStruct` back on `preds`, the in_catch exclusion
+unscoped or removed. Equivalent: the back-edge test as `<` (equal nums is the
+self edge, whose header is in_catch). Unpinned: `MergeShortCircuit` on the new
+`rewire_preds` -- the shipped code keeps DAD there, and no input in reach
+separates the two.
+
+**Residuals, pre-existing, NOT fixed:** the exception path of `loopAfterTry` still reads the try's last test before the loop (HEAD's rendering, kept); a handler loop inside a loop whose
+header is the try's start (the #122 `loopHeadTry` family: the TryBlock wraps the
+outer loop, the inner loop's exit is the try's follow, and the outer loop
+renders as `do { get(); } while (a())`) -- the rendered handler loop is followed
+by a `return;` the bytecode does not have (dexllm#144); a handler whose entry is itself a
+loop header (catch variable unused) is still lost (its edges in are catch
+edges; dexllm#145); a loop reached from two handlers is written under the first only (the
+#114 shared-tail family; dexllm#146); `ShortcutManagerCompat.pushDynamicShortcut`'s
+restored arm returns an `Iterator`-typed `null` from a `boolean` method
+(dexllm#147)
+(register conflation, newly visible).
 
 ### Production fix — reused `this` register materialised as a local (`this = X` → valid, 2026-07-03)
 

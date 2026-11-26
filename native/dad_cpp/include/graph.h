@@ -61,6 +61,19 @@ public:
     std::vector<NodeBase*> all_sucs(NodeBase* node) const;
     // DAD: graph.py:57 preds — filters out in_catch predecessors.
     std::vector<NodeBase*> preds(NodeBase* node) const;
+    // Beyond-DAD (dexllm#134): the predecessors WhileBlockStruct re-points to
+    // the LoopBlock replacing a loop header. DAD uses preds(), which drops the
+    // in_catch ones. That lost two kinds of edge, both kept now:
+    //  * every edge into a loop wholly inside a handler (its header is
+    //    in_catch): the loop vanished from the output;
+    //  * a BACK edge from a catch inside the loop -- the catch's end is a
+    //    `continue`, and without the edge it fell into the code after the try.
+    // A FORWARD in_catch edge into a header that is not in_catch -- a handler's
+    // tail falling into a loop that follows the try -- stays dropped, as DAD
+    // does: re-pointing it lets the catch walk claim the loop, and the normal
+    // path after the try loses it. (MergeShortCircuit keeps preds() for the
+    // same reason.)
+    std::vector<NodeBase*> rewire_preds(NodeBase* node) const;
     // DAD: graph.py:60 all_preds — reverse_edges + reverse_catch_edges.
     std::vector<NodeBase*> all_preds(NodeBase* node) const;
 

@@ -605,3 +605,16 @@ two-switch String switch inside a for-each loop, whose second switch's join is a
 node already written when the switch is.
 
 Both are part of this project and carry this project's licence.
+
+`handler-loop.dex` (md5 `11aadb4aa5747e33419bcd0b35bc0a52`) was written for
+dexllm#134 and assembled from the committed `handler-loop.smali` the same way.
+Each method runs a loop that only a catch handler reaches, or a catch that
+returns to a loop's header: a do-while, a pretest loop followed by a rethrow
+(kotlin's `ReentrantReadWriteLock.write` finally), a handler loop with a second
+back edge, and a catch whose end is a `continue`, plus three controls, a loop
+after the try whose header the handler's tail also reaches, an `&&` test only
+the handler reaches and one it shares with the normal path. On the
+pre-fix build the handler loops vanish and the catch falls into the code after
+the try.
+
+It is part of this project and carries this project's licence.

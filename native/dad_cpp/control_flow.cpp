@@ -582,7 +582,8 @@ void WhileBlockStruct(Graph& graph,
         new_node->CopyFrom(*nn);
 
         const bool entry = (n == graph.entry);
-        auto lpreds = graph.preds(n);
+        // dexllm#134: see Graph::rewire_preds.
+        auto lpreds = graph.rewire_preds(n);
         auto lsuccs = graph.sucs(n);
         for (NodeBase* p : lpreds) {
             graph.add_edge(MapGet(node_map, p), new_node);
@@ -816,9 +817,12 @@ bool ClosesDoWhile(Graph& graph, NodeBase* start, NodeBase* latch,
                    const std::vector<NodeBase*>& nodes) {
     auto* lc = dynamic_cast<CondBlock*>(latch);
     if (!lc) return true;  // not a condition: LoopType ignores it anyway
-    // A latch reached only through a catch handler is the dexllm#134 family
-    // (the loop's structure is wrong whichever type it gets); left to DAD.
-    if (lc->in_catch) return true;
+    // A latch reached only through a catch handler, closing a loop whose
+    // header is NOT (a retry loop: the try is structured around the loop
+    // rather than inside it, wrong whichever type it gets), is left to DAD. A
+    // loop wholly inside a handler has an in_catch header and is typed here
+    // like any other (dexllm#134).
+    if (lc->in_catch && !start->in_catch) return true;
     auto in_loop = [&](NodeBase* x) {
         return x && std::find(nodes.begin(), nodes.end(), x) != nodes.end();
     };

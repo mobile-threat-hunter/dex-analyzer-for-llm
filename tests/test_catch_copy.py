@@ -39,16 +39,18 @@ DECLS = {
     # wrong for the IOException arm -- recorded, not this change's
     "twoHandlers()V": ["IllegalStateException v1_2;"],
     "withNull()V": ["java.io.IOException v1_0 = null;"],
-    "loop()V": ["java.io.IOException v1;"],
+    # the loop after the handler is rendered since dexllm#134: the copies are
+    # declared inside it, with the handler type
+    "loop()V": ["java.io.IOException v1 = v0_1;", "java.io.IOException v2_1 = v1;"],
     "orString()V": ["String v1;"],
     "orCall()V": ["String v1_1;"],
     # a parameter reaches it: the parameter's type, as before
     "orParam(Ljava/lang/Throwable;)V": ["Throwable v1_0 = p2;"],
     # every register last written with a String on the joined path; the copy
-    # goes round a loop (the loop body after a handler is lost, pre-existing
-    # and identical before this change -- what this pins is the declaration)
+    # goes round a loop after the handler (rendered since dexllm#134)
     "loopStale()V": [
-        "java.io.IOException v0_1;",
+        "java.io.IOException v0_1 = v2_0;",
+        "java.io.IOException v1_1 = v0_1;",
         "String v2_2 = ((String) C.get());",
     ],
     # a copy of null merged with null: no handler type, so the pass leaves it

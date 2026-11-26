@@ -66,6 +66,18 @@ std::vector<NodeBase*> Graph::preds(NodeBase* node) const {
     return out;
 }
 
+std::vector<NodeBase*> Graph::rewire_preds(NodeBase* node) const {
+    const auto& src = GetOrEmpty(reverse_edges, node);
+    std::vector<NodeBase*> out;
+    out.reserve(src.size());
+    for (NodeBase* p : src) {
+        // `num` is the RPO index: an edge to a node numbered no later than
+        // its source is a back edge (DFS property).
+        if (!p->in_catch || node->in_catch || node->num <= p->num) out.push_back(p);
+    }
+    return out;
+}
+
 // DAD: graph.py:60 all_preds.
 std::vector<NodeBase*> Graph::all_preds(NodeBase* node) const {
     const auto& a = GetOrEmpty(reverse_edges, node);
